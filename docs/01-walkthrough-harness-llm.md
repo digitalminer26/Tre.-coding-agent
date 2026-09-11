@@ -3,12 +3,12 @@
 Grounded in the actual source of the pi coding agent (v0.85.1), which is split into four
 layers. Every claim below is traceable to a file:
 
-| Layer | Package | Job |
-|---|---|---|
-| Wire | `@earendil-works/pi-ai` | HTTP/SSE to LLM endpoints, per-provider request building & response parsing, model catalog |
-| Loop | `@earendil-works/pi-agent-core` | The agent loop: stream response → dispatch tool calls → feed results back → repeat |
-| Harness | `@earendil-works/pi-coding-agent` (`dist/core/`) | System prompt, built-in tools, sessions, compaction, extensions |
-| UI | `@earendil-works/pi-tui` | Terminal rendering of the event stream |
+| Layer   | Package                                          | Job                                                                                        |
+|---------|--------------------------------------------------|--------------------------------------------------------------------------------------------|
+| Wire    | `@earendil-works/pi-ai`                          | HTTP/SSE to LLM endpoints, per-provider request building & response parsing, model catalog |
+| Loop    | `@earendil-works/pi-agent-core`                  | The agent loop: stream response → dispatch tool calls → feed results back → repeat         |
+| Harness | `@earendil-works/pi-coding-agent` (`dist/core/`) | System prompt, built-in tools, sessions, compaction, extensions                            |
+| UI      | `@earendil-works/pi-tui`                         | Terminal rendering of the event stream                                                     |
 
 Key architectural decision: **the loop works entirely in a provider-neutral message type
 (`AgentMessage`). Conversion to the provider wire format happens exactly once, at the LLM
@@ -135,15 +135,15 @@ with backoff; the fetch itself carries the `AbortSignal`.
 The endpoint streams `data: {json}\n\n` chunks; the parser (`stream()` in
 openai-completions.js) normalizes them into a small event vocabulary:
 
-| SSE chunk field | Internal event |
-|---|---|
-| (first chunk) | `start` — an empty assistant message skeleton is created |
-| `choices[0].delta.content` | `text_delta` — appended to a `text` block |
-| `choices[0].delta.reasoning_content` (or similar) | `thinking_delta` |
-| `choices[0].delta.tool_calls[i]` | `toolcall_start` / `toolcall_delta` — name arrives first, `function.arguments` arrives as **string fragments** accumulated in `partialArgs`, matched by `index` then `id` |
-| `chunk.usage` (final chunk, because `include_usage`) | usage recorded on the message |
-| `choices[0].finish_reason` | mapped: `stop`→`stop`, `tool_calls`→`toolUse`, `length`→`length`, `content_filter`→error, … |
-| stream end | `done` (or `error`) |
+| SSE chunk field                                      | Internal event                                                                                                                                                            |
+|------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| (first chunk)                                        | `start` — an empty assistant message skeleton is created                                                                                                                  |
+| `choices[0].delta.content`                           | `text_delta` — appended to a `text` block                                                                                                                                 |
+| `choices[0].delta.reasoning_content` (or similar)    | `thinking_delta`                                                                                                                                                          |
+| `choices[0].delta.tool_calls[i]`                     | `toolcall_start` / `toolcall_delta` — name arrives first, `function.arguments` arrives as **string fragments** accumulated in `partialArgs`, matched by `index` then `id` |
+| `chunk.usage` (final chunk, because `include_usage`) | usage recorded on the message                                                                                                                                             |
+| `choices[0].finish_reason`                           | mapped: `stop`→`stop`, `tool_calls`→`toolUse`, `length`→`length`, `content_filter`→error, …                                                                               |
+| stream end                                           | `done` (or `error`)                                                                                                                                                       |
 
 Every event carries `partial` — the **full in-progress assistant message**. The loop
 pushes that partial into the context on `start` and *replaces the same slot* as deltas
@@ -308,20 +308,20 @@ replay from an earlier entry."
 
 ## 9. What to copy, what to simplify (for our own agent)
 
-| Concern | pi's approach | Our MVP recommendation |
-|---|---|---|
-| Message model | Provider-neutral blocks, convert at boundary | **Copy.** It's the difference between "works" and "works with every endpoint" |
-| Endpoint abstraction | Per-model compat descriptor + per-API module | **Simplify:** one API module (openai-completions) + a model config file; add Anthropic later only if needed |
-| Loop | Outer/inner loops, steering, follow-up, per-turn hooks | **Copy the inner loop + hooks**; skip steering/follow-up until the UI needs them |
-| Tool protocol | JSON schema + `execute(id, args, signal, onUpdate)` + error-as-result | **Copy exactly.** Small, and it's what makes the model robust |
-| Parallel tool calls | Default parallel, opt-out per tool | **Copy** (one `Promise.all` + ordering) |
-| `length` → fail all calls | Salvage parser + safety guard | **Copy** (cheap, prevents corrupt edits) |
-| Truncation | 2000 lines / 50KB, head vs tail, temp file recovery | **Copy** |
-| System prompt | Sections: tools, guidelines, context files, skills index, cwd | **Copy the shape**; keep it < ~2k tokens |
-| Compaction | Structured summary between turns, never split call/result | **Defer to Phase 3** — MVP just warns near the limit; but design the context-rebuild seam now |
-| Sessions | JSONL append-only + replay | **Copy** (it's trivially simple and gets resume + branching for free) |
-| Skills | Index in prompt, body on demand | **Copy the pattern**; very high value, ~0 cost |
-| UI | Ink TUI over an event stream | **Defer.** MVP = plain CLI that prints events; the event vocabulary (§3/§4) is the UI's API |
+| Concern                   | pi's approach                                                         | Our MVP recommendation                                                                                      |
+|---------------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| Message model             | Provider-neutral blocks, convert at boundary                          | **Copy.** It's the difference between "works" and "works with every endpoint"                               |
+| Endpoint abstraction      | Per-model compat descriptor + per-API module                          | **Simplify:** one API module (openai-completions) + a model config file; add Anthropic later only if needed |
+| Loop                      | Outer/inner loops, steering, follow-up, per-turn hooks                | **Copy the inner loop + hooks**; skip steering/follow-up until the UI needs them                            |
+| Tool protocol             | JSON schema + `execute(id, args, signal, onUpdate)` + error-as-result | **Copy exactly.** Small, and it's what makes the model robust                                               |
+| Parallel tool calls       | Default parallel, opt-out per tool                                    | **Copy** (one `Promise.all` + ordering)                                                                     |
+| `length` → fail all calls | Salvage parser + safety guard                                         | **Copy** (cheap, prevents corrupt edits)                                                                    |
+| Truncation                | 2000 lines / 50KB, head vs tail, temp file recovery                   | **Copy**                                                                                                    |
+| System prompt             | Sections: tools, guidelines, context files, skills index, cwd         | **Copy the shape**; keep it < ~2k tokens                                                                    |
+| Compaction                | Structured summary between turns, never split call/result             | **Defer to Phase 3** — MVP just warns near the limit; but design the context-rebuild seam now               |
+| Sessions                  | JSONL append-only + replay                                            | **Copy** (it's trivially simple and gets resume + branching for free)                                       |
+| Skills                    | Index in prompt, body on demand                                       | **Copy the pattern**; very high value, ~0 cost                                                              |
+| UI                        | Ink TUI over an event stream                                          | **Defer.** MVP = plain CLI that prints events; the event vocabulary (§3/§4) is the UI's API                 |
 
 The single most important invariant, restated: **everything the model sees is a message;
 everything the model can do is a tool; everything the tool does is observed through the
