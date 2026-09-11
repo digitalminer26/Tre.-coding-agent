@@ -21,3 +21,15 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-11 17:22:51 | edit | PLAN.md | add citation policy to repo map + merge gate | .history/snapshots/PLAN.md/20260911T172251Z |
 | 2026-09-11 17:22:51 | create | docs/03-citation-policy.md | created | (new file — nothing to snapshot) |
 | 2026-09-11 17:22:52 | create | THIRD_PARTY.md | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/mock-sse.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/mock-sse.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/fake-stream.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/fake-stream.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/eval.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:17:54 | create | test/eval.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:18 | create | test/mock-sse.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:19 | create | test/mock-sse.test.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:19 | create | test/fake-stream.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:19 | create | test/fake-stream.test.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:19 | create | test/eval.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-11 23:32:19 | create | test/eval.test.ts | WS8: created | (new file — nothing to snapshot) |
