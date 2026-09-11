@@ -23,11 +23,11 @@ consume, built *from* the first three.)
 
 Discriminated union on `role`:
 
-| role | produced by | key fields |
-|---|---|---|
-| `user` | the human | `content: string` (MVP), `timestamp` |
-| `assistant` | the LLM (via wire) | `content: ContentBlock[]`, `model`, `provider`, `stopReason`, `usage?`, `errorMessage?` |
-| `toolResult` | the tool pipeline | `toolCallId`, `toolName`, `content: TextBlock[]`, `isError?`, `details?` |
+| role         | produced by        | key fields                                                                              |
+|--------------|--------------------|-----------------------------------------------------------------------------------------|
+| `user`       | the human          | `content: string` (MVP), `timestamp`                                                    |
+| `assistant`  | the LLM (via wire) | `content: ContentBlock[]`, `model`, `provider`, `stopReason`, `usage?`, `errorMessage?` |
+| `toolResult` | the tool pipeline  | `toolCallId`, `toolName`, `content: TextBlock[]`, `isError?`, `details?`                |
 
 Content blocks: `text`, `thinking`, `toolCall {id, name, arguments}`.
 
@@ -44,14 +44,14 @@ Rules:
 
 ### `AssistantStreamEvent` (emitted by `StreamFn`, one per assistant message)
 
-| event | when | payload |
-|---|---|---|
-| `start` | first, always | `partial` — empty skeleton |
-| `text_delta` | per content chunk | `delta` + cumulative `partial` |
-| `thinking_delta` | per reasoning chunk | `delta` + cumulative `partial` |
-| `toolcall_start` | per tool call (name/id arrive first) | `index` (position in response), `id?`, `name?`, `partial` |
-| `toolcall_delta` | per argument fragment | `index`, `argsDelta` (raw JSON string fragment), `partial` |
-| `done` | last, always | `message` — final; `stopReason` carries the outcome |
+| event            | when                                 | payload                                                    |
+|------------------|--------------------------------------|------------------------------------------------------------|
+| `start`          | first, always                        | `partial` — empty skeleton                                 |
+| `text_delta`     | per content chunk                    | `delta` + cumulative `partial`                             |
+| `thinking_delta` | per reasoning chunk                  | `delta` + cumulative `partial`                             |
+| `toolcall_start` | per tool call (name/id arrive first) | `index` (position in response), `id?`, `name?`, `partial`  |
+| `toolcall_delta` | per argument fragment                | `index`, `argsDelta` (raw JSON string fragment), `partial` |
+| `done`           | last, always                         | `message` — final; `stopReason` carries the outcome        |
 
 Invariants:
 - **I2 — every event carries the full in-progress message.** The loop pushes
@@ -64,14 +64,14 @@ Invariants:
 
 `AgentEvent = AssistantStreamEvent` (passed through unchanged) plus:
 
-| event | when | payload |
-|---|---|---|
-| `agent_start` | run begins | — |
-| `turn_start` / `turn_end` | per LLM turn | `turn` (1-based) |
-| `tool_execution_start` | per tool call | `toolCall` |
-| `tool_execution_update` | optional progress | `toolCallId`, `text` |
-| `tool_execution_end` | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
-| `agent_end` | run ends | `stopReason`, `messages` (final context) |
+| event                     | when                         | payload                                    |
+|---------------------------|------------------------------|--------------------------------------------|
+| `agent_start`             | run begins                   | —                                          |
+| `turn_start` / `turn_end` | per LLM turn                 | `turn` (1-based)                           |
+| `tool_execution_start`    | per tool call                | `toolCall`                                 |
+| `tool_execution_update`   | optional progress            | `toolCallId`, `text`                       |
+| `tool_execution_end`      | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
+| `agent_end`               | run ends                     | `stopReason`, `messages` (final context)   |
 
 ## Contract 3 — `StreamFn`
 
