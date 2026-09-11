@@ -58,11 +58,6 @@ coding-agent/
 ├─ test/
 │  ├─ mock-sse.ts         # WS8: fake SSE server (deterministic loop tests)
 │  └─ *.test.ts
-├─ docs/
-│  ├─ 01-walkthrough-harness-llm.md  # reference behavior (pi, source-verified)
-│  ├─ 02-contracts.md                # WS0 contract spec + change protocol
-│  └─ 03-citation-policy.md          # L1/L2/L3 citation rules for pi-derived code
-├─ THIRD_PARTY.md        # aggregate citation table + MIT license text
 └─ models.json           # local model registry (baseUrl, id, maxTokens, compat)
 ```
 
@@ -269,7 +264,6 @@ before it merges.
 - [ ] No exceptions cross the module boundary — failures become data (messages/results).
 - [ ] Honors `AbortSignal` end to end.
 - [ ] `reviewer` subagent has signed off on the diff.
-- [ ] Citations per `docs/03-citation-policy.md` (L1/L2 headers present; `THIRD_PARTY.md` row added in the same commit).
 - [ ] File-history snapshot taken before any edit to shared files.
 
 ## 7. Risks & mitigations

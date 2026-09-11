@@ -12,14 +12,14 @@ Read `docs/01-walkthrough-harness-llm.md` first — it's the reference behavior.
 
 ## 0. Decisions (lock these before starting)
 
-| #   | Decision         | Recommendation                                                                      | Why / alternative                                                                                                                                                                                                                                                                          |
-|-----|------------------|-------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| D1  | Language/runtime | **LOCKED (2026-09-11): TypeScript + Node ≥ 20 (ESM), tsc, `node --test`**           | pi's source is a ready TS reference impl; same-language patterns are copyable. Python permitted only as a *cold satellite* (offline/batch tools that talk to the agent via session JSONL, e.g. the WS8 eval scorer) — never across the hot streaming path. Revisit the mix as we progress. |
-| D2  | First endpoint   | **LOCKED: OpenAI-compatible `chat/completions`**, dev server = TKG `vks-llama`      | You own it, it's testable, it exercises the full wire path incl. tool calling. Add Anthropic native only if a target model demands it.                                                                                                                                                     |
-| D3  | MVP toolset      | **LOCKED:** `read`, `write`, `edit`, `bash`                                         | The four pi defaults; everything else is added later.                                                                                                                                                                                                                                      |
-| D4  | Sandbox          | **LOCKED: none for MVP** (`bash` + file mutators gated by approval, WS7)            | Keeps MVP small; safety is its own workstream (WS7).                                                                                                                                                                                                                                       |
-| D5  | UI               | **LOCKED: plain CLI first** (print streaming events, read stdin). Ink TUI deferred. | The event vocabulary *is* the UI API; don't couple a fancy TUI to an unproven loop.                                                                                                                                                                                                        |
-| D6  | Model for dev    | **LOCKED:** TKG-pinned `Qwen3.8-27B-UD-Q4_K_M` (ctx 131k)                           | Fast iteration, no cost, mirrors production. Keep an OpenAI/Anthropic key as a quality bar for evals.                                                                                                                                                                                      |
+| # | Decision | Recommendation | Why / alternative |
+|---|---|---|---|
+| D1 | Language/runtime | **LOCKED (2026-09-11): TypeScript + Node ≥ 20 (ESM), tsc, `node --test`** | pi's source is a ready TS reference impl; same-language patterns are copyable. Python permitted only as a *cold satellite* (offline/batch tools that talk to the agent via session JSONL, e.g. the WS8 eval scorer) — never across the hot streaming path. Revisit the mix as we progress. |
+| D2 | First endpoint | **LOCKED: OpenAI-compatible `chat/completions`**, dev server = TKG `vks-llama` | You own it, it's testable, it exercises the full wire path incl. tool calling. Add Anthropic native only if a target model demands it. |
+| D3 | MVP toolset | **LOCKED:** `read`, `write`, `edit`, `bash` | The four pi defaults; everything else is added later. |
+| D4 | Sandbox | **LOCKED: none for MVP** (`bash` + file mutators gated by approval, WS7) | Keeps MVP small; safety is its own workstream (WS7). |
+| D5 | UI | **LOCKED: plain CLI first** (print streaming events, read stdin). Ink TUI deferred. | The event vocabulary *is* the UI API; don't couple a fancy TUI to an unproven loop. |
+| D6 | Model for dev | **LOCKED:** TKG-pinned `Qwen3.8-27B-UD-Q4_K_M` (ctx 131k) | Fast iteration, no cost, mirrors production. Keep an OpenAI/Anthropic key as a quality bar for evals. |
 
 > These are the only blocking decisions. Everything below proceeds once D1–D5 are set.
 
@@ -58,11 +58,6 @@ coding-agent/
 ├─ test/
 │  ├─ mock-sse.ts         # WS8: fake SSE server (deterministic loop tests)
 │  └─ *.test.ts
-├─ docs/
-│  ├─ 01-walkthrough-harness-llm.md  # reference behavior (pi, source-verified)
-│  ├─ 02-contracts.md                # WS0 contract spec + change protocol
-│  └─ 03-citation-policy.md          # L1/L2/L3 citation rules for pi-derived code
-├─ THIRD_PARTY.md        # aggregate citation table + MIT license text
 └─ models.json           # local model registry (baseUrl, id, maxTokens, compat)
 ```
 
@@ -250,12 +245,12 @@ At step 3 you have a real coding agent. Everything after is hardening.
 
 ## 5. Parallel execution plan (who runs what)
 
-| Wave | Concurrent workstreams            | Notes                                                                            |
-|------|-----------------------------------|----------------------------------------------------------------------------------|
-| A    | WS0                               | single; gate                                                                     |
-| B    | WS1 · WS2 · WS3 · WS4 · WS5 · WS8 | six independent streams; WS2 uses WS8's fake `StreamFn`, WS1 uses WS8's mock SSE |
-| C    | WS6, then WS7                     | sequential (integration, then safety)                                            |
-| D    | WS9, WS10                         | only after C is green                                                            |
+| Wave | Concurrent workstreams | Notes |
+|---|---|---|
+| A | WS0 | single; gate |
+| B | WS1 · WS2 · WS3 · WS4 · WS5 · WS8 | six independent streams; WS2 uses WS8's fake `StreamFn`, WS1 uses WS8's mock SSE |
+| C | WS6, then WS7 | sequential (integration, then safety) |
+| D | WS9, WS10 | only after C is green |
 
 Within Wave B, each workstream is sized for one focused subagent session. Suggested
 owner mapping: `worker` for WS1/WS2/WS3/WS5/WS6/WS7, `researcher` for WS4/WS8 (WS8's eval
@@ -269,18 +264,17 @@ before it merges.
 - [ ] No exceptions cross the module boundary — failures become data (messages/results).
 - [ ] Honors `AbortSignal` end to end.
 - [ ] `reviewer` subagent has signed off on the diff.
-- [ ] Citations per `docs/03-citation-policy.md` (L1/L2 headers present; `THIRD_PARTY.md` row added in the same commit).
 - [ ] File-history snapshot taken before any edit to shared files.
 
 ## 7. Risks & mitigations
 
-| Risk                                                           | Likelihood | Mitigation                                                                                                                                                        |
-|----------------------------------------------------------------|------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Local model's tool calling is flaky (malformed/truncated JSON) | **High**   | WS8 eval suite gates model choice; the `length`→fail-all guard + JSON salvage (WS1/WS2) make bad calls non-destructive; keep an API model as the quality bar.     |
-| Contract churn after parallel work starts                      | Med        | WS0 is explicitly the gate; any contract change is a *broadcast* — all of Wave B re-checks. Keep WS0 small and reviewed hard.                                     |
-| SSE parser edge cases across endpoints                         | Med        | Mock SSE (WS8) encodes the tricky cases (split frames, multi-tool, `length`, error) as fixtures; live llama.cpp check is the final gate, not the unit-test basis. |
-| Scope creep into TUI/compaction early                          | Med        | They're Phase 3 by design; the CLI prints the same event stream the TUI would render, so nothing is lost by deferring.                                            |
-| Running `bash` unsandboxed on a live box                       | Med        | WS7 approval gate is the gate to "daily use"; until then run with `--yes` off by default.                                                                         |
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Local model's tool calling is flaky (malformed/truncated JSON) | **High** | WS8 eval suite gates model choice; the `length`→fail-all guard + JSON salvage (WS1/WS2) make bad calls non-destructive; keep an API model as the quality bar. |
+| Contract churn after parallel work starts | Med | WS0 is explicitly the gate; any contract change is a *broadcast* — all of Wave B re-checks. Keep WS0 small and reviewed hard. |
+| SSE parser edge cases across endpoints | Med | Mock SSE (WS8) encodes the tricky cases (split frames, multi-tool, `length`, error) as fixtures; live llama.cpp check is the final gate, not the unit-test basis. |
+| Scope creep into TUI/compaction early | Med | They're Phase 3 by design; the CLI prints the same event stream the TUI would render, so nothing is lost by deferring. |
+| Running `bash` unsandboxed on a live box | Med | WS7 approval gate is the gate to "daily use"; until then run with `--yes` off by default. |
 
 ## 8. Out of scope (MVP)
 
@@ -290,11 +284,11 @@ in the contracts; none block the MVP.
 
 ## 9. Decision log
 
-| Date       | Decision            | Ruling                                                                                                                                                                                                                                           |
-|------------|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Date | Decision | Ruling |
+|---|---|---|
 | 2026-09-11 | D1 Language/runtime | TypeScript + Node ≥ 20 (ESM), tsc, `node --test` (no bundler, no Jest/Vitest). Python allowed only for cold/offline tools (boundary = session JSONL / one-shot stdio), starting candidate: the WS8 eval scorer. Revisit as the build progresses. |
-| 2026-09-11 | D2 First endpoint   | OpenAI-compatible `chat/completions`; dev/test server = TKG `vks-llama`. Unit tests run against the mock SSE server (WS8); the live endpoint is the final integration gate, never the unit-test basis.                                           |
-| 2026-09-11 | D3 MVP toolset      | `read`, `write`, `edit`, `bash`.                                                                                                                                                                                                                 |
-| 2026-09-11 | D4 Sandbox          | None for MVP. `bash` and file mutators sit behind the WS7 approval gate; approval is OFF by default (`--yes` to bypass).                                                                                                                         |
-| 2026-09-11 | D5 UI               | Plain CLI first: prints the `AgentEvent` stream, reads stdin. Ink TUI deferred to WS10.                                                                                                                                                          |
-| 2026-09-11 | D6 Model for dev    | TKG-pinned `Qwen3.8-27B-UD-Q4_K_M` (ctx 131k). Hosted API key reserved as the eval-suite quality bar only.                                                                                                                                       |
+| 2026-09-11 | D2 First endpoint | OpenAI-compatible `chat/completions`; dev/test server = TKG `vks-llama`. Unit tests run against the mock SSE server (WS8); the live endpoint is the final integration gate, never the unit-test basis. |
+| 2026-09-11 | D3 MVP toolset | `read`, `write`, `edit`, `bash`. |
+| 2026-09-11 | D4 Sandbox | None for MVP. `bash` and file mutators sit behind the WS7 approval gate; approval is OFF by default (`--yes` to bypass). |
+| 2026-09-11 | D5 UI | Plain CLI first: prints the `AgentEvent` stream, reads stdin. Ink TUI deferred to WS10. |
+| 2026-09-11 | D6 Model for dev | TKG-pinned `Qwen3.8-27B-UD-Q4_K_M` (ctx 131k). Hosted API key reserved as the eval-suite quality bar only. |
