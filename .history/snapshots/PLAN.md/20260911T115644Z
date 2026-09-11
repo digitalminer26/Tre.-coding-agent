@@ -1,0 +1,283 @@
+# Coding Agent — Build Plan & Workstreams
+
+Goal: build a working coding agent (harness ↔ LLM, like pi) in TypeScript, first endpoint =
+the local llama.cpp server (OpenAI-compatible chat-completions + tool calling). This plan
+divides the work into **independent, contract-first workstreams** that can be run in
+parallel (by subagents or people), each with a clear deliverable and exit criteria.
+
+Read `docs/01-walkthrough-harness-llm.md` first — it's the reference behavior. This plan is
+*how to get there*.
+
+---
+
+## 0. Decisions (lock these before starting)
+
+| # | Decision | Recommendation | Why / alternative |
+|---|---|---|---|
+| D1 | Language/runtime | **TypeScript + Node ≥ 20** (ESM) | pi's source is a ready TS reference impl; same-language patterns are copyable. Alt: Python (more LLM-ecosystem libs, but you'd re-derive everything pi already solves). |
+| D2 | First endpoint | **OpenAI-compatible `chat/completions`** (llama.cpp on the TKG cluster) | You own it, it's testable, it exercises the full wire path incl. tool calling. Add Anthropic native only if a target model demands it. |
+| D3 | MVP toolset | `read`, `write`, `edit`, `bash` | The four pi defaults; everything else is added later. |
+| D4 | Sandbox | **None for MVP** (runs on your box, `bash` gated by approval). VM sandbox is a later workstream. | Keeps MVP small; safety is its own workstream (WS7). |
+| D5 | UI | **Plain CLI first** (print streaming events, read stdin). Ink TUI deferred. | The event vocabulary *is* the UI API; don't couple a fancy TUI to an unproven loop. |
+| D6 | Model for dev | a local tool-capable GGUF (e.g. a Qwen3/Gemma-class 8–32B) on the cluster | Fast iteration, no cost, mirrors production. Keep an OpenAI/Anthropic key as a quality bar for evals. |
+
+> These are the only blocking decisions. Everything below proceeds once D1–D5 are set.
+
+## 1. Architecture & module map
+
+One repo, mirroring pi's four layers but collapsed to a single package with clear internal
+boundaries. The **boundary between modules is a TypeScript interface** — that's what makes
+parallel work safe.
+
+```
+coding-agent/
+├─ src/
+│  ├─ types.ts            # WS0: AgentMessage union, ToolCall, ToolResult, Usage,
+│  │                      #      StopReason, AgentEvent (start/text_*/thinking_*/
+│  │                      #      toolcall_*/done/error), Tool interface, StreamFn type
+│  ├─ config/
+│  │  └─ models.ts        # WS0/WS1: model catalog + per-model compat descriptor
+│  ├─ wire/
+│  │  ├─ openai-completions.ts   # WS1: buildParams, convertMessages, SSE parse → events
+│  │  └─ http.ts                 # WS1: fetch + retry + abort
+│  ├─ loop/
+│  │  └─ agent-loop.ts    # WS2: runLoop — stream, dispatch tools, feed back, steering
+│  ├─ tools/
+│  │  ├─ registry.ts      # WS3: tool registry, schema gen, execute pipeline
+│  │  ├─ truncate.ts      # WS3: 2000-line / 50KB head & tail truncation
+│  │  ├─ read.ts write.ts edit.ts bash.ts   # WS3
+│  │  └─ safety.ts        # WS7: beforeToolCall approval gate, path sandbox
+│  ├─ prompt/
+│  │  └─ system-prompt.ts # WS4: base + tools + guidelines + project ctx + skills index + cwd
+│  │  └─ skills.ts        # WS4: skills index (name+desc), on-demand body
+│  ├─ session/
+│  │  └─ session.ts       # WS5: JSONL append + replay + resume
+│  ├─ cli/
+│  │  └─ main.ts          # WS6: wires it together, prints events, reads stdin
+│  └─ index.ts            # public API
+├─ test/
+│  ├─ mock-sse.ts         # WS8: fake SSE server (deterministic loop tests)
+│  └─ *.test.ts
+└─ models.json           # local model registry (baseUrl, id, maxTokens, compat)
+```
+
+**The three contracts that decouple the workstreams** (defined in WS0, everyone codes
+against them):
+
+1. `StreamFn = (model, llmContext, opts) => AsyncIterable<AgentEvent>` — the loop's only
+   dependency on the wire layer.
+2. `Tool = { name; description; parameters; execute(id, args, signal, onUpdate) }` — the
+   loop's only dependency on tools.
+3. `AgentMessage` union + `AgentEvent` vocabulary — the shared language of loop, wire,
+   session, and UI.
+
+Get these three right and reviewed before parallel work starts. Everything else is
+filling in behind a stable interface.
+
+## 2. Workstreams
+
+Legend: **deps** = what it needs; **parallel** = who it can run alongside; **owner** =
+suggested subagent type (see §5); **size** = rough effort.
+
+### WS0 — Contracts & scaffold *(blocking, do first)*
+- **Purpose:** stand up the repo (tsconfig, ESM, test runner, `models.json`) and author
+  `types.ts` with the three contracts above + the model-catalog descriptor shape.
+- **Deliverable:** compiling skeleton + `types.ts` + a `README` of the contracts.
+- **Exit criteria:** `tsc` passes; a 20-line fake `StreamFn` and a fake `Tool` both type-check
+  against the interfaces; contract reviewed.
+- **deps:** D1–D5.  **parallel:** — (it's the gate).  **owner:** `worker`.  **size:** S.
+
+### WS1 — Wire layer (provider client)
+- **Purpose:** `stream()` for OpenAI-compatible endpoints. `buildParams` (messages→wire,
+  tools→JSON-schema, `stream:true`, `stream_options.include_usage`, per-model compat), SSE
+  parser → normalized `AgentEvent`s, tool-call arg accumulation + JSON salvage parse, usage
+  capture, retry + `AbortSignal`.
+- **Deliverable:** `wire/openai-completions.ts` + `wire/http.ts` + `config/models.ts`.
+- **Exit criteria:** against the **mock SSE server** (WS8) it yields the exact event
+  sequence for a text reply and a multi-tool-call reply; against the **live llama.cpp**
+  endpoint it streams a real model's tokens and a real tool call, end to end.
+- **deps:** WS0 (types, `StreamFn`).  **parallel:** WS3, WS4, WS5, WS2, WS8.  **owner:**
+  `worker`.  **size:** M.
+- **Watch-outs:** assistant `content` is a *string* (not array); tool-call `arguments` is a
+  JSON *string*; empty assistant messages skipped; tool-call-id normalization; `length`
+  finish-reason surfaced faithfully.
+
+### WS2 — Core loop
+- **Purpose:** `runLoop`. Consume `StreamFn`, maintain context, extract tool calls, dispatch
+  (parallel by default, per-tool sequential opt-out), append `toolResult` messages, handle
+  the `length`→fail-all-calls guard, batch `terminate`, error/abort. Steering/follow-up =
+  optional later (leave a hook, don't implement the UI for it).
+- **Deliverable:** `loop/agent-loop.ts`.
+- **Exit criteria:** with the **mock `StreamFn`** (a scripted fake, no network) it runs a full
+  multi-turn: user → assistant(toolcall) → toolresult → assistant(text) → stop, and it stops
+  cleanly on `error`/`aborted`/`length`. A unit test asserts the exact `AgentMessage[]` it
+  produces.
+- **deps:** WS0 (types). Only needs WS1's *interface*, not its body → **can start the moment
+  WS0 lands.**  **parallel:** WS1, WS3, WS4, WS5, WS8.  **owner:** `worker`.  **size:** M.
+- **Watch-outs:** replace the *same* context slot as the partial streams; never throw out of
+  the loop (errors become messages); results appended in call order.
+
+### WS3 — Tool system
+- **Purpose:** registry + schema gen + execute pipeline (validate → `beforeToolCall` →
+  execute(signal, onUpdate) → `afterToolCall` → result), error-as-`isError`-result, the
+  2000-line/50KB truncation (head for `read`, tail for `bash`, temp-file recovery path),
+  parallel/sequential dispatch support. Build `read`, `write`, `edit`, `bash`.
+- **Deliverable:** `tools/*`.
+- **Exit criteria:** each tool unit-tested against a temp dir; `edit`'s exact-match
+  semantics (unique `oldText`, no overlap) tested incl. the failure paths; a too-long `bash`
+  output truncates to ≤ limits and reports the full-output path; an unknown tool returns an
+  error result, not a throw.
+- **deps:** WS0 (Tool interface).  **parallel:** WS1, WS2, WS4, WS5, WS8.  **owner:**
+  `worker`.  **size:** M–L (4 tools + framework).
+- **Watch-outs:** `edit` must match the *original* file, not incrementally; `bash` tail
+  truncation never splits lines; all tools honor `signal.aborted`.
+
+### WS4 — System prompt & skills
+- **Purpose:** `buildSystemPrompt` (base + per-tool one-liners + derived guidelines +
+  project-context files + skills *index* + cwd) and the skills loader (index in prompt, body
+  read on demand via `read`).
+- **Deliverable:** `prompt/system-prompt.ts`, `prompt/skills.ts`.
+- **Exit criteria:** given a fixture of enabled tools + a project context file + a skills
+  dir, it produces a deterministic prompt; a test asserts skills appear as name+description
+  only (no bodies) and that guidelines are derived from the tool set.
+- **deps:** WS0.  **parallel:** everything.  **owner:** `researcher`/`worker`.  **size:** S.
+
+### WS5 — Session persistence
+- **Purpose:** JSONL append-only session (header, messages, modelChange, compaction entry
+  slot) + replay/resume. Compaction itself is deferred (WS9) but the entry type and the
+  "rebuild context honoring a compaction boundary" seam are defined now.
+- **Deliverable:** `session/session.ts`.
+- **Exit criteria:** append N messages → kill → replay → identical `AgentMessage[]`; resume
+  continues a loop from the replayed context.
+- **deps:** WS0.  **parallel:** everything.  **owner:** `worker`.  **size:** S.
+
+### WS6 — CLI / integration
+- **Purpose:** `main.ts` — load `models.json`, build prompt (WS4), register tools (WS3),
+  construct the real `StreamFn` (WS1), run the loop (WS2), print events (streaming text,
+  tool-call lines, tool results), read stdin, persist via WS5. This is the **integration
+  seam** — the first place all modules meet.
+- **Deliverable:** runnable `coding-agent` CLI.
+- **Exit criteria:** the §4 vertical-slice scenarios all pass against live llama.cpp.
+- **deps:** WS1+WS2+WS3+WS4+WS5 (real bodies). **Starts after the parallel batch; it's
+  short because everything behind it was interface-tested already.**  **owner:** `worker`.
+  **size:** S–M.
+
+### WS7 — Safety & permissions
+- **Purpose:** `beforeToolCall` approval gate (prompt the human before `bash`/`write`/`edit`
+  when not `--yes`), path sandbox (confine `read`/`write`/`edit` to the project root by
+  default), destructive-action confirmation. Later: VM sandbox.
+- **Deliverable:** `tools/safety.ts` + CLI flags.
+- **Exit criteria:** with approval off, a `bash` call is blocked and the block reason is fed
+  back to the model as an error result; a `write` outside the root is refused.
+- **deps:** WS3 (the hook it plugs into).  **parallel:** after WS3.  **owner:** `worker`.
+  **size:** S.
+
+### WS8 — Test & eval harness
+- **Purpose:** (a) **mock SSE server** that replays canned SSE streams (text-only,
+  multi-tool-call, truncation/`length`, error) — this is what makes WS1/WS2 testable with no
+  network; (b) a **mock `StreamFn`** (scripted, in-process) for pure loop tests; (c) an eval
+  script that runs a small set of tasks (e.g. "create a file", "fix this typo", "run a
+  command and report exit code") against a chosen model and scores tool-call correctness.
+- **Deliverable:** `test/mock-sse.ts`, `test/fake-stream.ts`, `test/eval.ts`.
+- **Exit criteria:** WS1 and WS2's exit criteria are *expressed as tests using these mocks*;
+  eval runs a 3-task suite and prints pass/fail per task.
+- **deps:** WS0 (types). Buildable **in parallel with WS1** — it's a precondition for
+  testing the wire layer.  **owner:** `worker`/`researcher`.  **size:** S–M.
+
+### WS9 — Context management (compaction) — *Phase 3, deferred*
+- Auto-compaction (trigger `contextTokens > window − reserve`, keep-recent, structured
+  summary, never split a tool call from its results, iterative summaries). Only after the
+  MVP loop is stable. **owner:** `worker`. **size:** M.
+
+### WS10 — TUI (Ink) — *Phase 3, deferred*
+- Streaming render, tool-call display, diff view, keybindings. Consumes the same
+  `AgentEvent` stream the CLI already prints. **owner:** `worker`. **size:** L.
+
+## 3. Dependency graph
+
+```
+                ┌─────────────────────────── D1..D5 decisions ───────────────────────────┐
+                └───────────────────────────────────┬─────────────────────────────────────┘
+                                                    ▼
+                                              ┌──────────┐
+                                              │   WS0    │  contracts + scaffold (GATE)
+                                              └────┬─────┘
+      ┌───────────────┬───────────────┬────────────┼───────────────┬───────────────┐
+      ▼               ▼               ▼            ▼               ▼               ▼
+ ┌─────────┐    ┌─────────┐    ┌─────────┐   ┌─────────┐     ┌─────────┐   ┌─────────┐
+ │  WS1    │    │  WS2    │    │  WS3    │   │  WS4    │     │  WS5    │   │  WS8    │
+ │ wire    │    │ loop    │    │ tools   │   │ prompt  │     │ session │   │ tests   │
+ └────┬────┘    └────┬────┘    └────┬────┘   └────┬────┘     └────┬────┘   └────┬────┘
+      │   (WS2 needs only WS1's StreamFn *interface*, not its body)
+      │               │               │            │               │             │
+      └───────────────┴───────┬───────┴────────────┘               │             │
+                              ▼                                    │             │
+                       ┌───────────┐                               │             │
+                       │   WS6     │  CLI / integration (all real bodies)      │
+                       │  glue     │◄──────────────────────────────┘─────────────┘
+                       └─────┬─────┘
+                             ▼
+                       ┌───────────┐   (WS7 plugs into WS3's hook; can run alongside WS6)
+                       │   WS7     │
+                       │  safety   │
+                       └─────┬─────┘
+                             ▼
+                 Phase 3:  WS9 compaction · WS10 TUI
+```
+
+## 4. Build order & vertical slice
+
+**Phase A — Gate (WS0).** One focused session. Do not start parallel work until the three
+contracts compile and are reviewed.
+
+**Phase B — Parallel batch (WS1, WS2, WS3, WS4, WS5, WS8).** All run concurrently against
+the WS0 contracts + WS8 mocks. No network needed except WS1's final live-endpoint check.
+
+**Phase C — Integrate (WS6 → WS7).** Short, because each module was already interface-tested.
+
+**Vertical slice — first runnable thing (do this inside Phase C, before safety/TUI):**
+1. `agent run "say hello"` → prompt built, one LLM call, streamed text printed. *(proves
+   wire + loop + CLI with zero tools)*
+2. Enable `bash` only → `agent run "list files in cwd"` → real tool call round-trip.
+3. Enable `read`/`write`/`edit` → `agent run "create hello.txt with 'hi' and read it back"`.
+
+At step 3 you have a real coding agent. Everything after is hardening.
+
+## 5. Parallel execution plan (who runs what)
+
+| Wave | Concurrent workstreams | Notes |
+|---|---|---|
+| A | WS0 | single; gate |
+| B | WS1 · WS2 · WS3 · WS4 · WS5 · WS8 | six independent streams; WS2 uses WS8's fake `StreamFn`, WS1 uses WS8's mock SSE |
+| C | WS6, then WS7 | sequential (integration, then safety) |
+| D | WS9, WS10 | only after C is green |
+
+Within Wave B, each workstream is sized for one focused subagent session. Suggested
+owner mapping: `worker` for WS1/WS2/WS3/WS5/WS6/WS7, `researcher` for WS4/WS8 (WS8's eval
+scoring may want a second opinion), `reviewer` to gate each workstream's exit criteria
+before it merges.
+
+## 6. Per-workstream "definition of done" checklist (use as merge gate)
+
+- [ ] Type-checks against WS0 contracts with **no** changes to other modules.
+- [ ] Exit-criteria test(s) exist and pass (unit +, where applicable, mock-integration).
+- [ ] No exceptions cross the module boundary — failures become data (messages/results).
+- [ ] Honors `AbortSignal` end to end.
+- [ ] `reviewer` subagent has signed off on the diff.
+- [ ] File-history snapshot taken before any edit to shared files.
+
+## 7. Risks & mitigations
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Local model's tool calling is flaky (malformed/truncated JSON) | **High** | WS8 eval suite gates model choice; the `length`→fail-all guard + JSON salvage (WS1/WS2) make bad calls non-destructive; keep an API model as the quality bar. |
+| Contract churn after parallel work starts | Med | WS0 is explicitly the gate; any contract change is a *broadcast* — all of Wave B re-checks. Keep WS0 small and reviewed hard. |
+| SSE parser edge cases across endpoints | Med | Mock SSE (WS8) encodes the tricky cases (split frames, multi-tool, `length`, error) as fixtures; live llama.cpp check is the final gate, not the unit-test basis. |
+| Scope creep into TUI/compaction early | Med | They're Phase 3 by design; the CLI prints the same event stream the TUI would render, so nothing is lost by deferring. |
+| Running `bash` unsandboxed on a live box | Med | WS7 approval gate is the gate to "daily use"; until then run with `--yes` off by default. |
+
+## 8. Out of scope (MVP)
+
+Anthropic-native wire, image inputs, subagents, branch/tree navigation, themes/keybindings,
+VM sandboxing, multi-model routing, OAuth/expiring-token handling. All have seams reserved
+in the contracts; none block the MVP.
