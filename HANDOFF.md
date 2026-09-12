@@ -1,76 +1,57 @@
-# HANDOFF — resume point (2026-09-12, WS7 done)
+# HANDOFF — resume point (2026-09-12, WS8 done)
 
 ## Where we are
-WS0–WS8 (MVP + safety) are complete and green. WS7 (safety & permissions)
-landed today: the agent now has real permission boundaries.
+WS0–WS8 (MVP + safety + eval harness) are complete and green. The MVP is
+functionally done: wire layer, loop, tools, prompt/skills, sessions, CLI,
+safety, and the eval harness all exist and are tested.
 
-- **Path sandbox** — read/write/edit are confined to the project root
-  (`--cwd`, default process cwd). The safety hook resolves each `path` arg
-  against the root and REWRITES `args.path` to the canonical absolute result
-  (so `--cwd` actually means something — tools no longer depend on process
-  cwd). Lexical check (kills `../` + absolute escapes) + realpath check on
-  the deepest existing ancestor (kills symlink escapes).
-- **Approval gate** — bash/write/edit are gated. Mode `ask` (default): every
-  gated call prompts the human, anything but `y` denies. `--yes`:
-  auto-approve except destructive bash. `--no-approve`: never prompt, block
-  gated calls outright (fail-closed for non-interactive). A denial is a
-  BLOCK → `isError` tool result the model reads and adapts to (I3/D7).
-- **Destructive confirmation (D8, new decision in PLAN §9)** — even under
-  `--yes`, bash commands matching destructive patterns (recursive rm,
-  `git push -f/--force/--force-with-lease`, dd/redirection to raw devices,
-  mkfs, fork bomb, shutdown/reboot/halt/poweroff) still confirm. Patterns
-  are deliberately over-triggering.
-- **bash runs in the project root** — `createBashTool(cwd)` factory
-  (bashTool = no-cwd default).
-- Prompts are serialized (one question on screen at a time; `makeAskQueue`)
-  and fail closed: non-TTY stdin without an injected approver denies; a
-  throwing ask() denies.
+The last remaining piece — the WS8 eval *runner* — landed today:
+
+- **`npm run eval`** (`test/eval-run.ts`) plugs the real wire StreamFn
+  (`openAiStream`) into `runEval` and runs the PLAN WS8 3-task suite
+  (create file / fix typo / run command + report exit code) against a live
+  model from models.json. Prints a pass/fail table per task; exits
+  0 = all pass, 1 = any fail, 2 = setup error (bad args / missing models
+  file / unknown model). A `--timeout <ms>` (default 180s) aborts the
+  stream — an aborted task scores as a failed task (I3: no hangs).
+- **Scorer extension (D9)**: `EvalTask.expected.argsContains` — substring
+  match for open-ended string args. Added because the 27B answered
+  "run pwd and report its exit code" with `pwd; echo "Exit code: $?"` —
+  an eval that fails a task because the model did *more* than the minimum
+  is mismeasurement. `argsSubset` (deep-equal) is unchanged.
+- Verified live: **3/3 PASS** against TKG `Qwen3.8-27B-UD-Q4_K_M`
+  (baseline 2026-09-12). The 27B is run-to-run variable — an earlier run
+  had it `read` before `edit` on fix-typo (single-turn FAIL). Treat the
+  eval as a regression baseline, not a gate; a FAIL is a measurement.
 
 ## Remaining
-- **WS8 residual (small)**: an eval *runner* that plugs the real wire
-  StreamFn into `runEval` (test/eval.ts already scores; nothing drives it
-  end-to-end against a live model yet).
 - **Phase 3 (deferred)**: WS9 context compaction, WS10 Ink TUI.
 
-## WS7 key facts
-- `src/tools/safety.ts`: `makeSafetyHooks({root, mode, ask})` → the
-  `BeforeToolCall` hook (undefined = allow, `{args}` = rewrite,
-  `{blocked}` = refuse). `checkPathWithinRoot(root, p)` (exported, tested),
-  `destructiveBashPatterns(cmd) → string[]` (labels; [] = safe),
-  `makeAskQueue(inner)`, `AskApproval`/`ApprovalMode` types.
-- Hook order per call: (1) path sandbox for read/write/edit (missing/non-
-  string `path` → blocked — defense in depth), (2) approval gate for
-  write/edit/bash (read is never gated), (3) bash destructive
-  classification feeds the gate. A sandboxed path tool ALWAYS returns
-  `{args}` (the rewrite) even when allowed.
-- CLI (`src/cli/main.ts`): `MainDeps.askApproval?` injection; one-shot uses
-  a throwaway readline per question (TTY only; non-TTY → deny); the REPL
-  shares its readline with the approver via a `consumer` slot — either the
-  `you> ` prompt or an approval prompt is pending, each `line` resolves the
-  pending consumer (piped stdin can answer: `printf 'msg\nn\n' | coding-agent`).
-  `wiredTools` swaps bash for `createBashTool(root)`; the executor =
-  `makeToolExecutor({ beforeToolCall: makeSafetyHooks(...) })` flows through
-  `runTurn`'s `executeToolCall?` dep.
-- Pipeline block message: `Tool "<name>" was blocked: <reason>` (isError).
-  The CLI prints it truncated at 200 chars — the FULL reason lives in the
-  session's toolResult (tests should assert on the session, not the print).
-- Tests: `test/safety.test.ts` (31 tests: sandbox incl. symlink escape +
-  fail-closed root, D8 pattern table, all 3 modes, FIFO queue, pipeline
-  integration). `test/cli.test.ts` gained WS7 section (injected
-  askApproval deny/approve, --yes, --no-approve, absolute + `../` escapes
-  via --session assertions, bash `pwd` in root, bad --cwd → exit 2).
-  `test/cli-live.test.ts` slice 4 = live denied approval (real model reads
-  the isError result); slices 2/3 now use `--yes --cwd <dir>` (chdir hack
-  gone).
-- Verified live (RUN_LIVE=1): all 175 tests pass incl. 4 CLI slices.
-  Verified by hand: non-TTY one-shot denies without hanging; TTY (via
-  `script -q /dev/null`) prompts and answers; REPL piped deny/approve both
-  work, EOF exits cleanly.
+## WS8 (eval) key facts
+- `test/eval.ts`: `runEval({streamFn, model, tasks, systemPrompt?, signal?})`
+  → `EvalResult[]` (`{task, pass, reason, calls}`). Scoring is single-turn:
+  one LLM call per task, inspect the first assistant message, score the
+  FIRST emitted tool call against `expected.toolName` + `argsSubset`
+  (deep-equal) + `argsContains` (substring). `stopReason: "error"` →
+  failed task with the stream error in `reason`; no tool call → "no tool
+  call emitted". `formatEvalReport(results)` → the printable table.
+- `test/eval-run.ts`: `EVAL_TASKS` (the 3 PLAN tasks, real `DEFAULT_TOOLS`
+  schemas), `parseArgs` (`--models <path>` default `./models.json`,
+  `--model <id>`, `--timeout <ms>`, `--help`), `main(argv) → exit code`
+  with the realpath entry guard (importable without side effects).
+  Status line goes to stderr; the report to stdout.
+- Test coverage: `test/eval.test.ts` (5 tests: pass/wrong-tool/wrong-args,
+  argsContains hit/miss/non-string, no-call, stream error, report format)
+  — all via fake-stream, no network. Full fast suite: 176 tests.
+- Live prompts must stay short and direct (WS6 lesson, restated in
+  eval-run.ts comments).
 
 ## Conventions
 - **I3**: failures are data (isError results, exit codes), never uncaught
   throws. **D7**: blocked/denied = isError ToolResult the model reads.
   **D8**: destructive bash confirms even under --yes.
+  **D9**: eval scoring — single turn, first tool call, argsSubset +
+  argsContains.
 - Tests: `node --test` (no framework), tsc strict, ESM `.js` suffixes on
   relative imports. Live tests gated `RUN_LIVE=1` (models.json → TKG
   vks-llama, --parallel 1, so live tests are slow: ~45s full suite).
@@ -81,9 +62,6 @@ landed today: the agent now has real permission boundaries.
   ignores instructions (lesson from WS6).
 
 ## How to resume
-1. `npm test` (fast, 175 tests) and `RUN_LIVE=1 npm test` (final gate).
-2. WS8 residual: wire a tiny runner (`node test/eval.ts` or `npm run eval`)
-   that loads models.json, builds the real openai-completions StreamFn,
-   runs a 3-task suite (create file / fix typo / run command + report exit
-   code) and prints pass/fail per task.
+1. `npm test` (fast, 176 tests) and `RUN_LIVE=1 npm test` (final gate).
+2. `npm run eval` — live 3-task eval vs the default models.json model.
 3. Phase 3 when the MVP feels stable: WS9 compaction, WS10 TUI.

@@ -81,3 +81,9 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 16:49:53 | edit | test/cli-live.test.ts | WS7: --yes on slices 2/3, drop chdir hack, live denied-approval slice | .history/snapshots/test/cli-live.test.ts/20260912T164953Z |
 | 2026-09-12 16:49:53 | edit | PLAN.md | WS7: D8 destructive-confirmation decision | .history/snapshots/PLAN.md/20260912T164953Z |
 | 2026-09-12 16:49:53 | edit | HANDOFF.md | WS7 done, resume point Phase-3 (WS9) | .history/snapshots/HANDOFF.md/20260912T164953Z |
+| 2026-09-12 21:21:19 | create | test/eval-run.ts | created: WS8 residual live eval runner | (new file — nothing to snapshot) |
+| 2026-09-12 21:21:19 | edit | package.json | add npm run eval script | .history/snapshots/package.json/20260912T212119Z |
+| 2026-09-12 21:24:20 | edit | test/eval.ts | add argsContains substring scoring | .history/snapshots/test/eval.ts/20260912T212420Z |
+| 2026-09-12 21:24:20 | edit | test/eval.test.ts | cover argsContains scoring | .history/snapshots/test/eval.test.ts/20260912T212420Z |
+| 2026-09-12 21:28:11 | edit | HANDOFF.md | WS8 residual done — new resume point Phase 3 | .history/snapshots/HANDOFF.md/20260912T212811Z |
+| 2026-09-12 21:28:11 | edit | PLAN.md | add D9 eval-scoring decision | .history/snapshots/PLAN.md/20260912T212811Z |
