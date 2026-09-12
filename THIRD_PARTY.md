@@ -4,9 +4,9 @@ Aggregate citation table for this repo. Kept in sync per
 `docs/03-citation-policy.md` rule 4 — every commit that adds L1/L2 code adds its row
 here.
 
-| File(s)   | Source   | Level   | What was taken             |
-|-----------|----------|---------|----------------------------|
-| —         | —        | —       | (empty until Wave B lands) |
+| File(s)                | Source             | Level | What was taken                                                                                                     |
+|------------------------|--------------------|-------|--------------------------------------------------------------------------------------------------------------------|
+| src/session/session.ts | pi 0.85.1 (agent-core) | L2 | Append-only JSONL session log + resume-by-replay (context rebuilt from the log, honoring compaction boundaries); simplified: 4 entry kinds, no branching/branchSummary/custom entries |
 
 ## License
 

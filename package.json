@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "bin": {
+    "coding-agent": "dist/src/cli/main.js"
+  },
   "description": "A small, fully-owned coding agent: TypeScript harness talking to OpenAI-compatible LLM endpoints. Built from scratch, pi as design reference (see PLAN.md).",
   "engines": {
     "node": ">=20"
