@@ -33,3 +33,8 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-11 23:32:19 | create | test/fake-stream.test.ts | WS8: created | (new file — nothing to snapshot) |
 | 2026-09-11 23:32:19 | create | test/eval.ts | WS8: created | (new file — nothing to snapshot) |
 | 2026-09-11 23:32:19 | create | test/eval.test.ts | WS8: created | (new file — nothing to snapshot) |
+| 2026-09-12 00:01:23 | create | src/config/models.ts | WS1: created | (new file — nothing to snapshot) |
+| 2026-09-12 00:01:23 | create | src/wire/http.ts | WS1: created | (new file — nothing to snapshot) |
+| 2026-09-12 00:01:24 | create | src/wire/openai-completions.ts | WS1: created | (new file — nothing to snapshot) |
+| 2026-09-12 00:01:24 | create | test/wire.test.ts | WS1: created | (new file — nothing to snapshot) |
+| 2026-09-12 00:01:24 | create | test/wire-live.test.ts | WS1: created | (new file — nothing to snapshot) |
