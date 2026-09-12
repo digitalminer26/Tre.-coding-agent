@@ -1,4 +1,4 @@
-# HANDOFF — resume point (2026-09-12)
+# HANDOFF — resume point (2026-09-12, WS5 done)
 
 Build of a minimal coding-agent harness (TypeScript, zero runtime deps, Node 26).
 Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkthrough-harness-llm.md`.
@@ -12,37 +12,126 @@ Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkth
 | WS1 | wire layer: `src/wire/{http,abort,openai-completions}.ts`, `src/config/models.ts` + tests | ✅ done, commit `4732991` |
 | WS2 | core loop: `src/loop/agent-loop.ts` + `test/agent-loop.test.ts` (13 tests) | ✅ done, commit `39c33c8` |
 | WS3 | tool system: `src/tools/{registry,validate,truncate,pipeline,read,write,edit,bash,index}.ts` + 3 test files | ✅ done, commit `16d64c9` |
-| WS4 | system prompt + skills | not started |
-| WS5 | session JSONL persistence | not started |
-| WS6 | integration / vertical slice against live endpoint | deferred — propose after the six |
+| WS4 | system prompt + skills: `src/prompt/{system-prompt,skills}.ts` + `test/prompt.test.ts` | ✅ done, commit `0856746` |
+| WS5 | session JSONL persistence: `src/session/session.ts` + `test/session.test.ts` (10 tests) | ✅ done, commit `510a0ac` |
+| WS6 | CLI / integration: `src/cli/main.ts` (PLAN.md §WS6) | ⬜ not started — **next up, see below** |
+| WS7 | safety & permissions: approval gate + path sandbox (PLAN.md §WS7) | not started (deps: WS3 ✓) |
+| WS9 | context management (auto-compaction) — Phase 3, deferred | seam defined in WS5 (see key facts) |
 
-## Resume WS4 — exact next steps
+Note: WS8 was built before WS1 by deliberate dependency order (the harness is
+the precondition for testing the wire layer). PLAN.md is the numbering
+authority.
 
-Spec + exit criteria: PLAN.md WS4 (authoritative). Deliverables: `src/prompt/system-prompt.ts`, `src/prompt/skills.ts`.
+## Resume WS6 — exact next steps
 
-1. `skills.ts`: loader that scans a skills dir (fixture in tests; real path later = `~/.pi/agent/skills` or a project `.pi/skills` — WS6 decides the resolution order) and returns the INDEX: `[{ name, description }]` parsed from each skill dir's `SKILL.md` frontmatter (name + description; body never parsed into the prompt). On-demand body = the model calling `read` on the SKILL.md path — skills.ts should expose each skill's `dir`/`filePath` so the prompt can point at the exact path.
-2. `system-prompt.ts`: `buildSystemPrompt(opts: { model, tools: Tool[], cwd, projectContextFiles?: string[], skills?: SkillIndexEntry[], extraGuidelines?: string[] }) => string`, deterministic (no timestamps/random). Sections, in order: base identity (minimal harness, tool use, error-as-data), one-liner per enabled tool (from `tool.description`, so the prompt is derived from the tool set — exit criterion), derived guidelines (e.g. if `bash` enabled → "run, don't guess"; if `edit`+`read` → "read before edit"), project-context file contents, skills INDEX (name+description+path only), cwd.
-3. Tests (`test/prompt.test.ts`): with a fixture tools list + fixture project file + fixture skills dir (two fake SKILL.md files with bodies) → assert: deterministic (two calls equal); each tool name appears exactly once in the tool section; guidelines change with the tool set (e.g. no `bash` line when bash absent); skills appear as name+description+path and their BODY text does NOT appear in the prompt; project context file content appears verbatim; cwd appears.
-4. `npm test` green (baseline now 97 total: 95 pass + 2 live skipped) → commit `WS4: system prompt + skills index (name+desc only, body on demand via read)`.
-5. Then WS5 (session JSONL) — implement → `npm test` green → commit. Specs in PLAN.md per-WS sections (exit criteria authoritative).
+Spec + exit criteria: PLAN.md §WS6 (authoritative). Deliverable:
+`src/cli/main.ts` — the **integration seam**, first place all modules meet.
+
+1. `main.ts`: load `models.json` (project root already exists — points at
+   vks-llama, key stays out of git), pick model by id (short id accepted),
+   build the system prompt (WS4 `buildSystemPrompt`, skills dir resolution
+   order is decided HERE: project `.pi/skills` first, then
+   `~/.pi/agent/skills`), register tools (WS3 `src/tools/index.ts`),
+   construct the real `StreamFn` (WS1 `openAiStream`).
+2. Run `runLoop` (WS2) with the replayed context when resuming:
+   `--resume <file.jsonl>` → `replaySession(path)` → seed `initialMessages`
+   + continue appending via `Session.open(path)`. Fresh run:
+   `Session.create(path, { cwd, model })`. Persist every context-affecting
+   message (user input, assistant turns, tool results) as it lands —
+   `AgentEvent` stream is the source; append on `start`/message-finalization,
+   not per delta.
+3. Event printer: streaming assistant text (delta → stdout, newline on
+   done), one line per tool call (`name` + id + args summary), tool result
+   lines (truncate with WS3 `truncate.ts`), stopReason on `agent_end`
+   (including `error` + `errorMessage` — I3: failures are data).
+4. stdin: readline REPL; SIGINT mid-stream → `AbortController.abort()`
+   (the loop's abort path is already tested in WS2 — mid-stream abort keeps
+   the partial with `stopReason:"aborted"`, mid-tool abort yields
+   "Operation aborted" results).
+5. Exit criteria (PLAN.md §WS6): the §4 vertical-slice scenarios all pass
+   against live llama.cpp (`RUN_LIVE=1`-gated pattern already exists —
+   `test/wire-live.test.ts`). Live notes from the WS4-era HANDOFF still hold:
+   Qwen is a **thinking model** → `max_tokens >= 4096`.
+6. Server note (2026-09-12 infra): the local llama.cpp server now runs
+   `--parallel 1` (single slot) — concurrent requests queue instead of
+   sharing the KV pool. Keep CLI prompts lean; long generations may wait
+   behind queued requests (seconds to ~1 min).
+
+Then WS7 (safety & permissions) — PLAN.md §WS7; its hook is the WS3
+`beforeToolCall` gate (`{ blocked: string }` shape is already tested).
 
 ## Key facts (already verified — do not re-probe)
 
-- **Tests**: `npm test` = `tsc && node --test dist/test/*.test.js`. Strict tsconfig: `noUncheckedIndexedAccess`, `verbatimModuleSyntax` (type-only imports!), target ES2022, NodeNext.
-- **Live endpoint**: `http://172.30.70.11:8080/v1` (vks-llama, llama.cpp), model id `Qwen3.8-27B-UD-Q4_K_M` (short id accepted). It is a **thinking model** (`reasoning_content` field, spends token budget thinking) → live tests need `max_tokens >= 4096`. Live tests gated behind `RUN_LIVE=1` (test/wire-live.test.ts — both pass).
-- **Contract invariants** (docs/02-contracts.md): I1 everything is a message/tool; I2 every stream event carries full in-progress message (loop pushes on `start`, replaces SAME slot on every event); I3 no exceptions cross boundaries — streams ALWAYS emit `start`…`done` even on error/abort (both fakeStream and openAiStream already do this; the loop relies on it).
-- **WS2 seam**: loop takes `executeToolCall?: ExecuteToolCall` option (defaults to `tool.execute`); WS3's validation/hook pipeline gets injected there. `prepareNextTurn` hook is where WS5 compaction lands.
-- **WS8 fixtures** (pinned by tests, reuse them): mock-sse 5 scenarios (`text`, `multi-tool`, `length`, `http-error`, `stream-error`); fakeStream turns as above; `runEval` scores first tool call of one LLM call.
-- **fakeStream quirk (verified, WS2)**: deltas are pre-built before the first yield, so a mid-turn abort's `done` message carries the FULL text, not a truncated partial. Don't "fix" without updating WS8 self-tests; WS2 tests pin loop behavior (stopReason + slot consistency), not fake truncation fidelity.
-- **Loop type notes (verified, WS2)**: `prepareNextTurn` may return `undefined` (keep context) or a Promise — type is `AgentMessage[] | undefined | Promise<AgentMessage[] | undefined>`. `LlmContext.messages` handed to the StreamFn is the loop's LIVE context array (cloned only for `initialMessages`) — capture by value if you assert on it later.
-- **D7 (WS3, in decision log)**: `ToolResult` has `isError?: boolean`; the pipeline reports failures in-band and the loop marks `ToolResultMessage.isError` from it (a throw out of `executeToolCall` is still caught and marked isError — I3 safety net for broken tools).
-- **`ExecuteToolCall` lives in `src/types.ts`** (contract home) so tools can implement it without importing the loop; `agent-loop.ts` re-exports it for WS2-era compatibility.
-- **Truncation semantics (WS3, tested)**: kept text is the EXACT original slice through the last kept line — head-truncated text ends with `\n` (the separator existed in the original); tail-truncated ends with `\n` iff the original did. Byte cost model counts each line's own `\n` (so `keptBytes` = exact kept-text bytes, never over the budget).
-- **Pipeline hook shapes (WS3)**: `beforeToolCall` returns `{ args? }` (rewrite) | `{ blocked: string }` (WS7 approval seam) | `undefined`; `afterToolCall` returns a replacement `ToolResult` | `undefined`. Both may be async; broken hooks are contained (I3).
-- **node:test hooks (WS3)**: `beforeEach`/`afterEach` are top-level imports from `"node:test"` in @types/node 24 — `test.beforeEach` does NOT type-check.
+- **WS5 session format (2026-09-12, 510a0ac)**: one `.jsonl` per session;
+  entry kinds `header` (version=1, id, createdAt, cwd) / `message`
+  (id + `AgentMessage`) / `modelChange` (model id + provider label — apiKeys
+  NEVER in the file) / `compaction` (summary + firstKeptEntryId +
+  tokensBefore). `Session.create` refuses existing files (EEXIST); resume =
+  `Session.open`. Torn tail = unparseable LAST line without trailing `\n`
+  (dropped, reported via `droppedTornTail`); any other bad line throws.
+  **WS9's compaction writes `Session.appendCompaction(...)` between turns;
+  the trigger point is the loop's `prepareNextTurn` hook**; replay rebuilds
+  via pure `replayContext(entries)` = [summary-as-user-message] + entries
+  from `firstKeptEntryId` on (chain-safe). Do not keep a shadow in-memory
+  "logical context" — the log is the source of truth.
+- **Tests**: `npm test` = `tsc && node --test dist/test/*.test.js`. Strict
+  tsconfig: `noUncheckedIndexedAccess`, `verbatimModuleSyntax` (type-only
+  imports!), target ES2022, NodeNext. Current: 117 total — 115 pass + 2 live
+  skipped (`RUN_LIVE=1`). Files: agent-loop 13 · wire 13 · tools 32 · prompt
+  10 · truncate 8 · mock-sse 8 · validate 7 · fake-stream 7 · session 10 ·
+  contracts 3 · eval 4 · wire-live 2.
+- **Live endpoint**: `http://172.30.70.11:8080/v1` (vks-llama, llama.cpp),
+  model id `Qwen3.8-27B-UD-Q4_K_M` (short id accepted). It is a **thinking
+  model** (`reasoning_content` field, spends token budget thinking) → live
+  tests need `max_tokens >= 4096`. Live tests gated behind `RUN_LIVE=1`.
+- **Contract invariants** (docs/02-contracts.md): I1 everything is a
+  message/tool; I2 every stream event carries full in-progress message (loop
+  pushes on `start`, replaces SAME slot on every event); I3 no exceptions
+  cross boundaries — streams ALWAYS emit `start`…`done` even on error/abort
+  (both fakeStream and openAiStream already do this; the loop relies on it).
+- **WS2 seam**: loop takes `executeToolCall?: ExecuteToolCall` option
+  (defaults to `tool.execute`); WS3's validation/hook pipeline gets injected
+  there. `prepareNextTurn` hook is where WS9 compaction lands.
+- **WS8 fixtures** (pinned by tests, reuse them): mock-sse 5 scenarios
+  (`text`, `multi-tool`, `length`, `http-error`, `stream-error`); fakeStream
+  turns as above; `runEval` scores first tool call of one LLM call.
+- **fakeStream quirk (verified, WS2)**: deltas are pre-built before the
+  first yield, so a mid-turn abort's `done` message carries the FULL text,
+  not a truncated partial. Don't "fix" without updating WS8 self-tests; WS2
+  tests pin loop behavior (stopReason + slot consistency), not fake
+  truncation fidelity.
+- **Loop type notes (verified, WS2)**: `prepareNextTurn` may return
+  `undefined` (keep context) or a Promise — type is `AgentMessage[] |
+  undefined | Promise<AgentMessage[] | undefined>`. `LlmContext.messages`
+  handed to the StreamFn is the loop's LIVE context array (cloned only for
+  `initialMessages`) — capture by value if you assert on it later.
+- **D7 (WS3, in decision log)**: `ToolResult` has `isError?: boolean`; the
+  pipeline reports failures in-band and the loop marks
+  `ToolResultMessage.isError` from it (a throw out of `executeToolCall` is
+  still caught and marked isError — I3 safety net for broken tools).
+- **`ExecuteToolCall` lives in `src/types.ts`** (contract home) so tools can
+  implement it without importing the loop; `agent-loop.ts` re-exports it for
+  WS2-era compatibility.
+- **Truncation semantics (WS3, tested)**: kept text is the EXACT original
+  slice through the last kept line — head-truncated text ends with `\n` (the
+  separator existed in the original); tail-truncated ends with `\n` iff the
+  original did. Byte cost model counts each line's own `\n` (so `keptBytes` =
+  exact kept-text bytes, never over the budget).
+- **Pipeline hook shapes (WS3)**: `beforeToolCall` returns `{ args? }`
+  (rewrite) | `{ blocked: string }` (WS7 approval seam) | `undefined`;
+  `afterToolCall` returns a replacement `ToolResult` | `undefined`. Both may
+  be async; broken hooks are contained (I3).
+- **node:test hooks (WS3)**: `beforeEach`/`afterEach` are top-level imports
+  from `"node:test"` in @types/node 24 — `test.beforeEach` does NOT
+  type-check.
 
 ## Working method for this repo
 
-- **Sequential only** — no parallel subagent fan-out (user's explicit request; worker subagent also terminates early on large tasks).
-- **File-history discipline**: before creating/modifying any project file, log it: `~/.pi/agent/skills/file-history/scripts/hist add <path> "created"` (or snapshot for existing files). Append-only `.history/CHANGELOG.md`.
-- Commit per workstream with a descriptive message; verify exit criteria from PLAN.md before committing.
+- **Sequential only** — no parallel subagent fan-out (user's explicit
+  request; worker subagent also terminates early on large tasks).
+- **File-history discipline**: before creating/modifying any project file,
+  log it: `~/.pi/agent/skills/file-history/scripts/hist add <path> "created"`
+  (or snapshot for existing files). Append-only `.history/CHANGELOG.md`.
+- Commit per workstream with a descriptive message; verify exit criteria
+  from PLAN.md before committing. Code commit first, docs (HANDOFF) commit
+  second — the docs commit references the code commit's hash.
