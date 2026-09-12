@@ -43,3 +43,18 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 01:59:48 | create | test/agent-loop.test.ts | created | (new file — nothing to snapshot) |
 | 2026-09-12 01:59:48 | edit | HANDOFF.md | snapshot pre-WS2-complete-update | .history/snapshots/HANDOFF.md/20260912T015948Z |
 | 2026-09-12 02:08:09 | edit | src/loop/agent-loop.ts | pre-fix: prepareNextTurn return type missing undefined | .history/snapshots/src/loop/agent-loop.ts/20260912T020809Z |
+| 2026-09-12 02:21:42 | edit | src/types.ts | pre-D7: add ToolResult.isError | .history/snapshots/src/types.ts/20260912T022142Z |
+| 2026-09-12 02:21:42 | edit | src/loop/agent-loop.ts | pre-D7: isError from result, not throw | .history/snapshots/src/loop/agent-loop.ts/20260912T022142Z |
+| 2026-09-12 02:21:42 | edit | PLAN.md | pre-D7: decision log row | .history/snapshots/PLAN.md/20260912T022142Z |
+| 2026-09-12 02:21:42 | create | src/tools/validate.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:42 | create | src/tools/truncate.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/registry.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/pipeline.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/read.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/write.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/edit.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/bash.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | src/tools/index.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | test/tools.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | test/truncate.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 02:21:43 | create | test/validate.test.ts | created | (new file — nothing to snapshot) |

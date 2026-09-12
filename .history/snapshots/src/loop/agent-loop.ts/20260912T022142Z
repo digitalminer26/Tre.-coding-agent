@@ -29,7 +29,6 @@ import type {
   AgentEvent,
   AgentMessage,
   AssistantMessage,
-  ExecuteToolCall,
   ModelConfig,
   StopReason,
   StreamFn,
@@ -39,10 +38,17 @@ import type {
   ToolResultMessage,
 } from "../types.js";
 
-// The seam type lives in types.ts (contract home) so the tools layer can
-// implement it without depending on the loop layer. Re-exported for
-// compatibility with the WS2-era location.
-export type { ExecuteToolCall } from "../types.js";
+/**
+ * The loop's tool-execution seam. Defaults to `tool.execute` directly;
+ * WS3's full pipeline (validate → beforeToolCall → execute → afterToolCall)
+ * is injected here so the loop stays decoupled from the tool system.
+ */
+export type ExecuteToolCall = (
+  tool: Tool,
+  call: ToolCallBlock,
+  signal: AbortSignal,
+  onUpdate?: (text: string) => void,
+) => Promise<ToolResult>;
 
 export interface AgentLoopOptions {
   model: ModelConfig;
@@ -196,9 +202,7 @@ export async function* runLoop(
         results.set(call.id, {
           result:
             result ?? { content: [{ type: "text", text: "(no output)" }] },
-          // D7: the pipeline reports failures in-band (I3); a throw here is
-          // an I3 violation (broken tool) and is marked isError in the catch.
-          isError: result?.isError === true,
+          isError: false,
         });
       } catch (err) {
         // A tool violating I3 (throwing) must not kill the run.

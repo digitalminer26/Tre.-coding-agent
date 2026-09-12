@@ -172,31 +172,11 @@ export type StreamFn = (
 
 export interface ToolResult {
   content: TextBlock[];
-  /**
-   * Set by the tool pipeline (WS3) when the call failed (invalid args,
-   * blocked by a hook, tool error). The loop marks the ToolResultMessage
-   * `isError` accordingly — I3: tool failures are data, not exceptions (D7).
-   */
-  isError?: boolean;
   /** Surfaced on the ToolResultMessage.details of the matching message. */
   details?: Record<string, unknown>;
   /** If true on every result of a batch, the loop stops after the batch. */
   terminate?: boolean;
 }
-
-/**
- * The loop's tool-execution seam (Contract 4). Defaults in the loop to
- * `tool.execute` directly; WS3's full pipeline (validate → beforeToolCall →
- * execute → afterToolCall) is injected here so the loop stays decoupled
- * from the tool system. Lives in types.ts (not the loop) so the tools
- * layer can implement it without depending on the loop layer.
- */
-export type ExecuteToolCall = (
-  tool: Tool,
-  call: ToolCallBlock,
-  signal: AbortSignal,
-  onUpdate?: (text: string) => void,
-) => Promise<ToolResult>;
 
 /** The loop's only dependency on tools. */
 export interface Tool {
