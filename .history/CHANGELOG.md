@@ -68,3 +68,9 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 11:09:31 | create | src/session/session.ts | created (WS5) | (new file — nothing to snapshot) |
 | 2026-09-12 11:09:31 | create | test/session.test.ts | created (WS5) | (new file — nothing to snapshot) |
 | 2026-09-12 11:09:31 | edit | HANDOFF.md | mark WS4 done (0856746), update resume point to WS5, then WS6 after WS5 lands | .history/snapshots/HANDOFF.md/20260912T110931Z |
+| 2026-09-12 12:46:57 | create | src/cli/main.ts | created (WS6) | (new file — nothing to snapshot) |
+| 2026-09-12 12:46:57 | create | test/cli.test.ts | created (WS6) | (new file — nothing to snapshot) |
+| 2026-09-12 12:46:57 | create | test/cli-live.test.ts | created (WS6) | (new file — nothing to snapshot) |
+| 2026-09-12 12:46:58 | edit | package.json | add bin: coding-agent (WS6) | .history/snapshots/package.json/20260912T124658Z |
+| 2026-09-12 12:46:58 | edit | THIRD_PARTY.md | add WS5 session.ts row (missed in 510a0ac) + WS6 row | .history/snapshots/THIRD_PARTY.md/20260912T124658Z |
+| 2026-09-12 14:24:38 | edit | HANDOFF.md | WS6 done (e004ce8), resume point WS7 | .history/snapshots/HANDOFF.md/20260912T142438Z |
