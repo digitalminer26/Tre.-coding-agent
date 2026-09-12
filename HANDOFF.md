@@ -1,154 +1,89 @@
-# HANDOFF — resume point (2026-09-12, WS6 done)
+# HANDOFF — resume point (2026-09-12, WS7 done)
 
-Build of a minimal coding-agent harness (TypeScript, zero runtime deps, Node 26).
-Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkthrough-harness-llm.md`.
+## Where we are
+WS0–WS8 (MVP + safety) are complete and green. WS7 (safety & permissions)
+landed today: the agent now has real permission boundaries.
 
-## Status
+- **Path sandbox** — read/write/edit are confined to the project root
+  (`--cwd`, default process cwd). The safety hook resolves each `path` arg
+  against the root and REWRITES `args.path` to the canonical absolute result
+  (so `--cwd` actually means something — tools no longer depend on process
+  cwd). Lexical check (kills `../` + absolute escapes) + realpath check on
+  the deepest existing ancestor (kills symlink escapes).
+- **Approval gate** — bash/write/edit are gated. Mode `ask` (default): every
+  gated call prompts the human, anything but `y` denies. `--yes`:
+  auto-approve except destructive bash. `--no-approve`: never prompt, block
+  gated calls outright (fail-closed for non-interactive). A denial is a
+  BLOCK → `isError` tool result the model reads and adapts to (I3/D7).
+- **Destructive confirmation (D8, new decision in PLAN §9)** — even under
+  `--yes`, bash commands matching destructive patterns (recursive rm,
+  `git push -f/--force/--force-with-lease`, dd/redirection to raw devices,
+  mkfs, fork bomb, shutdown/reboot/halt/poweroff) still confirm. Patterns
+  are deliberately over-triggering.
+- **bash runs in the project root** — `createBashTool(cwd)` factory
+  (bashTool = no-cwd default).
+- Prompts are serialized (one question on screen at a time; `makeAskQueue`)
+  and fail closed: non-TTY stdin without an injected approver denies; a
+  throwing ask() denies.
 
-| WS | What | State |
-|----|------|-------|
-| WS0 | `src/types.ts` contracts + scaffold + 3 contract tests | ✅ done |
-| WS8 | test/eval harness: `test/mock-sse.ts`, `test/fake-stream.ts`, `test/eval.ts` + tests | ✅ done, commit `ec952b3` |
-| WS1 | wire layer: `src/wire/{http,abort,openai-completions}.ts`, `src/config/models.ts` + tests | ✅ done, commit `4732991` |
-| WS2 | core loop: `src/loop/agent-loop.ts` + `test/agent-loop.test.ts` (13 tests) | ✅ done, commit `39c33c8` |
-| WS3 | tool system: `src/tools/{registry,validate,truncate,pipeline,read,write,edit,bash,index}.ts` + 3 test files | ✅ done, commit `16d64c9` |
-| WS4 | system prompt + skills: `src/prompt/{system-prompt,skills}.ts` + `test/prompt.test.ts` | ✅ done, commit `0856746` |
-| WS5 | session JSONL persistence: `src/session/session.ts` + `test/session.test.ts` (10 tests) | ✅ done, commit `510a0ac` |
-| WS6 | CLI / integration: `src/cli/main.ts` (PLAN.md §WS6) | ✅ done, commit `e004ce8` — vertical slice all 3 scenarios pass LIVE |
-| WS7 | safety & permissions: approval gate + path sandbox (PLAN.md §WS7) | ⬜ not started — **next up, see below** |
-| WS9 | context management (auto-compaction) — Phase 3, deferred | seam defined in WS5 (see key facts) |
+## Remaining
+- **WS8 residual (small)**: an eval *runner* that plugs the real wire
+  StreamFn into `runEval` (test/eval.ts already scores; nothing drives it
+  end-to-end against a live model yet).
+- **Phase 3 (deferred)**: WS9 context compaction, WS10 Ink TUI.
 
-Note: WS8 was built before WS1 by deliberate dependency order (the harness is
-the precondition for testing the wire layer). PLAN.md is the numbering
-authority.
+## WS7 key facts
+- `src/tools/safety.ts`: `makeSafetyHooks({root, mode, ask})` → the
+  `BeforeToolCall` hook (undefined = allow, `{args}` = rewrite,
+  `{blocked}` = refuse). `checkPathWithinRoot(root, p)` (exported, tested),
+  `destructiveBashPatterns(cmd) → string[]` (labels; [] = safe),
+  `makeAskQueue(inner)`, `AskApproval`/`ApprovalMode` types.
+- Hook order per call: (1) path sandbox for read/write/edit (missing/non-
+  string `path` → blocked — defense in depth), (2) approval gate for
+  write/edit/bash (read is never gated), (3) bash destructive
+  classification feeds the gate. A sandboxed path tool ALWAYS returns
+  `{args}` (the rewrite) even when allowed.
+- CLI (`src/cli/main.ts`): `MainDeps.askApproval?` injection; one-shot uses
+  a throwaway readline per question (TTY only; non-TTY → deny); the REPL
+  shares its readline with the approver via a `consumer` slot — either the
+  `you> ` prompt or an approval prompt is pending, each `line` resolves the
+  pending consumer (piped stdin can answer: `printf 'msg\nn\n' | coding-agent`).
+  `wiredTools` swaps bash for `createBashTool(root)`; the executor =
+  `makeToolExecutor({ beforeToolCall: makeSafetyHooks(...) })` flows through
+  `runTurn`'s `executeToolCall?` dep.
+- Pipeline block message: `Tool "<name>" was blocked: <reason>` (isError).
+  The CLI prints it truncated at 200 chars — the FULL reason lives in the
+  session's toolResult (tests should assert on the session, not the print).
+- Tests: `test/safety.test.ts` (31 tests: sandbox incl. symlink escape +
+  fail-closed root, D8 pattern table, all 3 modes, FIFO queue, pipeline
+  integration). `test/cli.test.ts` gained WS7 section (injected
+  askApproval deny/approve, --yes, --no-approve, absolute + `../` escapes
+  via --session assertions, bash `pwd` in root, bad --cwd → exit 2).
+  `test/cli-live.test.ts` slice 4 = live denied approval (real model reads
+  the isError result); slices 2/3 now use `--yes --cwd <dir>` (chdir hack
+  gone).
+- Verified live (RUN_LIVE=1): all 175 tests pass incl. 4 CLI slices.
+  Verified by hand: non-TTY one-shot denies without hanging; TTY (via
+  `script -q /dev/null`) prompts and answers; REPL piped deny/approve both
+  work, EOF exits cleanly.
 
-## Resume WS7 — exact next steps
+## Conventions
+- **I3**: failures are data (isError results, exit codes), never uncaught
+  throws. **D7**: blocked/denied = isError ToolResult the model reads.
+  **D8**: destructive bash confirms even under --yes.
+- Tests: `node --test` (no framework), tsc strict, ESM `.js` suffixes on
+  relative imports. Live tests gated `RUN_LIVE=1` (models.json → TKG
+  vks-llama, --parallel 1, so live tests are slow: ~45s full suite).
+- File history: every agent-made change is snapshotted in `.history/`
+  (see CHANGELOG.md). Git: commit per workstream with `WS<n>: ...` subject
+  + a docs commit for HANDOFF/PLAN updates.
+- The model is a 27B Q4 — live prompts must be short and direct, or it
+  ignores instructions (lesson from WS6).
 
-Spec + exit criteria: PLAN.md §WS7 (authoritative). Deliverables:
-`src/tools/safety.ts` + CLI flags. Deps: WS3 (the hook it plugs into).
-
-1. **Approval gate**: a WS3 `beforeToolCall` hook (shape already tested:
-   `{ args? }` | `{ blocked: string }` | `undefined`). Prompt the human
-   before `bash`/`write`/`edit` unless `--yes`. With approval off (denied),
-   the block reason must be fed back to the model as an **error tool result**
-   (exit criterion — the hook returns `{ blocked: reason }` and the pipeline
-   converts it).
-2. **Path sandbox**: confine `read`/`write`/`edit` to the project root
-   (default: `--cwd`, else process cwd) — resolve + reject escapes
-   (`..`, symlinked prefixes? at minimum lexical + `realpath` check).
-   A `write` outside the root must be refused (exit criterion). NOTE:
-   today the tools resolve relative paths against the PROCESS cwd (WS6
-   live slice 3 had to `process.chdir`) — the sandbox gives `--cwd` its
-   real meaning.
-3. **Destructive-action confirmation**: `bash` commands matching
-   destructive patterns (rm -rf, git push --force, disk writes, …) require
-   explicit confirm even with `--yes`? — decide and document in the file
-   header. VM sandbox: later, out of scope.
-4. Wire into `main.ts`: build the hook, inject it via the WS3 pipeline
-   (loop's `executeToolCall` option), add `--yes`/`--no-approve` flags.
-5. Exit criteria: unit tests (blocked bash → error result reaches the
-   model; write outside root refused) + one live scenario with approval
-   denied (`RUN_LIVE=1`).
-
-Server note (2026-09-12 infra, still holds): the local llama.cpp server
-runs `--parallel 1` (single slot) — concurrent requests queue instead of
-sharing the KV pool; long generations may wait seconds to ~1 min.
-
-## Key facts (already verified — do not re-probe)
-
-- **WS6 CLI shape (2026-09-12, e004ce8)**: `src/cli/main.ts` —
-  `main(argv, deps)` returns the exit code, never throws for expected
-  failures (I3); `deps` = `{ streamFn?, cwd?, sinks? }` (tests inject). **
-  Node 26: `process.stdout`/`stderr` are GETTER-ONLY — you cannot swap them
-  in tests**; inject sinks instead. `runTurn()` is exported (user msg
-  persisted to session BEFORE the run — kill-safe — then the run's new
-  messages after). `printEvent` printer: text deltas raw to out; tool lines
-  `→ name {args≤120}` / `  ✓|✗ result≤200`; diagnostics (error/aborted/
-  length) to err. `parseArgs`: flags consume the next argv entry (loop
-  skips it — regression-tested). Skills: `--skills` (repeatable) else
-  `<cwd>/.pi/skills` + `~/.pi/agent/skills`, dedup by name, earlier wins.
-  Resume re-resolves the session's modelChange against models.json
-  (apiKeys never in the session file). SIGINT: first aborts the active
-  run, second exits 130; REPL tracks the readline `close` event (piped
-  stdin closes the interface at EOF — never `question()` a closed
-  interface; `close()` in finally is try/caught). Test sinks MUST call the
-  `write(s, cb)` callback or `flushSinks` hangs. Tools resolve relative
-  paths against the PROCESS cwd (WS7's sandbox changes this).
-  Live-verified 2026-09-12: slice1 ~5s, slice2 ~25s, slice3 ~19s (Qwen
-  thinking model); REPL smoke: piped prompt + /quit → exit 0.
-- **WS5 session format (2026-09-12, 510a0ac)**: one `.jsonl` per session;
-  entry kinds `header` (version=1, id, createdAt, cwd) / `message`
-  (id + `AgentMessage`) / `modelChange` (model id + provider label — apiKeys
-  NEVER in the file) / `compaction` (summary + firstKeptEntryId +
-  tokensBefore). `Session.create` refuses existing files (EEXIST); resume =
-  `Session.open`. Torn tail = unparseable LAST line without trailing `\n`
-  (dropped, reported via `droppedTornTail`); any other bad line throws.
-  **WS9's compaction writes `Session.appendCompaction(...)` between turns;
-  the trigger point is the loop's `prepareNextTurn` hook**; replay rebuilds
-  via pure `replayContext(entries)` = [summary-as-user-message] + entries
-  from `firstKeptEntryId` on (chain-safe). Do not keep a shadow in-memory
-  "logical context" — the log is the source of truth.
-- **Tests**: `npm test` = `tsc && node --test dist/test/*.test.js`. Strict
-  tsconfig: `noUncheckedIndexedAccess`, `verbatimModuleSyntax` (type-only
-  imports!), target ES2022, NodeNext. Current: 133 total — 128 pass + 5 live
-  skipped (`RUN_LIVE=1`). Files: agent-loop 13 · wire 13 · tools 32 · prompt
-  10 · truncate 8 · mock-sse 8 · validate 7 · fake-stream 7 · session 10 ·
-  contracts 3 · eval 4 · wire-live 2 · **cli 10 · cli-live 3**.
-  `package.json` has `"bin": { "coding-agent": "dist/src/cli/main.js" }`
-  (after `npm install`, `coding-agent` is on PATH; direct run:
-  `node dist/src/cli/main.js run "..."`).
-- **Live endpoint**: `http://172.30.70.11:8080/v1` (vks-llama, llama.cpp),
-  model id `Qwen3.8-27B-UD-Q4_K_M` (short id accepted). It is a **thinking
-  model** (`reasoning_content` field, spends token budget thinking) → live
-  tests need `max_tokens >= 4096`. Live tests gated behind `RUN_LIVE=1`.
-- **Contract invariants** (docs/02-contracts.md): I1 everything is a
-  message/tool; I2 every stream event carries full in-progress message (loop
-  pushes on `start`, replaces SAME slot on every event); I3 no exceptions
-  cross boundaries — streams ALWAYS emit `start`…`done` even on error/abort
-  (both fakeStream and openAiStream already do this; the loop relies on it).
-- **WS2 seam**: loop takes `executeToolCall?: ExecuteToolCall` option
-  (defaults to `tool.execute`); WS3's validation/hook pipeline gets injected
-  there. `prepareNextTurn` hook is where WS9 compaction lands.
-- **WS8 fixtures** (pinned by tests, reuse them): mock-sse 5 scenarios
-  (`text`, `multi-tool`, `length`, `http-error`, `stream-error`); fakeStream
-  turns as above; `runEval` scores first tool call of one LLM call.
-- **fakeStream quirk (verified, WS2)**: deltas are pre-built before the
-  first yield, so a mid-turn abort's `done` message carries the FULL text,
-  not a truncated partial. Don't "fix" without updating WS8 self-tests; WS2
-  tests pin loop behavior (stopReason + slot consistency), not fake
-  truncation fidelity.
-- **Loop type notes (verified, WS2)**: `prepareNextTurn` may return
-  `undefined` (keep context) or a Promise — type is `AgentMessage[] |
-  undefined | Promise<AgentMessage[] | undefined>`. `LlmContext.messages`
-  handed to the StreamFn is the loop's LIVE context array (cloned only for
-  `initialMessages`) — capture by value if you assert on it later.
-- **D7 (WS3, in decision log)**: `ToolResult` has `isError?: boolean`; the
-  pipeline reports failures in-band and the loop marks
-  `ToolResultMessage.isError` from it (a throw out of `executeToolCall` is
-  still caught and marked isError — I3 safety net for broken tools).
-- **`ExecuteToolCall` lives in `src/types.ts`** (contract home) so tools can
-  implement it without importing the loop; `agent-loop.ts` re-exports it for
-  WS2-era compatibility.
-- **Truncation semantics (WS3, tested)**: kept text is the EXACT original
-  slice through the last kept line — head-truncated text ends with `\n` (the
-  separator existed in the original); tail-truncated ends with `\n` iff the
-  original did. Byte cost model counts each line's own `\n` (so `keptBytes` =
-  exact kept-text bytes, never over the budget).
-- **Pipeline hook shapes (WS3)**: `beforeToolCall` returns `{ args? }`
-  (rewrite) | `{ blocked: string }` (WS7 approval seam) | `undefined`;
-  `afterToolCall` returns a replacement `ToolResult` | `undefined`. Both may
-  be async; broken hooks are contained (I3).
-- **node:test hooks (WS3)**: `beforeEach`/`afterEach` are top-level imports
-  from `"node:test"` in @types/node 24 — `test.beforeEach` does NOT
-  type-check.
-
-## Working method for this repo
-
-- **Sequential only** — no parallel subagent fan-out (user's explicit
-  request; worker subagent also terminates early on large tasks).
-- **File-history discipline**: before creating/modifying any project file,
-  log it: `~/.pi/agent/skills/file-history/scripts/hist add <path> "created"`
-  (or snapshot for existing files). Append-only `.history/CHANGELOG.md`.
-- Commit per workstream with a descriptive message; verify exit criteria
-  from PLAN.md before committing. Code commit first, docs (HANDOFF) commit
-  second — the docs commit references the code commit's hash.
+## How to resume
+1. `npm test` (fast, 175 tests) and `RUN_LIVE=1 npm test` (final gate).
+2. WS8 residual: wire a tiny runner (`node test/eval.ts` or `npm run eval`)
+   that loads models.json, builds the real openai-completions StreamFn,
+   runs a 3-task suite (create file / fix typo / run command + report exit
+   code) and prints pass/fail per task.
+3. Phase 3 when the MVP feels stable: WS9 compaction, WS10 TUI.

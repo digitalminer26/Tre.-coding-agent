@@ -74,3 +74,10 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 12:46:58 | edit | package.json | add bin: coding-agent (WS6) | .history/snapshots/package.json/20260912T124658Z |
 | 2026-09-12 12:46:58 | edit | THIRD_PARTY.md | add WS5 session.ts row (missed in 510a0ac) + WS6 row | .history/snapshots/THIRD_PARTY.md/20260912T124658Z |
 | 2026-09-12 14:24:38 | edit | HANDOFF.md | WS6 done (e004ce8), resume point WS7 | .history/snapshots/HANDOFF.md/20260912T142438Z |
+| 2026-09-12 16:49:52 | edit | src/cli/main.ts | WS7: --yes/--no-approve flags, path sandbox root validation, ask mechanism, safety executor wiring | .history/snapshots/src/cli/main.ts/20260912T164952Z |
+| 2026-09-12 16:49:53 | edit | src/tools/bash.ts | WS7: createBashTool(cwd) factory — bash runs in project root | .history/snapshots/src/tools/bash.ts/20260912T164953Z |
+| 2026-09-12 16:49:53 | edit | src/tools/index.ts | WS7: export createBashTool | .history/snapshots/src/tools/index.ts/20260912T164953Z |
+| 2026-09-12 16:49:53 | edit | test/cli.test.ts | WS7: approval + sandbox CLI tests | .history/snapshots/test/cli.test.ts/20260912T164953Z |
+| 2026-09-12 16:49:53 | edit | test/cli-live.test.ts | WS7: --yes on slices 2/3, drop chdir hack, live denied-approval slice | .history/snapshots/test/cli-live.test.ts/20260912T164953Z |
+| 2026-09-12 16:49:53 | edit | PLAN.md | WS7: D8 destructive-confirmation decision | .history/snapshots/PLAN.md/20260912T164953Z |
+| 2026-09-12 16:49:53 | edit | HANDOFF.md | WS7 done, resume point Phase-3 (WS9) | .history/snapshots/HANDOFF.md/20260912T164953Z |
