@@ -1,4 +1,4 @@
-# HANDOFF — resume point (2026-09-11)
+# HANDOFF — resume point (2026-09-12)
 
 Build of a minimal coding-agent harness (TypeScript, zero runtime deps, Node 26).
 Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkthrough-harness-llm.md`.
@@ -10,29 +10,23 @@ Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkth
 | WS0 | `src/types.ts` contracts + scaffold + 3 contract tests | ✅ done |
 | WS8 | test/eval harness: `test/mock-sse.ts`, `test/fake-stream.ts`, `test/eval.ts` + tests | ✅ done, commit `ec952b3` |
 | WS1 | wire layer: `src/wire/{http,abort,openai-completions}.ts`, `src/config/models.ts` + tests | ✅ done, commit `4732991` |
-| WS2 | core loop: `src/loop/agent-loop.ts` | ⚠️ **IN PROGRESS** — loop written + `tsc` clean, **loop tests NOT written, not committed** |
+| WS2 | core loop: `src/loop/agent-loop.ts` + `test/agent-loop.test.ts` (13 tests) | ✅ done, commit `39c33c8` |
 | WS3 | tool system: registry, truncate, read/write/edit/bash | not started |
 | WS4 | system prompt + skills | not started |
 | WS5 | session JSONL persistence | not started |
 | WS6 | integration / vertical slice against live endpoint | deferred — propose after the six |
 
-## Resume WS2 — exact next steps
+## Resume WS3 — exact next steps
 
-1. Write `test/agent-loop.test.ts` using `fakeStream` from `test/fake-stream.ts` (scripted turns: `text | thinking | toolcall | error | aborted | length`). Planned tests:
-   - full multi-turn: user → assistant(toolcall) → toolresult → assistant(text) → stop; assert exact `AgentMessage[]` in `agent_end.messages` (normalize timestamps + strip `undefined` keys — fake messages carry an own `usage: undefined` key)
-   - clean stop on `error` (errorMessage kept, no throw) and on `aborted` (partial kept in context)
-   - real `AbortSignal` fired mid-turn → `agent_end.stopReason === "aborted"`
-   - `length` guard: tool calls FAILED (isError, "truncated" text), never executed (`tool.calls.length === 0`), run continues to next turn
-   - batch `terminate: true` on every result → loop stops (script a 3rd turn that must NOT be consumed — fakeStream throws if exhausted)
-   - parallel batch: 2 calls, slow resolves after fast → results + `tool_execution_end` events still in CALL order
-   - `executionMode: "sequential"` on any call → whole batch serialized (assert start/end log order)
-   - unknown tool → error result "not found", no throw
-   - tool that throws (I3 violation) → error result, run survives
-   - `maxTurns` cap; `prepareNextTurn` hook can rewrite context (assert next turn's `LlmContext` sees it)
-   - Helper: `drain(gen)` collects events; `makeTool(name, over?)` records `{id, args}` calls in a closure
-2. `npm test` (tsc + `node --test dist/test/*.test.js`; baseline 22+35… expect ~35 pass + 2 live skipped).
-3. Commit: `git add -A && git commit -m "WS2: core agent loop — I2 context slot, length guard, batch dispatch (parallel/sequential), terminate, error-as-data"`.
-4. Then WS3 (tools), WS4 (prompt/skills), WS5 (session JSONL) in that order — each: implement → `npm test` green → commit. Specs in PLAN.md per-WS sections (exit criteria there are authoritative).
+1. `src/tools/` framework first, then the four tools. Specs + exit criteria: PLAN.md WS3 (authoritative):
+   - registry: add/list byName.
+   - execute pipeline: validate args vs `parameters` JsonSchema → `beforeToolCall` hook (WS7's approval gate seam — leave the hook point, don't build the UI) → `tool.execute(signal, onUpdate)` → `afterToolCall` → `ToolResult`; failures become `isError` results, NEVER throw (I3).
+   - truncate: 2000-line / 50KB cap — head-keep for `read`, tail-keep for `bash`, never split a line; on overflow write full output to a temp file and report `details: { truncated: true, fullOutputPath }`.
+   - tools: `read`, `write`, `edit` (exact match against the ORIGINAL file — unique `oldText`, no overlap; test the failure paths), `bash` (spawn, timeout, honor `signal.aborted`, tail-truncate).
+2. Wire WS2's seam: WS3's pipeline is what gets injected as `executeToolCall` (loop defaults to raw `tool.execute`; keep that default for the loop's own tests).
+3. Tests: each tool unit-tested against a temp dir; `edit` exact-match semantics incl. failures; a too-long `bash` output truncates to ≤ limits and reports the full-output path; unknown tool → error result, not a throw.
+4. `npm test` green (baseline now 50 total: 48 pass + 2 live skipped) → commit `WS3: tool system — registry, validation pipeline, truncate (head/tail + temp file), read/write/edit/bash`.
+5. Then WS4 (prompt/skills), WS5 (session JSONL) in that order — each: implement → `npm test` green → commit. Specs in PLAN.md per-WS sections (exit criteria there are authoritative).
 
 ## Key facts (already verified — do not re-probe)
 
@@ -41,6 +35,8 @@ Plan: `PLAN.md`. Contracts: `docs/02-contracts.md`. Walkthrough: `docs/01-walkth
 - **Contract invariants** (docs/02-contracts.md): I1 everything is a message/tool; I2 every stream event carries full in-progress message (loop pushes on `start`, replaces SAME slot on every event); I3 no exceptions cross boundaries — streams ALWAYS emit `start`…`done` even on error/abort (both fakeStream and openAiStream already do this; the loop relies on it).
 - **WS2 seam**: loop takes `executeToolCall?: ExecuteToolCall` option (defaults to `tool.execute`); WS3's validation/hook pipeline gets injected there. `prepareNextTurn` hook is where WS5 compaction lands.
 - **WS8 fixtures** (pinned by tests, reuse them): mock-sse 5 scenarios (`text`, `multi-tool`, `length`, `http-error`, `stream-error`); fakeStream turns as above; `runEval` scores first tool call of one LLM call.
+- **fakeStream quirk (verified, WS2)**: deltas are pre-built before the first yield, so a mid-turn abort's `done` message carries the FULL text, not a truncated partial. Don't "fix" without updating WS8 self-tests; WS2 tests pin loop behavior (stopReason + slot consistency), not fake truncation fidelity.
+- **Loop type notes (verified, WS2)**: `prepareNextTurn` may return `undefined` (keep context) or a Promise — type is `AgentMessage[] | undefined | Promise<AgentMessage[] | undefined>`. `LlmContext.messages` handed to the StreamFn is the loop's LIVE context array (cloned only for `initialMessages`) — capture by value if you assert on it later.
 
 ## Working method for this repo
 
