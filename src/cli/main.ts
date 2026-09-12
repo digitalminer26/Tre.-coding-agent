@@ -32,7 +32,8 @@
  *   - I3: run failures are data (exit codes), never uncaught throws.
  */
 import { homedir } from "node:os";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
 import { loadModelsFile, resolveModel } from "../config/models.js";
@@ -40,7 +41,13 @@ import { openAiStream } from "../wire/openai-completions.js";
 import { runLoop } from "../loop/agent-loop.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
 import { loadSkillsIndex } from "../prompt/skills.js";
-import { DEFAULT_TOOLS } from "../tools/index.js";
+import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
+import {
+  makeSafetyHooks,
+  makeAskQueue,
+  type ApprovalMode,
+  type AskApproval,
+} from "../tools/safety.js";
 import {
   Session,
   replaySession,
@@ -50,6 +57,7 @@ import type {
   AgentEvent,
   AgentMessage,
   AssistantMessage,
+  ExecuteToolCall,
   ModelConfig,
   StopReason,
   StreamFn,
@@ -70,6 +78,10 @@ export interface CliOptions {
   resumePath?: string;
   skillDirs: string[];
   maxTurns: number;
+  /** --yes: auto-approve gated tools (except destructive bash). */
+  yes: boolean;
+  /** --no-approve: never prompt; gated tools are blocked. */
+  noApprove: boolean;
 }
 
 export interface ParsedArgs extends CliOptions {
@@ -88,6 +100,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     cwd: process.cwd(),
     skillDirs: [],
     maxTurns: 32,
+    yes: false,
+    noApprove: false,
     errors: [],
   };
   let i = 0;
@@ -117,6 +131,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
         else opts.maxTurns = n;
       }
       i += 2;
+    } else if (a === "--yes" || a === "--no-approve") {
+      if (a === "--yes") opts.yes = true;
+      else opts.noApprove = true;
+      i++;
     } else if (a === "--help" || a === "-h") {
       opts.errors.push("help");
       i++;
@@ -133,6 +151,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (opts.sessionPath && opts.resumePath) {
     opts.errors.push("--session and --resume are mutually exclusive");
+  }
+  if (opts.yes && opts.noApprove) {
+    opts.errors.push("--yes and --no-approve are mutually exclusive");
   }
   return opts;
 }
@@ -179,6 +200,8 @@ export interface RunAgentOptions {
   initialMessages: AgentMessage[];
   onEvent?: (ev: AgentEvent) => void;
   maxTurns?: number;
+  /** Tool pipeline (WS7 safety hooks); default: raw tool.execute. */
+  executeToolCall?: ExecuteToolCall;
 }
 
 export interface RunOutcome {
@@ -203,6 +226,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunOutcome> {
     streamFn: opts.streamFn,
     signal: opts.signal,
     maxTurns: opts.maxTurns,
+    executeToolCall: opts.executeToolCall,
   })) {
     opts.onEvent?.(ev);
     if (ev.type === "agent_end") {
@@ -314,6 +338,7 @@ export async function runTurn(opts: {
   prompt: string;
   sinks: PrintSinks;
   maxTurns: number;
+  executeToolCall?: ExecuteToolCall;
 }): Promise<{ outcome: RunOutcome; context: AgentMessage[] }> {
   const { controller, context, session } = opts;
   const user: UserMessage = { role: "user", content: opts.prompt, timestamp: Date.now() };
@@ -329,6 +354,7 @@ export async function runTurn(opts: {
     initialMessages: seeded,
     onEvent: (ev) => printEvent(ev, opts.sinks),
     maxTurns: opts.maxTurns,
+    executeToolCall: opts.executeToolCall,
   });
 
   if (session) {
@@ -351,11 +377,23 @@ Options:
   --model <id>       model id from models.json (default: the file's "default")
   --models <file>    models.json path (default: ./models.json)
   --tools <list>     read,write,edit,bash — or "all" (default) / "none"
-  --cwd <dir>        working directory the agent operates in
+  --cwd <dir>        project root: the agent's working directory and the
+                     sandbox boundary for file tools (default: process cwd)
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --skills <dir>     skills dir (repeatable)
   --max-turns <n>    per-run LLM-turn cap (default 32)
+  --yes              auto-approve gated tools (bash/write/edit) without
+                     prompting; destructive bash commands (recursive rm,
+                     git push -f, dd to /dev/*, ...) still confirm
+  --no-approve       never prompt: gated tools are blocked with an error
+                     result (fail-closed, for non-interactive runs)
+
+Safety (WS7): file tools are sandboxed to the project root (--cwd or the
+process cwd) — paths that escape it (../, absolute paths, symlinks) are
+refused. bash runs in the project root. Gated tool calls (bash/write/edit)
+ask the human by default; anything but y is a denial, and a denial comes
+back to the model as an error result.
 
 SIGINT during a run aborts the run (second SIGINT exits).`;
 
@@ -364,6 +402,58 @@ export interface MainDeps {
   cwd?: string;
   /** Injectable sinks (tests capture output); defaults to the real streams. */
   sinks?: PrintSinks;
+  /** Injectable approval prompt (tests); default: a readline question. */
+  askApproval?: AskApproval;
+}
+
+/**
+ * WS7: one-shot default approver — a throwaway readline per question
+ * (nothing else consumes stdin in one-shot mode). Non-TTY stdin → deny
+ * immediately (fail-closed: no human can answer; use --yes/--no-approve).
+ * EOF/error → deny. TTY: the question is shown as the readline prompt.
+ */
+function makeTempReadlineAsk(): AskApproval {
+  return (question) => {
+    if (!process.stdin.isTTY) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let rl: Interface | undefined;
+      let settled = false;
+      const done = (v: boolean): void => {
+        if (settled) return;
+        settled = true;
+        try {
+          rl?.close();
+        } catch {
+          // already closed — fine
+        }
+        resolve(v);
+      };
+      try {
+        rl = createInterface({ input: process.stdin, output: process.stdout });
+      } catch {
+        done(false);
+        return;
+      }
+      rl.setPrompt(question);
+      rl.prompt();
+      rl.once("line", (line: string) => done(/^y(es)?$/i.test(line.trim())));
+      rl.once("close", () => done(false));
+    });
+  };
+}
+
+/**
+ * WS7: wraps an approver — serializes prompts (a parallel batch may hold
+ * several gated calls, only one question may be on screen at a time) and,
+ * on non-TTY stdin, logs the question to stderr (the readline prompt is
+ * not visible there).
+ */
+function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): AskApproval {
+  const queued = makeAskQueue(inner);
+  return (q) => {
+    if (!process.stdin.isTTY) err.write(q + "\n");
+    return queued(q);
+  };
 }
 
 /**
@@ -399,14 +489,25 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 2;
   }
 
+  // WS7: project root — the sandbox boundary for the file tools and the
+  // working directory for bash.
+  const root = path.resolve(args.cwd);
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    sinks.err.write(`error: cwd ${root} is not an existing directory\n`);
+    return 2;
+  }
+  // bash runs in the project root, so its relative paths mean the same
+  // thing as the file tools' (the safety hook resolves those against it).
+  const wiredTools = tools.map((t) => (t.name === "bash" ? createBashTool(root) : t));
+
   // skills
-  const skillDirs = args.skillDirs.length > 0 ? args.skillDirs : defaultSkillDirs(args.cwd);
+  const skillDirs = args.skillDirs.length > 0 ? args.skillDirs : defaultSkillDirs(root);
   const skills = await loadSkills(skillDirs);
 
   // system prompt
   const systemPrompt = buildSystemPrompt({
-    cwd: args.cwd,
-    tools,
+    cwd: root,
+    tools: wiredTools,
     model: model.id,
     skills,
   });
@@ -434,7 +535,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         sinks.err.write(`resumed ${path}: ${context.length} context message(s)\n`);
       } else {
         session = await Session.create(path, {
-          cwd: args.cwd,
+          cwd: root,
           model: { id: model.id, provider: model.provider },
         });
       }
@@ -455,13 +556,22 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   };
   process.on("SIGINT", onSigint);
 
+  // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
+  // tool pipeline.
+  const mode: ApprovalMode = args.noApprove ? "no" : args.yes ? "yes" : "ask";
+  const buildExecutor = (ask: AskApproval) =>
+    makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
+
   let rl: Interface | undefined;
   try {
     if (args.oneShot) {
       active = true;
+      const ask = deps.askApproval ?? makeTempReadlineAsk();
+      const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
       const { outcome } = await runTurn({
-        model, systemPrompt, tools, streamFn, controller, context, session,
+        model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
         prompt: args.prompt!, sinks, maxTurns: args.maxTurns,
+        executeToolCall: executor,
       });
       await flushSinks(sinks);
       return exitCodeFor(outcome.stopReason);
@@ -470,16 +580,56 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     // REPL
     const r = createInterface({ input: process.stdin, output: process.stdout });
     rl = r;
+    // WS7: one pending question at a time — either the "you> " REPL prompt
+    // or a tool-approval prompt — both routed to the same readline
+    // interface. Piped stdin can still answer (each line resolves the
+    // pending question).
+    type Consumer =
+      | { kind: "user"; resolve: (line: string | null) => void }
+      | { kind: "approve"; resolve: (yes: boolean) => void };
+    let consumer: Consumer | undefined;
     let rlClosed = false;
-    r.on("close", () => (rlClosed = true));
+    const settle = (fn: (c: Consumer) => void): void => {
+      const c = consumer;
+      if (!c) return;
+      consumer = undefined;
+      fn(c);
+    };
+    r.on("line", (line: string) =>
+      settle((c) => (c.kind === "user" ? c.resolve(line) : c.resolve(/^y(es)?$/i.test(line.trim())))),
+    );
+    r.on("close", () => {
+      rlClosed = true;
+      settle((c) => (c.kind === "user" ? c.resolve(null) : c.resolve(false)));
+    });
+    const askLine = (): Promise<string | null> =>
+      new Promise((resolve) => {
+        // A piped stdin closes the interface itself at EOF — never prompt
+        // a closed interface (ERR_USE_AFTER_CLOSE).
+        if (rlClosed) {
+          resolve(null);
+          return;
+        }
+        consumer = { kind: "user", resolve };
+        r.setPrompt("you> ");
+        r.prompt();
+      });
+    const replAsk: AskApproval = (question) =>
+      new Promise((resolve) => {
+        if (rlClosed) {
+          resolve(false);
+          return;
+        }
+        consumer = { kind: "approve", resolve };
+        r.setPrompt(question);
+        r.prompt();
+      });
+    const ask = deps.askApproval ?? replAsk;
+    const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
     sinks.err.write("coding-agent REPL — /quit to exit, SIGINT aborts the current run\n");
     for (;;) {
-      // A piped stdin closes the interface itself at EOF — never call
-      // question() on a closed interface (ERR_USE_AFTER_CLOSE).
       if (rlClosed) break;
-      const line = await new Promise<string | null>((resolve) =>
-        r.question("you> ", (a) => resolve(a)),
-      );
+      const line = await askLine();
       if (line === null) break; // EOF (Ctrl-D)
       const prompt = line.trim();
       if (prompt === "") continue;
@@ -492,8 +642,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       active = true;
       try {
         const result = await runTurn({
-          model, systemPrompt, tools, streamFn, controller, context, session,
+          model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
           prompt, sinks, maxTurns: args.maxTurns,
+          executeToolCall: executor,
         });
         context = result.context;
       } finally {

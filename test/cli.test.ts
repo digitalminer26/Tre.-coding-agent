@@ -8,13 +8,16 @@
  *     messages after) and resume (second run seeded with replayed context)
  *   - error-as-data: provider error → exit 1, no throw (I3)
  *   - arg parsing failures → exit 2
+ *   - WS7: gated tool calls (bash/write/edit) go through the safety hooks —
+ *     approval (injected askApproval / --yes / --no-approve), denial →
+ *     isError result, path sandbox (absolute & ../ escapes, --cwd root)
  * Live vertical slice: test/cli-live.test.ts (RUN_LIVE=1).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { fakeStream } from "./fake-stream.js";
 import {
   exitCodeFor,
@@ -222,7 +225,7 @@ test("main one-shot: real bash tool round-trip, 4-message session", async (t) =>
     { type: "text", text: "done" },
   ]);
   const S = mkSinks();
-  const code = await main(["run", "list files", "--tools", "bash", "--models", models, "--session", session], {
+  const code = await main(["run", "list files", "--tools", "bash", "--yes", "--models", models, "--session", session], {
     streamFn,
     sinks: S.sinks,
   });
@@ -372,4 +375,198 @@ test("kill mid-run: prompt persisted before the run, partial kept on abort", asy
   assert.equal(replayed.context[1]!.role, "assistant");
   const asst = replayed.context[1]!;
   if (asst.role === "assistant") assert.equal(asst.stopReason, "aborted");
+});
+
+// ─────────────────────────────── WS7: safety ────────────────────────────────
+
+test("parseArgs: --yes / --no-approve flags (mutually exclusive)", () => {
+  const a = parseArgs(["run", "x", "--yes"]);
+  assert.deepEqual(a.errors, []);
+  assert.equal(a.yes, true);
+  const b = parseArgs(["run", "x", "--no-approve"]);
+  assert.deepEqual(b.errors, []);
+  assert.equal(b.noApprove, true);
+  assert.notDeepEqual(parseArgs(["run", "x", "--yes", "--no-approve"]).errors, []);
+});
+
+test("WS7: gated bash denied → run completes, model gets an isError result", async (t) => {
+  const { dir, models } = await workspace(t);
+  const session = join(dir, "s.jsonl");
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo should-not-run" } }] },
+    { type: "text", text: "the command was denied" },
+  ]);
+  const S = mkSinks();
+  const asked: string[] = [];
+  const code = await main(
+    ["run", "run it", "--tools", "bash", "--models", models, "--session", session],
+    {
+      streamFn,
+      sinks: S.sinks,
+      askApproval: async (q) => {
+        asked.push(q);
+        return false;
+      },
+    },
+  );
+  assert.equal(code, 0, "a denial is data — the run continues");
+  assert.equal(asked.length, 1, "the gated call was prompted");
+  assert.match(asked[0]!, /bash/);
+  assert.match(S.out(), /✗/, "blocked call prints an error line");
+  assert.match(S.out(), /denied/);
+
+  const replayed = await replaySession(session);
+  const tr = replayed.context.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult", "the tool result is in the session");
+  assert.equal(tr.isError, true, "the denial is an isError tool result (D7/I3)");
+  assert.match(tr.content.map((c) => c.text).join(" "), /denied/);
+});
+
+test("WS7: gated bash approved via injected ask → executes", async (t) => {
+  const { dir, models } = await workspace(t);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo approved-yes" } }] },
+    { type: "text", text: "ok" },
+  ]);
+  const S = mkSinks();
+  const code = await main(["run", "run it", "--tools", "bash", "--models", models], {
+    streamFn,
+    sinks: S.sinks,
+    askApproval: async () => true,
+  });
+  assert.equal(code, 0);
+  assert.match(S.out(), /approved-yes/);
+});
+
+test("WS7: --yes auto-approves non-destructive bash (ask never called)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo auto" } }] },
+    { type: "text", text: "ok" },
+  ]);
+  const S = mkSinks();
+  let asked = 0;
+  const code = await main(["run", "run it", "--tools", "bash", "--yes", "--models", models], {
+    streamFn,
+    sinks: S.sinks,
+    askApproval: async () => {
+      asked++;
+      return true;
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(asked, 0, "--yes must not prompt for non-destructive calls");
+  assert.match(S.out(), /auto/);
+});
+
+test("WS7: --no-approve blocks gated bash without prompting", async (t) => {
+  const { dir, models } = await workspace(t);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo no" } }] },
+    { type: "text", text: "blocked" },
+  ]);
+  const S = mkSinks();
+  let asked = 0;
+  const code = await main(["run", "run it", "--tools", "bash", "--no-approve", "--models", models], {
+    streamFn,
+    sinks: S.sinks,
+    askApproval: async () => {
+      asked++;
+      return true;
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(asked, 0, "--no-approve must never prompt");
+  assert.match(S.out(), /✗.*no-approve/);
+});
+
+test("WS7: sandbox — absolute path outside root is refused even with --yes", async (t) => {
+  const { dir, models } = await workspace(t);
+  // A SIBLING of the root — outside the sandbox (unique name per run).
+  const target = join(dirname(dir), `ws7-evil-${basename(dir)}.txt`);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "write", args: { path: target, content: "x" } }] },
+    { type: "text", text: "nope" },
+  ]);
+  const S = mkSinks();
+  const session = join(dir, "s.jsonl");
+  const code = await main(
+    ["run", "write it", "--tools", "write", "--yes", "--models", models, "--cwd", dir, "--session", session],
+    { streamFn, sinks: S.sinks },
+  );
+  assert.equal(code, 0);
+  assert.match(S.out(), /✗/, "the blocked call prints an error line");
+  // The printed line is truncated at 200 chars — the full reason lives in
+  // the session's tool result (which the model reads).
+  const replayed = await replaySession(session);
+  const tr = replayed.context.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult");
+  assert.match(tr.content.map((c) => c.text).join(" "), /outside the project root/);
+  await assert.rejects(readFile(target, "utf8"), "the file must not be created");
+});
+
+test("WS7: sandbox — ../ escape is refused even with --yes", async (t) => {
+  const { dir, models } = await workspace(t);
+  // Root = dir/sub, so "../escape.txt" lands in dir (outside the root).
+  const sub = join(dir, "sub");
+  await mkdir(sub);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "write", args: { path: "../escape.txt", content: "x" } }] },
+    { type: "text", text: "no" },
+  ]);
+  const S = mkSinks();
+  const session = join(sub, "s.jsonl");
+  const code = await main(
+    ["run", "write it", "--tools", "write", "--yes", "--models", models, "--cwd", sub, "--session", session],
+    { streamFn, sinks: S.sinks },
+  );
+  assert.equal(code, 0);
+  assert.match(S.out(), /✗/);
+  const replayed = await replaySession(session);
+  const tr = replayed.context.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult");
+  assert.match(tr.content.map((c) => c.text).join(" "), /outside the project root/);
+  await assert.rejects(readFile(join(dir, "escape.txt"), "utf8"));
+});
+
+test("WS7: sandbox + --cwd — relative write lands under the project root", async (t) => {
+  const { dir, models } = await workspace(t);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "write", args: { path: "a/b.txt", content: "rooted" } }] },
+    { type: "text", text: "ok" },
+  ]);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "write it", "--tools", "write", "--yes", "--models", models, "--cwd", dir],
+    { streamFn, sinks: S.sinks },
+  );
+  assert.equal(code, 0);
+  const onDisk = await readFile(join(dir, "a", "b.txt"), "utf8");
+  assert.equal(onDisk, "rooted");
+});
+
+test("WS7: bash runs in the project root (--cwd)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "pwd" } }] },
+    { type: "text", text: "ok" },
+  ]);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "where am i", "--tools", "bash", "--yes", "--models", models, "--cwd", dir],
+    { streamFn, sinks: S.sinks },
+  );
+  assert.equal(code, 0);
+  assert.match(S.out(), new RegExp(dir));
+});
+
+test("WS7: bad --cwd (nonexistent) → exit 2", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(["run", "x", "--models", models, "--cwd", join(dir, "nope")], {
+    streamFn: fakeStream([{ type: "text", text: "x" }]),
+    sinks: S.sinks,
+  });
+  assert.equal(code, 2);
+  assert.match(S.err(), /not an existing directory/);
 });

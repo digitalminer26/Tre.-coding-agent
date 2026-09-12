@@ -6,6 +6,11 @@
  *
  * Errors (spawn failure, timeout, abort, non-zero exit) are isError RESULTS
  * whose text the model reads — I3.
+ *
+ * WS7: `createBashTool(cwd)` pins the shell's working directory to the
+ * project root, so relative paths in commands mean the same thing as
+ * relative paths in the file tools (the safety hook resolves those
+ * against the root). `bashTool` (no cwd) is the process-cwd default.
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -34,7 +39,8 @@ function boundedTail(s: string, cap: number): string {
   return cut;
 }
 
-export const bashTool: Tool = {
+export function createBashTool(cwd?: string): Tool {
+  return {
   name: "bash",
   description:
     "Run a shell command and return its output (stdout, then [stderr] if any). " +
@@ -63,6 +69,7 @@ export const bashTool: Tool = {
           shell: true,
           stdio: ["ignore", "pipe", "pipe"],
           env: process.env,
+          ...(cwd ? { cwd } : {}),
         });
       } catch (err) {
         resolve({
@@ -160,3 +167,7 @@ export const bashTool: Tool = {
     });
   },
 };
+}
+
+/** The default bash tool (runs in the process cwd). */
+export const bashTool: Tool = createBashTool();
