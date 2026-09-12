@@ -58,3 +58,4 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 02:21:43 | create | test/tools.test.ts | created | (new file — nothing to snapshot) |
 | 2026-09-12 02:21:43 | create | test/truncate.test.ts | created | (new file — nothing to snapshot) |
 | 2026-09-12 02:21:43 | create | test/validate.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 03:18:15 | edit | HANDOFF.md | snapshot pre-WS3-complete-update | .history/snapshots/HANDOFF.md/20260912T031815Z |
