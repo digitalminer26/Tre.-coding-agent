@@ -38,3 +38,5 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 00:01:24 | create | src/wire/openai-completions.ts | WS1: created | (new file — nothing to snapshot) |
 | 2026-09-12 00:01:24 | create | test/wire.test.ts | WS1: created | (new file — nothing to snapshot) |
 | 2026-09-12 00:01:24 | create | test/wire-live.test.ts | WS1: created | (new file — nothing to snapshot) |
+| 2026-09-12 01:49:25 | edit | src/loop/agent-loop.ts | created | .history/snapshots/src/loop/agent-loop.ts/20260912T014925Z |
+| 2026-09-12 01:49:26 | edit | HANDOFF.md | created | .history/snapshots/HANDOFF.md/20260912T014926Z |
