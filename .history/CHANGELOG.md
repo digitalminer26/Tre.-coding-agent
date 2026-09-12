@@ -62,3 +62,9 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 03:30:35 | create | src/prompt/skills.ts | created | (new file — nothing to snapshot) |
 | 2026-09-12 03:30:36 | create | src/prompt/system-prompt.ts | created | (new file — nothing to snapshot) |
 | 2026-09-12 03:30:36 | create | test/prompt.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 03:47:49 | create | src/session/session.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 03:47:50 | create | test/session.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 03:52:47 | edit | HANDOFF.md | snapshot pre-WS5-resume-update | .history/snapshots/HANDOFF.md/20260912T035247Z |
+| 2026-09-12 11:09:31 | create | src/session/session.ts | created (WS5) | (new file — nothing to snapshot) |
+| 2026-09-12 11:09:31 | create | test/session.test.ts | created (WS5) | (new file — nothing to snapshot) |
+| 2026-09-12 11:09:31 | edit | HANDOFF.md | mark WS4 done (0856746), update resume point to WS5, then WS6 after WS5 lands | .history/snapshots/HANDOFF.md/20260912T110931Z |
