@@ -1,0 +1,163 @@
+/**
+ * WS8 residual — live eval runner.
+ *
+ * Plugs the real wire StreamFn (`openAiStream`) into `runEval` and runs the
+ * PLAN WS8 3-task suite (create file / fix typo / run command + report exit
+ * code) against a live model from models.json. Scores the FIRST tool call of
+ * each single-turn task against the expected tool name + arg subset.
+ *
+ * Usage (from the project root):
+ *   npm run eval [-- --models <path> --model <id> --timeout <ms>]
+ *
+ * Exit codes (I3 — failures are data, never uncaught throws):
+ *   0 = all tasks passed, 1 = one or more tasks failed,
+ *   2 = setup failure (bad args, missing models file, unknown model).
+ * A timeout aborts the stream; the aborted task scores as a failed task.
+ */
+import { realpathSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { loadModelsFile, resolveModel } from "../src/config/models.js";
+import { DEFAULT_TOOLS } from "../src/tools/index.js";
+import { openAiStream } from "../src/wire/openai-completions.js";
+import { runEval, formatEvalReport, type EvalTask } from "./eval.js";
+import type { Tool } from "../src/types.js";
+
+function byName(name: string): Tool {
+  const t = DEFAULT_TOOLS.find((t) => t.name === name);
+  if (!t) throw new Error(`internal: unknown tool in eval suite: ${name}`);
+  return t;
+}
+
+/**
+ * The PLAN WS8 3-task suite. Prompts are short and direct — the live model is
+ * a 27B Q4 and ignores long instructions (WS6 lesson).
+ */
+export const EVAL_TASKS: EvalTask[] = [
+  {
+    name: "create-file",
+    prompt: "Create the file hello.txt containing exactly the text: hi",
+    tools: [byName("read"), byName("write"), byName("bash")],
+    expected: { toolName: "write", argsSubset: { path: "hello.txt" } },
+  },
+  {
+    name: "fix-typo",
+    prompt:
+      'The file notes.md contains the single line "Helo". ' +
+      'Replace the text "Helo" with "Hello".',
+    tools: [byName("read"), byName("edit")],
+    expected: {
+      toolName: "edit",
+      argsSubset: { path: "notes.md", oldText: "Helo", newText: "Hello" },
+    },
+  },
+  {
+    name: "run-command",
+    prompt: "Run the shell command pwd and report its exit code.",
+    tools: [byName("bash")],
+    // argsContains: the model may bake the exit-code report into the command
+    // (e.g. `pwd; echo $?`) — the task's essence is "runs pwd via bash".
+    expected: { toolName: "bash", argsContains: { command: "pwd" } },
+  },
+];
+
+interface RunnerOpts {
+  modelsPath: string;
+  modelId?: string;
+  timeoutMs: number;
+  errors: string[];
+}
+
+export function parseArgs(argv: string[]): RunnerOpts {
+  const opts: RunnerOpts = {
+    modelsPath: "./models.json",
+    timeoutMs: 180_000,
+    errors: [],
+  };
+  let i = 0;
+  while (i < argv.length) {
+    const a = argv[i]!;
+    if (a === "--models" || a === "--model" || a === "--timeout") {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        opts.errors.push(`${a} needs a value`);
+        i += 1;
+        continue;
+      }
+      if (a === "--models") opts.modelsPath = v;
+      else if (a === "--model") opts.modelId = v;
+      else {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) opts.errors.push("--timeout must be a positive number of ms");
+        else opts.timeoutMs = Math.floor(n);
+      }
+      i += 2;
+    } else if (a === "--help" || a === "-h") {
+      opts.errors.push("help");
+      i++;
+    } else {
+      opts.errors.push(`unknown option: ${a}`);
+      i++;
+    }
+  }
+  return opts;
+}
+
+export async function main(argv: string[]): Promise<number> {
+  const opts = parseArgs(argv);
+  if (opts.errors.includes("help")) {
+    process.stdout.write(
+      "usage: eval-run [--models <path>] [--model <id>] [--timeout <ms>]\n",
+    );
+    return 0;
+  }
+  if (opts.errors.length > 0) {
+    for (const e of opts.errors) process.stderr.write(`eval: ${e}\n`);
+    return 2;
+  }
+  if (!existsSync(opts.modelsPath)) {
+    process.stderr.write(`eval: models file not found: ${opts.modelsPath}\n`);
+    return 2;
+  }
+  let model;
+  try {
+    model = resolveModel(loadModelsFile(opts.modelsPath), opts.modelId);
+  } catch (err) {
+    process.stderr.write(`eval: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 2;
+  }
+
+  process.stderr.write(
+    `eval: ${model.id} @ ${model.baseUrl} — ${EVAL_TASKS.length} tasks (timeout ${opts.timeoutMs}ms)\n`,
+  );
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  try {
+    const results = await runEval({
+      streamFn: openAiStream,
+      model,
+      tasks: EVAL_TASKS,
+      signal: controller.signal,
+    });
+    process.stdout.write(formatEvalReport(results) + "\n");
+    return results.every((r) => r.pass) ? 0 : 1;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Run only when executed directly (`node dist/test/eval-run.js`), not when
+// imported. argv[1] may be a path with symlinks, so compare realpath.
+const entryPath = fileURLToPath(import.meta.url);
+if (
+  process.argv[1] &&
+  (() => {
+    try {
+      return realpathSync(process.argv[1]!) === entryPath;
+    } catch {
+      return false;
+    }
+  })()
+) {
+  main(process.argv.slice(2)).then((code) => process.exit(code));
+}

@@ -68,29 +68,6 @@ test("eval: scores pass / wrong-tool / wrong-args on a 3-task suite", async () =
   assert.deepEqual(results[2]!.calls, [{ name: "bash", args: { command: "ls" } }]);
 });
 
-test("eval: argsContains matches substrings, fails on miss or non-string", async () => {
-  const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: 'pwd; echo "Exit code: $?"' } }] },
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "ls" } }] },
-    { type: "toolcall", calls: [{ name: "bash", args: { command: 42 } }] },
-  ]);
-  const expect = { toolName: "bash", argsContains: { command: "pwd" } };
-  const results = await runEval({
-    streamFn,
-    model: MODEL,
-    tasks: [
-      { name: "contains-hit", prompt: "x", tools: [noOpTool("bash")], expected: expect },
-      { name: "contains-miss", prompt: "x", tools: [noOpTool("bash")], expected: expect },
-      { name: "contains-non-string", prompt: "x", tools: [noOpTool("bash")], expected: expect },
-    ],
-  });
-  assert.equal(results[0]!.pass, true, "substring present → pass");
-  assert.equal(results[1]!.pass, false);
-  assert.match(results[1]!.reason, /does not contain "pwd"/);
-  assert.equal(results[2]!.pass, false, "non-string arg → fail, never throws");
-  assert.match(results[2]!.reason, /does not contain "pwd"/);
-});
-
 test("eval: no tool call emitted → fail with 'no tool call emitted'", async () => {
   const streamFn = fakeStream([{ type: "text", text: "I will do it manually." }]);
   const results = await runEval({

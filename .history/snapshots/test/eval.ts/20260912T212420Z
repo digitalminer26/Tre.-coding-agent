@@ -26,12 +26,6 @@ export interface EvalTask {
     toolName: string;
     /** Each key must deep-equal the matching key of the emitted call's args. */
     argsSubset?: Record<string, unknown>;
-    /**
-     * Each key must hold a STRING value containing the given substring.
-     * For open-ended string args where the model may do more than the minimum
-     * (e.g. `pwd; echo $?` for "run pwd and report its exit code").
-     */
-    argsContains?: Record<string, string>;
   };
 }
 
@@ -103,13 +97,6 @@ function scoreTask(task: EvalTask, message: AssistantMessage | undefined): EvalR
   for (const [k, v] of Object.entries(task.expected.argsSubset ?? {})) {
     if (!isDeepStrictEqual(first.args[k], v)) {
       result.reason = `arg "${k}" mismatch: expected ${JSON.stringify(v)}, got ${JSON.stringify(first.args[k])}`;
-      return result;
-    }
-  }
-  for (const [k, v] of Object.entries(task.expected.argsContains ?? {})) {
-    const actual = first.args[k];
-    if (typeof actual !== "string" || !actual.includes(v)) {
-      result.reason = `arg "${k}" does not contain ${JSON.stringify(v)}: got ${JSON.stringify(actual)}`;
       return result;
     }
   }
