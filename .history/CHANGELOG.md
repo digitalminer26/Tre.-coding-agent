@@ -40,3 +40,6 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 00:01:24 | create | test/wire-live.test.ts | WS1: created | (new file — nothing to snapshot) |
 | 2026-09-12 01:49:25 | edit | src/loop/agent-loop.ts | created | .history/snapshots/src/loop/agent-loop.ts/20260912T014925Z |
 | 2026-09-12 01:49:26 | edit | HANDOFF.md | created | .history/snapshots/HANDOFF.md/20260912T014926Z |
+| 2026-09-12 01:59:48 | create | test/agent-loop.test.ts | created | (new file — nothing to snapshot) |
+| 2026-09-12 01:59:48 | edit | HANDOFF.md | snapshot pre-WS2-complete-update | .history/snapshots/HANDOFF.md/20260912T015948Z |
+| 2026-09-12 02:08:09 | edit | src/loop/agent-loop.ts | pre-fix: prepareNextTurn return type missing undefined | .history/snapshots/src/loop/agent-loop.ts/20260912T020809Z |

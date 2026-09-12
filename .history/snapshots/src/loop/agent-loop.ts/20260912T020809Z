@@ -67,8 +67,7 @@ export interface AgentLoopOptions {
    */
   prepareNextTurn?: (context: AgentMessage[], turn: number) =>
     | AgentMessage[]
-    | undefined
-    | Promise<AgentMessage[] | undefined>;
+    | Promise<AgentMessage[]>;
   executeToolCall?: ExecuteToolCall;
 }
 
