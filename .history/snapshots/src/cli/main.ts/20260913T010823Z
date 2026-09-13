@@ -54,7 +54,6 @@ import {
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
-import { runTui } from "../tui/run.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -71,8 +70,6 @@ import type {
 
 export interface CliOptions {
   oneShot: boolean;
-  /** WS10: interactive UI — "plain" (readline REPL) or "tui" (Ink). */
-  ui: "plain" | "tui";
   prompt?: string;
   modelId?: string;
   modelsPath: string;
@@ -103,7 +100,6 @@ const KNOWN_TOOLS = new Set(DEFAULT_TOOLS.map((t) => t.name));
 export function parseArgs(argv: string[]): ParsedArgs {
   const opts: ParsedArgs = {
     oneShot: false,
-    ui: "plain",
     modelsPath: "./models.json",
     tools: "all",
     cwd: process.cwd(),
@@ -120,9 +116,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const a = argv[i]!;
     if (a === "run") {
       opts.oneShot = true;
-      i++;
-    } else if (a === "tui") {
-      opts.ui = "tui";
       i++;
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
@@ -168,9 +161,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (opts.oneShot && opts.prompt === undefined) {
     opts.errors.push("`run` needs a prompt: coding-agent run \"your prompt\"");
-  }
-  if (opts.ui === "tui" && opts.prompt !== undefined) {
-    opts.errors.push("`tui` takes no prompt: coding-agent tui [--flags]");
   }
   if (opts.sessionPath && opts.resumePath) {
     opts.errors.push("--session and --resume are mutually exclusive");
@@ -383,8 +373,6 @@ export async function runTurn(opts: {
   noCompact?: boolean;
   /** WS9: estimated tokens kept after a compaction (default 8192). */
   compactKeepTokens?: number;
-  /** WS10: extra consumer of the event stream (the TUI renders from it). */
-  tap?: (ev: AgentEvent) => void;
 }): Promise<{ outcome: RunOutcome; context: AgentMessage[] }> {
   const { controller, context, session } = opts;
   const user: UserMessage = { role: "user", content: opts.prompt, timestamp: Date.now() };
@@ -443,7 +431,6 @@ export async function runTurn(opts: {
       if (ev.type === "done") await persist(ev.message);
       else if (ev.type === "tool_execution_end") await persist(ev.result);
     }
-    opts.tap?.(ev);
     printEvent(ev, opts.sinks);
   };
 
@@ -470,8 +457,6 @@ const HELP = `coding-agent — minimal coding-agent harness
 Usage:
   coding-agent run "prompt"     one-shot run (exit when the run ends)
   coding-agent                  interactive REPL
-  coding-agent tui              interactive Ink TUI (streaming, diff view,
-                                ↑/↓ history, ctrl+c abort/quit)
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")
@@ -551,7 +536,7 @@ function makeTempReadlineAsk(): AskApproval {
  * on non-TTY stdin, logs the question to stderr (the readline prompt is
  * not visible there).
  */
-export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): AskApproval {
+function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): AskApproval {
   const queued = makeAskQueue(inner);
   return (q) => {
     if (!process.stdin.isTTY) err.write(q + "\n");
@@ -655,34 +640,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
 
   const streamFn = deps.streamFn ?? openAiStream;
 
-  // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
-  // tool pipeline.
-  const mode: ApprovalMode = args.noApprove ? "no" : args.yes ? "yes" : "ask";
-  const buildExecutor = (ask: AskApproval) =>
-    makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
-
-  // WS10: the Ink TUI — same setup as the REPL, different presentation.
-  // It installs its own SIGINT handling (abort while busy / exit 130 idle).
-  if (args.ui === "tui") {
-    const code = await runTui({
-      model,
-      systemPrompt,
-      tools: wiredTools,
-      streamFn,
-      session,
-      context,
-      entryIds,
-      maxTurns: args.maxTurns,
-      buildExecutor,
-      noCompact: args.noCompact,
-      compactKeepTokens: args.compactKeepTokens,
-      deps: { askApproval: deps.askApproval },
-    });
-    if (session) await session.close();
-    return code;
-  }
-
-  // SIGINT: first aborts the active run, second exits (plain CLI only).
+  // SIGINT: first aborts the active run, second exits.
   let controller = new AbortController();
   let active = false;
   const onSigint = (): void => {
@@ -690,6 +648,12 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     else process.exit(130);
   };
   process.on("SIGINT", onSigint);
+
+  // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
+  // tool pipeline.
+  const mode: ApprovalMode = args.noApprove ? "no" : args.yes ? "yes" : "ask";
+  const buildExecutor = (ask: AskApproval) =>
+    makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
 
   let rl: Interface | undefined;
   try {
