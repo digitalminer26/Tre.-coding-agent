@@ -25,7 +25,6 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
-import { makeSummaryMessage } from "../context/compact.js";
 import type { AgentMessage, UserMessage } from "../types.js";
 
 /** Bump when the on-disk entry shape changes; replay rejects other versions. */
@@ -100,10 +99,6 @@ export interface LoadedSession {
 export interface SessionReplay extends LoadedSession {
   /** Rebuilt LLM context: message entries only, compaction boundaries honored. */
   context: AgentMessage[];
-  /** Parallel to `context`: the entry id each context message came from
-   *  (message entry → its id; compaction summary → the entry's id). WS9's
-   *  compaction needs this to write `firstKeptEntryId` for kept messages. */
-  contextEntryIds: string[];
   /** Last modelChange in the log, if any. */
   model?: SessionModel;
 }
@@ -294,13 +289,7 @@ export async function loadSession(path: string): Promise<LoadedSession> {
  * A compaction may keep an earlier compaction's summary (chain-safe).
  * Pure: no I/O.
  */
-export interface ReplayWithIds {
-  context: AgentMessage[];
-  /** Parallel to `context`: the entry id each message came from. */
-  contextEntryIds: string[];
-}
-
-export function replayContextWithIds(entries: SessionEntry[]): ReplayWithIds {
+export function replayContext(entries: SessionEntry[]): AgentMessage[] {
   interface Retained {
     id: string;
     message: AgentMessage;
@@ -323,18 +312,16 @@ export function replayContextWithIds(entries: SessionEntry[]): ReplayWithIds {
     }
     // header / modelChange carry no LLM context
   }
-  return { context: retained.map((r) => r.message), contextEntryIds: retained.map((r) => r.id) };
-}
-
-export function replayContext(entries: SessionEntry[]): AgentMessage[] {
-  return replayContextWithIds(entries).context;
+  return retained.map((r) => r.message);
 }
 
 /** How a compaction summary re-enters the context: as a user message. */
 export function summaryMessage(entry: CompactionEntry): UserMessage {
-  // Same marker/format as the live path (compact.ts makeSummaryMessage) so a
-  // replayed summary is indistinguishable from the one the run produced.
-  return makeSummaryMessage(entry.summary, entry.timestamp);
+  return {
+    role: "user",
+    content: `[Compaction summary of earlier context]\n\n${entry.summary}`,
+    timestamp: entry.timestamp,
+  };
 }
 
 /**
@@ -349,13 +336,11 @@ export async function replaySession(path: string): Promise<SessionReplay> {
       model = { id: entry.model, provider: entry.provider };
     }
   }
-  const replayed = replayContextWithIds(loaded.entries);
   const result: SessionReplay = {
     header: loaded.header,
     entries: loaded.entries,
     droppedTornTail: loaded.droppedTornTail,
-    context: replayed.context,
-    contextEntryIds: replayed.contextEntryIds,
+    context: replayContext(loaded.entries),
   };
   if (model) result.model = model;
   return result;

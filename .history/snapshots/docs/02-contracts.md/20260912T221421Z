@@ -71,7 +71,6 @@ Invariants:
 | `tool_execution_start`    | per tool call                | `toolCall`                                 |
 | `tool_execution_update`   | optional progress            | `toolCallId`, `text`                       |
 | `tool_execution_end`      | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
-| `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context)   |
 
 ## Contract 3 — `StreamFn`

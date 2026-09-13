@@ -146,14 +146,6 @@ export type AgentEvent =
   | { type: "tool_execution_start"; toolCall: ToolCallBlock }
   | { type: "tool_execution_update"; toolCallId: string; text: string }
   | { type: "tool_execution_end"; toolCallId: string; result: ToolResultMessage }
-  | {
-      /** D10 (WS9): the CLI's compaction hook replaced the context between
-       *  LLM turns. Emitted by the CLI (runTurn), not by the loop. */
-      type: "context_compacted";
-      tokensBefore: number;
-      messagesKept: number;
-      summaryChars: number;
-    }
   | AssistantStreamEvent;
 
 // ─────────────────── 3. The loop's two dependencies ───────────────────

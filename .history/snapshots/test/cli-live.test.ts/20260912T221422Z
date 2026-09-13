@@ -10,10 +10,6 @@
  *   4. WS7 — approval denied (injected askApproval → false): the bash call
  *      is blocked, the denial is an isError tool result in the session, and
  *      the run still completes (data, not a crash — I3).
- *   5. WS9 — a small-window copy of the model trips the compaction trigger
- *      mid-run: a real summary call folds the old exchange, the session gets
- *      a compaction entry, and the task still completes in the compacted
- *      context (replayed context starts with the summary).
  * At scenario 3 the harness is a real coding agent.
  *
  * Note: the local server runs --parallel 1 (single slot) — long generations
@@ -21,7 +17,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { main } from "../src/cli/main.js";
@@ -137,50 +133,6 @@ test("live slice 3: read/write/edit — create hello.txt with 'hi', read it back
 });
 
 // ─────────────────────── WS7: approval gate, live ───────────────────────
-
-// ─────────────────────── WS9: compaction, live ───────────────────────
-
-test("live slice 5 (WS9): small context window → mid-run compaction with a real summary", {
-  skip: !RUN_LIVE,
-  timeout: 600_000, // two runs + up to two silent summary calls
-}, async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "om-cli-live5-"));
-  t.after(() => import("node:fs/promises").then((fs) => fs.rm(dir, { recursive: true, force: true })));
-  const session = join(dir, "s.jsonl");
-  // A small-window copy of the real model: the trigger
-  // (last usage + maxTokens + slack > window) trips on the first tool turn.
-  const real = JSON.parse(await readFile(MODELS, "utf8")) as { default: string; models: Record<string, unknown>[] };
-  const small = { default: real.default, models: real.models.map((m) => ({ ...m, contextWindow: 3000, maxTokens: 1024 })) };
-  const smallModels = join(dir, "models-small.json");
-  await writeFile(smallModels, JSON.stringify(small));
-
-  // Run 1: seed one old exchange (the summary must be able to fold it).
-  const seed = await liveRun(t, [
-    "run", "Remember the passphrase 'purple mountain majesty'. Just confirm you noted it.",
-    "--tools", "none", "--models", smallModels, "--session", session,
-  ]);
-  assert.equal(seed.code, 0, `seed run: exit ${seed.code}; stderr: ${seed.err}`);
-
-  // Run 2: resume + a tool task big enough to trip the trigger.
-  const { code, out, err } = await liveRun(t, [
-    "run", "Create the file notes.txt with the single line: hello world. Then read it back and tell me its contents.",
-    "--tools", "write,read", "--yes", "--models", smallModels, "--resume", session,
-  ]);
-  assert.equal(code, 0, `exit ${code}; stderr: ${err}`);
-  assert.match(out, /hello world/, "the task completed in the compacted context");
-  assert.match(err, /✂ context compacted/, "the compaction was reported to the user");
-
-  const replayed = await replaySession(session);
-  const compactions = replayed.entries.filter((e) => e.type === "compaction");
-  assert.ok(compactions.length >= 1, "at least one compaction entry in the session");
-  const head = replayed.context[0]!;
-  assert.equal(head.role, "user");
-  if (head.role === "user") {
-    assert.match(head.content, /Compaction summary of earlier context/, "replayed context starts with the summary");
-    // The summary must have captured the seeded fact (the whole point of WS9).
-    assert.match(head.content, /purple mountain majesty/i);
-  }
-});
 
 test("live slice 4 (WS7): approval denied — bash is blocked, the model reads it", {
   skip: !RUN_LIVE,
