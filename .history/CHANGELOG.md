@@ -109,3 +109,5 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-13 01:08:24 | create | test/tui-state.test.ts | created: WS10 state tests | (new file — nothing to snapshot) |
 | 2026-09-13 01:08:24 | create | test/tui-diff.test.ts | created: WS10 diff tests | (new file — nothing to snapshot) |
 | 2026-09-13 01:08:25 | create | test/tui-app.test.tsx | created: WS10 Ink render tests | (new file — nothing to snapshot) |
+| 2026-09-13 05:21:45 | edit | src/cli/main.ts | WS10 fix: tui subcommand requires a TTY (clean error, exit 2, I3) — Ink raw-mode error otherwise | .history/snapshots/src/cli/main.ts/20260913T052145Z |
+| 2026-09-13 05:21:45 | edit | test/cli.test.ts | WS10 fix: tui non-TTY guard test | .history/snapshots/test/cli.test.ts/20260913T052145Z |

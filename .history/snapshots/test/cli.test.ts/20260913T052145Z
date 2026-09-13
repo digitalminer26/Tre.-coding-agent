@@ -118,15 +118,6 @@ test("parseArgs: errors", () => {
   assert.notDeepEqual(parseArgs(["--model"]).errors, []);
   assert.notDeepEqual(parseArgs(["run", "x", "--session", "a", "--resume", "b"]).errors, []);
   assert.notDeepEqual(parseArgs(["run", "x", "--max-turns", "0"]).errors, []);
-  assert.notDeepEqual(parseArgs(["tui", "a prompt"]).errors, []); // tui takes no prompt
-});
-
-test("parseArgs: tui subcommand", () => {
-  const a = parseArgs(["tui", "--tools", "none"]);
-  assert.deepEqual(a.errors, []);
-  assert.equal(a.ui, "tui");
-  assert.equal(a.oneShot, false);
-  assert.equal(parseArgs(["run", "x"]).ui, "plain");
 });
 
 test("resolveTools: all / none / filter / unknown", () => {
@@ -143,21 +134,6 @@ test("exitCodeFor: stop 0, aborted 130, error/length/toolUse 1", () => {
   assert.equal(exitCodeFor("error"), 1);
   assert.equal(exitCodeFor("length"), 1);
   assert.equal(exitCodeFor("toolUse"), 1);
-});
-
-test("main: tui without a TTY fails cleanly (exit 2, I3 — no Ink raw-mode dump)", async (t) => {
-  // node --test runs with non-TTY stdin; under a real TTY this path can't
-  // be reached, so skip there.
-  if (process.stdin.isTTY) t.skip("stdin is a TTY");
-  const { dir, models } = await workspace(t);
-  const S = mkSinks();
-  const code = await main(["tui", "--tools", "none", "--models", models, "--cwd", dir], {
-    streamFn: fakeStream([{ type: "text", text: "unreachable" }]),
-    sinks: S.sinks,
-  });
-  assert.equal(code, 2);
-  assert.match(S.err(), /interactive terminal/);
-  assert.doesNotMatch(S.out(), /unreachable/); // the fake stream was never used
 });
 
 // ─────────────────────────────── printer ───────────────────────────────
