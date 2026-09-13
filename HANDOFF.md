@@ -1,60 +1,77 @@
-# HANDOFF — resume point (2026-09-12, WS8 done)
+# HANDOFF — resume point (2026-09-12, WS9 done)
 
 ## Where we are
-WS0–WS8 (MVP + safety + eval harness) are complete and green. The MVP is
-functionally done: wire layer, loop, tools, prompt/skills, sessions, CLI,
-safety, and the eval harness all exist and are tested.
+WS0–WS9 complete and green. The MVP is done end to end: wire, loop, tools,
+prompt/skills, sessions, CLI, safety, eval, and context compaction. Only
+**WS10 (Ink TUI)** remains in the plan.
 
-The last remaining piece — the WS8 eval *runner* — landed today:
+Landed today (WS9 — context compaction, D10):
 
-- **`npm run eval`** (`test/eval-run.ts`) plugs the real wire StreamFn
-  (`openAiStream`) into `runEval` and runs the PLAN WS8 3-task suite
-  (create file / fix typo / run command + report exit code) against a live
-  model from models.json. Prints a pass/fail table per task; exits
-  0 = all pass, 1 = any fail, 2 = setup error (bad args / missing models
-  file / unknown model). A `--timeout <ms>` (default 180s) aborts the
-  stream — an aborted task scores as a failed task (I3: no hangs).
-- **Scorer extension (D9)**: `EvalTask.expected.argsContains` — substring
-  match for open-ended string args. Added because the 27B answered
-  "run pwd and report its exit code" with `pwd; echo "Exit code: $?"` —
-  an eval that fails a task because the model did *more* than the minimum
-  is mismeasurement. `argsSubset` (deep-equal) is unchanged.
-- Verified live: **3/3 PASS** against TKG `Qwen3.8-27B-UD-Q4_K_M`
-  (baseline 2026-09-12). The 27B is run-to-run variable — an earlier run
-  had it `read` before `edit` on fix-typo (single-turn FAIL). Treat the
-  eval as a regression baseline, not a gate; a FAIL is a measurement.
+- **Auto-compaction between LLM turns.** The loop's existing
+  `prepareNextTurn` hook is wired in `runTurn` (CLI): when the last
+  assistant usage (`totalTokens + maxTokens + 1024 slack`) would exceed
+  `contextWindow`, the older messages are folded into ONE silent LLM call
+  (no tools) and the context becomes `[summary-user-message, …kept]`.
+- **Keep policy (D10):** the recent tail up to ~8192 *estimated* tokens
+  (chars/4, `--compact-keep <n>`), snapped to unit boundaries — an
+  assistant toolCall is never split from its ToolResultMessages — and the
+  most recent user message always survives (nothing safe to fold → skip).
+- **Iterative summaries:** if the context already starts with a summary,
+  the summarizer prompt folds it in ("produce an UPDATED summary").
+  Verified live: two consecutive compactions in one run.
+- **Session persistence:** the WS5 `compaction` entry is now written for
+  real (`firstKeptEntryId` = first kept message's entry id), so a resumed
+  run replays to exactly `[summary, …kept]`. This forced **incremental
+  persistence** — `runTurn` now appends each message on
+  `done`/`tool_execution_end` (was: batch after `agent_end`) and tracks
+  message→entry-id (`entryIds` map, seeded from the replay on `--resume`).
+  Side benefit: a kill mid-run keeps the whole run, not just the prompt.
+- **New contract citizen (D10):** `context_compacted` AgentEvent
+  (CLI-emitted, not loop) — the CLI prints a `✂` line on stderr.
+  `replaySession` now also returns `contextEntryIds` (parallel to
+  `context`).
+- **I3:** a failed/empty summary call skips compaction for that turn —
+  the run continues uncompacted, never crashes.
+- **Pure core:** `src/context/compact.ts` (estimateTokens, shouldCompact,
+  planCompaction, renderTranscript, summarizePrompt, makeSummaryMessage,
+  compactContext) — no I/O, injectable StreamFn.
+- **CLI flags:** `--no-compact` (off), `--compact-keep <n>` (default 8192).
+  Compaction is on by default whenever a session exists (no session →
+  nothing to persist a boundary → no compaction).
+
+## WS9 verification
+- `test/compact.test.ts` (14 tests): trigger, plan invariants (unit
+  boundaries, last-user survives, no overlap/loss), transcript rendering +
+  truncation, summarizer prompt (incl. iterative), compactContext happy /
+  not-needed / failed / empty (no tools on the silent call, captured
+  request assertions).
+- `test/cli.test.ts` (+4 e2e, fake stream): parseArgs; over-budget mid-run
+  → silent call + compacted context + compaction entry replays;
+  `--no-compact` → full history, no entry; failed summary → run continues
+  uncompacted.
+- `test/cli-live.test.ts` (live slice 5, RUN_LIVE=1): small-window model
+  copy trips the trigger mid-run against the real 27B; asserts the `✂`
+  line, ≥1 compaction entry, replayed context starts with the summary,
+  and the summary captured a seeded fact verbatim (passphrase). PASS.
+- Full fast suite: **194 tests, 0 fail** (6 live skipped).
+- Manual live run: two back-to-back compactions (~2.5k → 809-char summary;
+  then 2.7k → 1056-char updated summary), task still completed correctly.
 
 ## Remaining
-- **Phase 3 (deferred)**: WS9 context compaction, WS10 Ink TUI.
-
-## WS8 (eval) key facts
-- `test/eval.ts`: `runEval({streamFn, model, tasks, systemPrompt?, signal?})`
-  → `EvalResult[]` (`{task, pass, reason, calls}`). Scoring is single-turn:
-  one LLM call per task, inspect the first assistant message, score the
-  FIRST emitted tool call against `expected.toolName` + `argsSubset`
-  (deep-equal) + `argsContains` (substring). `stopReason: "error"` →
-  failed task with the stream error in `reason`; no tool call → "no tool
-  call emitted". `formatEvalReport(results)` → the printable table.
-- `test/eval-run.ts`: `EVAL_TASKS` (the 3 PLAN tasks, real `DEFAULT_TOOLS`
-  schemas), `parseArgs` (`--models <path>` default `./models.json`,
-  `--model <id>`, `--timeout <ms>`, `--help`), `main(argv) → exit code`
-  with the realpath entry guard (importable without side effects).
-  Status line goes to stderr; the report to stdout.
-- Test coverage: `test/eval.test.ts` (5 tests: pass/wrong-tool/wrong-args,
-  argsContains hit/miss/non-string, no-call, stream error, report format)
-  — all via fake-stream, no network. Full fast suite: 176 tests.
-- Live prompts must stay short and direct (WS6 lesson, restated in
-  eval-run.ts comments).
+- **WS10 — Ink TUI** (the only workstream left): streaming render,
+  tool-call display, diff view, keybindings. Consumes the same
+  `AgentEvent` stream the CLI already prints (now incl.
+  `context_compacted`).
 
 ## Conventions
 - **I3**: failures are data (isError results, exit codes), never uncaught
   throws. **D7**: blocked/denied = isError ToolResult the model reads.
-  **D8**: destructive bash confirms even under --yes.
-  **D9**: eval scoring — single turn, first tool call, argsSubset +
-  argsContains.
+  **D8**: destructive bash confirms even under --yes. **D9**: eval scoring
+  (single turn, first tool call, argsSubset + argsContains). **D10**:
+  compaction semantics (above; full text in PLAN §9).
 - Tests: `node --test` (no framework), tsc strict, ESM `.js` suffixes on
   relative imports. Live tests gated `RUN_LIVE=1` (models.json → TKG
-  vks-llama, --parallel 1, so live tests are slow: ~45s full suite).
+  vks-llama, --parallel 1, so live tests are slow: ~105s full live file).
 - File history: every agent-made change is snapshotted in `.history/`
   (see CHANGELOG.md). Git: commit per workstream with `WS<n>: ...` subject
   + a docs commit for HANDOFF/PLAN updates.
@@ -62,6 +79,8 @@ The last remaining piece — the WS8 eval *runner* — landed today:
   ignores instructions (lesson from WS6).
 
 ## How to resume
-1. `npm test` (fast, 176 tests) and `RUN_LIVE=1 npm test` (final gate).
-2. `npm run eval` — live 3-task eval vs the default models.json model.
-3. Phase 3 when the MVP feels stable: WS9 compaction, WS10 TUI.
+1. `npm test` (fast, 194 tests); `RUN_LIVE=1 npm test` (final gate);
+   `npm run eval` (live 3-task eval).
+2. WS10: an Ink app consuming `AgentEvent` (see `printEvent` in
+   src/cli/main.ts for the current plain-text rendering to replace).
+   Note the TUI will want `context_compacted` styled distinctly.

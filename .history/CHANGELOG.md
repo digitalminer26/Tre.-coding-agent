@@ -87,3 +87,13 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 21:24:20 | edit | test/eval.test.ts | cover argsContains scoring | .history/snapshots/test/eval.test.ts/20260912T212420Z |
 | 2026-09-12 21:28:11 | edit | HANDOFF.md | WS8 residual done — new resume point Phase 3 | .history/snapshots/HANDOFF.md/20260912T212811Z |
 | 2026-09-12 21:28:11 | edit | PLAN.md | add D9 eval-scoring decision | .history/snapshots/PLAN.md/20260912T212811Z |
+| 2026-09-12 22:14:21 | edit | src/types.ts | WS9: add context_compacted AgentEvent (D10) | .history/snapshots/src/types.ts/20260912T221421Z |
+| 2026-09-12 22:14:21 | edit | src/session/session.ts | WS9: summaryMessage via compact.makeSummaryMessage; replay gains contextEntryIds | .history/snapshots/src/session/session.ts/20260912T221421Z |
+| 2026-09-12 22:14:21 | edit | src/cli/main.ts | WS9: --no-compact/--compact-keep flags, incremental persistence, compaction hook wiring | .history/snapshots/src/cli/main.ts/20260912T221421Z |
+| 2026-09-12 22:14:21 | edit | docs/02-contracts.md | WS9: context_compacted event row | .history/snapshots/docs/02-contracts.md/20260912T221421Z |
+| 2026-09-12 22:14:21 | edit | test/cli.test.ts | WS9: e2e compaction test | .history/snapshots/test/cli.test.ts/20260912T221421Z |
+| 2026-09-12 22:14:22 | edit | test/cli-live.test.ts | WS9: live compaction scenario | .history/snapshots/test/cli-live.test.ts/20260912T221422Z |
+| 2026-09-12 22:14:22 | edit | PLAN.md | WS9: D10 + done marker | .history/snapshots/PLAN.md/20260912T221422Z |
+| 2026-09-12 22:14:22 | edit | HANDOFF.md | WS9 done — resume point WS10 | .history/snapshots/HANDOFF.md/20260912T221422Z |
+| 2026-09-12 22:14:22 | create | src/context/compact.ts | created: WS9 compaction logic (pure) + compactContext driver | (new file — nothing to snapshot) |
+| 2026-09-12 22:14:22 | create | test/compact.test.ts | created: WS9 compaction tests | (new file — nothing to snapshot) |
