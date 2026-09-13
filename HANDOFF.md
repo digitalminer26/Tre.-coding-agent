@@ -1,86 +1,81 @@
-# HANDOFF — resume point (2026-09-12, WS9 done)
+# HANDOFF — MVP complete (2026-09-12, WS0–WS10 done)
 
 ## Where we are
-WS0–WS9 complete and green. The MVP is done end to end: wire, loop, tools,
-prompt/skills, sessions, CLI, safety, eval, and context compaction. Only
-**WS10 (Ink TUI)** remains in the plan.
+**All ten workstreams are done and green.** The MVP is complete end to end:
+wire (WS1), loop (WS2), tools (WS3), prompt/skills (WS4), sessions (WS5),
+CLI glue (WS6), safety (WS7), eval (WS8), compaction (WS9), TUI (WS10).
+There is no remaining plan work — further work is post-MVP (see PLAN §8:
+Anthropic-native wire, images, subagents, themes, sandboxing, multi-model
+routing, OAuth).
 
-Landed today (WS9 — context compaction, D10):
+Landed today (WS10 — Ink TUI, D11):
 
-- **Auto-compaction between LLM turns.** The loop's existing
-  `prepareNextTurn` hook is wired in `runTurn` (CLI): when the last
-  assistant usage (`totalTokens + maxTokens + 1024 slack`) would exceed
-  `contextWindow`, the older messages are folded into ONE silent LLM call
-  (no tools) and the context becomes `[summary-user-message, …kept]`.
-- **Keep policy (D10):** the recent tail up to ~8192 *estimated* tokens
-  (chars/4, `--compact-keep <n>`), snapped to unit boundaries — an
-  assistant toolCall is never split from its ToolResultMessages — and the
-  most recent user message always survives (nothing safe to fold → skip).
-- **Iterative summaries:** if the context already starts with a summary,
-  the summarizer prompt folds it in ("produce an UPDATED summary").
-  Verified live: two consecutive compactions in one run.
-- **Session persistence:** the WS5 `compaction` entry is now written for
-  real (`firstKeptEntryId` = first kept message's entry id), so a resumed
-  run replays to exactly `[summary, …kept]`. This forced **incremental
-  persistence** — `runTurn` now appends each message on
-  `done`/`tool_execution_end` (was: batch after `agent_end`) and tracks
-  message→entry-id (`entryIds` map, seeded from the replay on `--resume`).
-  Side benefit: a kill mid-run keeps the whole run, not just the prompt.
-- **New contract citizen (D10):** `context_compacted` AgentEvent
-  (CLI-emitted, not loop) — the CLI prints a `✂` line on stderr.
-  `replaySession` now also returns `contextEntryIds` (parallel to
-  `context`).
-- **I3:** a failed/empty summary call skips compaction for that turn —
-  the run continues uncompacted, never crashes.
-- **Pure core:** `src/context/compact.ts` (estimateTokens, shouldCompact,
-  planCompaction, renderTranscript, summarizePrompt, makeSummaryMessage,
-  compactContext) — no I/O, injectable StreamFn.
-- **CLI flags:** `--no-compact` (off), `--compact-keep <n>` (default 8192).
-  Compaction is on by default whenever a session exists (no session →
-  nothing to persist a boundary → no compaction).
+- **`coding-agent tui` subcommand** — a full interactive UI on top of the
+  SAME `AgentEvent` stream the plain CLI prints (the REPL is untouched,
+  still the default).
+- **Architecture (D11):** pure state machine (`src/tui/state.ts` —
+  `applyEvent` folds events into a `TuiState`; input key handling is pure
+  functions) + pure diff renderer (`src/tui/diff.ts` — LCS over lines,
+  splitlines semantics, 500-line guard) + a presentational Ink app
+  (`src/tui/app.tsx` — no agent logic; the keybinding table is the only
+  place keys become intents) + a thin driver (`src/tui/run.tsx` — owns the
+  Ink instance; one `runTurn` per submitted prompt, so sessions,
+  compaction and safety hooks behave identically to the REPL; the TUI's
+  sinks are no-ops).
+- **Features:** streaming render with caret, turn counter, tool calls with
+  args + ✓/✗ results, **edit diff view** (`-`/`+`/context lines under the
+  edit call), prompt history (↑/↓), approval prompt (y/n/esc — D8 flow,
+  input locked while pending), ctrl+c aborts the run (busy) or exits 130
+  (idle), `/quit` exits 0.
+- **Ink quirk handled:** Ink does NOT split `\r` inside multi-char chunks
+  (paste semantics) — fast typing coalesces prompt+Enter into one string
+  event; the App splits it (typed part → submit). Regression-tested.
+- Deps added: `ink@7`, `react@19` (+`@types/react`), `ink-testing-library`
+  (dev). tsconfig gained `"jsx": "react-jsx"`.
 
-## WS9 verification
-- `test/compact.test.ts` (14 tests): trigger, plan invariants (unit
-  boundaries, last-user survives, no overlap/loss), transcript rendering +
-  truncation, summarizer prompt (incl. iterative), compactContext happy /
-  not-needed / failed / empty (no tools on the silent call, captured
-  request assertions).
-- `test/cli.test.ts` (+4 e2e, fake stream): parseArgs; over-budget mid-run
-  → silent call + compacted context + compaction entry replays;
-  `--no-compact` → full history, no entry; failed summary → run continues
-  uncompacted.
-- `test/cli-live.test.ts` (live slice 5, RUN_LIVE=1): small-window model
-  copy trips the trigger mid-run against the real 27B; asserts the `✂`
-  line, ≥1 compaction entry, replayed context starts with the summary,
-  and the summary captured a seeded fact verbatim (passphrase). PASS.
-- Full fast suite: **194 tests, 0 fail** (6 live skipped).
-- Manual live run: two back-to-back compactions (~2.5k → 809-char summary;
-  then 2.7k → 1056-char updated summary), task still completed correctly.
-
-## Remaining
-- **WS10 — Ink TUI** (the only workstream left): streaming render,
-  tool-call display, diff view, keybindings. Consumes the same
-  `AgentEvent` stream the CLI already prints (now incl.
-  `context_compacted`).
+## WS10 verification
+- `test/tui-diff.test.ts` (8): LCS correctness (insert/delete/replace,
+  context, non-zip alignment), splitlines semantics, guards.
+- `test/tui-state.test.ts` (19): event folding (streaming accumulation,
+  multi-message turns, thinking hint, tool id-matching out of order,
+  update previews, edit diff attachment, compaction item, agent_end
+  error/aborted/length, busy/approval clearing), all input functions,
+  approval promise resolution, immutability.
+- `test/tui-app.test.tsx` (8): render (header/items/diff/compaction/error/
+  hints/busy/caret), key routing (chars, backspace, enter, arrows, ctrl+c),
+  coalesced-chunk typing + approval, approval y/n/esc/enter, state→app
+  integration.
+- **Live (27B, real pty via `script`):** run 1 — prompt → write call →
+  approval `[y/N]` rendered → `y` (coalesced chunk) approved →
+  `tui-smoke.txt` created with exact content, exit 0. Run 2 — edit call →
+  diff view rendered `- x = 1` / `+ x = 2` → file modified correctly.
+  (Run 2 initially hung because the 27B spontaneously followed the
+  project's file-history convention — extra gated bash calls, each
+  needing approval; `--yes` run confirmed the flow.)
+- Full fast suite: **228 tests, 0 fail** (7 live skipped).
 
 ## Conventions
 - **I3**: failures are data (isError results, exit codes), never uncaught
   throws. **D7**: blocked/denied = isError ToolResult the model reads.
   **D8**: destructive bash confirms even under --yes. **D9**: eval scoring
   (single turn, first tool call, argsSubset + argsContains). **D10**:
-  compaction semantics (above; full text in PLAN §9).
-- Tests: `node --test` (no framework), tsc strict, ESM `.js` suffixes on
-  relative imports. Live tests gated `RUN_LIVE=1` (models.json → TKG
-  vks-llama, --parallel 1, so live tests are slow: ~105s full live file).
+  compaction semantics (PLAN §9). **D11**: TUI architecture (PLAN §9).
+- Tests: `node --test` (no framework), tsc strict, ESM `.jsx`/`.ts` for the
+  Ink app, `.js` suffixes on relative imports. Live tests gated `RUN_LIVE=1`
+  (models.json → TKG vks-llama, --parallel 1, slow: ~105s full live file).
 - File history: every agent-made change is snapshotted in `.history/`
   (see CHANGELOG.md). Git: commit per workstream with `WS<n>: ...` subject
   + a docs commit for HANDOFF/PLAN updates.
-- The model is a 27B Q4 — live prompts must be short and direct, or it
-  ignores instructions (lesson from WS6).
+- The model is a 27B Q4 — live prompts must be short and direct; it is
+  run-to-run variable and occasionally does *more* than asked (e.g. extra
+  bookkeeping tool calls), so live feeds need generous waits or `--yes`.
 
-## How to resume
-1. `npm test` (fast, 194 tests); `RUN_LIVE=1 npm test` (final gate);
+## How to resume (post-MVP)
+1. `npm test` (fast, 228 tests); `RUN_LIVE=1 npm test` (final gate);
    `npm run eval` (live 3-task eval).
-2. WS10: an Ink app consuming `AgentEvent` (see `printEvent` in
-   src/cli/main.ts for the current plain-text rendering to replace).
-   Note the TUI will want `context_compacted` styled distinctly.
+2. `coding-agent tui` for the interactive UI; `coding-agent` for the plain
+   REPL; `coding-agent run "..."` for one-shots.
+3. Pick a post-MVP item from PLAN §8. The seams that matter: wire
+   (StreamFn), loop (AgentLoopOptions hooks), tools (ToolPipelineHooks),
+   sessions (entry types), TUI (TuiState items — a new item kind renders
+   by adding a case to `Item` in app.tsx).

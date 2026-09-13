@@ -97,3 +97,15 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-12 22:14:22 | edit | HANDOFF.md | WS9 done — resume point WS10 | .history/snapshots/HANDOFF.md/20260912T221422Z |
 | 2026-09-12 22:14:22 | create | src/context/compact.ts | created: WS9 compaction logic (pure) + compactContext driver | (new file — nothing to snapshot) |
 | 2026-09-12 22:14:22 | create | test/compact.test.ts | created: WS9 compaction tests | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:23 | edit | package.json | WS10: add ink+react deps, ink-testing-library | .history/snapshots/package.json/20260913T010823Z |
+| 2026-09-13 01:08:23 | edit | tsconfig.json | WS10: jsx react-jsx | .history/snapshots/tsconfig.json/20260913T010823Z |
+| 2026-09-13 01:08:23 | edit | src/cli/main.ts | WS10: tui subcommand + prepareRun extraction + runTurn tap | .history/snapshots/src/cli/main.ts/20260913T010823Z |
+| 2026-09-13 01:08:23 | edit | PLAN.md | WS10: D11 + done marker | .history/snapshots/PLAN.md/20260913T010823Z |
+| 2026-09-13 01:08:24 | edit | HANDOFF.md | WS10 done — MVP complete | .history/snapshots/HANDOFF.md/20260913T010824Z |
+| 2026-09-13 01:08:24 | create | src/tui/state.ts | created: WS10 pure TUI state machine | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:24 | create | src/tui/diff.ts | created: WS10 edit diff renderer | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:24 | create | src/tui/app.tsx | created: WS10 Ink app component | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:24 | create | src/tui/run.ts | created: WS10 TUI driver | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:24 | create | test/tui-state.test.ts | created: WS10 state tests | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:24 | create | test/tui-diff.test.ts | created: WS10 diff tests | (new file — nothing to snapshot) |
+| 2026-09-13 01:08:25 | create | test/tui-app.test.tsx | created: WS10 Ink render tests | (new file — nothing to snapshot) |
