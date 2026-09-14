@@ -285,15 +285,15 @@ test("compactContext: keep target is capped by the model's window (small-window 
     user("old " + "y".repeat(8000)), // ~2000, unit 0
     assistantText(big), // ~2000, unit 1
     user("mid " + "y".repeat(8000)), // ~2000, unit 2
-    assistantText(big), // ~2000, unit 3
+    assistantText(big, usageOf(2100)), // ~2000, unit 3
     user("current task"), // unit 4
-    assistantText("ok", usageOf(3100)), // unit 5 (trigger: 3100+100+1024 > 4000)
+    assistantText("ok"), // unit 5
   ];
   const fn = fakeStream([{ type: "text", text: "SUMMARY." }]);
   const r = await compactContext({ streamFn: fn, model: small, signal: new AbortController().signal, context: ctx });
   assert.ok(r, "compaction happened");
   assert.equal(r!.kept[0], ctx[2]!, "the keep window stops at the capped size (unit 2)");
-  assert.deepEqual(r!.kept, ctx.slice(2), "kept is the suffix from unit 2");
+  assert.deepEqual(r!.toSummarize, ctx.slice(0, 2));
 });
 
 test("compactContext: empty summary text → undefined (skip, keep context)", async () => {

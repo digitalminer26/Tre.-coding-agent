@@ -1,0 +1,227 @@
+# ── stall detection ──────────────────────────────────────────────
+# Distinguishes "slow but alive" from "clearly dead": the feeder fails
+# fast (and kills the app) after STALL_LIMIT seconds of TOTAL silence —
+# capture static, session static, AND the LLM server emitting no logs.
+# Any growth or provable server activity keeps the clock reset, so a
+# legitimately slow model call (queue wait / long generation) is tolerated.
+STALL_LIMIT="${STALL_LIMIT:-180}"
+_REF_PROG=""
+_REF_TIME=""
+_LAST_SRV=0
+_SRV_BUSY=0
+_kt_logs() {
+  # bounded kubectl — a hung cluster call must never hang the feeder
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 8 kubectl -n default logs deploy/local-ai-stack -c llama-backend --since=60s 2>/dev/null
+  else
+    perl -e 'alarm 8; exec @ARGV' kubectl -n default logs deploy/local-ai-stack -c llama-backend --since=60s 2>/dev/null
+  fi
+}
+server_busy() { # rc 0 = server logged something within ~60s (throttled to 15s)
+  local now lines
+  now=$(date +%s)
+  if [ $(( now - _LAST_SRV )) -lt 15 ]; then [ "$_SRV_BUSY" = "1" ]; return; fi
+  _LAST_SRV=$now
+  lines=$(_kt_logs | wc -l | tr -d " ")
+  if [ "${lines:-0}" -ge 1 ]; then _SRV_BUSY=1; else _SRV_BUSY=0; fi
+  [ "$_SRV_BUSY" = "1" ]
+}
+stall_check() { # rc 0 = STALLED (nothing running); also kills the app
+  local cap sess nowp nowt
+  cap=$(wc -c 2>/dev/null < "$OUT" | tr -d " ") || cap=0
+  [ -n "$cap" ] || cap=0
+  sess=$(wc -c 2>/dev/null < "$SESS" | tr -d " ") || sess=0
+  [ -n "$sess" ] || sess=0
+  nowp=$(( cap + sess ))
+  nowt=$(date +%s)
+  if [ -z "$_REF_TIME" ]; then _REF_TIME=$nowt; _REF_PROG=$nowp; return 1; fi
+  if [ "$nowp" -ne "$_REF_PROG" ] || server_busy; then
+    _REF_PROG=$nowp; _REF_TIME=$nowt
+    return 1
+  fi
+  if [ $(( nowt - _REF_TIME )) -ge "$STALL_LIMIT" ]; then
+    write_status stall
+    echo "FEED STALL: no progress for ${STALL_LIMIT}s (capture+session static, server idle) — nothing is running; killing app" >&2
+    [ -n "$SESS" ] && pkill -9 -f "$SESS" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+wait_until() { # file pattern timeout_s
+  local n=$(( $3 * 2 ))
+  for ((k = 0; k < n; k++)); do
+    grep -qF -- "$2" "$1" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
+}
+# Pattern in the bytes APPENDED since the last call (1KB overlap for
+# patterns split across polls). Advances the offset; a match consumes it.
+new_since() { # offfile file pattern timeout_s
+  local off=0 now start k
+  [ -f "$1" ] && off=$(cat "$1")
+  local n=$(( ${4:-0} * 2 ))
+  for ((k = 0; k <= n; k++)); do
+    now=$(wc -c < "$2" 2>/dev/null | tr -d " ") || now=0
+    if [ "${FEED_DEBUG:-0}" = "1" ] && [ $(( k % 8 )) -eq 0 ]; then
+      echo "FEED $(date +%H:%M:%S) new_since[$3] k=$k off=$off now=$now" >&2
+    fi
+    if [ "$now" -gt "$off" ]; then
+      start=$off
+      if [ $(( now - start )) -gt 16384 ]; then start=$(( now - 16384 )); fi
+      if tail -c +$(( start + 1 )) "$2" 2>/dev/null | head -c $(( now - start )) | grep -qF -- "$3"; then
+        echo "$now" > "$1"
+        [ "${FEED_DEBUG:-0}" = "1" ] && echo "FEED $(date +%H:%M:%S) new_since[$3] MATCH k=$k off=$off now=$now" >&2
+        return 0
+      fi
+      if [ "$now" -gt $(( off + 1024 )) ]; then echo $(( now - 1024 )) > "$1"; fi
+    fi
+    stall_check && return 99
+    [ "${4:-0}" -eq 0 ] && return 1
+    sleep 0.5
+  done
+  echo "FEED new_since TIMEOUT pattern=\"$3\" timeout=${4:-0}s" >&2
+  return 1
+}
+# Advance the offset to "now" (consume everything already in the capture).
+flush_off() { wc -c < "$OUT" 2>/dev/null | tr -d " " > "$OFF"; }
+# Wait until the capture stops growing for ~5s (Ink renders on every
+# event; no new frames = no active turn). NOTE: a grepped "working…" marker
+# does NOT work — debug-mode captures keep every frame, so stale busy
+# frames sit in the tail window forever.
+wait_idle() { # timeout_s
+  local n=$(( ${1:-120} * 2 )) k last=-1 cur stable=0
+  for ((k = 0; k <= n; k++)); do
+    cur=$(wc -c < "$OUT" 2>/dev/null | tr -d " ") || cur=0
+    if [ "$cur" -eq "$last" ]; then
+      stable=$(( stable + 1 ))
+      [ $stable -ge 10 ] && { echo "FEED idle after ~$(( k / 2 ))s" >&2; return 0; }
+    else
+      stable=0
+    fi
+    last=$cur
+    sleep 0.5
+  done
+  echo "FEED wait_idle TIMEOUT after ${1:-120}s" >&2
+  return 1
+}
+# True when the last session message is a final assistant message (no tool
+# call blocks). DISC-based: immune to render-timing quirks (unlike capture
+# growth, which stalls during long model thinking gaps).
+turn_done() { # session_file
+  [ -f "$1" ] || return 1
+  local last
+  last=$(grep '"type":"message"' "$1" 2>/dev/null | tail -1)
+  [ -n "$last" ] || return 1
+  case "$last" in *'"role":"assistant"'*) ;; *) return 1 ;; esac
+  case "$last" in *'"type":"toolCall"'*) return 1 ;; *) return 0 ;; esac
+}
+wait_turn_done() { # session timeout_s
+  local n=$(( ${2:-300} * 2 )) k
+  for ((k = 0; k <= n; k++)); do
+    if turn_done "$1"; then echo "FEED $(date +%H:%M:%S) turn done after ~$(( k / 2 ))s" >&2; return 0; fi
+    stall_check && return 99
+    sleep 1
+  done
+  echo "FEED wait_turn_done TIMEOUT session=$1 timeout=${2:-300}s" >&2
+  return 1
+}
+wait_new_user_msg() { # initial_user_count timeout_s
+  local start=${1:-0} n k=$(( ${2:-120} * 2 ))
+  for ((k = 0; k <= n; k++)); do
+    n=$(grep -c '"role":"user"' "$SESS" 2>/dev/null) || n=0
+    if [ "${n:-0}" -gt "$start" ]; then
+      echo "FEED $(date +%H:%M:%S) new user msg in session (count=$n)" >&2
+      return 0
+    fi
+    stall_check && return 99
+    sleep 0.5
+  done
+  echo "FEED wait_new_user_msg TIMEOUT (no new user msg in ${2}s)" >&2
+  return 1
+}
+# Like new_since, but searches the WHOLE capture file, not just the bytes
+# since the feeder's offset. For one-shot render events the feeder may have
+# already scrolled past (e.g. the tool line rendered during a post-approval
+# sleep): a since-offset wait would block the full budget on bytes that
+# will never arrive again.
+wait_pattern() { # file pattern timeout_s
+  local n=$(( ${3:-0} * 2 )) k
+  for ((k = 0; k <= n; k++)); do
+    if [ -f "$1" ] && grep -qF -- "$2" "$1" 2>/dev/null; then
+      echo "FEED $(date +%H:%M:%S) wait_pattern[$2] MATCH after ~$(( k / 2 ))s" >&2
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "FEED wait_pattern TIMEOUT pattern=\"$2\" timeout=${3:-0}s" >&2
+  return 1
+}
+# Poll for an approval prompt while simultaneously watching the session for
+# turn completion. A plain new_since loop goes blind: if the run finishes
+# (e.g. after exactly N approvals), the (N+1)th new_since blocks for the
+# whole budget. rc: 0 = approval seen, 1 = turn done first, 2 = timeout.
+approval_or_done() { # budget_s
+  local off=0 now start n=$(( $1 * 2 )) k
+  off=$(cat "$OFF" 2>/dev/null) || off=0
+  [ -n "$off" ] || off=0
+  for ((k = 0; k <= n; k++)); do
+    turn_done "$SESS" && return 1
+    now=$(wc -c < "$OUT" 2>/dev/null | tr -d " ") || now=0
+    if [ "${FEED_DEBUG:-0}" = "1" ] && [ $(( k % 8 )) -eq 0 ]; then
+      echo "FEED $(date +%H:%M:%S) appr_or_done k=$k off=$off now=$now" >&2
+    fi
+    if [ "$now" -gt "$off" ]; then
+      start=$off
+      [ $(( now - start )) -gt 16384 ] && start=$(( now - 16384 ))
+      if tail -c +$(( start + 1 )) "$OUT" 2>/dev/null | head -c $(( now - start )) | grep -qF "y approve"; then
+        echo "$now" > "$OFF"
+        [ "${FEED_DEBUG:-0}" = "1" ] && echo "FEED $(date +%H:%M:%S) appr_or_done APPROVAL k=$k now=$now" >&2
+        return 0
+      fi
+      [ "$now" -gt $(( off + 1024 )) ] && echo $(( now - 1024 )) > "$OFF"
+    fi
+    stall_check && return 99
+    sleep 0.5
+  done
+  echo "FEED appr_or_done TIMEOUT budget=${1}s" >&2
+  return 2
+}
+# Send n backspaces (clear a known-length input line before /quit).
+clear_line() {
+  local i
+  for ((i = 0; i < $1; i++)); do printf "\\177"; done
+}
+# The feeder's verdict on how the app ended — pty_feed maps this to the
+# scenario's exit code (script itself swallows the app's exit status).
+write_status() { # word
+  [ -n "${OUT:-}" ] && echo "$1" > "${OUT}.status" 2>/dev/null
+  return 0
+}
+# /quit (call after wait_turn_done — the app is idle, input line empty).
+# If the child already exited, the broken pipe ends the feeder.
+quit_retry() {
+  local i
+  for ((i = 0; i < 4; i++)); do
+    echo "FEED $(date +%H:%M:%S) quit_retry round $i" >&2
+    wait_idle 30 || true
+    # subshell: a SIGPIPE (app already exited) kills the subshell, not the
+    # feeder shell — otherwise the feeder dies mid-diagnostic.
+    if (printf "/quit\r" 2>/dev/null); then
+      echo "FEED $(date +%H:%M:%S) sent /quit" >&2
+    else
+      echo "FEED $(date +%H:%M:%S) quit: pipe closed (app exited)" >&2
+      write_status clean-exit
+      return 0
+    fi
+    sleep 5
+    if stall_check; then
+      write_status stall
+      echo "FEED STALL at quit: app unresponsive to /quit" >&2
+      return 1
+    fi
+  done
+  write_status gave-up
+  echo "FEED $(date +%H:%M:%S) quit_retry gave up (app still alive)" >&2
+}

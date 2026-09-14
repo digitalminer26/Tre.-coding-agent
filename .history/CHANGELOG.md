@@ -111,3 +111,26 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-13 01:08:25 | create | test/tui-app.test.tsx | created: WS10 Ink render tests | (new file — nothing to snapshot) |
 | 2026-09-13 05:21:45 | edit | src/cli/main.ts | WS10 fix: tui subcommand requires a TTY (clean error, exit 2, I3) — Ink raw-mode error otherwise | .history/snapshots/src/cli/main.ts/20260913T052145Z |
 | 2026-09-13 05:21:45 | edit | test/cli.test.ts | WS10 fix: tui non-TTY guard test | .history/snapshots/test/cli.test.ts/20260913T052145Z |
+| 2026-09-13 16:22:55 | edit | HANDOFF.md | WS10 e2e: feeder redesign (sourced lib, session-based waits, stall detector), /quit fixes | .history/snapshots/HANDOFF.md/20260913T162255Z |
+| 2026-09-13 16:22:55 | edit | test/e2e.sh | WS10 e2e: 480s watchdogs, stall detector integration, approval_or_done | .history/snapshots/test/e2e.sh/20260913T162255Z |
+| 2026-09-13 16:22:55 | edit | test/e2e-feederlib.sh | WS10 e2e: extracted from e2e.sh (eval-quoting bug), stall detector | .history/snapshots/test/e2e-feederlib.sh/20260913T162255Z |
+| 2026-09-13 16:22:55 | edit | src/tui/run.tsx | WS10: /quit at approval + busy-quit + mounted guard | .history/snapshots/src/tui/run.tsx/20260913T162255Z |
+| 2026-09-13 16:22:55 | edit | src/tui/app.tsx | WS10: /quit at approval prompt (deny+quit), TUI_DEBUG key logger | .history/snapshots/src/tui/app.tsx/20260913T162255Z |
+
+| 2026-09-13T18:37:14Z | edit | HANDOFF.md | WS10 e2e hardening state (harness bug cascade, product /quit fixes, server-contention gotcha) | (snapshot 20260913T162255Z holds the prior version) |
+| 2026-09-13 21:38:41 | edit | HANDOFF.md | progress checkpoint: full5 results (4 PASS / 9 FAIL), post-full5 harness fixes pending validation | .history/snapshots/HANDOFF.md/20260913T213841Z |
+| 2026-09-13 21:38:41 | edit | test/e2e.sh | post-full5 fixes: status mapping→pty_feed, _kill_watchdog, run() fn, wait_pattern, count bugs, s12 feed | .history/snapshots/test/e2e.sh/20260913T213841Z |
+| 2026-09-13 21:38:41 | edit | test/e2e-feederlib.sh | post-full5: wait_pattern helper | .history/snapshots/test/e2e-feederlib.sh/20260913T213841Z |
+| 2026-09-13 22:52:59 | edit | test/e2e.sh | s5: wait_pattern drop closing quote (match real tool line) | .history/snapshots/test/e2e.sh/20260913T225259Z |
+| 2026-09-13 22:52:59 | edit | src/cli/main.ts | REPL piped mode: queue lines arriving with no pending consumer (s8) | .history/snapshots/src/cli/main.ts/20260913T225259Z |
+| 2026-09-13 23:05:26 | edit | test/eval-run.ts | timeout becomes per-task budget (shared budget starved later tasks, e2e s13) | .history/snapshots/test/eval-run.ts/20260913T230526Z |
+| 2026-09-13 23:09:25 | edit | test/e2e.sh | scenario_13 watchdog 480s -> 900s (eval per-task budget needs headroom) | .history/snapshots/test/e2e.sh/20260913T230925Z |
+| 2026-09-14 00:20:14 | edit | src/context/compact.ts | window-aware keep cap + single-prompt fold (s12: small-window runs could never compact) | .history/snapshots/src/context/compact.ts/20260914T002014Z |
+| 2026-09-14 00:20:14 | edit | test/compact.test.ts | update single-prompt fold test to new semantics; add window-cap test | .history/snapshots/test/compact.test.ts/20260914T002014Z |
+| 2026-09-14 00:20:14 | edit | src/cli/main.ts | REPL loop: EOF only after queued burst lines drained (s8 round 2) | .history/snapshots/src/cli/main.ts/20260914T002014Z |
+| 2026-09-14 01:31:30 | edit | HANDOFF.md | rewrite: full6 12/13, all fixes landed, s10 = known gap (bash sandbox) | .history/snapshots/HANDOFF.md/20260914T013130Z |
+| 2026-09-14 03:18:05 | edit | src/tools/bash.ts | WS11: sandboxed spawn path (createBashTool cwd+opts, --no-sandbox wiring) post-hoc-baseline | .history/snapshots/src/tools/bash.ts/20260914T031805Z |
+| 2026-09-14 03:18:05 | edit | src/cli/main.ts | WS11: --no-sandbox flag + wiring (post-REPL-fix baseline) post-hoc-baseline | .history/snapshots/src/cli/main.ts/20260914T031805Z |
+| 2026-09-14 03:18:05 | edit | src/tools/sandbox.ts | WS11: new Seatbelt policy module new-file | .history/snapshots/src/tools/sandbox.ts/20260914T031805Z |
+| 2026-09-14 03:36:10 | edit | PLAN.md | WS11 section + D12 decision + module map sandbox.ts | .history/snapshots/PLAN.md/20260914T033610Z |
+| 2026-09-14 04:30:24 | edit | HANDOFF.md | final state: WS11 done, 13/13 verified, s12 flakiness = server contention | .history/snapshots/HANDOFF.md/20260914T043024Z |

@@ -37,11 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
 import { loadModelsFile, resolveModel } from "../config/models.js";
-import {
-  compactContext,
-  makeSummaryMessage,
-  shouldCompact,
-} from "../context/compact.js";
+import { compactContext, makeSummaryMessage } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
 import { runLoop } from "../loop/agent-loop.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
@@ -424,27 +420,7 @@ export async function runTurn(opts: {
         context: ctx,
         keepTokens: opts.compactKeepTokens,
       });
-      if (!r) {
-        // I3 skip visibility (WS10 e2e s12): when the trigger DID fire, a
-        // missing result means the summary call failed or came back empty —
-        // say so, instead of the skip being invisible.
-        const lastAsst = [...ctx]
-          .reverse()
-          .find((m): m is AssistantMessage => m.role === "assistant");
-        if (
-          lastAsst &&
-          shouldCompact(
-            lastAsst.usage,
-            opts.model.contextWindow,
-            opts.model.maxTokens,
-          )
-        ) {
-          opts.sinks.err.write(
-            "compaction skipped: summary call failed or returned empty (context unchanged)\n",
-          );
-        }
-        return undefined;
-      }
+      if (!r) return undefined;
       const firstId = ids.get(r.kept[0]!);
       if (!firstId) {
         opts.sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");

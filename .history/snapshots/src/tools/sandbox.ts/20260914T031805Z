@@ -1,0 +1,140 @@
+/**
+ * WS11 — bash kernel sandbox (macOS Seatbelt).
+ *
+ * The bash tool runs arbitrary shell code; the WS7 path sandbox covers only
+ * the file tools (read/write/edit). This module confines the bash CHILD at
+ * the kernel level via `sandbox-exec` (Seatbelt), so the shell cannot read
+ * secret surfaces (/etc, /var/root, other home dirs, keychains) or write
+ * system directories — the same boundary WS7 enforces for the file tools.
+ *
+ * D12 (verified empirically on macOS 15, Apple Silicon):
+ *   - DENYLIST, not allowlist. A catchall `file-read-data` deny (path-regex
+ *     or subpath "/") plus re-allowing system prefixes makes exec SIGABRT —
+ *     even for exec targets that ARE allowed. Targeted denies work.
+ *   - Precedence: the LAST matching rule wins — a later `allow` re-allows a
+ *     denied path. That is how the workspace escapes the /Users deny.
+ *   - The kernel resolves symlinks BEFORE the MAC check (/etc → /private/etc),
+ *     so both spellings are denied.
+ *   - Profiles are inherited across fork/exec: the shell's children are
+ *     confined too.
+ *   - darwin only. Elsewhere the bash tool runs unsandboxed (the approval
+ *     gate + destructive classifier still apply). Opt out: --no-sandbox.
+ *
+ * Known v1 boundary: per-user temp (/var/folders) and /opt are readable and
+ * writable (tool runtimes need them); commands that need ~/.ssh etc. (e.g.
+ * git push over ssh) fail under the sandbox — run with --no-sandbox for
+ * system-maintenance work.
+ */
+import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+export const SANDBOX_EXEC = "/usr/sbin/sandbox-exec";
+
+let availableCache: boolean | undefined;
+
+/** True when the kernel sandbox is usable on this platform. */
+export function bashSandboxAvailable(): boolean {
+  if (availableCache === undefined) {
+    availableCache = process.platform === "darwin" && existsSync(SANDBOX_EXEC);
+  }
+  return availableCache;
+}
+
+/** Reset the availability cache (tests). */
+export function __resetSandboxAvailability(): void {
+  availableCache = undefined;
+}
+
+/** Escape a string for a Seatbelt S-expression literal. */
+export function seString(p: string): string {
+  return p.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * Generate the Seatbelt policy for a bash child working in `workspace`.
+ * Reads: secret surfaces denied, workspace re-allowed. Writes: system
+ * surfaces denied, workspace + /dev/null|stdout|stderr re-allowed.
+ */
+export function generateBashSandboxPolicy(workspace: string): string {
+  const w = seString(workspace);
+  return [
+    "(version 1)",
+    "(allow default)",
+    "; ── reads: deny secret surfaces, re-allow the workspace ──",
+    '(deny file-read* (subpath "/etc"))',
+    '(deny file-read* (subpath "/private/etc"))',
+    '(deny file-read* (subpath "/var/root"))',
+    '(deny file-read* (subpath "/private/var/root"))',
+    '(deny file-read* (subpath "/private/var/db"))',
+    '(deny file-read* (subpath "/cores"))',
+    '(deny file-read* (subpath "/Library/Keychains"))',
+    '(deny file-read* (subpath "/System/Volumes/Preboot"))',
+    '(deny file-read* (subpath "/Users"))',
+    `(allow file-read* (subpath "${w}"))`,
+    "; ── writes: deny system surfaces, re-allow workspace + /dev fakes ──",
+    '(deny file-write* (subpath "/etc"))',
+    '(deny file-write* (subpath "/private/etc"))',
+    '(deny file-write* (subpath "/usr"))',
+    '(deny file-write* (subpath "/bin"))',
+    '(deny file-write* (subpath "/sbin"))',
+    '(deny file-write* (subpath "/System"))',
+    '(deny file-write* (subpath "/Library"))',
+    '(deny file-write* (subpath "/var/root"))',
+    '(deny file-write* (subpath "/private/var/root"))',
+    '(deny file-write* (subpath "/cores"))',
+    '(deny file-write* (subpath "/Users"))',
+    '(deny file-write* (subpath "/dev"))',
+    `(allow file-write* (subpath "${w}"))`,
+    '(allow file-write* (subpath "/dev/null"))',
+    '(allow file-write* (subpath "/dev/stdout"))',
+    '(allow file-write* (subpath "/dev/stderr"))',
+  ].join("\n");
+}
+
+export interface SandboxSpawn {
+  child: ChildProcess;
+  /** Release the policy file. Idempotent; best-effort. */
+  dispose: () => Promise<void>;
+}
+
+/**
+ * Spawn `command` under the Seatbelt workspace policy. The policy file is
+ * written to a private dir under the OS temp dir (0600, random name —
+ * sandbox-exec reads it BEFORE applying the profile, so it does not itself
+ * need to be readable under the policy). The child is
+ * `sandbox-exec -f <policy> /bin/sh -c <command>` — the same shell the
+ * unsandboxed path uses (node `shell: true`).
+ */
+export async function spawnSandboxedBash(
+  command: string,
+  opts: { cwd?: string; env: NodeJS.ProcessEnv },
+): Promise<SandboxSpawn> {
+  const dir = await mkdtemp(path.join(tmpdir(), "coding-agent-sb-"));
+  const policyPath = path.join(dir, `policy-${randomBytes(8).toString("hex")}.sb`);
+  await writeFile(policyPath, generateBashSandboxPolicy(opts.cwd ?? process.cwd()), {
+    mode: 0o600,
+  });
+  const child = spawn(
+    SANDBOX_EXEC,
+    ["-f", policyPath, "/bin/sh", "-c", command],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: opts.env,
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    },
+  );
+  let disposed = false;
+  return {
+    child,
+    dispose: async () => {
+      if (disposed) return;
+      disposed = true;
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    },
+  };
+}

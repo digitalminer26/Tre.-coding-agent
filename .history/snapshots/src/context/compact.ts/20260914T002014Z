@@ -10,14 +10,10 @@
  *               NEXT prompt size) plus the output budget
  *               (`maxTokens` + 1024 slack) would exceed `contextWindow`.
  *   keep      — the most recent messages up to ~`keepTokens` (default 8192,
- *               ESTIMATED: chars/4; capped by the model's window:
- *               window - maxTokens - slack, so a compacted context can
- *               actually fit), snapped to unit boundaries so a toolCall
- *               assistant message is never split from its
- *               ToolResultMessages. The most recent user message is kept
- *               verbatim unless it is the ONLY user message (index 0) —
- *               then the task survives via the summary (the summarizer
- *               must record the user's goal and constraints).
+ *               ESTIMATED: chars/4), snapped to unit boundaries so a
+ *               toolCall assistant message is never split from its
+ *               ToolResultMessages, and always including the most recent
+ *               user message (the current task must survive).
  *   summary   — ONE silent LLM call (no tools, events consumed, not yielded)
  *               over the folded messages. Iterative: if the context already
  *               starts with a previous summary, the prompt folds it in.
@@ -143,8 +139,7 @@ export function planCompaction(
     if (acc >= keepTokens) break;
   }
 
-  // The most recent user message is kept verbatim (it is itself a unit
-  // boundary); see the guard below for the single-prompt exception.
+  // The most recent user message must survive (it is itself a boundary).
   let lastUser = -1;
   for (let i = context.length - 1; i >= 0; i--) {
     if (context[i]!.role === "user") {
@@ -152,9 +147,7 @@ export function planCompaction(
       break;
     }
   }
-  // (WS10 e2e s12) The task still survives when lastUser === 0: the
-  // summarizer prompt requires the user's goal and constraints in the summary.
-  if (lastUser > 0 && lastUser < keepFrom) keepFrom = lastUser;
+  if (lastUser >= 0 && lastUser < keepFrom) keepFrom = lastUser;
 
   if (keepFrom <= 0) return undefined; // the keep window ate everything
   return {
@@ -253,12 +246,7 @@ export async function compactContext(opts: {
   if (!shouldCompact(lastAssistant?.usage, opts.model.contextWindow, opts.model.maxTokens)) {
     return undefined;
   }
-  // The keep target must fit the model's window: with a small contextWindow,
-  // keeping the 8192 default would leave the compacted context LARGER than
-  // the window (WS10 e2e s12). Cap it at what the trigger already budgets:
-  // window - maxTokens - slack.
-  const windowCap = Math.max(512, opts.model.contextWindow - opts.model.maxTokens - 1024);
-  const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap));
+  const plan = planCompaction(opts.context, opts.keepTokens);
   if (!plan) return undefined;
 
   let text = "";

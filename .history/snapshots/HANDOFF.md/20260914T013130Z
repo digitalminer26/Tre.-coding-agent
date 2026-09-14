@@ -1,0 +1,100 @@
+# HANDOFF — WS10 e2e: full5 done, harness fixes in, re-run pending (2026-09-13)
+
+## Where we are
+WS0–WS9 complete. WS10 (TUI) functionally complete — 231 fast tests green.
+The e2e suite (`test/e2e.sh`, 13 scenarios vs live 27B) has been through a
+long hardening cycle. **full5** (workdir /tmp/e2e-zoIPeE, log
+/tmp/e2e-full5.log) is done: **4 PASS / 9 FAIL**, and every failure is now
+understood and fixed in the harness (fixes applied AFTER full5, syntax-checked
+and unit-verified, but NOT yet validated by an e2e run). Nothing is running
+right now; the LLM server is idle.
+
+## full5 results
+PASS: tui-basic (write+approve), tui-resume (context replay), tui-editdiff
+(-/+ render), tui-deny (isError result).
+
+FAIL — all root-caused:
+- s5 tui-ctrl-c-abort: feeder's `sleep 8` after approval outpaced the tool-line
+  render → `new_since` (since-offset) waited the full budget for a line already
+  past its offset → Ctrl+C never sent → tool ran 40s to completion → stall
+  detector correctly killed the app (it WAS dead) → rc 137 (status mapping was
+  in the wrong function).
+- s6 tui-history-resubmit: the RUN ITSELF WAS FINE (both turns done, clean
+  /quit) — failed on a harness bug: `grep -c ... || echo 0` prints "0\n0" on
+  no match → `[ $n -ge 2 ]` → "integer expression expected".
+- s7 one-shot / s9 no-approve / s10 sandbox / s11 kill-mid-run: `run: command
+  not found` (rc 127) — the `run` shell function was lost when the FEEDER_LIB
+  block was removed.
+- s8 repl-piped: rc 137 — starved by agent-turn re-evals sharing the server
+  (REPL banner + first user msg were in the session; turns just didn't finish
+  in 480s).
+- s12 tui-compaction: the PRODUCT WORKED — reads+write completed, "Wrote 73
+  bytes" rendered, c.md has both markers, session shows the 3 tool calls — but
+  the feed's 360s "Wrote" render-wait budget was too small for 3 slow tool
+  calls on a contended server; the turn finished just after the watchdog.
+- s13 eval-baseline: **the eval itself PASSED 3/3** (`eval rc=0 passes=3
+  fails=0`) — the scenario "failure" is the same grep-count bug.
+
+## Harness state (all fixed in files, pending e2e validation)
+- **CRITICAL eval-quoting bug** (found earlier): feeder funcs were `eval`'d
+  inside a double-quoted `bash -c` string → quote desync mangled code
+  (`printf "/quit\r"` → `printf /quitr`). FIXED by moving to
+  `test/e2e-feederlib.sh`, SOURCED by the feeder.
+- **`_kill_watchdog`** (NEW, tested: 0s return, no orphans): plain `kill`
+  (TERM) to the watchdog subshell is DEFERRED by bash until its foreground
+  `sleep` exits → every scenario burned the full 480s window; and killing the
+  subshell orphaned the sleep, which later fired its pkill at a LATER scenario
+  sharing the tag (cross-contamination seen in run 4). Fix: `pkill -KILL -P`
+  the sleep child, then `kill -KILL` the subshell; all watchdogs now
+  `sleep N && pkill` (no pkill if the sleep died).
+- **Status mapping** now in `pty_feed` (was accidentally in `guarded_run`):
+  feeder writes `<out>.status` (clean-exit→0, stall→99, gave-up→1); macOS
+  `script` returns 0 even for a SIGKILLed child so the file is the only
+  trustworthy signal.
+- **`run()` shell function** reconstructed: `run() { $BIN run "$@"; }`.
+- **`wait_pattern`** (feederlib): whole-file search (not since-offset) for
+  one-shot render events — scenario 5's tool line uses it.
+- **grep-count bugs fixed** (s6, s13, s8 msgs): `grep -c` alone (it prints 0
+  and exits 1 on no match; `|| echo 0` doubled it).
+- **Stall detector** (feederlib): fails fast after STALL_LIMIT=180s of TOTAL
+  silence (capture+session static AND server idle), else keeps waiting;
+  `server_busy` throttled 15s + 8s timeout guard. This is the "clearly dead
+  vs just slow" distinction — it worked correctly in full5 (killed the truly
+  dead s5 app, tolerated busy-server waits elsewhere).
+- **quit_retry**: subshell printf (SIGPIPE kills subshell, not feeder) +
+  status writes.
+- Watchdogs: all TUI scenarios 480s. `FEED_DEBUG=1` = timestamped feeder trace.
+
+## Product fixes made during e2e (real bugs, keep!)
+- `src/tui/app.tsx`: `/quit`/`/exit` at an approval prompt denies + exits
+  (was: stuck user). `TUI_DEBUG=1` logs key events (pty → capture file).
+- `src/tui/run.tsx`: `/quit` while BUSY aborts the turn and exits 0 (was:
+  swallowed by the busy guard); `mounted` guard vs rerender-after-unmount.
+- `test/eval.ts`: tolerates benign leading exploration calls (27B does
+  read→edit for fix-typo); scores the first call matching the expected tool.
+- Regression test: `test/tui-app.test.tsx` (approval-quit).
+
+## Files
+- `test/e2e.sh` — 13 scenarios, pty_feed/guarded_run/_kill_watchdog, run().
+  `bash test/e2e.sh [first [last]]`.
+- `test/e2e-feederlib.sh` — feeder functions (sourced, NOT eval'd).
+- `src/tui/{run.tsx,app.tsx,state.ts,render.tsx}` — TUI (D11 pure state).
+- `test/tui-app.test.tsx`, `test/eval.ts`, `test/eval-run.ts`.
+
+## Environmental gotcha — SERVER CONTENTION
+e2e and the pi agent share one single-model llama.cpp server. Long agent
+context = ~38k-token re-eval per turn ≈ 68s prompt eval, which STARVES test
+requests (killed s8 in full5). Run the suite when the agent is idle; keep
+agent turns short while it runs. The stall detector's server_busy check
+correctly tolerates busy servers (busy = keep waiting).
+
+## Next (exact)
+1. Re-run the 9 failed scenarios (server is idle now):
+   `cd /Users/tertain/projects/coding-agent && FEED_DEBUG=1 nohup bash test/e2e.sh 5 13 > /tmp/e2e-rerun.log 2>&1 &`
+   (A 14:14 launch attempt died before e2e started — the `tsc && npm test &&
+   nohup ...` background chain broke early; launch e2e as its own command.)
+   Expected: s7/s9/s10/s11 now run (run() exists); s6/s13 should pass (count
+   bugs gone; s13's eval already passed 3/3); s5 should show a real abort;
+   s8/s12 need an idle server (should be fine if the agent stays quiet).
+2. If green: full 1..13 run for the record, then commit WS10 + WS11 (skills/plugins) or user's call.
+3. Fast suite: `npm test` (231 tests, 7 live skipped when server down).
