@@ -26,6 +26,7 @@ interface Cbs {
   onSubmit?: () => void;
   onCtrlC?: () => void;
   onApproval?: (ok: boolean) => void;
+  onQuit?: () => void;
 }
 
 const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
@@ -38,6 +39,7 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       onSubmit: () => cbs?.onSubmit?.(),
       onCtrlC: () => cbs?.onCtrlC?.(),
       onApproval: (ok: boolean) => cbs?.onApproval?.(ok),
+      onQuit: () => cbs?.onQuit?.(),
     }),
   );
 
@@ -109,6 +111,18 @@ test("a coalesced chunk (prompt + enter in ONE write) types then submits", async
   await tick();
   assert.deepEqual(calls, ["char:fix the bug", "submit"]);
   app.unmount();
+});
+
+test("/quit at an approval prompt denies the call and quits (no stuck user)", async () => {
+  const calls: string[] = [];
+  const app = makeApp(setApproval(makeInitialState("m"), "run rm -rf?", () => {}), {
+    onApproval: (ok: boolean) => calls.push(ok ? "approved" : "denied"),
+    onQuit: () => calls.push("quit"),
+  });
+  app.stdin.write("/quit\r");
+  await tick();
+  app.unmount();
+  assert.deepEqual(calls, ["denied", "quit"]);
 });
 
 test("a coalesced approval chunk (y + enter in ONE write) approves", async () => {

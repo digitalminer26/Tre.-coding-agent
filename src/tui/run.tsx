@@ -68,12 +68,20 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
   let controller = new AbortController();
+  let mounted = true;
   let app: ReturnType<typeof render>;
 
   // ── state + render ───────────────────────────────────────────────────────
   const setState = (s: TuiState): void => {
     state = s;
-    app.rerender(React.createElement(App, { state, ...handlers }));
+    // Late events (e.g. the aborted agent_end after a /quit-abort) arrive
+    // after unmount — never rerender a dead instance.
+    if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
+  };
+  const quit = (code: number): void => {
+    exitCode = code;
+    mounted = false;
+    app.unmount();
   };
 
   const runPrompt = async (prompt: string): Promise<void> => {
@@ -109,11 +117,19 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     onHistory: (dir: -1 | 1): void => setState(inputHistory(state, dir)),
     onSubmit: (): void => {
       const r = submitInput(state);
-      if (r === null) return; // empty line / busy / approving
+      if (r === null) {
+        // Busy (or an empty line): an explicit /quit still wins — abort the
+        // running turn and exit 0. Without this, /quit is swallowed by the
+        // busy guard while its characters sit in the input line, looking dead.
+        if ((state.input === "/quit" || state.input === "/exit") && state.busy) {
+          controller.abort();
+          quit(0);
+        }
+        return;
+      }
       const prompt = r.prompt;
       if (prompt === "/quit" || prompt === "/exit") {
-        exitCode = 0;
-        app.unmount();
+        quit(0);
         return;
       }
       if (prompt.startsWith("/")) {
@@ -125,12 +141,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
     onCtrlC: (): void => {
       if (state.busy) controller.abort();
-      else {
-        exitCode = 130;
-        app.unmount();
-      }
+      else quit(130);
     },
     onApproval: (ok: boolean): void => setState(approvalAnswer(state, ok)),
+    onQuit: (): void => quit(0),
   };
 
   app = render(React.createElement(App, { state, ...handlers }), { exitOnCtrlC: false });

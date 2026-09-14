@@ -16,6 +16,8 @@ export interface AppProps {
   onSubmit: () => void;
   onCtrlC: () => void;
   onApproval: (ok: boolean) => void;
+  /** /quit while idle — exit 0 (the driver owns the unmount). */
+  onQuit: () => void;
 }
 
 export function App(props: AppProps): React.ReactElement {
@@ -23,6 +25,7 @@ export function App(props: AppProps): React.ReactElement {
 
   // The keybinding table: the ONLY place that maps keys to intents.
   useInput((input, key) => {
+    if (process.env.TUI_DEBUG) console.error("TUIKEY", JSON.stringify(input), "ret=", key.return, "ctrl=", key.ctrl, "esc=", key.escape);
     if (key.ctrl && input === "c") {
       props.onCtrlC();
       return;
@@ -33,6 +36,13 @@ export function App(props: AppProps): React.ReactElement {
       // multi-char chunks) — look at the first character only; a bare Enter
       // arrives as key.return with an empty input string.
       const first = input.replace(/[\r\n].*$/, "");
+      // /quit at an approval prompt: deny the pending call and exit —
+      // without this the user is stuck (input is locked while approving).
+      if (first === "/quit" || first === "/exit") {
+        props.onApproval(false);
+        props.onQuit();
+        return;
+      }
       if (first === "y" || key.return) props.onApproval(true);
       else if (first === "n" || key.escape) props.onApproval(false);
       return;

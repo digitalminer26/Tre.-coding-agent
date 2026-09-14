@@ -3,8 +3,9 @@
  *
  * Plugs the real wire StreamFn (`openAiStream`) into `runEval` and runs the
  * PLAN WS8 3-task suite (create file / fix typo / run command + report exit
- * code) against a live model from models.json. Scores the FIRST tool call of
- * each single-turn task against the expected tool name + arg subset.
+ * code) against a live model from models.json. Scores each single-turn task
+ * against the expected tool name + arg subset, tolerating benign leading
+ * exploration calls (e.g. a read before the edit) — see scoreTask in eval.ts.
  *
  * Usage (from the project root):
  *   npm run eval [-- --models <path> --model <id> --timeout <ms>]
@@ -12,7 +13,8 @@
  * Exit codes (I3 — failures are data, never uncaught throws):
  *   0 = all tasks passed, 1 = one or more tasks failed,
  *   2 = setup failure (bad args, missing models file, unknown model).
- * A timeout aborts the stream; the aborted task scores as a failed task.
+ * `--timeout` is a per-task budget; the whole run aborts after
+ * timeout x task count (WS10: a single shared budget starved later tasks).
  */
 import { realpathSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -106,7 +108,7 @@ export async function main(argv: string[]): Promise<number> {
   const opts = parseArgs(argv);
   if (opts.errors.includes("help")) {
     process.stdout.write(
-      "usage: eval-run [--models <path>] [--model <id>] [--timeout <ms>]\n",
+      "usage: eval-run [--models <path>] [--model <id>] [--timeout <ms> per task]\n",
     );
     return 0;
   }
@@ -127,11 +129,14 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   process.stderr.write(
-    `eval: ${model.id} @ ${model.baseUrl} — ${EVAL_TASKS.length} tasks (timeout ${opts.timeoutMs}ms)\n`,
+    `eval: ${model.id} @ ${model.baseUrl} — ${EVAL_TASKS.length} tasks (timeout ${opts.timeoutMs}ms per task)\n`,
   );
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  // --timeout is a per-task budget; one per task for the whole run. A single
+  // shared budget let a slow first task starve the rest (WS10 e2e s13: the
+  // third task vanished from the report under a contended server).
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs * EVAL_TASKS.length);
   try {
     const results = await runEval({
       streamFn: openAiStream,

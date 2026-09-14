@@ -94,12 +94,17 @@ function scoreTask(task: EvalTask, message: AssistantMessage | undefined): EvalR
     return result;
   }
 
-  // Score against the FIRST emitted tool call.
-  const first = calls[0]!;
-  if (first.name !== task.expected.toolName) {
-    result.reason = `wrong tool: expected "${task.expected.toolName}", got "${first.name}"`;
+  // Score the first emitted call that matches the expected tool. A small live
+  // model often makes a benign exploration call first (e.g. read notes.md
+  // before edit) — that is reasonable behavior, not a failure. Only a call to
+  // a genuinely different tool (with the expected tool never used) fails here.
+  const target = calls.find((c) => c.name === task.expected.toolName);
+  if (target === undefined) {
+    const seen = calls.map((c) => c.name).join(", ");
+    result.reason = `wrong tool: expected "${task.expected.toolName}", got "${seen}"`;
     return result;
   }
+  const first = target;
   for (const [k, v] of Object.entries(task.expected.argsSubset ?? {})) {
     if (!isDeepStrictEqual(first.args[k], v)) {
       result.reason = `arg "${k}" mismatch: expected ${JSON.stringify(v)}, got ${JSON.stringify(first.args[k])}`;
