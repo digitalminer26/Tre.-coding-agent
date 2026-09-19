@@ -1,13 +1,13 @@
 {
-  "default": "Qwen3.8-27B-UD-Q4_K_M",
+  "default": "Qwen3.8-27B-UD-Q4_K_S",
   "models": [
     {
-      "id": "Qwen3.8-27B-UD-Q4_K_M",
+      "id": "Qwen3.8-27B-UD-Q4_K_S",
       "provider": "vks-llama",
-      "baseUrl": "http://172.30.70.11:8080/v1",
+      "baseUrl": "http://172.30.70.13:8080/v1",
       "api": "openai-completions",
       "apiKey": "not-needed",
-      "contextWindow": 131072,
+      "contextWindow": 98304,
       "maxTokens": 8192,
       "temperature": 0.6
     }

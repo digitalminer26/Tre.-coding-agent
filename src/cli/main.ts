@@ -90,6 +90,12 @@ export interface CliOptions {
   yes: boolean;
   /** --no-approve: never prompt; gated tools are blocked. */
   noApprove: boolean;
+  /** --local (D13, the default since D13): auto-approve gated calls scoped
+   *  to the workspace; prompt when a bash command references paths outside
+   *  the safe locations. Destructive bash still confirms (D8). */
+  local: boolean;
+  /** --ask (pre-D13 default): prompt for every gated call. */
+  ask: boolean;
   /** --no-compact (WS9): disable auto-compaction (default: on with sessions). */
   noCompact: boolean;
   /** --compact-keep (WS9): estimated tokens kept after a compaction. */
@@ -118,6 +124,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     maxTurns: 32,
     yes: false,
     noApprove: false,
+    local: false,
+    ask: false,
     noCompact: false,
     compactKeepTokens: 8192,
     noSandbox: false,
@@ -158,10 +166,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         else opts.compactKeepTokens = n;
       }
       i += 2;
-    } else if (a === "--yes" || a === "--no-approve" || a === "--no-compact" ||
-               a === "--no-sandbox") {
+    } else if (a === "--yes" || a === "--no-approve" || a === "--local" || a === "--ask" ||
+               a === "--no-compact" || a === "--no-sandbox") {
       if (a === "--yes") opts.yes = true;
       else if (a === "--no-approve") opts.noApprove = true;
+      else if (a === "--local") opts.local = true;
+      else if (a === "--ask") opts.ask = true;
       else if (a === "--no-compact") opts.noCompact = true;
       else opts.noSandbox = true;
       i++;
@@ -185,8 +195,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (opts.sessionPath && opts.resumePath) {
     opts.errors.push("--session and --resume are mutually exclusive");
   }
-  if (opts.yes && opts.noApprove) {
-    opts.errors.push("--yes and --no-approve are mutually exclusive");
+  {
+    const flags: [string, boolean][] = [
+      ["--yes", opts.yes],
+      ["--no-approve", opts.noApprove],
+      ["--local", opts.local],
+      ["--ask", opts.ask],
+    ];
+    const on = flags.filter(([, v]) => v).map(([f]) => f);
+    if (on.length > 1) opts.errors.push(`approval flags are mutually exclusive: ${on.join(", ")}`);
   }
   return opts;
 }
@@ -513,9 +530,15 @@ Options:
   --resume <file>    resume an existing session file
   --skills <dir>     skills dir (repeatable)
   --max-turns <n>    per-run LLM-turn cap (default 32)
-  --yes              auto-approve gated tools (bash/write/edit) without
-                     prompting; destructive bash commands (recursive rm,
-                     git push -f, dd to /dev/*, ...) still confirm
+  --local            (DEFAULT since D13) auto-approve gated calls scoped to
+                     the workspace: bash runs un-prompted while every path it
+                     references stays inside the project root or a system
+                     read/temp surface; a command touching anything else
+                     prompts (naming the outside paths). write/edit
+                     auto-approve (the path sandbox already confines them
+                     to the root). Destructive bash still confirms (D8).
+  --ask              prompt for EVERY gated call (the pre-D13 default)
+  --yes              auto-approve ALL gated calls (except destructive bash)
   --no-approve       never prompt: gated tools are blocked with an error
                      result (fail-closed, for non-interactive runs)
   --no-compact       disable auto-compaction (on by default with sessions)
@@ -524,13 +547,17 @@ Options:
   --no-sandbox       run bash without the kernel file-access sandbox
                      (on by default on macOS; no-op elsewhere)
 
-Safety (WS7/WS11): file tools are sandboxed to the project root (--cwd or
-the process cwd) — paths that escape it (../, absolute paths, symlinks) are
-refused. On macOS the bash tool runs in the project root under a kernel
-(Seatbelt) sandbox with the same boundary; elsewhere it runs in the project
-root unsandboxed. Gated tool calls (bash/write/edit) ask the human by
-default; anything but y is a denial, and a denial comes back to the model as
-an error result.
+Safety (WS7/WS11/D13): file tools are sandboxed to the project root
+(--cwd or the process cwd) — paths that escape it (../, absolute paths,
+symlinks) are refused. On macOS the bash tool runs in the project root
+under a kernel (Seatbelt) sandbox with the same boundary; elsewhere it runs
+in the project root unsandboxed. Approval (D8/D13): the default mode
+(local) auto-approves calls scoped to the workspace — bash prompts only
+when it references paths outside the safe locations or matches a
+destructive pattern; --ask prompts for every gated call; --yes auto-
+approves everything (except destructive bash); --no-approve blocks all
+gated calls. Anything but y is a denial, and a denial comes back to the
+model as an error result.
 
 SIGINT during a run aborts the run (second SIGINT exits).`;
 
@@ -693,8 +720,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const streamFn = deps.streamFn ?? openAiStream;
 
   // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
-  // tool pipeline.
-  const mode: ApprovalMode = args.noApprove ? "no" : args.yes ? "yes" : "ask";
+  // tool pipeline. D13: mode default is "local" (workspace-scoped
+  // auto-approve); --ask restores the pre-D13 prompt-per-call.
+  const mode: ApprovalMode =
+    args.noApprove ? "no" : args.yes ? "yes" : args.ask ? "ask" : "local";
   const buildExecutor = (ask: AskApproval) =>
     makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
 
@@ -721,6 +750,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       buildExecutor,
       noCompact: args.noCompact,
       compactKeepTokens: args.compactKeepTokens,
+      // D15: static labels for the TUI's /display-bottom fields.
+      cwd: root,
+      sessionPath: args.resumePath ?? args.sessionPath,
       deps: { askApproval: deps.askApproval },
     });
     if (session) await session.close();

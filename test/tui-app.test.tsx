@@ -94,7 +94,8 @@ test("typing routes chars and backspace to callbacks; enter submits", async () =
   // Ink delivers a multi-char write as ONE input event (paste-style)
   // — the TUI's onChar appends the whole string, so both orders work.
   assert.deepEqual(calls, ["char:hi", "bs", "submit"]);
-  assert.match(app.lastFrame() ?? "", /you/);
+  // D15: no 'you' prefix — the typed text sits on the plain input row
+  assert.match(app.lastFrame() ?? "", /hi/);
   app.unmount();
 });
 

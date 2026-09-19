@@ -5,8 +5,20 @@
  * the testable surface in state.ts and makes this file purely presentational.
  */
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
+import cliTruncate from "cli-truncate";
 import type { TuiItem, TuiState } from "./state.js";
+import {
+  approvalLine,
+  bottomLines,
+  fitItems,
+  inputText,
+  suggestMenu,
+  RESERVED_BOTTOM_LINES,
+} from "./state.js";
+
+/** Truncate a line to at most `w` display columns (ellipsis at the end). */
+const oneLine = (s: string, w: number): string => cliTruncate(s, w, { position: "end" });
 
 export interface AppProps {
   state: TuiState;
@@ -22,6 +34,26 @@ export interface AppProps {
 
 export function App(props: AppProps): React.ReactElement {
   const { state } = props;
+
+  // Pinned input layout (D14): the frame is exactly `rows` lines tall by
+  // construction, so Ink runs in "fullscreen" mode and the bottom stays
+  // pinned. Width/rows MUST mirror Ink's getWindowSize fallbacks (80x24).
+  const { stdout } = useStdout();
+  const width = stdout.columns > 0 ? stdout.columns : 80;
+  const rows = stdout.rows > 0 ? stdout.rows : 24;
+  // `!== null` (not `!== undefined`): TuiState.approval is `{...} | null` —
+  // `!== undefined` is true for null too, which would shrink the budget by 1
+  // on every idle frame and make the frame rows-1 tall (not fullscreen).
+  // D16: the completion menu (visible only for bare "/" command words)
+  // renders BETWEEN the hint and the top separator, so it steals budget
+  // from the item area exactly like the approval line does.
+  const menu = suggestMenu(state, width);
+  const layout = fitItems(
+    state.items,
+    width,
+    rows,
+    (state.approval !== null ? 1 : 0) + menu.length,
+  );
 
   // The keybinding table: the ONLY place that maps keys to intents.
   useInput((input, key) => {
@@ -78,29 +110,52 @@ export function App(props: AppProps): React.ReactElement {
     if (input !== "" && !key.meta) props.onChar(input);
   });
 
+  // Frame, top -> bottom (exactly `rows` lines by construction):
+  //   header(1) + visible items + pad + [approval(1)] + hint(1)
+  //   + [D16 menu lines (0..MENU_MAX_LINES)]
+  //   + top separator(1) + input line(1) + bottom separator(1)
+  //   + RESERVED_BOTTOM_LINES bottom-display lines (D15: /display-bottom).
   return (
     <Box flexDirection="column">
       <Text dimColor>
-        {state.modelLabel} — turn {state.turn}
-        {state.busy ? " · working…" : ""}
+        {oneLine(
+          `${state.modelLabel} — turn ${state.turn}${state.busy ? " · working…" : ""}`,
+          width
+        )}
       </Text>
-      {state.items.map((it, i) => (
-        <Item key={i} item={it} />
+      {layout.visible.map((item, i) => (
+        <Item key={i} item={item} />
       ))}
-      <Box>
-        <Text color="cyan">you</Text>
-        <Text> {state.input}</Text>
-      </Box>
+      {Array.from({ length: layout.pad }, (_, i) => (
+        <Text key={`pad-${i}`}> </Text>
+      ))}
       {state.approval !== null && (
-        <Box>
-          <Text color="yellow">{state.approval.question} [y/N]</Text>
-        </Box>
+        <Text color="yellow">{approvalLine(state.approval.question, width)}</Text>
       )}
       <Text dimColor>
-        {state.approval !== null
-          ? "y approve · n/esc deny"
-          : "enter send · ↑/↓ history · ctrl+c abort/quit · /quit exit"}
+        {oneLine(
+          state.approval !== null
+            ? "y approve · n/esc deny"
+            : "enter send · ↑/↓ history · ctrl+c abort/quit · /quit exit",
+          width
+        )}
       </Text>
+      {/* D16: slash-command completion menu — grey lines above the input,
+          selected candidate marked with "> ". */}
+      {menu.map((m, i) => (
+        <Text key={`menu-${i}`} dimColor={!m.selected}>{m.line}</Text>
+      ))}
+      <Text color="gray">{"\u2500".repeat(width)}</Text>
+      {/* D15: no 'you' prefix — the input line is plain text. The fallback
+          space keeps an empty input at one rendered row (a zero-width <Text>
+          collapses and the frame would be a row short). */}
+      <Text>{inputText(state.input, width) || " "}</Text>
+      <Text color="gray">{"\u2500".repeat(width)}</Text>
+      {/* D15: the reserved lines are the user-configurable bottom display
+          (/display-bottom) — blank when nothing is selected. */}
+      {bottomLines(state, width).map((line, i) => (
+        <Text key={`reserved-${i}`} dimColor>{line || " "}</Text>
+      ))}
     </Box>
   );
 }
@@ -108,12 +163,9 @@ export function App(props: AppProps): React.ReactElement {
 function Item({ item }: { item: TuiItem }): React.ReactElement {
   switch (item.kind) {
     case "user":
-      return (
-        <Box>
-          <Text color="cyan">you</Text>
-          <Text> {item.text}</Text>
-        </Box>
-      );
+      // D15: plain text at full width — no 'you' prefix (the dedicated input
+      // line already marks where typing happens).
+      return <Text>{item.text || " "}</Text>;
     case "assistant":
       return (
         <Box flexDirection="column">
@@ -161,5 +213,7 @@ function Item({ item }: { item: TuiItem }): React.ReactElement {
       );
     case "error":
       return <Text color="red">{item.text}</Text>;
+    case "info":
+      return <Text dimColor>{item.text}</Text>;
   }
 }

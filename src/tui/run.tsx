@@ -8,7 +8,14 @@
  *
  * Keybindings (table in app.tsx): enter=send · ↑/↓=prompt history ·
  * ctrl+c=abort the run (busy) / exit 130 (idle) · y/n/esc=approval answer.
+ * D16: while the input is a bare "/" command word, ↑/↓ navigate the
+ * grey completion menu (menuNav) and enter completes the selected word
+ * (menuComplete) before the normal submit path runs.
  * `/quit` (or `/exit`) ends the session with code 0.
+ * D15: `/display-bottom [field …]` configures the reserved bottom lines
+ * (pure handler in state.ts: handleSlashCommand); the driver dispatches it
+ * before the unknown-command error, and passes static labels (cwd, session)
+ * into the state via makeInitialState.
  */
 import React from "react";
 import { render } from "ink";
@@ -16,10 +23,13 @@ import { App } from "./app.js";
 import {
   approvalAnswer,
   applyEvent,
+  handleSlashCommand,
   inputBackspace,
   inputChar,
   inputHistory,
   makeInitialState,
+  menuComplete,
+  menuNav,
   noteError,
   pushUser,
   setApproval,
@@ -57,6 +67,9 @@ export interface TuiRunOptions {
   buildExecutor: (ask: AskApproval) => ExecuteToolCall;
   noCompact?: boolean;
   compactKeepTokens?: number;
+  /** D15: static labels for the `/display-bottom` fields. */
+  cwd?: string;
+  sessionPath?: string;
   deps?: {
     /** Injected approver (tests): bypasses the TUI's y/n prompt. */
     askApproval?: AskApproval;
@@ -64,7 +77,10 @@ export interface TuiRunOptions {
 }
 
 export async function runTui(opts: TuiRunOptions): Promise<number> {
-  let state: TuiState = makeInitialState(opts.model.id);
+  // D15: static labels for the /display-bottom fields (cwd, session).
+  const info: Record<string, string> = { cwd: opts.cwd ?? process.cwd() };
+  if (opts.sessionPath !== undefined) info.session = opts.sessionPath;
+  let state: TuiState = makeInitialState(opts.model.id, info);
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
   let controller = new AbortController();
@@ -114,14 +130,32 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   const handlers = {
     onChar: (ch: string): void => setState(inputChar(state, ch)),
     onBackspace: (): void => setState(inputBackspace(state)),
-    onHistory: (dir: -1 | 1): void => setState(inputHistory(state, dir)),
+    onHistory: (dir: -1 | 1): void => {
+      // D16: arrows steer the completion menu when it is visible, else the
+      // prompt history.
+      const nav = menuNav(state, dir);
+      if (nav !== null) {
+        setState(nav);
+        return;
+      }
+      setState(inputHistory(state, dir));
+    },
     onSubmit: (): void => {
+      // D16: enter first completes the selected menu candidate (one more
+      // enter submits the completed word).
+      const completed = menuComplete(state);
+      if (completed !== null) {
+        setState(completed);
+        return;
+      }
       const r = submitInput(state);
       if (r === null) {
         // Busy (or an empty line): an explicit /quit still wins — abort the
         // running turn and exit 0. Without this, /quit is swallowed by the
         // busy guard while its characters sit in the input line, looking dead.
-        if ((state.input === "/quit" || state.input === "/exit") && state.busy) {
+        // D16: trimmed — menu completion leaves "/quit " with a trailing space.
+        const trimmed = state.input.trim();
+        if ((trimmed === "/quit" || trimmed === "/exit") && state.busy) {
           controller.abort();
           quit(0);
         }
@@ -130,6 +164,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const prompt = r.prompt;
       if (prompt === "/quit" || prompt === "/exit") {
         quit(0);
+        return;
+      }
+      // D15: slash commands are UI commands, not runs — dispatch through the
+      // pure handler, then clear the busy flag submitInput raised.
+      const slash = handleSlashCommand(r.state, prompt);
+      if (slash.handled) {
+        setState({ ...slash.state, busy: false });
         return;
       }
       if (prompt.startsWith("/")) {

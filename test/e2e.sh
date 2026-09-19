@@ -174,9 +174,11 @@ EOF
 }
 
 scenario_04() { # TUI deny: 'n' → isError result (✗) → run continues → rc=0
+  # D13 `local` default auto-approves workspace-scoped bash, so the command
+  # must reach OUTSIDE the workspace to get an approval prompt at all.
   local D="$WORK/04"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
-printf 'Run the bash command: echo denied-probe\r'
+printf 'Run the bash command: cat /etc/hostname\r'
 i=0
 while [ $i -lt 3 ]; do
   approval_or_done 240
@@ -195,15 +197,17 @@ EOF
 }
 
 scenario_05() { # TUI ctrl+c: aborts the running turn, prompt returns, rc=0
+  # D13 `local` default auto-approves workspace-scoped bash, so the command
+  # must reach OUTSIDE the workspace to get the 'y approve' prompt first.
   local D="$WORK/05"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
-printf 'Run the bash command: sleep 40 && echo done-sleeping\r'
+printf 'Run the bash command: sleep 40 && cat /etc/hostname\r'
 if new_since "$OFF" "$OUT" "y approve" 300; then printf 'y\r'; sleep 8; fi
 # wait for the sleep tool to actually start running (the tool line renders
 # the JSON args; the prompt echo does not contain "command:"). The command
 # value keeps its "&& echo done-sleeping" tail, so match without the closing
 # quote — the quoted form never matched the real tool line (WS10 e2e re-run).
-if wait_pattern "$OUT" '"command":"sleep 40' 300; then
+if wait_pattern "$OUT" '"command":"sleep 40' 300; then # tool line still starts with "sleep 40"
   sleep 3
   printf '\x03'
   new_since "$OFF" "$OUT" "aborted" 120 || exit 7
@@ -284,15 +288,26 @@ scenario_09() { # --no-approve: gated bash blocked as isError, run completes
   echo "rc=0, gated tool blocked as isError result"
 }
 
-scenario_10() { # sandbox: path escape (/etc/passwd) blocked even with --yes
+scenario_10() { # sandbox: path escape (file outside the workspace) blocked even with --yes
+  # The leak check uses a random CANARY file OUTSIDE the workspace, not a
+  # grep for "root:": the model KNOWS the standard first line of /etc/passwd
+  # from training, so it can "answer" the old prompt from parametric knowledge
+  # while both sandboxes block the real file — the old check false-positived
+  # on that (2026-09-18: read tool blocked AND Seatbelt returned
+  # "Operation not permitted", yet `grep "root:"` matched the model's own
+  # recitation). A random canary is unguessable → the leak check is precise.
+  # (The /etc denylist itself is pinned at the kernel level by
+  # test/sandbox.test.ts: `cat /etc/passwd` must FAIL under the profile.)
   local D="$WORK/10"; mkdir -p "$D"
-  guarded_run 300 "$D" run "Read the file /etc/passwd and tell me the first line." --yes \
+  local CANARY="CANARY-10-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  printf '%s\n' "$CANARY" > "$WORK/outside-canary-10.txt"
+  guarded_run 300 "$D" run "Read the file $WORK/outside-canary-10.txt and tell me the first line." --yes \
     --session "$D/s.jsonl" --cwd "$D"
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
-  grep -q "✗" "$D/out.log" || { echo "sandbox escape was not blocked (no ✗)"; return 1; }
-  grep -qF "root:" "$D/out.log" && { echo "FAIL: /etc/passwd content leaked into output"; return 1; }
-  echo "rc=0, escape blocked, no content leaked"
+  grep -q "✗\|Operation not permitted" "$D/out.log" || { echo "sandbox escape was not blocked (no ✗ / 'Operation not permitted')"; return 1; }
+  grep -qF "$CANARY" "$D/out.log" && { echo "FAIL: canary leaked into output — sandbox bypassed"; return 1; }
+  echo "rc=0, escape blocked, canary not leaked"
 }
 
 scenario_11() { # kill -9 mid-run → resume replays partial session cleanly
@@ -371,6 +386,54 @@ scenario_13() { # eval baseline (D9: regression baseline, variance-annotated)
   echo "$passes/$passes tasks PASS"
 }
 
+scenario_14() { # TUI pinned layout: input row exactly 4 lines above the bottom
+  local D="$WORK/14"; mkdir -p "$D"
+  cat > "$D/feed.sh" <<'EOF'
+printf 'Reply with exactly: PONG-14\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  pty_feed 14 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+    --session "$D/s.jsonl" --cwd "$D"
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  grep -qF "PONG-14" "$D/out.log" || { echo "no PONG-14 in frames"; return 1; }
+  # ANSI-strip (CSI sequences + charset selection + other escapes), then
+  # check the LAST 7 lines: hint / ─ separator / you-input / ─ separator /
+  # 3 reserved blank. (python3, not sed: macOS sed chokes on \x1b escapes
+  # with "illegal byte sequence" and emits nothing.)
+  python3 - "$D/out.log" "$D/plain.txt" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+clean = re.sub(r"\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\-_])", "", raw)
+clean = clean.replace("\r", "")
+open(sys.argv[2], "w").write(clean)
+PY
+  # The PTY log is a CONCATENATION of every frame, so `tail -N` cannot be
+  # trusted (the previous frame's reserved blanks bleed into the tail).
+  # D15: the input row is plain text (no 'you' prefix), so anchor on the
+  # LAST hint line (rendered in every frame, --yes means no approval hint)
+  # and verify the block AFTER it: ─ / input / ─ / 3 reserved blank lines.
+  local hintline; hintline=$(grep -n "enter send" "$D/plain.txt" | tail -1 | cut -d: -f1)
+  [ -n "$hintline" ] || { echo "no hint line found in frames"; return 1; }
+  local i l
+  l=$(sed -n "$((hintline+1))p" "$D/plain.txt")
+  echo "$l" | grep -qE '^─+$' || { echo "top separator wrong: '$l'"; return 1; }
+  l=$(sed -n "$((hintline+2))p" "$D/plain.txt")
+  # input row: blank after the prompt was sent, or the /quit quit_retry typed
+  [ -z "$l" ] || [ "$l" = " " ] || case "$l" in /*) ;; *) echo "input row wrong: '$l'"; return 1;; esac
+  l=$(sed -n "$((hintline+3))p" "$D/plain.txt")
+  echo "$l" | grep -qE '^─+$' || { echo "bottom separator wrong: '$l'"; return 1; }
+  local ok=1
+  for i in 4 5 6; do
+    l=$(sed -n "$((hintline+i))p" "$D/plain.txt")
+    [ -z "$l" ] || [ "$l" = " " ] || { echo "reserved line +$i not blank: '$l'"; ok=0; }
+  done
+  [ $ok -eq 1 ] || return 1
+  echo "rc=0, PONG-14 rendered, pinned block (hint/─/input/─/3×blank) at the bottom"
+}
+
 # ───────────────────────────── runner ─────────────────────────────
 
 run_one() {
@@ -389,6 +452,7 @@ run_one() {
     11) name="kill-mid-run+resume" ;;
     12) name="tui-compaction(✂)" ;;
     13) name="eval-baseline" ;;
+    14) name="tui-pinned-layout" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

@@ -23,7 +23,9 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "cli-truncate": "^6.1.1",
     "ink": "^7.1.1",
-    "react": "^19.3.0"
+    "react": "^19.3.0",
+    "wrap-ansi": "^10.0.1"
   }
 }

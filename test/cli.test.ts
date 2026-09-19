@@ -112,6 +112,22 @@ test("parseArgs: REPL mode has no prompt requirement", () => {
   assert.equal(a.oneShot, false);
 });
 
+test("parseArgs: D13 approval flags (--local / --ask) parse; default is neither", () => {
+  assert.equal(parseArgs(["--local"]).local, true);
+  assert.equal(parseArgs(["--ask"]).ask, true);
+  assert.equal(parseArgs([]).local, false);
+  assert.equal(parseArgs([]).ask, false);
+});
+
+test("parseArgs: D13 approval flags are mutually exclusive", () => {
+  assert.match(parseArgs(["--local", "--yes"]).errors.join(" "), /mutually exclusive/);
+  assert.match(parseArgs(["--ask", "--no-approve"]).errors.join(" "), /mutually exclusive/);
+  assert.match(parseArgs(["--local", "--ask", "--yes"]).errors.join(" "), /mutually exclusive/);
+  // A single flag (or none) is fine.
+  assert.deepEqual(parseArgs(["--local"]).errors, []);
+  assert.deepEqual(parseArgs(["--no-approve"]).errors, []);
+});
+
 test("parseArgs: errors", () => {
   assert.notDeepEqual(parseArgs(["run"]).errors, []);
   assert.notDeepEqual(parseArgs(["--bogus"]).errors, []);
@@ -414,7 +430,7 @@ test("parseArgs: --yes / --no-approve flags (mutually exclusive)", () => {
   assert.notDeepEqual(parseArgs(["run", "x", "--yes", "--no-approve"]).errors, []);
 });
 
-test("WS7: gated bash denied → run completes, model gets an isError result", async (t) => {
+test("WS7: gated bash denied (--ask) → run completes, model gets an isError result", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   const streamFn = fakeStream([
@@ -423,8 +439,10 @@ test("WS7: gated bash denied → run completes, model gets an isError result", a
   ]);
   const S = mkSinks();
   const asked: string[] = [];
+  // D13: the default mode is "local" (this command would auto-approve),
+  // so the pre-D13 prompt-per-call behavior is exercised via --ask.
   const code = await main(
-    ["run", "run it", "--tools", "bash", "--models", models, "--session", session],
+    ["run", "run it", "--tools", "bash", "--models", models, "--session", session, "--ask"],
     {
       streamFn,
       sinks: S.sinks,
