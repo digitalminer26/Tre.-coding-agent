@@ -58,8 +58,10 @@ export interface Usage {
  *   toolUse  — model wants to call tools
  *   error    — provider/transport failure; see errorMessage
  *   aborted  — AbortSignal fired; the partial is kept in context
+ *   budget   — the loop's per-run maxTurns cap was hit; set by the LOOP
+ *              (never a wire finish_reason); the run is resumable
  */
-export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
+export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted" | "budget";
 
 export interface UserMessage {
   role: "user";
@@ -150,6 +152,12 @@ export type AgentEvent =
       stopReason: StopReason;
       /** Final context — what the session layer appends to the JSONL file. */
       messages: AgentMessage[];
+      /**
+       * Present when stopReason === "budget": the per-run cap that was hit
+       * (so the UI can name it). The cap is per-run — a new prompt starts
+       * a new run with a fresh count.
+       */
+      maxTurns?: number;
     }
   | { type: "turn_start"; turn: number }
   | { type: "turn_end"; turn: number }

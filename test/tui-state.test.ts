@@ -216,6 +216,38 @@ test("agent_end: error/aborted/length become error items; busy + approval clear"
   }
 });
 
+test("agent_end: budget → error item, busy + approval clear, TUI stays usable", () => {
+  const withApproval = setApproval(makeInitialState("m"), "allow?", () => {});
+  const s = applyEvent(
+    { ...withApproval, busy: true },
+    { type: "agent_end", stopReason: "budget", maxTurns: 4, messages: [] },
+  );
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "error");
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /budget: max 4 turns reached/);
+  assert.match(text, /send another prompt to continue/);
+  assert.equal(s.busy, false);
+  assert.equal(s.approval, null);
+  // The TUI stays usable: a fresh prompt can be submitted (a NEW run,
+  // whose cap resets).
+  const r = submitInput({ ...s, input: "keep going" });
+  assert.notEqual(r, null);
+  assert.equal(r!.prompt, "keep going");
+
+  // No maxTurns on the event → the number is omitted, the note still lands.
+  const s2 = applyEvent(makeInitialState("m"), {
+    type: "agent_end",
+    stopReason: "budget",
+    messages: [],
+  });
+  const last2 = s2.items[s2.items.length - 1]!;
+  assert.equal(last2.kind, "error");
+  const text2 = last2.kind === "error" ? last2.text : "<not an error item>";
+  assert.match(text2, /^budget: turns reached/);
+  assert.equal(s2.busy, false);
+});
+
 test("agent_end: stop adds no noise and clears busy", () => {
   const s0 = fold([{ type: "agent_start" }]);
   const ok = applyEvent(s0, { type: "agent_end", stopReason: "stop", messages: [] });

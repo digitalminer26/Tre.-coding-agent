@@ -446,7 +446,7 @@ test("tool that throws (I3 violation) → error result, run survives", async () 
 
 // ─────────────────────────── caps & hooks ───────────────────────────
 
-test("maxTurns caps the number of LLM turns", async () => {
+test("maxTurns caps the number of LLM turns (cap-hit is an explicit budget outcome)", async () => {
   const { tool } = makeTool("read");
   const turns: FakeTurn[] = [
     { type: "toolcall", calls: [{ id: "c1", name: "read", args: {} }] },
@@ -455,7 +455,34 @@ test("maxTurns caps the number of LLM turns", async () => {
   const events = await drainLoop(turns, [tool], { maxTurns: 1 });
   const end = agentEnd(events);
   assert.equal(events.filter((e) => e.type === "turn_start").length, 1);
-  assert.equal(end.stopReason, "toolUse", "last assistant message's stopReason is kept");
+  assert.equal(end.stopReason, "budget", "the cap-hit is an explicit budget outcome");
+  assert.equal(end.maxTurns, 1, "agent_end carries the cap it hit");
+});
+
+test("maxTurns=2 with a model that keeps issuing tool calls → agent_end stopReason budget + maxTurns", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: {} }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "read", args: {} }] },
+    { type: "text", text: "never reached" },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 2 });
+  const end = agentEnd(events);
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+  assert.equal(end.stopReason, "budget");
+  assert.equal(end.maxTurns, 2);
+});
+
+test("normal short run is unaffected: agent_end stopReason stop, no maxTurns on the event", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: {} }] },
+    { type: "text", text: "all done" },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 8 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(end.maxTurns, undefined, "a normal stop carries no cap");
 });
 
 test("prepareNextTurn can rewrite the next turn's context", async () => {

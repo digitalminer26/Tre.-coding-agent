@@ -108,6 +108,12 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         items = [...items, { kind: "error", text: "aborted" }];
       } else if (ev.stopReason === "length") {
         items = [...items, { kind: "error", text: "length: output limit hit — tool-call arguments may be truncated" }];
+      } else if (ev.stopReason === "budget") {
+        // Cap hit is an outcome, not a dead end: the TUI stays usable —
+        // the next prompt is a NEW run whose cap resets (the generic
+        // agent_end path above clears busy/approval).
+        const cap = ev.maxTurns !== undefined ? `max ${ev.maxTurns} turns` : "turns";
+        items = [...items, { kind: "error", text: `budget: ${cap} reached — send another prompt to continue` }];
       }
       return { ...state, busy: false, approval: null, items };
     }
