@@ -72,6 +72,10 @@ always exactly 4 lines above the screen bottom.
   finish the current increment (committed + tested), then tell the user:
   what is done, what remains, and the exact relaunch command
   (`tre. tui --session <file>` to save / `--resume <file>` to continue).
+- Sessions must live OUTSIDE the repository (D20 boundary): pass
+  `--session ~/.tre/sessions/<task>-<utc-timestamp>.jsonl` or use `--session-auto`.
+  The agent under test must never be able to read or edit its own session
+  history — a session file inside the repo would be both readable and editable.
 - Do not start a second increment after you have used ~80% of your turns.
 
 ## Definition of done
