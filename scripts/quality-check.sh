@@ -54,10 +54,11 @@ fi
 # is invoked from (npm test already runs with CWD at the repo root). Its
 # status is aggregated with the scan below: either one failing fails the gate.
 ROOT=$(dirname "$(dirname "$0")")
-DEPS_STATUS=0
-if ! (cd "$ROOT" && node scripts/check-deps.mjs); then
-  DEPS_STATUS=$?
-fi
+# Capture the subshell status DIRECTLY — under `if ! cmd`, `$?` is the
+# inverted status (0) when cmd failed, so the old form never recorded a
+# deps failure (D20 integration fix, caught by a from-elsewhere probe).
+(cd "$ROOT" && node scripts/check-deps.mjs)
+DEPS_STATUS=$?
 
 SCAN_STATUS=0
 FILELIST=$(find "$DIR" -type f -name '*.ts' | sort)
