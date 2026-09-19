@@ -292,11 +292,8 @@ e2e (full sweep 1..14, 27B Qwen both clusters): 01,02,03,06,07,08,09,11 PASS.
   Needs owner attention — this is the security module.
 - **s13 (eval-baseline): FAIL at 900 s — known 27B variance** (documented).
 
-Design + resume doc: `D14-RESUME.md` (delete after committing).
-
-NOTE: the D13 work (safety.ts, main.ts, tests, models.json, PLAN.md, this
-file's D13 section) was already uncommitted when D14 started — the dirty tree
-contains BOTH; commit decision (one commit vs two) is the user's.
+Design + resume doc: D14-RESUME.md (deleted after commit — recoverable from
+git history of 95347ed).
 
 ## D13 — workspace-scoped approval (`local` mode, new default) — DONE
 
