@@ -16,13 +16,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fakeStream } from "./fake-stream.js";
 import { runLoop } from "../src/loop/agent-loop.js";
 import {
   Session,
+  defaultSessionPath,
   loadSession,
   replayContext,
   replaySession,
@@ -356,4 +357,18 @@ test("appends after close() throw (I3: failure is a rejection, not a crash)", as
   const s = await Session.create(path);
   await s.close();
   await assert.rejects(s.appendMessage(userMsg("late", 9)), /closed/);
+});
+
+test("defaultSessionPath (D20): deterministic UTC name under ~/.tre/sessions/, outside any repo", () => {
+  // Sep 19, 2026, 10:05:03 UTC (month index 8 = September) — exercises the
+  // zero-padding of month, day, and every time field.
+  const at = new Date(Date.UTC(2026, 8, 19, 10, 5, 3));
+  const p = defaultSessionPath(at, 4242);
+  assert.equal(p, join(homedir(), ".tre", "sessions", "tre-20260919-100503-4242.jsonl"));
+  // Starts under ~/.tre/sessions/ (never inside a repository) and is JSONL.
+  assert.ok(p.startsWith(join(homedir(), ".tre", "sessions") + "/"), `expected prefix, got ${p}`);
+  assert.ok(p.endsWith(".jsonl"));
+  // Two different injected seconds produce two different paths.
+  const oneSecondLater = defaultSessionPath(new Date(Date.UTC(2026, 8, 19, 10, 5, 4)), 4242);
+  assert.notEqual(oneSecondLater, p);
 });
