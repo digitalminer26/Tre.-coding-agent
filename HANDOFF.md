@@ -1,4 +1,43 @@
-# HANDOFF — self-improve readiness (D17), on top of D16 (2026-09-19)
+# HANDOFF — Tre Coding Agent rename + quality gate (D18), on top of D17 (2026-09-19)
+
+## D18 — rename to Tre Coding Agent (`tre.`) + quality gate — DONE (276 tests 0 fail; quality gate wired into `npm test`; PTY + --help verified)
+
+User request: real name "Tre Coding Agent", invoked as `tre.` (trailing dot
+— a valid POSIX command name). The legacy `coding-agent` command is KEPT as
+an alias (both bins point at the same `dist/src/cli/main.js`).
+
+- `package.json`: name `tre-coding-agent`, v0.1.0, dual bin
+  (`tre.` + `coding-agent`), `npm install --package-lock-only` synced the
+  lock. Global re-link (`npm link` after removing the stale `coding-agent`
+  global pkg dir — the first attempt failed on EEXIST of the old bin link).
+- CLI: help/usage, error strings, REPL banner → `tre.` / Tre Coding Agent.
+- TUI: header branded `tre. · <model> — turn N`. Hint line now advertises
+  the `/` menu ("enter send · / commands · ↑/↓ history · …") — the D16
+  HANDOFF claimed this was done; it wasn't. Verified by PTY capture.
+- `test/e2e.sh`: default range fixed 13 → 14 — `scenario_14` had been
+  silently excluded from full runs ever since it was added (latent bug).
+- **Quality gate** (D17 backlog item d, built by a farm agent, verified by
+  the orchestrator): `scripts/quality-check.sh` — POSIX sh, no deps, scans
+  src/*.ts for: `console.log(`, TODO/FIXME, trailing whitespace, tabs,
+  node_modules//bare-dist/ import specifiers. Optional dir arg (default
+  src/). Wired into `npm test` as the FIRST step (fail-fast) + standalone
+  `npm run check`. Verified: clean run exit 0 (24 files), bad fixture exit 1
+  naming file:line for every violation class.
+- Guardrail-zone files (self-improve skill relaunch text, guardrail comment)
+  updated under a human-decision `GUARDRAIL_BYPASS=1` commit, as designed.
+- **gpu-farm pilot** (first real fan-out): 2 workstreams on both lanes
+  (Qwen3.8-27B, nvidia + radeon). Result: the quality-gate agent DELIVERED
+  its file 3 min before its 1200 s timeout but was killed while composing
+  the final answer (farm marks it `timeout`, .out empty); the read-heavy
+  brand-audit agent (600 s) also timed out. LESSON for farm use on 27B:
+  (1) artifacts on disk survive the timeout — check the workstream's cwd
+  before discarding a `timeout` result; (2) give 27B ≥1500 s for tasks that
+  end in a long final answer, or require the agent to write its report to a
+  file as it goes; (3) the orchestrator absorbed the audit inline (one grep
+  pass) — for small read-heavy tasks, inline beats a farm lane.
+- Post-rename brand audit: remaining "coding agent" strings are general-
+  category prose (system prompts in tests, docs titles, README description)
+  or historical records (PLAN.md) — intentionally left.
 
 ## D17 — self-improve readiness — DONE (baseline committed + tagged; skill + guardrail hook live; e2e s14 menu-aware and live-passing)
 
