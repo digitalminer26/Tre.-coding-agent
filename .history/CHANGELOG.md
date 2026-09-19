@@ -178,3 +178,5 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-19 02:16:40 | edit | test/tui-pinned-layout.test.ts | D16: menu geometry + pure-function tests | .history/snapshots/test/tui-pinned-layout.test.ts/20260919T021640Z |
 | 2026-09-19 02:16:40 | edit | HANDOFF.md | D16 section | .history/snapshots/HANDOFF.md/20260919T021640Z |
 | 2026-09-19 11:50:58 | edit | .gitignore | gitignore .history/ + context-fold/ tooling byproducts before baseline commit | .history/snapshots/.gitignore/20260919T115058Z |
+| 2026-09-19 12:08:09 | edit | test/e2e.sh | D16: scenario_14 anchor skips completion-menu lines between hint and top separator | .history/snapshots/test/e2e.sh/20260919T120809Z |
+| 2026-09-19 12:13:03 | edit | HANDOFF.md | self-improve readiness: baseline commit + tag, skill, guardrail hook, e2e s14 menu-aware + live pass, recursive backlog | .history/snapshots/HANDOFF.md/20260919T121303Z |

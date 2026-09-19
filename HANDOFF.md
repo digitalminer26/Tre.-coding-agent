@@ -1,4 +1,58 @@
-# HANDOFF — D16: slash-command completion menu (TUI), on top of D15 (2026-09-18)
+# HANDOFF — self-improve readiness (D17), on top of D16 (2026-09-19)
+
+## D17 — self-improve readiness — DONE (baseline committed + tagged; skill + guardrail hook live; e2e s14 menu-aware and live-passing)
+
+Goal: make it safe to run `coding-agent tui` INSIDE this repo and let it
+improve itself. Assessment: possible — full toolset + red-teamed kernel
+sandbox + a network-free verification loop (`npm test`, 276 tests) +
+sessions/resume + git. A running process is immune to its own on-disk edits
+(Node doesn't hot-reload); only the NEXT launch is affected.
+
+What was set up (all committed on top of the D12–D16 baseline):
+
+1. **Baseline commit + tag**: `95347ed` "D12-D16 …", tag
+   `known-good-2026-09-19`. Clean tree. `dist/` is gitignored, so recovery
+   from a broken build = `git checkout .` (sources) + `npm run build` —
+   the tag is the named safe harbor.
+2. **`.gitignore`**: added `.history/` (pi file-history snapshots — local
+   safety net, not repo content) and `context-fold/` (pi byproduct).
+3. **The self-improve skill**: `.pi/skills/self-improve/SKILL.md` — loads
+   by default (project skills dir is `<cwd>/.pi/skills`, no flag needed).
+   Encodes the mechanical protocol: clean-tree check → ONE increment →
+   `npm run build` → `npm test` → commit → HANDOFF.md → repeat; failure
+   recovery (`git checkout .` after 2 failed attempts, never leave a broken
+   build); the guardrail zone; a PTY-capture recipe for TUI verification;
+   turn-budget/session handoff rules; definition of done.
+4. **Hard guardrail hook**: `scripts/guardrail-check.sh` (sh, no deps) +
+   `scripts/git-hooks/pre-commit`, wired via `git config core.hooksPath
+   scripts/git-hooks` (repo-local config — a fresh clone must run that
+   command once; noted in the hook header). REJECTS any commit touching:
+   `src/tools/sandbox.ts`, `src/tools/safety.ts`, `src/tools/bash.ts`,
+   `scripts/guardrail-check.sh`, `scripts/git-hooks/*`,
+   `.pi/skills/self-improve/SKILL.md`. Human override: `GUARDRAIL_BYPASS=1
+   git commit`. Verified both ways (reject + bypass + normal commit pass).
+5. **e2e `scenario_14` menu-aware + LIVE VERIFIED**: the D16 note below
+   claiming it was unaffected was WRONG — the feeder types `/quit` (a
+   registered command), so the LAST frame has the menu open between the
+   hint and the top separator. The anchor now skips up to 5 menu lines
+   (`"> /…"` or `"  /…"`) after the hint. Re-run `bash test/e2e.sh 14 14`:
+   PASS against the live 27B (radeon).
+
+**First recursive run (pilot, supervised)** — scoped, test-gated tasks, in
+suggested order:
+   a. tab-completes-first (shift-tab or plain tab completes the selected
+      menu candidate instead of inserting a space — see D16 candidates)
+   b. per-argument completion: `/display-bottom ` → field names (relax the
+      "space hides the menu" rule for a known command's args)
+   c. new bottom fields: `provider`, `sandbox` (on/off), per-turn tokens
+      (registry entry + `bottomValue` case + label plumbing in run.tsx/main.ts)
+   d. `npm run lint`-style quality gate (eslint or a minimal script) wired
+      into `npm test` to stop style drift over many agent commits
+
+Model note: the harness is model-agnostic (`models.json` → any
+OpenAI-compatible endpoint). Currently served by Qwen3.8-27B Q4 (radeon
+`172.30.70.13:8080`) — fine for (a)–(c); point at a stronger endpoint for
+anything cross-cutting.
 
 ## D16 — `/` completion menu — DONE (unit 276/276 pass, 0 fail; live PTY verified: `/` → menu, ↓↓ → `/quit`, enter completes, enter exits)
 
@@ -43,8 +97,10 @@ Files:
   geometry with the menu (hint at row 14, menu 15–17, separators/input
   pinned at 18–20).
 
-NOTE: `test/e2e.sh` `scenario_14` unaffected (its feed never types `/`;
-its final-frame input row is blank → no menu).
+CORRECTION (D17): `test/e2e.sh` `scenario_14` WAS affected — the feeder
+types `/quit` (a registered command), so the LAST frame has the menu open
+between the hint and the top separator; the anchor was made menu-aware and
+the scenario live-verified (see D17).
 
 Next candidates: per-argument completion (e.g. `/display-bottom ` → field
 names as a second menu level — would need the "space hides the menu" rule
@@ -98,8 +154,8 @@ Files:
 Also changed: `test/e2e.sh` `scenario_14` re-anchored — it pinned the LAST
 `^you` line, which no longer exists; it now anchors on the LAST hint line
 and checks the block AFTER it (─ / input (blank or the typed `/quit`) / ─ /
-3×blank). NOTE: scenario_14 was NOT re-run (27B e2e is slow); the anchor
-logic was validated against a live PTY capture of the new frame shape.
+3×blank). SUPERSEDED (D17): scenario_14 WAS re-run live after the D16
+menu-aware rework — PASS (see D17).
 
 Next candidate fields (one-liners in the `bottomValue` switch + registry +
 label plumbed via `TuiRunOptions`): `sandbox` (on/off), `provider`,

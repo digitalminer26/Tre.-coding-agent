@@ -1,0 +1,6 @@
+#!/bin/sh
+# pre-commit — delegate to the version-controlled guardrail check.
+# (hooks in .git/hooks are not version-controlled; this repo points
+#  core.hooksPath here so every clone gets the guard by convention —
+#  run: git config core.hooksPath scripts/git-hooks)
+exec sh "$(dirname "$0")/../guardrail-check.sh"

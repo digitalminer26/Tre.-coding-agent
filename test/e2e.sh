@@ -413,25 +413,33 @@ PY
   # The PTY log is a CONCATENATION of every frame, so `tail -N` cannot be
   # trusted (the previous frame's reserved blanks bleed into the tail).
   # D15: the input row is plain text (no 'you' prefix), so anchor on the
-  # LAST hint line (rendered in every frame, --yes means no approval hint)
-  # and verify the block AFTER it: ─ / input / ─ / 3 reserved blank lines.
+  # LAST hint line (rendered in every frame, --yes means no approval hint).
+  # D16: when the input holds a bare "/" command word (the feeder types
+  # /quit before submitting it), the completion menu renders BETWEEN the
+  # hint and the top separator — skip up to MENU_MAX_LINES (5) menu lines
+  # ("> /…" or "  /…") before asserting the pinned block: ─ / input / ─ /
+  # 3 reserved blank lines.
   local hintline; hintline=$(grep -n "enter send" "$D/plain.txt" | tail -1 | cut -d: -f1)
   [ -n "$hintline" ] || { echo "no hint line found in frames"; return 1; }
-  local i l
-  l=$(sed -n "$((hintline+1))p" "$D/plain.txt")
+  local i l k base=$((hintline))
+  for ((k = 0; k < 5; k++)); do
+    l=$(sed -n "$((base+1))p" "$D/plain.txt")
+    case "$l" in "> /"* | "  /"*) base=$((base+1));; *) break;; esac
+  done
+  l=$(sed -n "$((base+1))p" "$D/plain.txt")
   echo "$l" | grep -qE '^─+$' || { echo "top separator wrong: '$l'"; return 1; }
-  l=$(sed -n "$((hintline+2))p" "$D/plain.txt")
+  l=$(sed -n "$((base+2))p" "$D/plain.txt")
   # input row: blank after the prompt was sent, or the /quit quit_retry typed
   [ -z "$l" ] || [ "$l" = " " ] || case "$l" in /*) ;; *) echo "input row wrong: '$l'"; return 1;; esac
-  l=$(sed -n "$((hintline+3))p" "$D/plain.txt")
+  l=$(sed -n "$((base+3))p" "$D/plain.txt")
   echo "$l" | grep -qE '^─+$' || { echo "bottom separator wrong: '$l'"; return 1; }
   local ok=1
   for i in 4 5 6; do
-    l=$(sed -n "$((hintline+i))p" "$D/plain.txt")
+    l=$(sed -n "$((base+i))p" "$D/plain.txt")
     [ -z "$l" ] || [ "$l" = " " ] || { echo "reserved line +$i not blank: '$l'"; ok=0; }
   done
   [ $ok -eq 1 ] || return 1
-  echo "rc=0, PONG-14 rendered, pinned block (hint/─/input/─/3×blank) at the bottom"
+  echo "rc=0, PONG-14 rendered, pinned block (hint[/menu]/─/input/─/3×blank) at the bottom"
 }
 
 # ───────────────────────────── runner ─────────────────────────────
