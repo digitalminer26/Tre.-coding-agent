@@ -24,12 +24,31 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { makeSummaryMessage } from "../context/compact.js";
 import type { AgentMessage, UserMessage } from "../types.js";
 
 /** Bump when the on-disk entry shape changes; replay rejects other versions. */
 export const SESSION_FORMAT_VERSION = 1;
+
+// ─────────────────────── default location (D20 boundary) ───────────────────────
+
+/**
+ * D20 boundary: sessions live OUTSIDE any repository — the agent under test
+ * must never be able to read or edit its own session history. `--session-auto`
+ * (WS6 CLI) resolves each run's session file here, in `~/.tre/sessions/`,
+ * named `tre-<UTC yyyyMMdd>-<HHmmss>-<pid>.jsonl`. Pure: no I/O — the caller
+ * creates the parent directory so the first write cannot fail.
+ */
+export function defaultSessionPath(now?: Date, pid?: number): string {
+  const d = now ?? new Date();
+  const p = pid ?? process.pid;
+  const pad2 = (n: number): string => String(n).padStart(2, "0");
+  const date = `${d.getUTCFullYear()}${pad2(d.getUTCMonth() + 1)}${pad2(d.getUTCDate())}`;
+  const time = `${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}${pad2(d.getUTCSeconds())}`;
+  return join(homedir(), ".tre", "sessions", `tre-${date}-${time}-${p}.jsonl`);
+}
 
 // ─────────────────────────── entry types (wire format) ───────────────────────────
 

@@ -19,6 +19,7 @@
  *   --cwd <dir>        working directory the agent operates in (default: process.cwd())
  *   --session <file>   session file: created if absent, resumed if present
  *   --resume <file>    resume an EXISTING session (error if absent)
+ *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
  *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.pi/skills then
  *                      ~/.pi/agent/skills (project skills shadow user skills by name)
  *   --max-turns <n>    per-run LLM-turn safety cap (default: 32)
@@ -35,7 +36,7 @@
  *   - I3: run failures are data (exit codes), never uncaught throws.
  */
 import { homedir } from "node:os";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
@@ -58,6 +59,7 @@ import {
 } from "../tools/safety.js";
 import {
   Session,
+  defaultSessionPath,
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
@@ -89,6 +91,8 @@ export interface CliOptions {
   cwd: string;
   sessionPath?: string;
   resumePath?: string;
+  /** D20: fresh session under ~/.tre/sessions/ (outside any repository). */
+  sessionAuto: boolean;
   skillDirs: string[];
   maxTurns: number;
   /** --yes: auto-approve gated tools (except destructive bash). */
@@ -124,6 +128,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     ui: "plain",
     tools: "all",
     cwd: process.cwd(),
+    sessionAuto: false,
     skillDirs: [],
     maxTurns: 32,
     yes: false,
@@ -171,12 +176,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       i += 2;
     } else if (a === "--yes" || a === "--no-approve" || a === "--local" || a === "--ask" ||
-               a === "--no-compact" || a === "--no-sandbox") {
+               a === "--no-compact" || a === "--no-sandbox" || a === "--session-auto") {
       if (a === "--yes") opts.yes = true;
       else if (a === "--no-approve") opts.noApprove = true;
       else if (a === "--local") opts.local = true;
       else if (a === "--ask") opts.ask = true;
       else if (a === "--no-compact") opts.noCompact = true;
+      else if (a === "--session-auto") opts.sessionAuto = true;
       else opts.noSandbox = true;
       i++;
     } else if (a === "--help" || a === "-h") {
@@ -198,6 +204,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (opts.sessionPath && opts.resumePath) {
     opts.errors.push("--session and --resume are mutually exclusive");
+  }
+  if (opts.sessionAuto && (opts.sessionPath || opts.resumePath)) {
+    opts.errors.push("conflict: --session-auto cannot be combined with --session/--resume");
   }
   {
     const flags: [string, boolean][] = [
@@ -540,6 +549,7 @@ Options:
                      sandbox boundary for file tools (default: process cwd)
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
+  --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
   --skills <dir>     skills dir (repeatable)
   --max-turns <n>    per-run LLM-turn cap (default 32)
   --local            (DEFAULT since D13) auto-approve gated calls scoped to
@@ -699,19 +709,33 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     skills,
   });
 
-  // session (resume / create)
+  // D20 boundary (--session-auto): resolve a fresh session path OUTSIDE any
+  // repository (~/.tre/sessions/) so the agent under test can never read or
+  // edit its own history. The parent dir is created up front (the first write
+  // must not fail on a missing directory) and `session: <path>` goes to stderr
+  // ONCE at startup — an orchestrator captures it to build its --resume
+  // command. Without the flag there is still no session file; combining
+  // --session-auto with --session/--resume was rejected in parseArgs.
+  let autoSessionPath: string | undefined;
+  if (args.sessionAuto) {
+    autoSessionPath = defaultSessionPath();
+    mkdirSync(path.dirname(autoSessionPath), { recursive: true });
+    sinks.err.write(`session: ${autoSessionPath}\n`);
+  }
+
+  // session (resume / create / --session-auto)
   let session: SessionType | undefined;
   let context: AgentMessage[] = [];
   // WS9: message → session entry id, for the session's lifetime. Seeded
   // from the replay on resume (a compaction's firstKeptEntryId must name a
   // kept message's entry); filled as new messages are appended.
   const entryIds = new Map<AgentMessage, string>();
-  if (args.resumePath || args.sessionPath) {
-    const path = args.resumePath ?? args.sessionPath!;
+  const sessionFile = args.resumePath ?? args.sessionPath ?? autoSessionPath;
+  if (sessionFile !== undefined) {
     try {
-      if (args.resumePath || existsSync(path)) {
-        const replayed = await replaySession(path);
-        session = await Session.open(path);
+      if (args.resumePath || existsSync(sessionFile)) {
+        const replayed = await replaySession(sessionFile);
+        session = await Session.open(sessionFile);
         context = replayed.context;
         replayed.context.forEach((m, i) => entryIds.set(m, replayed.contextEntryIds[i]!));
         if (replayed.model && !args.modelId) {
@@ -722,11 +746,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
           }
         }
         if (replayed.droppedTornTail) {
-          sinks.err.write(`note: session ${path} had a torn trailing line — it was dropped\n`);
+          sinks.err.write(`note: session ${sessionFile} had a torn trailing line — it was dropped\n`);
         }
-        sinks.err.write(`resumed ${path}: ${context.length} context message(s)\n`);
+        sinks.err.write(`resumed ${sessionFile}: ${context.length} context message(s)\n`);
       } else {
-        session = await Session.create(path, {
+        session = await Session.create(sessionFile, {
           cwd: root,
           model: { id: model.id, provider: model.provider },
         });
@@ -772,7 +796,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       compactKeepTokens: args.compactKeepTokens,
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
-      sessionPath: args.resumePath ?? args.sessionPath,
+      sessionPath: sessionFile,
       deps: { askApproval: deps.askApproval },
     });
     if (session) await session.close();

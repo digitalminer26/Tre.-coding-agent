@@ -137,6 +137,18 @@ test("parseArgs: errors", () => {
   assert.notDeepEqual(parseArgs(["tui", "a prompt"]).errors, []); // tui takes no prompt
 });
 
+test("parseArgs: --session-auto (D20) parses, defaults false, conflicts with --session/--resume", () => {
+  assert.equal(parseArgs(["--session-auto"]).sessionAuto, true);
+  assert.equal(parseArgs([]).sessionAuto, false);
+  const a = parseArgs(["run", "x", "--session-auto"]);
+  assert.deepEqual(a.errors, []);
+  assert.match(
+    parseArgs(["run", "x", "--session-auto", "--session", "s.jsonl"]).errors.join(" "),
+    /conflict/,
+  );
+  assert.match(parseArgs(["--session-auto", "--resume", "r.jsonl"]).errors.join(" "), /conflict/);
+});
+
 test("parseArgs: tui subcommand", () => {
   const a = parseArgs(["tui", "--tools", "none"]);
   assert.deepEqual(a.errors, []);
@@ -287,6 +299,20 @@ test("main one-shot: prompt → streamed text → exit 0, session persisted", as
   }
   assert.equal(replayed.context[1]!.role, "assistant");
   assert.deepEqual(replayed.model, { id: MODEL.id, provider: "fake" });
+});
+
+test("--session-auto + --session → exit 2 conflict, no session file created (D20)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "hi", "--tools", "none", "--models", models, "--session-auto", "--session", join(dir, "s.jsonl")],
+    { sinks: S.sinks },
+  );
+  assert.equal(code, 2);
+  assert.match(S.err(), /conflict/);
+  // The parse conflict is rejected BEFORE any session file exists.
+  const { existsSync } = await import("node:fs");
+  assert.ok(!existsSync(join(dir, "s.jsonl")));
 });
 
 test("main one-shot: real bash tool round-trip, 4-message session", async (t) => {
