@@ -1,4 +1,87 @@
-# HANDOFF — quiet file-access lines + models.json lookup (D19), on top of D18 (2026-09-19)
+# HANDOFF — recursive-dev boundary work (D20), on top of D19 (2026-09-19)
+
+## D20 — sessions outside the repo + explicit budget + dependency freeze — DONE (296 tests: 289 pass 0 fail; built by GPU farm, orchestrator-verified, 1 integration bug caught)
+
+User request (2026-09-19): implement the three pre-recursion boundary
+improvements (1: sessions out of the repo, 2: budget guard, 3: dependency
+freeze), parallelized with the gpu-farm skill. All three are in; the agent is
+now ready for recursive development with a human-in-the-loop orchestrator.
+
+**Build method (first multi-workstream farm run on this repo):** 3 git
+worktrees in /tmp (d20-ws1/2/3), node_modules symlinked from the main repo,
+3 self-contained specs in /tmp/farm-tre-d20.json, `farm run --force-lanes
+vks-llama,radeon-llama` (forced: the orchestrator session itself runs on
+vks-llama, so probes would self-contaminate). Wall 38.5 min: ws3-deps 11.5m
+(radeon), ws2-budget 33.7m (vks, while I stayed idle so the lane was free),
+ws1-sessions 27m (radeon, queued). All three: own commit, own green suite,
+REPORT.md. Merged into main in order ws1→ws2→ws3 — ZERO conflicts (disjoint
+regions were specified per workstream).
+
+**1. Sessions live OUTSIDE the repo** (`de4139a`): `--session-auto` flag —
+resolves `defaultSessionPath()` = `~/.tre/sessions/tre-<UTC yyyyMMdd>-<HHmmss>-<pid>.jsonl`
+(src/session/session.ts, pure function, injectable now/pid for tests),
+creates the parent dir, prints `session: <path>` to stderr ONCE (the
+orchestrator's hook for building `--resume <file>`). Without the flag:
+unchanged (no session file). `--session-auto` + `--session`/`--resume` →
+conflict, exit 2. Skill (guardrail zone, applied under GUARDRAIL_BYPASS=1,
+from the farm's SKILL-CHANGE.md) now MANDATES self-improve sessions under
+`~/.tre/sessions/`. Verified live: one-shot with `--session-auto` →
+`session: /Users/tertain/.tre/sessions/tre-...jsonl` + file created outside
+the repo.
+
+**2. Explicit budget** (`db1bfbb`): the existing `--max-turns` cap (default
+32, pre-dates D20) was SILENT on cap-hit — the loop broke with the previous
+message's stopReason ("toolUse"), exit 0, no message. Now: new StopReason
+`"budget"` set by runLoop at the cap; `agent_end` carries `maxTurns` only on
+budget; plain CLI → exit code **3** (distinct from 0 done / 1 provider / 2
+usage / 130 aborted) + stderr `budget: max <n> turns reached
+(resume: --resume <path>)` when a session is in use; TUI → error-kind item
+`budget: max <n> turns reached — send another prompt to continue`, busy
+cleared, next submit is a fresh run (per-run cap by construction). Verified
+live: `--max-turns 1` on a read-then-summarize prompt → rc=3 + note.
+
+**3. Dependency freeze** (`5fc4fa7`): `scripts/check-deps.mjs` (plain node
+ESM, zero deps) — embedded allowlist: runtime exactly {cli-truncate, ink,
+react, wrap-ansi}, dev exactly {@types/node, @types/react,
+ink-testing-library, typescript}; rejects unexpected packages AND
+lock/package.json drift (v2+v3 lockfile roots). Wired as check 6 in
+`quality-check.sh` (CWD pinned to repo root, so it checks the repo no matter
+where invoked). `test/quality-gate.test.ts`: 4 spawn-based fixture tests.
+Guardrail zone extended (applied under GUARDRAIL_BYPASS=1 from the farm's
+GUARDRAIL-CHANGE.md): `scripts/check-deps.mjs` is now PROTECTED — verified:
+a probe commit touching it is rejected by the hook.
+
+**Integration bug caught by the orchestrator (the reason farm work is
+verified, not trusted):** ws3's aggregation `if ! (cd "$ROOT" && node
+scripts/check-deps.mjs); then DEPS_STATUS=$?; fi` records the INVERTED
+status — a failed deps check left DEPS_STATUS=0 and the gate exited 0
+anyway (its own tests spawned check-deps.mjs directly, never the wrapper;
+its "standalone gate exits 0" check ran on a clean manifest). Fixed in
+e6167f1: capture the subshell status directly. Verified all three branches:
+poisoned package.json → rc 1 (main path + no-.ts early-exit), clean → rc 0.
+
+**Farm lessons (27B, this repo):** (1) `git add -A` staged the node_modules
+SYMLINK (gitignore's `node_modules/` doesn't match a symlink) — ws2 hit it,
+`git rm --cached node_modules` + amend; future farm worktrees should `git add
+<files>` explicitly or the spec should say so; (2) ws1 correctly deviated
+from the spec (a boolean flag registered on the value-taking branch would
+swallow the next argv token) — specs must name the branch, not just the
+line; (3) 27B needs ~11–34 min per workstream of this size; REPORT.md +
+commit artifacts survive even when the final answer is cut.
+
+**Definition of done met:** `npm test` 289/289 (quality gate incl. dep
+freeze, tsc strict, node --test); live probes for all three behaviors; hook
+reject-verified for check-deps.mjs. Commits: de4139a, db1bfbb, 5fc4fa7
+(branches d20-ws1-sessions / d20-ws2-budget / d20-ws3-deps, merged), 6ec9e64
+(guardrail overrides), e6167f1 (integration fix). REPORT.md artifacts:
+/tmp/tre-d20-ws{1,2,3}/REPORT.md.
+
+**Next (recursion):** ready to run the self-improve loop with a
+human-in-the-loop orchestrator: agent commits → orchestrator reviews
+git diff + `npm test` + targeted e2e (3, 4, 10) → next increment. Sessions
+via `--session-auto` (outside the repo by construction). e2e full-suite
+runs remain the deep regression net; the tag `known-good-2026-09-19` is the
+named safe harbor.
 
 ## D19 — quiet file-access tool lines + models.json lookup — DONE (284 tests: 277 pass 0 fail; PTY + live one-shot verified)
 
