@@ -1,4 +1,55 @@
-# HANDOFF — Tre Coding Agent rename + quality gate (D18), on top of D17 (2026-09-19)
+# HANDOFF — quiet file-access lines + models.json lookup (D19), on top of D18 (2026-09-19)
+
+## D19 — quiet file-access tool lines + models.json lookup — DONE (284 tests: 277 pass 0 fail; PTY + live one-shot verified)
+
+User request (2026-09-19): (1) "too verbose about the directory access — for
+now, it should only show if the access was denied based on the white list";
+(2) launching `tre.` outside the project dir couldn't locate models.json —
+fixable or must it move? Fixed in place, no move required.
+
+**1. Quiet file-access tools (read/write/edit), both surfaces:**
+- `src/types.ts`: `QUIET_ON_SUCCESS_TOOLS = {"read","write","edit"}` — the
+  single shared policy. bash is NOT quiet: its command line is the approval
+  surface and the user watches it.
+- `src/tui/state.ts`: a quiet tool starts as a `hidden: true` height-0
+  placeholder (no diff work either). On `tool_execution_end` (keyed by
+  `result.toolName`): success → the item is DROPPED (no line ever rendered);
+  denial → unhidden in place, so the ✗ + reason is the only file-access
+  line. `itemHeight` returns 0 for hidden items, so the fit math already
+  counts them as nothing; `app.tsx` renders `null` for them (the lockstep
+  contract is preserved).
+- `src/cli/main.ts` `printEvent`: quiet tools print no start line and no
+  success line; a denied call prints just `  ✗ <reason>`.
+- NOTE: the edit DIFF view (D10, `renderEditDiff`) is now unreachable on
+  success — it only ever attached to edit items, and those are hidden.
+The renderer, unit tests (`tui-diff.test.ts`) and the `diff` field all
+  still exist; re-showing diffs = remove `"edit"` from the set (one line),
+  and e2e scenario_03's old diff assertions are the template to restore.
+- Tests: tui-state (quiet contract: hidden mid-flight / dropped on success /
+  unhidden on denial, for read+write+edit; `tres`/`toolEnd` helpers now
+  carry the real toolName — they hardcoded "x", which had masked the end-
+  event name from the quiet logic), cli (printEvent: success silent, denial
+  line, bash unchanged), pinned-layout (hidden=0, denied=mark+result),
+e2e scenario_03 repurposed: file edited + NO diff line in frames.
+
+**2. models.json lookup (`src/config/models.ts` `findModelsFile`):**
+- `--models <file>` wins (returned as-is, even if missing — the caller
+  reports it, unchanged). Otherwise: walk UP from the launch directory
+  (like a `.git` dir: `test/`, `scripts/`, the project root, …) looking
+  for `models.json`, then fall back to the permanent `~/.tre/models.json`.
+- `main.ts` resolves this before loading; not-found → exit 2 with the
+  searched locations named + the `--models` escape. `CliOptions.modelsPath`
+  is now `string | undefined` (undefined = auto-locate).
+- Verified live: launch from /tmp → clean not-found error; launch from
+  `test/` (no local file) → walks up to the project's models.json and
+  runs. A user who wants a HOME-level config: `mkdir -p ~/.tre && cp
+  models.json ~/.tre/` — the project-local file still wins while launching
+  inside the tree.
+
+**Verified:** `npm test` 277/277 (quality gate clean, 24 files); live
+one-shot from a subdir: successful read prints NO line, failed read prints
+`✗ read: …`, bash lines unchanged; PTY TUI smoke: read turn renders no
+`→ read` / `✓` line, clean /quit.
 
 ## D18 — rename to Tre Coding Agent (`tre.`) + quality gate — DONE (276 tests 0 fail; quality gate wired into `npm test`; PTY + --help verified)
 
