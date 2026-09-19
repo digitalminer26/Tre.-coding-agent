@@ -111,7 +111,12 @@ export async function* runLoop(
   let stopReason: StopReason = "aborted"; // fallback: no assistant turn ran
 
   while (true) {
-    if (turn >= maxTurns) break;
+    if (turn >= maxTurns) {
+      // Cap hit: make it an explicit, audible outcome — not the previous
+      // message's stopReason (usually "toolUse"). The run is resumable.
+      stopReason = "budget";
+      break;
+    }
     turn += 1;
     yield { type: "turn_start", turn };
 
@@ -247,5 +252,10 @@ export async function* runLoop(
     }
   }
 
-  yield { type: "agent_end", stopReason, messages: context };
+  yield {
+    type: "agent_end",
+    stopReason,
+    messages: context,
+    ...(stopReason === "budget" ? { maxTurns } : {}),
+  };
 }

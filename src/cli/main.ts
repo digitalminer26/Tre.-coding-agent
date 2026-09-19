@@ -318,6 +318,10 @@ export function exitCodeFor(stopReason: StopReason): number {
     case "toolUse":
       // Ran out of turns while the model still wanted to call a tool.
       return 1;
+    case "budget":
+      // The per-run turn cap was reached — explicit, resumable (distinct
+      // from 0 = done, 1 = provider error, 2 = usage error).
+      return 3;
   }
 }
 
@@ -336,9 +340,10 @@ const oneLine = (s: string, n: number) => {
 /**
  * The event → terminal printer. Streaming text deltas go to `out` as they
  * arrive (no echo, no framing); tool lines are one line each; diagnostics go
- * to `err`. Thinking deltas are not printed.
+ * to `err`. Thinking deltas are not printed. `sessionPath` (optional) lets
+ * the budget note name a resume target when a session file is in use.
  */
-export function printEvent(ev: AgentEvent, sinks: PrintSinks): void {
+export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: string): void {
   switch (ev.type) {
     case "text_delta":
       sinks.out.write(ev.delta);
@@ -378,6 +383,13 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks): void {
         sinks.err.write("\naborted\n");
       } else if (ev.stopReason === "length") {
         sinks.err.write("\nlength: output limit hit — tool-call arguments may be truncated\n");
+      } else if (ev.stopReason === "budget") {
+        const note =
+          ev.maxTurns !== undefined
+            ? `budget: max ${ev.maxTurns} turns reached`
+            : "budget: turn cap reached";
+        const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
+        sinks.err.write(`\n${note}${resume}\n`);
       }
       break;
     default:
@@ -502,7 +514,7 @@ export async function runTurn(opts: {
       else if (ev.type === "tool_execution_end") await persist(ev.result);
     }
     opts.tap?.(ev);
-    printEvent(ev, opts.sinks);
+    printEvent(ev, opts.sinks, session?.path);
   };
 
   const outcome = await runAgent({

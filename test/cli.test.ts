@@ -153,8 +153,9 @@ test("resolveTools: all / none / filter / unknown", () => {
   assert.match(resolveTools("bash,nope")!.error ?? "", /unknown tool/);
 });
 
-test("exitCodeFor: stop 0, aborted 130, error/length/toolUse 1", () => {
+test("exitCodeFor: stop 0, budget 3, error/length/toolUse 1, aborted 130", () => {
   assert.equal(exitCodeFor("stop"), 0);
+  assert.equal(exitCodeFor("budget"), 3);
   assert.equal(exitCodeFor("aborted"), 130);
   assert.equal(exitCodeFor("error"), 1);
   assert.equal(exitCodeFor("length"), 1);
@@ -233,6 +234,30 @@ test("printEvent: text deltas, tool lines, end diagnostics", () => {
   for (const ev of evs) printEvent(ev, sinks);
   assert.equal(out, "Hello\n\n→ bash {\"command\":\"ls -la\"}\n  ✓ a b c\n");
   assert.match(err, /error: boom/);
+});
+
+test("printEvent: budget agent_end → stderr note (resume hint only with a session file)", () => {
+  let err = "";
+  const sinks: PrintSinks = {
+    out: { write: () => {} },
+    err: { write: (s) => (err += s) },
+  };
+  printEvent({ type: "agent_end", stopReason: "budget", maxTurns: 4, messages: [] }, sinks);
+  assert.match(err, /budget: max 4 turns reached/);
+  assert.doesNotMatch(err, /resume/);
+
+  err = "";
+  printEvent(
+    { type: "agent_end", stopReason: "budget", maxTurns: 4, messages: [] },
+    sinks,
+    "/tmp/s.jsonl",
+  );
+  assert.match(err, /budget: max 4 turns reached \(resume: --resume \/tmp\/s\.jsonl\)/);
+
+  err = "";
+  // No maxTurns on the event (defensive) — the note still names the outcome.
+  printEvent({ type: "agent_end", stopReason: "budget", messages: [] }, sinks);
+  assert.match(err, /budget: turn cap reached/);
 });
 
 test("printEvent: D19 — read/write/edit silent on success, denial shown, bash unchanged", () => {
@@ -365,6 +390,26 @@ test("main: provider error is data — exit 1, error printed", async (t) => {
   });
   assert.equal(code, 1);
   assert.match(S.err(), /error: boom/);
+});
+
+test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
+  const { dir, models } = await workspace(t);
+  const session = join(dir, "s.jsonl");
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--max-turns", "1", "--models", models, "--session", session],
+    {
+      streamFn: fakeStream([
+        // The model wants another round; the cap breaks the loop first.
+        { type: "toolcall", calls: [{ name: "ghost", args: {} }] },
+        { type: "text", text: "never reached" },
+      ]),
+      sinks: S.sinks,
+    },
+  );
+  assert.equal(code, 3);
+  assert.match(S.err(), /budget: max 1 turns reached/);
+  assert.match(S.err(), /\(resume: --resume .+s\.jsonl\)/);
 });
 
 test("main: bad model id / missing models file → exit 2", async (t) => {
