@@ -1,6 +1,6 @@
 ---
 name: self-improve
-description: MANDATORY protocol for making ANY code change in this repository (the coding-agent itself) — bug fixes, features, refactors, TUI changes. Enforces the commit-first loop, the build+test gate, the guardrail zone, and TUI verification. Read this before editing.
+description: MANDATORY protocol for making ANY code change in this repository (the Tre Coding Agent itself) — bug fixes, features, refactors, TUI changes. Enforces the commit-first loop, the build+test gate, the guardrail zone, and TUI verification. Read this before editing.
 ---
 # Self-improve protocol
 
@@ -30,7 +30,7 @@ in one sentence is too big.
   (restores tracked sources), re-read the failure output, plan differently.
 - NEVER leave the tree with a broken build: `dist/` is gitignored, so a
   broken state is not recoverable by `git checkout` of dist — the next
-  `coding-agent` launch will fail until someone rebuilds from a good commit.
+  `tre.` launch will fail until someone rebuilds from a good commit.
 - The safe harbor is the `known-good-*` git tag. If you have lost the plot:
   `git checkout . && git clean -fd`, then `npm run build && npm test`, then
   tell the user exactly what you did and why.
@@ -56,7 +56,7 @@ Capture a real frame (ANSI stays in the file — strip it before asserting):
 
 ```bash
 ( ( sleep 1.5; printf '/display-bottom model\r'; sleep 2 ) \
-  | script -q /dev/null coding-agent tui 2>&1 ) > /tmp/tui-check.out
+  | script -q /dev/null tre. tui 2>&1 ) > /tmp/tui-check.out
 python3 -c "import re,sys; raw=open('/tmp/tui-check.out','rb').read().decode('utf-8','replace'); \
 clean=re.sub(r'\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\\\-_])','',raw).replace('\r',''); \
 open('/tmp/tui-check-clean.txt','w').write(clean)"
@@ -71,7 +71,7 @@ always exactly 4 lines above the screen bottom.
 - The per-run turn cap is `--max-turns` (default 32). If a task will not fit,
   finish the current increment (committed + tested), then tell the user:
   what is done, what remains, and the exact relaunch command
-  (`coding-agent tui --session <file>` to save / `--resume <file>` to continue).
+  (`tre. tui --session <file>` to save / `--resume <file>` to continue).
 - Do not start a second increment after you have used ~80% of your turns.
 
 ## Definition of done

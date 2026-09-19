@@ -180,3 +180,11 @@ Pre-change snapshots live in `.history/snapshots/<file>/<ts>`. Newest entries at
 | 2026-09-19 11:50:58 | edit | .gitignore | gitignore .history/ + context-fold/ tooling byproducts before baseline commit | .history/snapshots/.gitignore/20260919T115058Z |
 | 2026-09-19 12:08:09 | edit | test/e2e.sh | D16: scenario_14 anchor skips completion-menu lines between hint and top separator | .history/snapshots/test/e2e.sh/20260919T120809Z |
 | 2026-09-19 12:13:03 | edit | HANDOFF.md | self-improve readiness: baseline commit + tag, skill, guardrail hook, e2e s14 menu-aware + live pass, recursive backlog | .history/snapshots/HANDOFF.md/20260919T121303Z |
+| 2026-09-19 13:27:02 | edit | package.json | rename to tre.: name + dual bin (tre. primary, coding-agent alias) | .history/snapshots/package.json/20260919T132702Z |
+| 2026-09-19 13:27:02 | edit | src/cli/main.ts | rename: HELP/usage/banner/errors -> tre. / Tre Coding Agent | .history/snapshots/src/cli/main.ts/20260919T132702Z |
+| 2026-09-19 13:27:02 | edit | README.md | rename: title + invocation refs -> tre. / Tre Coding Agent | .history/snapshots/README.md/20260919T132702Z |
+| 2026-09-19 13:27:02 | edit | test/e2e.sh | default scenario range 13->14 (scenario_14 was added after the default was set) | .history/snapshots/test/e2e.sh/20260919T132702Z |
+| 2026-09-19 13:27:03 | edit | docs/01-walkthrough-harness-llm.md | rename: product reference | .history/snapshots/docs/01-walkthrough-harness-llm.md/20260919T132703Z |
+| 2026-09-19 13:27:03 | edit | docs/03-citation-policy.md | rename: product reference | .history/snapshots/docs/03-citation-policy.md/20260919T132703Z |
+| 2026-09-19 13:27:03 | edit | .pi/skills/self-improve/SKILL.md | rename: relaunch command coding-agent -> tre. | .history/snapshots/.pi/skills/self-improve/SKILL.md/20260919T132703Z |
+| 2026-09-19 13:27:03 | edit | scripts/guardrail-check.sh | rename: comment wording | .history/snapshots/scripts/guardrail-check.sh/20260919T132703Z |

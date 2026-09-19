@@ -1,7 +1,7 @@
 #!/bin/sh
 # guardrail-check.sh — reject commits that touch the guardrail zone.
 #
-# The zone is the coding-agent's OWN cage: its kernel-sandbox policy
+# The zone is the agent's OWN cage: its kernel-sandbox policy
 # generator, its approval/gating logic, the bash tool's sandbox wiring,
 # this hook infrastructure, and the self-improve protocol skill. A model
 # editing these files is loosening its own fence — that requires a human.
