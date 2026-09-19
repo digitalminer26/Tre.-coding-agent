@@ -35,10 +35,10 @@ const asst = (content: ContentBlock[] = [], extra: Partial<AssistantMessage> = {
   timestamp: 0,
   ...extra,
 });
-const tres = (toolCallId: string, text: string, isError = false): ToolResultMessage => ({
+const tres = (toolCallId: string, text: string, isError = false, name = "x"): ToolResultMessage => ({
   role: "toolResult",
   toolCallId,
-  toolName: "x",
+  toolName: name,
   content: [{ type: "text", text }],
   isError,
   timestamp: 0,
@@ -53,10 +53,10 @@ const toolStart = (id: string, name: string, args: Record<string, unknown>): Age
   type: "tool_execution_start",
   toolCall: { type: "toolCall", id, name, arguments: args },
 });
-const toolEnd = (id: string, text: string, isError = false): AgentEvent => ({
+const toolEnd = (id: string, text: string, isError = false, name = "x"): AgentEvent => ({
   type: "tool_execution_end",
   toolCallId: id,
-  result: tres(id, text, isError),
+  result: tres(id, text, isError, name),
 });
 
 type ToolItem = Extract<TuiItem, { kind: "tool" }>;
@@ -109,20 +109,62 @@ test("tool: start shows args; end matches by id (order-independent) with isError
   const s = fold([
     toolStart("id-1", "bash", { command: "ls" }),
     toolStart("id-2", "read", { path: "a.txt" }),
-    toolEnd("id-2", "file body"),
-    toolEnd("id-1", "oops boom", true),
+    toolEnd("id-2", "file body", false, "read"),
+    toolEnd("id-1", "oops boom", true, "bash"),
   ]);
+  // D19: the SUCCEEDED quiet tool (read) is dropped; only the bash line stays
   const tools = s.items.filter((i) => i.kind === "tool");
-  assert.equal(tools.length, 2);
+  assert.equal(tools.length, 1);
   const t1 = asTool(tools[0]!);
-  const t2 = asTool(tools[1]!);
   assert.equal(t1.name, "bash");
   assert.equal(t1.running, false);
   assert.equal(t1.isError, true);
   assert.equal(t1.resultText, "oops boom");
-  assert.equal(t2.name, "read");
-  assert.equal(t2.isError, false);
-  assert.equal(t2.resultText, "file body");
+});
+
+test("tool: D19 quiet file tools — hidden mid-flight, dropped on success, unhidden on denial", () => {
+  // Mid-flight: the placeholder exists but is hidden (height-0)
+  const mid = fold([toolStart("r1", "read", { path: "a.txt" })]);
+  assert.equal(mid.items.length, 1);
+  assert.equal(asTool(mid.items[0]!).hidden, true);
+  // Success → the item is dropped entirely (no line at all)
+  const ok = applyEvent(mid, toolEnd("r1", "file body", false, "read"));
+  assert.equal(ok.items.length, 0);
+  // Denial → the item is unhidden with isError + the reason
+  const denied = fold([
+    toolStart("r2", "read", { path: "/etc/passwd" }),
+    toolEnd("r2", 'path "/etc/passwd" resolves outside the workspace', true, "read"),
+  ]);
+  const t = asTool(denied.items[0]!);
+  assert.equal(t.hidden, false);
+  assert.equal(t.isError, true);
+  assert.match(t.resultText!, /outside the workspace/);
+  // write follows the same contract; bash (not quiet) stays visible
+  const mixed = fold([
+    toolStart("w1", "write", { path: "b.txt" }),
+    toolStart("b1", "bash", { command: "ls" }),
+    toolEnd("w1", "ok", false, "write"),
+    toolEnd("b1", "a b", false, "bash"),
+  ]);
+  const tools = mixed.items.filter((i) => i.kind === "tool");
+  assert.equal(tools.length, 1);
+  assert.equal(asTool(tools[0]!).name, "bash");
+});
+
+test("tool: D19 quiet edit — no diff computed, success dropped, denial shown", () => {
+  const mid = fold([toolStart("e1", "edit", { path: "a.txt", oldText: "x = 1", newText: "x = 2" })]);
+  assert.equal(asTool(mid.items[0]!).diff, undefined); // hidden → no diff work
+  assert.equal(asTool(mid.items[0]!).hidden, true);
+  const ok = applyEvent(mid, toolEnd("e1", "ok", false, "edit"));
+  assert.equal(ok.items.length, 0);
+  const denied = fold([
+    toolStart("e2", "edit", { path: "/etc/a.txt", oldText: "x", newText: "y" }),
+    toolEnd("e2", "denied: outside the workspace", true, "edit"),
+  ]);
+  const t = asTool(denied.items[0]!);
+  assert.equal(t.hidden, false);
+  assert.equal(t.isError, true);
+  assert.equal(t.diff, undefined);
 });
 
 test("tool: update carries a live preview line, cleared by end", () => {
@@ -135,12 +177,10 @@ test("tool: update carries a live preview line, cleared by end", () => {
   assert.equal(t.running, false);
 });
 
-test("tool: edit calls carry the diff view; other calls don't", () => {
-  let s = fold([toolStart("e1", "edit", { path: "a.txt", oldText: "x = 1", newText: "x = 2" })]);
-  assert.deepEqual(asTool(s.items[0]!).diff, ["- x = 1", "+ x = 2"]);
-  assert.equal(asTool(s.items[0]!).running, true);
-  s = fold([toolStart("b1", "bash", { command: "ls" })]);
+test("tool: non-quiet (bash) calls still render normally, no diff", () => {
+  const s = fold([toolStart("b1", "bash", { command: "ls" })]);
   assert.equal(asTool(s.items[0]!).diff, undefined);
+  assert.equal(asTool(s.items[0]!).hidden, undefined);
 });
 
 test("context_compacted appends a compaction item", () => {

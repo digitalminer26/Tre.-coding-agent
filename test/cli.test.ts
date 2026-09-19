@@ -235,6 +235,37 @@ test("printEvent: text deltas, tool lines, end diagnostics", () => {
   assert.match(err, /error: boom/);
 });
 
+test("printEvent: D19 — read/write/edit silent on success, denial shown, bash unchanged", () => {
+  let out = "";
+  const sinks: PrintSinks = {
+    out: { write: (s) => (out += s) },
+    err: { write: () => {} },
+  };
+  const tc = (id: string, name: string, args: Record<string, unknown>) =>
+    ({ type: "tool_execution_start", toolCall: { type: "toolCall", id, name, arguments: args } }) as AgentEvent;
+  const te = (id: string, name: string, text: string, isError?: boolean) =>
+    ({
+      type: "tool_execution_end",
+      toolCallId: id,
+      result: { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError, timestamp: 1 },
+    }) as AgentEvent;
+  // Succeeded read/write: no line at all
+  for (const ev of [tc("r1", "read", { path: "a.txt" }), te("r1", "read", "file body"), tc("w1", "write", { path: "b.txt" }), te("w1", "write", "ok")]) {
+    printEvent(ev, sinks);
+  }
+  assert.equal(out, "");
+  // Denied read: only the ✗ result line (the start line stays suppressed)
+  for (const ev of [tc("r2", "read", { path: "/etc/passwd" }), te("r2", "read", "denied: outside the workspace", true)]) {
+    printEvent(ev, sinks);
+  }
+  assert.equal(out, "  ✗ denied: outside the workspace\n");
+  // bash is not quiet: start line + success line as before
+  for (const ev of [tc("b1", "bash", { command: "ls" }), te("b1", "bash", "a b")]) {
+    printEvent(ev, sinks);
+  }
+  assert.equal(out, "  ✗ denied: outside the workspace\n\n→ bash {\"command\":\"ls\"}\n  ✓ a b\n");
+});
+
 // ─────────────────────────── one-shot + session ───────────────────────────
 
 test("main one-shot: prompt → streamed text → exit 0, session persisted", async (t) => {

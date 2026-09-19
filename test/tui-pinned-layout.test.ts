@@ -145,6 +145,13 @@ test("itemHeight per kind at width 80", () => {
   };
   assert.equal(itemHeight(toolRun, 80), 2);
 
+  // D19: hidden (quiet file-access mid-flight) counts as zero lines, but a
+  // denied (unhidden) read renders mark + result
+  const toolHidden: TuiItem = { kind: "tool", id: "t-h", name: "read", argsText: '{ path: "a.txt" }', running: true, hidden: true };
+  assert.equal(itemHeight(toolHidden, 80), 0);
+  const toolDenied: TuiItem = { kind: "tool", id: "t-d", name: "read", argsText: '{ path: "/etc/passwd" }', running: false, resultText: "denied: outside the workspace", isError: true, hidden: false };
+  assert.equal(itemHeight(toolDenied, 80), 1 + 1);
+
   // tool (done): mark line + each non-empty diff line + result line
   const toolDone: TuiItem = {
     kind: "tool",

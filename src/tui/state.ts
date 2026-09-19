@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import type { AgentEvent } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, type AgentEvent } from "../types.js";
 import { renderEditDiff } from "./diff.js";
 import wrapAnsi from "wrap-ansi";
 import cliTruncate from "cli-truncate";
@@ -30,6 +30,12 @@ export type TuiItem =
       running: boolean;
       resultText?: string;
       isError?: boolean;
+      /**
+       * D19: set while a quiet (file-access) tool runs. The item is a
+       * height-0 placeholder: dropped on success, unhidden on denial so
+       * the ✗ + reason is the only file-access line the user ever sees.
+       */
+      hidden?: boolean;
     }
   | { kind: "compaction"; tokensBefore: number; messagesKept: number; summaryChars: number }
   | { kind: "error"; text: string }
@@ -152,7 +158,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       };
     }
     case "tool_execution_start": {
-      const diff = ev.toolCall.name === "edit" ? renderEditDiff(ev.toolCall.arguments) : undefined;
+      // D19: quiet (file-access) tools start as hidden placeholders — no
+      // line, and no diff work, until the outcome says otherwise.
+      const quiet = QUIET_ON_SUCCESS_TOOLS.has(ev.toolCall.name);
+      const diff =
+        quiet ? undefined : ev.toolCall.name === "edit" ? renderEditDiff(ev.toolCall.arguments) : undefined;
       return {
         ...state,
         items: [
@@ -164,6 +174,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             argsText: oneLine(JSON.stringify(ev.toolCall.arguments), 120),
             diff,
             running: true,
+            ...(quiet ? { hidden: true } : {}),
           },
         ],
       };
@@ -177,6 +188,21 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       );
     case "tool_execution_end": {
       const text = oneLine(ev.result.content.map((c) => c.text).join(" "), 200);
+      if (QUIET_ON_SUCCESS_TOOLS.has(ev.result.toolName)) {
+        if (ev.result.isError === true) {
+          // Denial — the one file-access event worth showing (unhide in place).
+          return withRunningTool(
+            state,
+            (t) => ({ ...t, running: false, hidden: false, resultText: text, isError: true }),
+            ev.toolCallId,
+          );
+        }
+        // Success — drop the placeholder entirely (no line at all).
+        return {
+          ...state,
+          items: state.items.filter((it) => !(it.kind === "tool" && it.id === ev.toolCallId)),
+        };
+      }
       return withRunningTool(
         state,
         (t) => ({ ...t, running: false, resultText: text, isError: ev.result.isError === true }),
@@ -326,6 +352,7 @@ export function itemHeight(item: TuiItem, width: number): number {
     case "assistant":
       return (item.thinking ? 1 : 0) + (item.text ? wrapLineCount(item.text, width) : 0);
     case "tool": {
+      if (item.hidden) return 0; // D19: quiet tool mid-flight — renders nothing
       const mark =
         item.resultText !== undefined
           ? item.isError

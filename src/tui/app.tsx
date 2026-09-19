@@ -124,7 +124,9 @@ export function App(props: AppProps): React.ReactElement {
         )}
       </Text>
       {layout.visible.map((item, i) => (
-        <Item key={i} item={item} />
+        // D19: hidden (quiet file-access) items are height-0 placeholders —
+        // the fit math already counted them as nothing, so render nothing.
+        item.kind === "tool" && item.hidden ? null : <Item key={i} item={item} />
       ))}
       {Array.from({ length: layout.pad }, (_, i) => (
         <Text key={`pad-${i}`}> </Text>

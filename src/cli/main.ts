@@ -13,7 +13,8 @@
  *
  * Options:
  *   --model <id>       model id from models.json (default: the file's "default")
- *   --models <file>    models.json path (default: ./models.json)
+ *   --models <file>    models.json path (default: nearest models.json above the
+ *                      launch dir, then ~/.tre/models.json)
  *   --tools <list>     comma list of read,write,edit,bash; "all" (default) or "none"
  *   --cwd <dir>        working directory the agent operates in (default: process.cwd())
  *   --session <file>   session file: created if absent, resumed if present
@@ -38,7 +39,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
-import { loadModelsFile, resolveModel } from "../config/models.js";
+import { findModelsFile, loadModelsFile, resolveModel } from "../config/models.js";
 import {
   compactContext,
   makeSummaryMessage,
@@ -61,6 +62,7 @@ import {
   type Session as SessionType,
 } from "../session/session.js";
 import { runTui } from "../tui/run.js";
+import { QUIET_ON_SUCCESS_TOOLS } from "../types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -81,7 +83,8 @@ export interface CliOptions {
   ui: "plain" | "tui";
   prompt?: string;
   modelId?: string;
-  modelsPath: string;
+  /** D19: undefined = auto-locate (nearest models.json above cwd, then ~/.tre/). */
+  modelsPath?: string;
   tools: string;
   cwd: string;
   sessionPath?: string;
@@ -119,7 +122,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const opts: ParsedArgs = {
     oneShot: false,
     ui: "plain",
-    modelsPath: "./models.json",
     tools: "all",
     cwd: process.cwd(),
     skillDirs: [],
@@ -345,9 +347,16 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks): void {
       if (ev.message.content.some((b) => b.type === "text")) sinks.out.write("\n");
       break;
     case "tool_execution_start":
-      sinks.out.write(`\n→ ${ev.toolCall.name} ${oneLine(JSON.stringify(ev.toolCall.arguments), 120)}\n`);
+      // D19: file-access tools (read/write/edit) are silent on success —
+      // only a denial earns a line.
+      if (!QUIET_ON_SUCCESS_TOOLS.has(ev.toolCall.name)) {
+        sinks.out.write(`\n→ ${ev.toolCall.name} ${oneLine(JSON.stringify(ev.toolCall.arguments), 120)}\n`);
+      }
       break;
     case "tool_execution_end": {
+      if (QUIET_ON_SUCCESS_TOOLS.has(ev.result.toolName) && ev.result.isError !== true) {
+        break; // D19: quiet tool succeeded — no line at all
+      }
       const text = ev.result.content
         .map((c) => c.text)
         .join(" ")
@@ -519,12 +528,13 @@ const HELP = `tre. — Tre Coding Agent: a small, fully-owned coding-agent harne
 Usage:
   tre. run "prompt"             one-shot run (exit when the run ends)
   tre.                          interactive REPL
-  tre. tui                      interactive Ink TUI (streaming, diff view,
+  tre. tui                      interactive Ink TUI (streaming,
                                 ↑/↓ history, ctrl+c abort/quit)
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")
-  --models <file>    models.json path (default: ./models.json)
+  --models <file>    models.json path (default: nearest models.json above the
+                     launch dir, then ~/.tre/models.json)
   --tools <list>     read,write,edit,bash — or "all" (default) / "none"
   --cwd <dir>        project root: the agent's working directory and the
                      sandbox boundary for file tools (default: process cwd)
@@ -639,12 +649,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 2;
   }
 
-  // models
+  // models (D19: --models wins; otherwise locate — nearest models.json above
+  // the launch directory, then the permanent ~/.tre/models.json)
+  const modelsPath = args.modelsPath ?? findModelsFile(undefined, path.resolve(process.cwd()));
+  if (modelsPath === null) {
+    sinks.err.write(
+      `error: models.json not found — searched ${path.resolve(process.cwd())} and its parents, then ~/.tre/models.json; pass --models <file>\n`,
+    );
+    return 2;
+  }
   let model: ModelConfig;
   try {
-    model = resolveModel(loadModelsFile(args.modelsPath), args.modelId);
+    model = resolveModel(loadModelsFile(modelsPath), args.modelId);
   } catch (err) {
-    sinks.err.write(`error: cannot load ${args.modelsPath}: ${String(err)}\n`);
+    sinks.err.write(`error: cannot load ${modelsPath}: ${String(err)}\n`);
     return 2;
   }
 
@@ -698,7 +716,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         replayed.context.forEach((m, i) => entryIds.set(m, replayed.contextEntryIds[i]!));
         if (replayed.model && !args.modelId) {
           try {
-            model = resolveModel(loadModelsFile(args.modelsPath), replayed.model.id);
+            model = resolveModel(loadModelsFile(modelsPath), replayed.model.id);
           } catch {
             sinks.err.write(`note: session model "${replayed.model.id}" not in models.json — using ${model.id}\n`);
           }

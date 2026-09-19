@@ -100,6 +100,16 @@ export interface ToolResultMessage {
 /** The provider-neutral message type. The loop's context is AgentMessage[]. */
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage;
 
+/**
+ * D19 — file-access tools the UI stays silent about ON SUCCESS. A call is
+ * shown only when it is DENIED (isError) — a whitelist denial is the only
+ * directory-access news worth a line. Both consumers are the TUI
+ * (state.ts: hidden item, unhidden or dropped on end) and the plain CLI
+ * (printEvent: no start line, end line only on isError). bash is NOT here:
+ * its command line is the approval surface.
+ */
+export const QUIET_ON_SUCCESS_TOOLS: ReadonlySet<string> = new Set(["read", "write", "edit"]);
+
 // ───────────────────────────── 2. Events ─────────────────────────────
 
 /**

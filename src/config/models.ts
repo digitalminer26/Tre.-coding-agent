@@ -8,7 +8,9 @@
  * Swapping endpoints = editing models.json; the wire layer stays one code
  * path (per-model quirks live in `compat`).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import type { ModelConfig } from "../types.js";
 
 export interface ModelsFile {
@@ -56,6 +58,32 @@ function normalizeModel(m: unknown, i: number): ModelConfig {
 /** Read + parse a models.json from disk. */
 export function loadModelsFile(path: string): ModelsFile {
   return parseModelsFile(readFileSync(path, "utf8"));
+}
+
+/**
+ * D19 — models.json lookup. `explicit` (from `--models`) wins and is
+ * returned as-is, even if missing — the caller reports the error. Otherwise
+ * walk UP from `start` (the launch directory, resolved) looking for a
+ * `models.json` — the same convention as a `.git` directory — then fall
+ * back to the permanent home location `~/.tre/models.json`. Returns null
+ * when nothing is found.
+ */
+export function findModelsFile(
+  explicit: string | undefined,
+  start: string,
+  home: string = homedir(),
+): string | null {
+  if (explicit !== undefined) return explicit;
+  let dir = start;
+  for (;;) {
+    const candidate = join(dir, "models.json");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break; // reached the filesystem root
+    dir = parent;
+  }
+  const homeFile = join(home, ".tre", "models.json");
+  return existsSync(homeFile) ? homeFile : null;
 }
 
 /**

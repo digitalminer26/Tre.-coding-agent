@@ -155,7 +155,7 @@ EOF
   echo "rc=0, model acted on replayed context (appended to earlier file)"
 }
 
-scenario_03() { # TUI edit diff: -/+ lines rendered under the edit call
+scenario_03() { # D19: a SUCCEEDED edit stays silent — no diff line in frames
   local D="$WORK/03"; mkdir -p "$D"
   printf 'x = 1\ny = 2\nz = 3\n' > "$D/a.txt"
   cat > "$D/feed.sh" <<'EOF'
@@ -167,10 +167,10 @@ EOF
   pty_feed 03 480 "$D/out.log" "$D/feed.sh" tui --yes --session "$D/s.jsonl" --cwd "$D"
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
-  grep -qF -- "- x = 1" "$D/out.log" || { echo "diff - line missing from frames"; return 1; }
-  grep -qF -- "+ x = 2" "$D/out.log" || { echo "diff + line missing from frames"; return 1; }
   head -1 "$D/a.txt" | grep -qF "x = 2" || { echo "file not edited"; return 1; }
-  echo "rc=0, diff rendered, file edited"
+  grep -qF -- "- x = 1" "$D/out.log" && { echo "D19 regression: diff - line rendered for a successful edit"; return 1; }
+  grep -qF -- "+ x = 2" "$D/out.log" && { echo "D19 regression: diff + line rendered for a successful edit"; return 1; }
+  echo "rc=0, file edited, edit line stayed silent"
 }
 
 scenario_04() { # TUI deny: 'n' → isError result (✗) → run continues → rc=0
