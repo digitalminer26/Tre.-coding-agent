@@ -6,8 +6,10 @@
  * (WS4) + tools (WS3) + loop (WS2) + wire (WS1) + session (WS5).
  *
  * Usage:
- *   coding-agent run "prompt"     one-shot: run to completion, exit
- *   coding-agent                  interactive REPL (one prompt per line)
+ *   tre. run "prompt"     one-shot: run to completion, exit
+ *   tre.                  interactive REPL (one prompt per line)
+ *
+ * (Tre Coding Agent — the legacy `coding-agent` command is an alias for `tre.`)
  *
  * Options:
  *   --model <id>       model id from models.json (default: the file's "default")
@@ -187,10 +189,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   if (opts.oneShot && opts.prompt === undefined) {
-    opts.errors.push("`run` needs a prompt: coding-agent run \"your prompt\"");
+    opts.errors.push("`run` needs a prompt: tre. run \"your prompt\"");
   }
   if (opts.ui === "tui" && opts.prompt !== undefined) {
-    opts.errors.push("`tui` takes no prompt: coding-agent tui [--flags]");
+    opts.errors.push("`tui` takes no prompt: tre. tui [--flags]");
   }
   if (opts.sessionPath && opts.resumePath) {
     opts.errors.push("--session and --resume are mutually exclusive");
@@ -512,12 +514,12 @@ export async function runTurn(opts: {
 
 // ─────────────────────────────────── main ───────────────────────────────────
 
-const HELP = `coding-agent — minimal coding-agent harness
+const HELP = `tre. — Tre Coding Agent: a small, fully-owned coding-agent harness
 
 Usage:
-  coding-agent run "prompt"     one-shot run (exit when the run ends)
-  coding-agent                  interactive REPL
-  coding-agent tui              interactive Ink TUI (streaming, diff view,
+  tre. run "prompt"             one-shot run (exit when the run ends)
+  tre.                          interactive REPL
+  tre. tui                      interactive Ink TUI (streaming, diff view,
                                 ↑/↓ history, ctrl+c abort/quit)
 
 Options:
@@ -734,7 +736,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     // (I3) instead of dumping Ink's raw-mode error.
     if (!process.stdin.isTTY) {
       sinks.err.write(
-        "error: `tui` needs an interactive terminal; use `coding-agent run \"...\"` or the REPL without one\n",
+        "error: `tui` needs an interactive terminal; use `tre. run \"...\"` or the REPL without one\n",
       );
       return 2;
     }
@@ -852,7 +854,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       });
     const ask = deps.askApproval ?? replAsk;
     const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
-    sinks.err.write("coding-agent REPL — /quit to exit, SIGINT aborts the current run\n");
+    sinks.err.write("tre. REPL — /quit to exit, SIGINT aborts the current run\n");
     for (;;) {
       // EOF on piped stdin — but only once queued burst lines are drained:
       // stdin can close in the same tick the piped lines arrive (WS10 e2e s8).

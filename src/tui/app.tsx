@@ -119,7 +119,7 @@ export function App(props: AppProps): React.ReactElement {
     <Box flexDirection="column">
       <Text dimColor>
         {oneLine(
-          `${state.modelLabel} — turn ${state.turn}${state.busy ? " · working…" : ""}`,
+          `tre. · ${state.modelLabel} — turn ${state.turn}${state.busy ? " · working…" : ""}`,
           width
         )}
       </Text>
@@ -136,7 +136,7 @@ export function App(props: AppProps): React.ReactElement {
         {oneLine(
           state.approval !== null
             ? "y approve · n/esc deny"
-            : "enter send · ↑/↓ history · ctrl+c abort/quit · /quit exit",
+            : "enter send · / commands · ↑/↓ history · ctrl+c abort/quit · /quit exit",
           width
         )}
       </Text>

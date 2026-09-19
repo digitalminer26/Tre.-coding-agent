@@ -1,12 +1,13 @@
 {
-  "name": "coding-agent",
-  "version": "0.0.1",
+  "name": "tre-coding-agent",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
+    "tre.": "dist/src/cli/main.js",
     "coding-agent": "dist/src/cli/main.js"
   },
-  "description": "A small, fully-owned coding agent: TypeScript harness talking to OpenAI-compatible LLM endpoints. Built from scratch, pi as design reference (see PLAN.md).",
+  "description": "Tre Coding Agent — a small, fully-owned coding agent: TypeScript harness talking to OpenAI-compatible LLM endpoints. Built from scratch, pi as design reference (see PLAN.md). Invoke as `tre.` (coding-agent is a legacy alias).",
   "engines": {
     "node": ">=20"
   },

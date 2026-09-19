@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 13, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 14, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="node $ROOT/dist/src/cli/main.js"
 MODELS="$ROOT/models.json"
 WORK="$(mktemp -d /tmp/e2e-XXXXXX)"
-FIRST="${1:-1}"; LAST="${2:-13}"
+FIRST="${1:-1}"; LAST="${2:-14}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 

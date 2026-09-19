@@ -1,4 +1,6 @@
-# coding-agent
+# Tre Coding Agent
+
+Invoke as `tre.` (the legacy `coding-agent` command remains as an alias).
 
 A small, fully-owned coding agent: a TypeScript harness that talks to an
 OpenAI-compatible LLM endpoint (first target: the TKG llama.cpp server), runs
