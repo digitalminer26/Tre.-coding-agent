@@ -9,14 +9,19 @@
 #      dist/ path (e.g. "./dist/x.js"). Only quoted specifiers are inspected,
 #      so comments mentioning dist/ (e.g. in src/cli/main.ts) are NOT flagged.
 #   5. tab characters (indent with spaces) — the one extra cheap check.
+#   6. dependency freeze — node scripts/check-deps.mjs runs with CWD at the
+#      repository root and rejects any package outside its embedded allowlist,
+#      plus any drift between package.json and package-lock.json (see that
+#      script for the exact rules).
 #
 # Usage:   scripts/quality-check.sh [dir]
 #          dir defaults to $(dirname $(dirname $0))/src
 # Exit:    0 = clean, 1 = violations found, 2 = usage error.
 #
-# Source-level only: never runs tsc / npm, never writes to dist/, no new
-# dependencies (POSIX sh + find + awk). Safe to run in parallel with the
-# build agent.
+# Source-level scan plus the dependency-freeze step above (plain node reading
+# two JSON files; never runs npm, never installs anything, nothing written to
+# dist/). This script itself adds no dependencies (POSIX sh + find + awk).
+# Safe to run in parallel with the build agent.
 #
 # Notes/limits (conservative choices):
 #   - Scans *.ts files only.
@@ -44,10 +49,22 @@ if [ ! -d "$DIR" ]; then
   exit 2
 fi
 
+# Check 6 — dependency freeze. The root is resolved from this script's own
+# path in the same style as DIR above, so it works no matter where the gate
+# is invoked from (npm test already runs with CWD at the repo root). Its
+# status is aggregated with the scan below: either one failing fails the gate.
+ROOT=$(dirname "$(dirname "$0")")
+DEPS_STATUS=0
+if ! (cd "$ROOT" && node scripts/check-deps.mjs); then
+  DEPS_STATUS=$?
+fi
+
+SCAN_STATUS=0
 FILELIST=$(find "$DIR" -type f -name '*.ts' | sort)
 
 if [ -z "$FILELIST" ]; then
   echo "quality-check: OK — no .ts files under $DIR (nothing to scan)."
+  if [ "$DEPS_STATUS" -ne 0 ]; then exit 1; fi
   exit 0
 fi
 
@@ -118,4 +135,10 @@ awk -v sq="$SQ" -v dir="$DIR" '
     exit bad ? 1 : 0
   }
 ' $FILELIST
-exit $?
+SCAN_STATUS=$?
+
+if [ "$DEPS_STATUS" -ne 0 ] || [ "$SCAN_STATUS" -ne 0 ]; then
+  echo "quality-check: FAILED — dependency freeze and/or source scan failed (see messages above)" >&2
+  exit 1
+fi
+exit 0
