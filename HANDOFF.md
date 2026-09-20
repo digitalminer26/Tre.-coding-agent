@@ -1,3 +1,75 @@
+# HANDOFF — terminal-size fd-leak fix (C23) on top of C22 (2026-09-20)
+
+## C23 — `tre. tui` leaked one fd per render frame (terminal-size) and died of EMFILE after ~3 minutes — FIXED (resolve-hook shim, 303 tests: 303 pass 0 fail; PTY frame stress verified flat)
+
+User report (2026-09-20): the self-improve run under `tre. tui` crashed.
+Two symptoms, one cause:
+
+1. The user's crash dump: `JavaScript heap out of memory` after 28 minutes
+   of a session-less `tre. tui` (no `--session` → auto-compaction OFF). The
+   heap-OOM side is not fully pinned down (no session file survived);
+   mitigation for long runs: launch with `--session` so compaction is on.
+2. The reproducible killer, found while observing a relaunched run:
+   **`bash: failed to spawn: EMFILE: too many open files`** +
+   **`error: fetch failed`** within ~3 minutes. `lsof` on the live process:
+   6,148 fds on `/dev/tty` + 2,037 unix socketpairs, perfectly linear in
+   time — a per-frame fd leak. macOS per-process cap
+   `kern.maxfilesperproc = 10240` (soft `ulimit -n` is 1,048,575 — the
+   sysctl, not the ulimit, is the real cap). Beyond it, every `open()`
+   fails: sandboxed bash can't spawn, and `fetch()`'s socket setup fails,
+   so the agent is blind and deaf.
+
+Root cause (caught with an `fs.openSync` stack-trace hook):
+**`terminal-size@4.0.1`** (a dependency of ink, called by ink's
+`getWindowSize()` on **every render frame** whenever `process.stdout`
+has no columns/rows — true under PTYs without a window size, e.g. `script`
+driven from a non-terminal parent) does
+`tty.WriteStream(fs.openSync('/dev/tty', O_EVTONLY|O_NONBLOCK))` and never
+closes it. Measured: the `tty.WriteStream`'s libuv handle keeps **exactly
+one fd per instance that `destroy()` + `closeSync` + waiting for `close`
+never release** (plain `openSync`/`closeSync` is clean — the WriteStream is
+the leaker). Every `terminalSize()` call that reaches `devTty()` therefore
+leaks; under the no-winsize PTY it is reached every frame.
+
+Fix (this commit):
+- **`src/tui/terminal-size-shim.ts`** — a drop-in replacement for
+  terminal-size (same export, same fallback chain stdout → stderr →
+  COLUMNS/LINES → 80×24, same `createIfNotDefault` quirk) with the
+  `/dev/tty` probe DROPPED entirely: the tput/resize probes read the same
+  size without opening any fd (verified: tput answers even on a no-winsize
+  pty; and when the tty truly has no size, the original probe returned
+  0×0 which ink treats as unknown → 80×24, so nothing is lost).
+- **`src/tui/terminal-size-hooks.ts`** — an ESM resolve hook that
+  redirects the bare specifier `"terminal-size"` to the shim
+  (`shortCircuit: true`).
+- **`src/tui/terminal-size-fix.ts`** — registers the hook
+  (`module.register()`, Node 26: `registerHooks()` exists but 24.x types
+  predate it; `register` is deprecated-but-functional and type-stable).
+- **`src/cli/main.ts`** — imports the fix first, and `runTui` is now a
+  **dynamic** import in the tui branch. The dynamic import is LOAD-BEARING:
+  a static import would link the whole module graph (ink included) before
+  `register()` evaluates, and the hook would be too late. Verified: with a
+  static ink import the fix silently does nothing.
+- **`test/terminal-size-fix.test.ts`** — regression test: spawns the built
+  fix + ink inside a real PTY (`script`), re-renders 300 frames, asserts
+  the `/dev/fd` count stays within +10 (was +4/frame → +1200). Skipped off
+  macOS (no `script` PTY there).
+
+Verification (all under a no-winsize PTY, 3000 frames):
+- before: fds 32 → 9,463 (≈3.1/frame by readdirSync; ≈4/frame by lsof incl.
+  the socketpairs);
+- after: fds 20 → 20 (delta 0). Shim `devTty`-free path: 100 calls, delta ≤4
+  (readdirSync noise).
+
+Notes for the next session:
+- The heap-OOM half of the user's original crash (28 min, session-less) is
+  still open. Long self-improve runs should use `--session` (compaction on)
+  and `NODE_OPTIONS="--max-old-space-size=..."` is NOT a fix, only a delay.
+- `module.register()` prints a DEP0205 deprecation warning on Node 26 —
+  cosmetic; revisit when the minimum Node floor moves.
+
+---
+
 # HANDOFF — length-guard nudge (C22) on top of C21 (2026-09-20)
 
 ## C22 — the self-improve loop died at kickoff on `length` — FIXED (models.json pin + one nudge retry, 302 tests: 302 pass 0 fail; live one-shot verified)

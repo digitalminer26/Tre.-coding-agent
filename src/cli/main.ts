@@ -40,6 +40,12 @@ import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface, type Interface } from "node:readline";
+// C23: MUST be evaluated before ink is loaded — it registers a resolve hook
+// that redirects terminal-size to a fd-safe shim. ink is therefore imported
+// DYNAMICALLY in the tui branch below (a static import would link the whole
+// module graph — including ink — before register() runs, making the hook
+// too late).
+import "../tui/terminal-size-fix.js";
 import { findModelsFile, loadModelsFile, resolveModel } from "../config/models.js";
 import {
   compactContext,
@@ -63,7 +69,7 @@ import {
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
-import { runTui } from "../tui/run.js";
+
 import { QUIET_ON_SUCCESS_TOOLS } from "../types.js";
 import type {
   AgentEvent,
@@ -794,6 +800,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       );
       return 2;
     }
+    // C23: dynamic — see the terminal-size-fix import above. Loading ink
+    // after the resolve hook is registered is what makes the fix apply.
+    const { runTui } = await import("../tui/run.js");
     const code = await runTui({
       model,
       systemPrompt,
