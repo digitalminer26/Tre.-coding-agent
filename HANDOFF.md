@@ -1,3 +1,44 @@
+# HANDOFF — TUI input cursor renders at its position (2026-09-20)
+
+## Cursor location — the input ▍ now shows WHERE the caret is, not just the end (303 tests: 303 pass 0 fail; PTY frame verified)
+
+Before (27b15b9): `inputCursor(input, width)` appended `▍` to the END of the
+(truncated) input, so the caret never reflected the actual edit position. Now
+the caret renders at `cursorPos` and ←/→ move it.
+
+What changed (one increment, 5 files):
+- **`src/tui/state.ts`** — added `cursorPos: number` to `TuiState` +
+  `makeInitialState` (0). `inputChar` inserts at the cursor (split+rejoin) and
+  advances it; `inputBackspace` deletes the char BEFORE the cursor (no-op at 0)
+  and decrements it; new `inputMove(s, dir)` moves left/right (no-op at the
+  bounds, locked while an approval is pending); `inputHistory` sets the cursor
+  to the end on load / 0 on clear; `submitInput` resets it to 0.
+  `inputCursor(input, cursorPos, width)` now renders `▍` at the cursor's
+  display column and windows the row to one display line so the cursor is
+  always visible: fits → whole string; cursor within the first `width` cols →
+  show from column 0 (no ellipsis); otherwise a leading `…` (1 col) + the
+  `width-1` cols around the cursor (a cursor at the END of a long input reduces
+  to the old ellipsis+tail+cursor). Display width is computed with a small
+  owned `charWidth`/`dispWidth`/`sliceByWidth` (wide CJK/Hangul = 2, combining
+  marks = 0) — **no new dependency** (the dep freeze blocks `string-width` /
+  `slice-ansi`, which are only transitive deps of `cli-truncate`).
+- **`src/tui/app.tsx`** — new `onMove` prop; the keybinding table routes
+  ←/→ to it; the input row renders `inputCursor(state.input, state.cursorPos,
+  width)`; the idle hint now advertises `←/→ cursor`.
+- **`src/tui/run.tsx`** — wires `onMove` → `inputMove`.
+- **`test/tui-app.test.tsx`** + **`test/tui-pinned-layout.test.ts`** — added
+  `onMove` to the render helpers; new `inputMove` unit test; `inputCursor` test
+  rewritten for the 3-arg signature + cursor-location cases; render tests that
+  set `input` now also set `cursorPos` (the cursor no longer defaults to the
+  end).
+
+Verification: `npm run build` clean; `npm test` 303 pass / 0 fail. PTY capture
+(local build, `script` pty, session in `$TMPDIR`): typed `hello` → `hell▍o`,
+then two left-arrows → `hel▍lo` — the caret visibly moves left. No guardrail-
+zone files touched; no new deps.
+
+---
+
 # HANDOFF — terminal-size fd-leak fix (C23) on top of C22 (2026-09-20)
 
 ## C23 — `tre. tui` leaked one fd per render frame (terminal-size) and died of EMFILE after ~3 minutes — FIXED (resolve-hook shim, 303 tests: 303 pass 0 fail; PTY frame stress verified flat)
