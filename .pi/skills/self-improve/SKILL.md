@@ -54,12 +54,19 @@ commits such changes themselves with `GUARDRAIL_BYPASS=1`.
 
 Capture a real frame (ANSI stays in the file — strip it before asserting):
 
+Paths go under $TMPDIR, not /tmp — when you (the agent under test) run
+this recipe from your bash tool, the tre. child INHERITS the kernel
+sandbox, where /private/tmp is write-denied and ~/.tre is read/write-
+denied. A fresh --session outside the repo keeps the frame clean too:
+
 ```bash
+TDIR="${TMPDIR:-/tmp}"
+S="$TDIR/tre-tui-check-$$-s.jsonl"; rm -f "$S"
 ( ( sleep 1.5; printf '/display-bottom model\r'; sleep 2 ) \
-  | script -q /dev/null tre. tui 2>&1 ) > /tmp/tui-check.out
-python3 -c "import re,sys; raw=open('/tmp/tui-check.out','rb').read().decode('utf-8','replace'); \
+  | script -q /dev/null tre. tui --session "$S" 2>&1 ) > "$TDIR/tui-check.out"
+python3 -c "import re,sys; raw=open('$TDIR/tui-check.out','rb').read().decode('utf-8','replace'); \
 clean=re.sub(r'\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\\\-_])','',raw).replace('\r',''); \
-open('/tmp/tui-check-clean.txt','w').write(clean)"
+open('$TDIR/tui-check-clean.txt','w').write(clean)"
 ```
 
 Then assert on the stripped lines: the pinned block is the LAST 8 lines —

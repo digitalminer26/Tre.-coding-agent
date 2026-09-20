@@ -53,6 +53,53 @@
  * (2026-09-18: /private — i.e. /tmp, /var, /etc — and /Volumes+/Network
  * became confined; before that the denylist left /tmp readable/writable,
  * which s10's canary exposed.)
+ *
+ * 2026-09-19 ("broken loop" fixes — the self-improve loop died at every git
+ * and node step under the sandbox; all three verified by a kernel canary
+ * matrix on macOS 15, Apple Silicon):
+ *   - The enumeration denies cover ancestor NODES (a `subpath` deny matches
+ *     the node itself on this kernel), so node's realpathSync walk-down —
+ *     lstat of every prefix from / — EPERM'd on /Users or /private BEFORE
+ *     reaching any allowed leaf. `node <file>` crashed for workspace, /tmp
+ *     AND $TMPDIR paths alike: tsc, node --test and npm were all dead under
+ *     the sandbox (only `node -e` survived). Fix: file-read-metadata
+ *     re-allows (stat/lstat/readlink only — no data, no listing) on the
+ *     ancestor chains of the workspace and the per-user tmp dir.
+ *   - /usr/bin/git is an xcode-select SHIM; it readlinks
+ *     /private/var/db/xcode_select_link, which the /private deny blocked —
+ *     every git call failed with rc=1 plus xcode-select stderr noise.
+ *     Fix: a single-file literal re-allow (no traversal is opened; the real
+ *     git under /Library/Developer/... was already readable).
+ *   - git additionally treats an UNREADABLE /etc/gitconfig as fatal — EPERM
+ *     is not the ENOENT it gets on machines where the file is absent. The
+ *     sandboxed child now gets GIT_CONFIG_NOSYSTEM=1 (standard practice for
+ *     confined tools; an explicit caller value wins) instead of loosening
+ *     the /etc deny.
+ *   - /bin/sh's cd is still broken under the policy (D12 note 8): the
+ *     quality gate therefore runs its one cd + node pair through `bash -c`
+ *     (see scripts/quality-check.sh), and test/e2e.sh keeps its workdir in
+ *     $TMPDIR instead of /tmp (write-denied; sessions live there too).
+ *   - NESTED use: a process ALREADY under a kernel policy cannot apply a
+ *     DIFFERENT one (sandbox_apply → EPERM, rc 71; re-applying the identical
+ *     policy succeeds — verified 2026-09-19). spawnSandboxedBash therefore
+ *     marks its children (TRE_SANDBOX=1) and, when ITSELF runs marked, spawns
+ *     the command unwrapped: the child inherits the caller's confinement
+ *     as-is — still a real kernel boundary, but the per-call workspace
+ *     policy is not re-applied. Consequence: test/e2e.sh scenario 10
+ *     (sandbox-escape) is skipped under an inherited sandbox, because the
+ *     harness there can only write to repo+tmpdir — both allowed regions —
+ *     so it cannot plant a canary in a denied location.
+ *   - PTY: the /dev write-deny blocked openpty() (needs /dev/ptmx + the
+ *     allocated /dev/ttysNN slave) — `script` died with "openpty: Operation
+ *     not permitted", killing every TUI scenario and the skill's TUI
+ *     verification recipe under an INHERITED sandbox (one-shot mode is
+ *     unaffected — verified 2026-09-19: e2e 5/14, all TUI scenarios dying
+ *     at startup). Fix: write-allows for /dev/ptmx (literal) and /dev/ttys*
+ *     (regex — SBPL has no glob). Safe: a pty is not a file channel (I/O is
+ *     the pty pair itself, children inherit the same policy), and
+ *     cross-session slaves stay kernel-DAC-restricted (verified: cat of a
+ *     foreign active slave → "Permission denied"). /dev READS were already
+ *     open by design (only writes are confined) — no read rules added.
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -120,6 +167,37 @@ export function sandboxShell(): string {
 }
 
 /**
+ * Metadata-only (file-read-metadata = stat/lstat/readlink — no data, no
+ * listing) re-allows for every ancestor directory of `real`, from its parent
+ * up to (excluding) /. Needed because node's realpathSync walks DOWN from /
+ * lstat-ing each prefix, and the enumeration denies (subpath "/Users",
+ * "/private", ...) cover the ancestor NODES themselves — the walk EPERMs
+ * before it reaches the allowed leaf (verified 2026-09-19). Emits nothing
+ * for top-level paths. (Ordering: emit these BEFORE the workspace's read
+ * allow so the workspace stays the last matching read rule.)
+ */
+export function ancestorMetadataRules(real: string): string[] {
+  const rules: string[] = [];
+  let cur = path.dirname(real);
+  while (cur.length > 1 && cur !== "/") {
+    rules.push(`(allow file-read-metadata (literal "${seString(cur)}"))`);
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return rules;
+}
+
+/** The OS temp dir's REAL path for policy rules (falls back to the input). */
+export function tmpdirRealPath(): string {
+  try {
+    return realpathSync(tmpdir());
+  } catch {
+    return tmpdir();
+  }
+}
+
+/**
  * Generate the Seatbelt policy for a bash child working in `workspace`.
  * Allowlist by enumeration — see the module header for the kernel semantics
  * (resolved-path matching, fatal symlink-top subpath denies, node denies
@@ -151,6 +229,15 @@ export function generateBashSandboxPolicy(workspace: string): string {
     '(deny file-read* (subpath "/Users"))',
     '(deny file-read* (subpath "/Volumes"))', // external mounts
     '(deny file-read* (subpath "/Network"))',
+    // xcode-select shim (/usr/bin/git and friends) readlinks this to find
+    // the CLT/Xcode dir; denied, it dies with rc=1 + stderr noise on every
+    // call. One file, no traversal (verified 2026-09-19).
+    '(allow file-read* (literal "/private/var/db/xcode_select_link"))',
+    // Ancestor metadata for node's realpathSync walk-down — workspace chain
+    // and per-user tmp chain (npm/tsc/child processes touch $TMPDIR even
+    // when the workspace is elsewhere). No file content is opened.
+    ...ancestorMetadataRules(workspaceRealPath(workspace)),
+    ...ancestorMetadataRules(tmpdirRealPath()),
     `(allow file-read* (subpath "${w}"))`, // the workspace (REAL path), wherever it lives — LAST so it wins
     "; ── writes: workspace + /dev fakes only ──",
     '(deny file-write* (subpath "/private"))',
@@ -170,6 +257,12 @@ export function generateBashSandboxPolicy(workspace: string): string {
     '(allow file-write* (subpath "/dev/null"))',
     '(allow file-write* (subpath "/dev/stdout"))',
     '(allow file-write* (subpath "/dev/stderr"))',
+    // PTY machinery (openpty: /dev/ptmx + the allocated slave /dev/ttysNN) —
+    // needed by `script` for TUI verification under an INHERITED sandbox;
+    // a pty is not a file channel, cross-session slaves stay DAC-restricted
+    // (verified 2026-09-19). SBPL has no glob → regex for the slaves.
+    '(allow file-write* (literal "/dev/ptmx"))',
+    '(allow file-write* (regex "/dev/ttys[0-9]+"))',
   ].join("\n");
 }
 
@@ -199,15 +292,37 @@ export async function spawnSandboxedBash(
   });
   const sandboxExec = sandboxExecPath();
   if (!sandboxExec) throw new Error("sandbox-exec binary not found");
-  const child = spawn(
-    sandboxExec,
-    ["-f", policyPath, sandboxShell(), "-c", command],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: opts.env,
-      ...(opts.cwd ? { cwd: opts.cwd } : {}),
-    },
-  );
+  // git treats an UNREADABLE system config (/etc/gitconfig — denied by the
+  // policy) as fatal: EPERM is not the ENOENT it gets where the file is
+  // absent. Skip the system level for confined children (inherited ones
+  // included — the outer sandbox still denies /etc); an explicit caller
+  // value wins.
+  const env: NodeJS.ProcessEnv = {
+    ...opts.env,
+    GIT_CONFIG_NOSYSTEM: opts.env.GIT_CONFIG_NOSYSTEM ?? "1",
+  };
+  // A process ALREADY under a kernel policy cannot apply a DIFFERENT one
+  // (sandbox_apply → EPERM, rc 71 — verified 2026-09-19). When this process
+  // was itself spawned by spawnSandboxedBash (TRE_SANDBOX marker), spawn
+  // unwrapped: the child inherits the caller's confinement as-is — still a
+  // real kernel boundary, but the per-call workspace policy is not
+  // re-applied (documented nested-use limitation).
+  const inherited = process.env.TRE_SANDBOX === "1";
+  const child = inherited
+    ? spawn(sandboxShell(), ["-c", command], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      })
+    : spawn(
+        sandboxExec,
+        ["-f", policyPath, sandboxShell(), "-c", command],
+        {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...env, TRE_SANDBOX: "1" },
+          ...(opts.cwd ? { cwd: opts.cwd } : {}),
+        },
+      );
   let disposed = false;
   return {
     child,

@@ -1,4 +1,73 @@
-# HANDOFF — recursive-dev boundary work (D20), on top of D19 (2026-09-19)
+# HANDOFF — sandboxed self-improve loop fix (C21) on top of D20 (2026-09-20)
+
+## C21 — the self-improve loop was dead under the kernel sandbox — FIXED (solution C, human-approved zone change, GUARDRAIL_BYPASS=1 commit)
+
+User report (2026-09-20): "tre. is not in a recursive improvement state; when
+I try to start the process it looks like tre. is unable to access many of the
+directories" — worst around git. Investigation (kernel canary matrix, all
+failures reproduced deterministically under `spawnSandboxedBash`):
+
+1. **node crash (loop-killer):** node's realpathSync walk-down lstats every
+   path prefix from /; the enumeration denies (`/Users`, `/private` subpaths)
+   match the ancestor NODES → EPERM → every `node <file>` crashed for
+   workspace, /tmp AND $TMPDIR paths (tsc, node --test, npm all dead under
+   the sandbox; only `node -e` survived).
+2. **git swamp:** /usr/bin/git is an xcode-select SHIM → readlink of
+   /private/var/db/xcode_select_link denied → rc=1 + stderr noise per call.
+   Real git: UNREADABLE /etc/gitconfig is FATAL (EPERM ≠ the ENOENT it gets
+   where the file is absent) → rc=128.
+3. **/bin/sh cd** ENOTDIR under the policy (D12 note 8) → quality-gate
+   dep-freeze false-fail.
+4. **PTY:** /dev write-deny blocked openpty() → `script: openpty: Operation
+   not permitted` → every TUI scenario + the skill's TUI recipe dead under an
+   INHERITED sandbox (one-shot mode unaffected — e2e 5/14, all TUI dead).
+5. **Nested sandbox:** a process already under a kernel policy cannot apply a
+   DIFFERENT one (sandbox_apply → EPERM, rc 71; identical policy re-apply OK).
+   The D20 farm had "proved" the loop green because its workstreams ran on
+   PI (no sandbox at all) — tre.'s canaries only ever tested cat/ls.
+
+Fixes (all in one commit, zone files under GUARDRAIL_BYPASS=1 per protocol):
+- `sandbox.ts` policy: `file-read-metadata` (stat/lstat/readlink ONLY — no
+  data, no listing) literal re-allows on the ancestor chains of the workspace
+  + $TMPDIR, emitted BEFORE the workspace read-allow (which stays LAST —
+  ordering unit-tested); literal read allow for /private/var/db/xcode_select_link
+  (one file, no traversal); pty write-allows /dev/ptmx (literal) + /dev/ttys*
+  (regex — SBPL has NO glob, NO extensible; verified kernel-DAC keeps
+  cross-session pty slaves restricted: foreign active slave → Permission
+  denied). /dev READS were already open by design (only writes confined).
+- `sandbox.ts` spawn: GIT_CONFIG_NOSYSTEM=1 on sandboxed children (explicit
+  caller value wins); nested semantics — spawnSandboxedBash marks its
+  children (TRE_SANDBOX=1) and, when ITSELF marked, spawns UNWRAPPED so the
+  child inherits the caller's confinement (no rc-71 crash; still confined).
+- `quality-check.sh`: the dep-freeze step's one cd+node pair runs via
+  `bash -c` (bash's cd passes the Seatbelt check; sh's doesn't).
+- `e2e.sh`: workdir /tmp → $TMPDIR (write-denied; also where sessions live);
+  s10 canary → repo root (a canary under $WORK=$TMPDIR would LEAK through the
+  allowed per-user temp read — false "sandbox bypassed"); s10 SKIPS under an
+  inherited sandbox (harness confined to repo+tmpdir = both allowed regions,
+  no denied canary location reachable).
+- `sandbox.test.ts`: unit tests (ancestorMetadataRules shape, policy rules +
+  ordering, env contract, node-file + pty + /dev-creation OS probes; OS
+  probe skips under an inherited sandbox — nested apply is EPERM).
+- self-improve SKILL (zone): TUI recipe /tmp → $TMPDIR + fresh --session
+  (the tre. child INHERITS the sandbox: /tmp write + ~/.tre denied).
+
+Verified 2026-09-20: unit 299 (292 pass/0 fail/7 skip); kernel canaries
+19/19 FRESH (all previously-broken steps green; /etc, /Users, /tmp writes,
+~/.ssh, /dev creation all still denied); `npm test` green FRESH and under
+INHERITED sandbox; e2e under INHERITED sandbox: 12/14 (all 6 TUI + one-shot +
+sandbox scenarios pass; s10 skipped by design; s13 eval-baseline = 27B
+variance — fails IDENTICALLY from a plain shell, pre-existing; s12
+compaction failed 3x inherited vs 1x plain — NOT sandbox-related: every
+inherited session shows ZERO tool errors, the 27B simply drifted the task
+at the 4k window across compaction (run A: lost step 3, never wrote c.md;
+run B: created merged.md via bash instead of c.md); s12 needs the same
+27B-variance annotation as s13, or a bigger window). NOTE: this machine has NO git identity configured
+anywhere (no ~/.gitconfig, no ~/.config/git, no /etc/gitconfig) — commits
+auto-fall-back to `Hong Yu <tertain@Hongs-MacBook-Air.local>` (git's
+no-identity fallback), which is why existing commits carry that identity.
+
+## D20 — sessions outside the repo + explicit budget + dependency freeze — DONE (296 tests: 289 pass 0 fail; built by GPU farm, orchestrator-verified, 1 integration bug caught)
 
 ## D20 — sessions outside the repo + explicit budget + dependency freeze — DONE (296 tests: 289 pass 0 fail; built by GPU farm, orchestrator-verified, 1 integration bug caught)
 

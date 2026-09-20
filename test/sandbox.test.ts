@@ -13,10 +13,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  ancestorMetadataRules,
   generateBashSandboxPolicy,
   sandboxExecPath,
   sandboxShell,
   seString,
+  tmpdirRealPath,
+  spawnSandboxedBash,
 } from "../src/tools/sandbox.js";
 
 test("seString escapes backslashes and quotes", () => {
@@ -135,6 +138,85 @@ test("policy: workspace path is S-expression-escaped", () => {
   assert.ok(p.includes('"/tmp/we\\"ird"'), "quotes in the path are escaped");
 });
 
+test("ancestorMetadataRules: walks parents up to (excluding) /, nothing for top-level", () => {
+  assert.deepEqual(ancestorMetadataRules("/a/b/c"), [
+    '(allow file-read-metadata (literal "/a/b"))',
+    '(allow file-read-metadata (literal "/a"))',
+  ]);
+  assert.deepEqual(ancestorMetadataRules("/a"), []);
+  assert.deepEqual(ancestorMetadataRules('/a/b"c'), [
+    '(allow file-read-metadata (literal "/a"))', // b"c is a FILE name; /a is its parent
+  ]);
+  assert.deepEqual(ancestorMetadataRules('/a/b"c/c'), [
+    '(allow file-read-metadata (literal "/a/b\\"c"))', // quote in an ancestor is escaped
+    '(allow file-read-metadata (literal "/a"))',
+  ]);
+});
+
+test("policy: ancestor metadata re-allows (workspace + tmp chains) + xcode link literal", () => {
+  const p = generateBashSandboxPolicy("/Users/u/proj");
+  // the workspace's ancestor NODES — the prefixes node's realpathSync
+  // walk-down lstats on its way to the allowed leaf (2026-09-19 fix)
+  for (const anc of ["/Users/u", "/Users"]) {
+    assert.ok(
+      p.includes(`(allow file-read-metadata (literal "${anc}"))`),
+      `missing ancestor metadata re-allow for ${anc}`,
+    );
+  }
+  // the per-user tmp chain too (npm/tsc/child processes touch $TMPDIR even
+  // when the workspace is elsewhere)
+  let cur = path.dirname(tmpdirRealPath());
+  while (cur.length > 1 && cur !== "/") {
+    assert.ok(
+      p.includes(`(allow file-read-metadata (literal "${seString(cur)}"))`),
+      `missing tmp-chain metadata re-allow for ${cur}`,
+    );
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  // the metadata rules come BEFORE the workspace's read allow — the
+  // workspace re-allow stays the LAST matching read rule
+  const firstMeta = p.indexOf("(allow file-read-metadata ");
+  const lastReadAllow = p.lastIndexOf("(allow file-read* (subpath ");
+  assert.ok(firstMeta >= 0, "has metadata re-allows");
+  assert.ok(firstMeta < lastReadAllow, "workspace read allow stays last");
+  // the xcode-select shim's single-file literal (git under the sandbox)
+  assert.ok(
+    p.includes('(allow file-read* (literal "/private/var/db/xcode_select_link"))'),
+    "xcode_select_link literal present",
+  );
+});
+
+test(
+  "spawnSandboxedBash sets GIT_CONFIG_NOSYSTEM=1 (explicit caller value wins)",
+  { skip: process.platform !== "darwin", timeout: 30_000 },
+  async () => {
+    const ws = mkdtempSync(path.join(tmpdir(), "sb-env-"));
+    try {
+      async function probe(env: NodeJS.ProcessEnv): Promise<string> {
+        const { child, dispose } = await spawnSandboxedBash("echo $GIT_CONFIG_NOSYSTEM", {
+          cwd: ws,
+          env,
+        });
+        let out = "";
+        if (child.stdout) child.stdout.on("data", (d: Buffer) => (out += d));
+        await new Promise<void>((res) => child.on("close", () => res()));
+        await dispose();
+        return out.trim();
+      }
+      assert.equal(await probe({ ...process.env }), "1", "unset → 1");
+      assert.equal(
+        await probe({ ...process.env, GIT_CONFIG_NOSYSTEM: "0" }),
+        "0",
+        "explicit caller value wins",
+      );
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  },
+);
+
 test("policy: the workspace re-allow uses the REAL path (resolved, not literal)", () => {
   // data access is checked against the resolved path — a /tmp/… workspace
   // (real: /private/tmp/…) must be re-allowed in its REAL spelling, else the
@@ -181,7 +263,15 @@ function runSandboxed(policy: string, cmd: string, cwd: string): { ok: boolean; 
 
 test(
   "OS probe (darwin): generated policy confines the bash child",
-  { skip: process.platform !== "darwin", timeout: 60_000 },
+  {
+    skip:
+      process.platform !== "darwin"
+        ? true
+        : process.env.TRE_SANDBOX === "1"
+          ? "under an inherited kernel sandbox — nested sandbox_apply is EPERM (rc 71); the kernel probe needs a fresh process (run npm test outside a sandboxed shell)"
+          : false,
+    timeout: 60_000,
+  },
   () => {
     const ws = mkdtempSync(path.join(tmpdir(), "sb-ws-"));
     try {
@@ -253,6 +343,54 @@ test(
         } finally {
           rmSync(perUserFile, { force: true });
         }
+
+        // 2026-09-19 (broken-loop canary): node's realpathSync walk-down —
+        // lstat of every prefix from / — must survive the enumeration
+        // denies. The ancestor nodes got metadata-only re-allows; without
+        // them `node <workspace-file>` crashed with EPERM lstat '/Users' (or
+        // '/private' for $TMPDIR workspaces) and tsc, node --test and npm
+        // were all dead under the sandbox.
+        const nodeProbeFile = path.join(ws, "probe.js");
+        writeFileSync(nodeProbeFile, 'console.log("node-ran")\n');
+        const nodeRun = runSandboxed(policy, `node "${nodeProbeFile}"`, ws);
+        assert.ok(
+          nodeRun.ok,
+          `running a node FILE under the workspace must succeed: ${nodeRun.out}`,
+        );
+        assert.match(nodeRun.out, /node-ran/);
+
+        // PTY machinery: `script` needs openpty() (/dev/ptmx + the allocated
+        // /dev/ttysNN slave) — without the write-allows every TUI scenario
+        // and the skill's TUI-verification recipe died at startup under an
+        // inherited sandbox ("openpty: Operation not permitted").
+        const ptyRound = runSandboxed(
+          policy,
+          "(sleep 0.2; printf 'pty-ok\\r') | script -q /dev/null /bin/cat 2>&1 | head -1",
+          ws,
+        );
+        assert.ok(
+          ptyRound.ok,
+          `script/openpty under the policy must succeed: ${ptyRound.out}`,
+        );
+        assert.match(ptyRound.out, /pty-ok/);
+        // ...but no NEW device nodes can be created in /dev (write-deny holds)
+        const devCreate = runSandboxed(policy, "touch /dev/sb-evil-node", ws);
+        assert.ok(!devCreate.ok, "creating a file in /dev must still be denied");
+        // ...and the metadata re-allow must not open DATA: listing /Users
+        // (readdir = file-read-data) is still denied.
+        const lsUsers = runSandboxed(policy, "ls /Users", ws);
+        assert.ok(!lsUsers.ok, "ls /Users (directory data) must still be denied");
+        // the xcode-select link literal is readable (the /usr/bin/git shim
+        // needs it), but the surrounding dir is not listable — no traversal.
+        if (existsSync("/private/var/db/xcode_select_link")) {
+          // readlink, not cat: the shim reads the LINK's target (metadata);
+          // cat would follow it into the (separately governed) Xcode/CLT dir.
+          const xcodeRead = runSandboxed(policy, "readlink /private/var/db/xcode_select_link", ws);
+          assert.ok(xcodeRead.ok, "readlink of xcode_select_link must succeed (git shim)");
+          assert.match(xcodeRead.out, /Xcode|CommandLineTools/);
+        }
+        const xcodeList = runSandboxed(policy, "ls /private/var/db", ws);
+        assert.ok(!xcodeList.ok, "ls of the dir containing the link must still be denied");
 
         // 2026-09-18: the sandboxed child runs /bin/bash (when present) so
         // that `cd` works — /bin/sh's cd fails with ENOTDIR under a deny

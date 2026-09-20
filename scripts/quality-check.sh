@@ -57,7 +57,13 @@ ROOT=$(dirname "$(dirname "$0")")
 # Capture the subshell status DIRECTLY — under `if ! cmd`, `$?` is the
 # inverted status (0) when cmd failed, so the old form never recorded a
 # deps failure (D20 integration fix, caught by a from-elsewhere probe).
-(cd "$ROOT" && node scripts/check-deps.mjs)
+# check-deps.mjs reads package.json from the CWD, so the step must run with
+# CWD=$ROOT; but /bin/sh's cd fails with ENOTDIR under the kernel sandbox
+# (D12 note 8), while /bin/bash's cd passes the Seatbelt check (same note).
+# So the one cd + node pair runs under bash — no behavior change outside
+# the sandbox, and the gate now survives `npm test` from a sandboxed child
+# (2026-09-19: this line was the dep-freeze false-fail in the loop).
+(bash -c 'cd "$1" && exec node scripts/check-deps.mjs' _ "$ROOT")
 DEPS_STATUS=$?
 
 SCAN_STATUS=0
