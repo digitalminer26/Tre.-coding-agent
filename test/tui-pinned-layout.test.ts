@@ -5,8 +5,9 @@
  * rendering in app.tsx; the App render tests pin the frame shape on
  * ink-testing-library's fake stdout (columns getter = 100, NO rows property →
  * effective 100×24). Frame contract: exactly `rows` lines — header on top,
- * hint / ─ separator / input line (plain, no prefix, ▍ cursor always at the
- * end) / ─ separator / 3 bottom-display lines (D15: /display-bottom) pinned
+ * hint / ─ separator / input line (plain, no prefix, ▍ cursor rendered at
+ * its location) / ─ separator / 3 bottom-display lines (D15: /display-bottom)
+ * pinned
  * at the bottom (input row exactly 4 lines above the screen bottom).
  */
 import { test } from "node:test";
@@ -24,6 +25,7 @@ import {
   itemsHeight,
   fitItems,
   inputCursor,
+  inputMove,
   approvalLine,
   bottomLines,
   handleSlashCommand,
@@ -34,6 +36,7 @@ import {
   MENU_MAX_LINES,
   SLASH_COMMANDS,
   makeInitialState,
+  setApproval,
 } from "../src/tui/state.js";
 import type { TuiItem, TuiState } from "../src/tui/state.js";
 
@@ -79,6 +82,7 @@ const renderApp = (state: TuiState) =>
       state,
       onChar: () => {},
       onBackspace: () => {},
+      onMove: () => {},
       onHistory: () => {},
       onSubmit: () => {},
       onCtrlC: () => {},
@@ -236,20 +240,60 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
 
 // ── inputCursor / approvalLine ──────────────────────────────────────────
 
-test("inputCursor: always one row, cursor at the end, keeps the tail", () => {
+test("inputCursor: always one row, cursor at its LOCATION, keeps the visible window", () => {
   // empty input → the cursor alone (the row is never blank)
-  assert.equal(inputCursor("", 80), "\u258d");
+  assert.equal(inputCursor("", 0, 80), "\u258d");
 
-  // short input passes through + the cursor at the end
-  assert.equal(inputCursor("hello", 80), "hello\u258d");
+  // short input, cursor at the end → passes through + the cursor at the end
+  assert.equal(inputCursor("hello", 5, 80), "hello\u258d");
 
-  // long input: truncated to width-1 (tail kept) + cursor = exactly one row
-  const long = inputCursor("x".repeat(300), 80);
+  // cursor in the MIDDLE → the ▍ is at that position, not the end
+  assert.equal(inputCursor("hello", 2, 80), "he\u258dllo");
+  assert.equal(inputCursor("hello", 0, 80), "\u258dhello"); // at the start
+
+  // long input, cursor at the END: tail kept + cursor = exactly one row
+  const long = inputCursor("x".repeat(300), 300, 80);
   assert.notEqual(long, "x".repeat(300) + "\u258d"); // was truncated
   assert.ok(wrapLineCount(long, 80) <= 1); // one row at width
   assert.ok(long.endsWith("\u258d")); // cursor at the end
-  assert.ok(long.startsWith("\u2026")); // position:'start' ellipsis
-  assert.ok(long.endsWith("xxxxx\u258d")); // position:'start' keeps the TAIL
+  assert.ok(long.startsWith("\u2026")); // head dropped → ellipsis
+  assert.ok(long.endsWith("xxxxx\u258d")); // keeps the TAIL
+
+  // long input, cursor in the MIDDLE: the window is centered on the cursor —
+  // the cursor is visible (not the tail), head + tail both trimmed, one row.
+  const mid = inputCursor("a".repeat(100) + "b".repeat(100), 100, 80);
+  assert.ok(wrapLineCount(mid, 80) <= 1);
+  assert.ok(mid.includes("\u258d")); // the cursor is on the row
+  assert.ok(mid.startsWith("\u2026")); // head (the a's) dropped
+  assert.ok(mid.endsWith("\u258d" + "b".repeat(78))); // tail (b's) after the cursor
+
+  // long input, cursor near the START: shown from column 0 (no ellipsis head)
+  const nearStart = inputCursor("x".repeat(300), 3, 80);
+  assert.equal(nearStart.startsWith("\u2026"), false); // no head ellipsis
+  assert.ok(wrapLineCount(nearStart, 80) <= 1);
+  assert.ok(nearStart.includes("\u258d"));
+});
+
+test("inputMove: moves the cursor left/right, no-op at the ends", () => {
+  const s0 = { ...makeInitialState("m"), input: "hello", cursorPos: 5 };
+  // left from the end → 4, right back → 5
+  assert.equal(inputMove(s0, -1).cursorPos, 4);
+  assert.equal(inputMove(inputMove(s0, -1), 1).cursorPos, 5);
+  // no-op at the left end
+  const atStart = { ...s0, cursorPos: 0 };
+  assert.equal(inputMove(atStart, -1).cursorPos, 0);
+  // no-op at the right end
+  assert.equal(inputMove(s0, 1).cursorPos, 5);
+  // a stale (overrun) index is clamped before moving
+  const stale = { ...s0, cursorPos: 99 };
+  assert.equal(inputMove(stale, -1).cursorPos, 4);
+  // empty input: cursor stays 0
+  const empty = makeInitialState("m");
+  assert.equal(inputMove(empty, -1).cursorPos, 0);
+  assert.equal(inputMove(empty, 1).cursorPos, 0);
+  // locked while an approval is pending
+  const appr = setApproval({ ...s0, cursorPos: 5 }, "q?", () => {});
+  assert.equal(inputMove(appr, -1), appr);
 });
 
 // ── D15: bottom display ────────────────────────────────────────────────
@@ -524,6 +568,7 @@ test("App frame: input text on the input row, bottom fields in the reserved line
   const app = renderApp(
     mkState([{ kind: "user", text: "run it" }], {
       input: "hello",
+      cursorPos: 5,
       bottom: ["model", "status", "turn"],
     }),
   );
@@ -552,7 +597,7 @@ test("App frame: user item renders as plain text at full width (no 'you ' prefix
 });
 
 test("App frame: '/' shows the grey menu above the top separator, frame stays rows tall", () => {
-  const app = renderApp(mkState([], { input: "/", suggestIdx: 1 }));
+  const app = renderApp(mkState([], { input: "/", cursorPos: 1, suggestIdx: 1 }));
   try {
     const lines = frameLines(app.lastFrame());
     assert.equal(lines.length, H); // exactly rows (budget shrank by 3)

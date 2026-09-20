@@ -27,6 +27,7 @@ import {
   inputBackspace,
   inputChar,
   inputHistory,
+  inputMove,
   makeInitialState,
   menuComplete,
   menuNav,
@@ -130,6 +131,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   const handlers = {
     onChar: (ch: string): void => setState(inputChar(state, ch)),
     onBackspace: (): void => setState(inputBackspace(state)),
+    onMove: (dir: -1 | 1): void => setState(inputMove(state, dir)),
     onHistory: (dir: -1 | 1): void => {
       // D16: arrows steer the completion menu when it is visible, else the
       // prompt history.

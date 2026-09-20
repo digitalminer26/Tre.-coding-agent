@@ -22,6 +22,7 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 50));
 interface Cbs {
   onChar?: (ch: string) => void;
   onBackspace?: () => void;
+  onMove?: (dir: -1 | 1) => void;
   onHistory?: (dir: -1 | 1) => void;
   onSubmit?: () => void;
   onCtrlC?: () => void;
@@ -35,6 +36,7 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       state,
       onChar: (ch: string) => cbs?.onChar?.(ch),
       onBackspace: () => cbs?.onBackspace?.(),
+      onMove: (dir: -1 | 1) => cbs?.onMove?.(dir),
       onHistory: (dir: -1 | 1) => cbs?.onHistory?.(dir),
       onSubmit: () => cbs?.onSubmit?.(),
       onCtrlC: () => cbs?.onCtrlC?.(),

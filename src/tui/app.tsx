@@ -24,6 +24,8 @@ export interface AppProps {
   state: TuiState;
   onChar: (ch: string) => void;
   onBackspace: () => void;
+  /** Move the input cursor left (-1) / right (1). */
+  onMove: (dir: -1 | 1) => void;
   onHistory: (dir: -1 | 1) => void;
   onSubmit: () => void;
   onCtrlC: () => void;
@@ -94,6 +96,14 @@ export function App(props: AppProps): React.ReactElement {
       if (tail !== "") props.onChar(tail);
       return;
     }
+    if (key.leftArrow) {
+      props.onMove(-1);
+      return;
+    }
+    if (key.rightArrow) {
+      props.onMove(1);
+      return;
+    }
     if (key.upArrow) {
       props.onHistory(-1);
       return;
@@ -138,7 +148,7 @@ export function App(props: AppProps): React.ReactElement {
         {oneLine(
           state.approval !== null
             ? "y approve · n/esc deny"
-            : "enter send · / commands · ↑/↓ history · ctrl+c abort/quit · /quit exit",
+            : "enter send · / commands · ↑/↓ history · ←/→ cursor · ctrl+c abort/quit · /quit exit",
           width
         )}
       </Text>
@@ -149,9 +159,10 @@ export function App(props: AppProps): React.ReactElement {
       ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: no 'you' prefix — the input line is plain text. The cursor
-          (inputCursor) is always present, so the row is never zero-width
-          and the frame keeps its exact height. */}
-      <Text>{inputCursor(state.input, width)}</Text>
+          (inputCursor) renders at state.cursorPos, so its LOCATION is visible
+          (not just at the end); it is always present, so the row is never
+          zero-width and the frame keeps its exact height. */}
+      <Text>{inputCursor(state.input, state.cursorPos, width)}</Text>
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: the reserved lines are the user-configurable bottom display
           (/display-bottom) — blank when nothing is selected. */}

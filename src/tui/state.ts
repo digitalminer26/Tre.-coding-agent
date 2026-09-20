@@ -46,6 +46,12 @@ export interface TuiState {
   items: TuiItem[];
   /** Current input line. */
   input: string;
+  /**
+   * Cursor position in `input` (0..input.length): where the next typed
+   * character lands. The input row renders the type cursor (▍) at this
+   * position, so its location is visible while editing.
+   */
+  cursorPos: number;
   /** Submitted prompts, oldest first (↑/↓ navigation). */
   history: string[];
   /** Index into `history` while navigating; null = typing a new line. */
@@ -77,6 +83,7 @@ export function makeInitialState(
   return {
     items: [],
     input: "",
+    cursorPos: 0,
     history: [],
     historyIdx: null,
     busy: false,
@@ -267,14 +274,36 @@ function lastAssistantStreaming(items: TuiItem[]): boolean {
 
 // ───────────────────────── input (pure key handling) ─────────────────────────
 
+/** Clamp a cursor position into [0, len] (defensive: stale index). */
+const clampCursor = (pos: number, len: number): number =>
+  Math.max(0, Math.min(pos, len));
+
 export function inputChar(s: TuiState, ch: string): TuiState {
   if (s.approval) return s; // input locked while an approval is pending
-  return { ...s, input: s.input + ch, historyIdx: null };
+  const pos = clampCursor(s.cursorPos, s.input.length);
+  const input = s.input.slice(0, pos) + ch + s.input.slice(pos);
+  return { ...s, input, cursorPos: pos + ch.length, historyIdx: null };
 }
 
 export function inputBackspace(s: TuiState): TuiState {
   if (s.approval) return s;
-  return { ...s, input: s.input.slice(0, -1), historyIdx: null };
+  const pos = clampCursor(s.cursorPos, s.input.length);
+  if (pos === 0) return s; // nothing before the cursor to delete
+  const input = s.input.slice(0, pos - 1) + s.input.slice(pos);
+  return { ...s, input, cursorPos: pos - 1, historyIdx: null };
+}
+
+/**
+ * Move the cursor left (dir -1) or right (dir 1). No-op at either end.
+ * (The cursor is a column into `input`, not a display column — movement is
+ * per code unit; the row is truncated for display, but the full string is
+ * what the cursor addresses.)
+ */
+export function inputMove(s: TuiState, dir: -1 | 1): TuiState {
+  if (s.approval) return s;
+  const pos = clampCursor(s.cursorPos, s.input.length) + dir;
+  if (pos < 0 || pos > s.input.length) return s;
+  return { ...s, cursorPos: pos };
 }
 
 /** dir: -1 = up (older), 1 = down (newer); below the newest → fresh line. */
@@ -282,12 +311,14 @@ export function inputHistory(s: TuiState, dir: -1 | 1): TuiState {
   if (s.history.length === 0) return s;
   if (s.historyIdx === null) {
     if (dir === 1) return s; // nothing newer than the fresh line
-    return { ...s, historyIdx: s.history.length - 1, input: s.history[s.history.length - 1]! };
+    const line = s.history[s.history.length - 1]!;
+    return { ...s, historyIdx: s.history.length - 1, input: line, cursorPos: line.length };
   }
   const next = s.historyIdx + dir;
-  if (next < 0) return { ...s, historyIdx: null, input: "" };
+  if (next < 0) return { ...s, historyIdx: null, input: "", cursorPos: 0 };
   if (next >= s.history.length) return s;
-  return { ...s, historyIdx: next, input: s.history[next]! };
+  const line = s.history[next]!;
+  return { ...s, historyIdx: next, input: line, cursorPos: line.length };
 }
 
 /** Enter: null while busy/approving or on an empty line; else the prompt. */
@@ -296,7 +327,7 @@ export function submitInput(s: TuiState): { state: TuiState; prompt: string } | 
   const prompt = s.input.trim();
   if (prompt === "") return null;
   return {
-    state: { ...s, input: "", historyIdx: null, history: [...s.history, prompt], busy: true },
+    state: { ...s, input: "", cursorPos: 0, historyIdx: null, history: [...s.history, prompt], busy: true },
     prompt,
   };
 }
@@ -431,17 +462,86 @@ export function fitItems(
 }
 
 /**
- * The input line content: the input with the type cursor (▍) at the end.
- * The cursor is ALWAYS shown — it marks where the next character lands,
- * so an empty input renders as the cursor alone (the row is never blank).
- * Truncated to exactly one row at width: the tail of a long input is kept
- * (cli-truncate adds the ellipsis and guarantees display width <= max(1,
- * width-1), leaving one column for the cursor).
+ * Display width of one code point (a small, owned approximation of
+ * string-width — no new dependency): 0 for zero-width combining marks, 2 for
+ * wide (CJK/Hangul) chars, 1 otherwise. The input row is plain text (no ANSI),
+ * so per-code-point widths are enough to window it to one display row.
  */
-export function inputCursor(input: string, width: number): string {
+function charWidth(cp: number): number {
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||
+    (cp >= 0x3041 && cp <= 0x33ff) ||
+    (cp >= 0x3400 && cp <= 0x4dbf) ||
+    (cp >= 0x4e00 && cp <= 0x9fff) ||
+    (cp >= 0xa000 && cp <= 0xa4cf) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0x20000 && cp <= 0x3fffd)
+  ) {
+    return 2;
+  }
+  if ((cp >= 0x300 && cp <= 0x36f) || (cp >= 0x1ab0 && cp <= 0x1aff)) return 0;
+  return 1;
+}
+
+/** Total display width of a string (sum of per-code-point widths). */
+function dispWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) w += charWidth(ch.codePointAt(0)!);
+  return w;
+}
+
+/**
+ * Slice `s` to the display-column window [start, end) (clamped to the string).
+ * Walks code points so wide/zero-width chars are counted by display width, not
+ * code units. The window boundaries are always char boundaries (callers compute
+ * them as sums of char widths), so no char is ever cut.
+ */
+function sliceByWidth(s: string, start: number, end: number): string {
+  let out = "";
+  let col = 0;
+  for (const ch of s) {
+    const cw = charWidth(ch.codePointAt(0)!);
+    const next = col + cw;
+    if (next > start && col < end) out += ch;
+    col = next;
+    if (col >= end) break;
+  }
+  return out;
+}
+
+/**
+ * The input line content: the input with the type cursor (▍) rendered at
+ * `cursorPos` (where the next character lands), so the cursor's LOCATION is
+ * visible, not just at the end. The cursor is ALWAYS shown — an empty input
+ * renders as the cursor alone (the row is never blank).
+ *
+ * Truncated to at most one row at `width`: a display-column window that always
+ * contains the cursor is kept.
+ *  - fits in `width` → the whole string (cursor at its position).
+ *  - cursor within the first `width` columns → show columns [0, width) (from
+ *    the head, no ellipsis); the tail is trimmed.
+ *  - otherwise → a leading "…" (one column) marks the dropped head, then
+ *    `width-1` columns of content ending no more than `width-1` columns after
+ *    the cursor — so the cursor is always on the row, and a cursor at the END
+ *    of a long input reduces to the old behavior (ellipsis + tail + cursor).
+ */
+export function inputCursor(input: string, cursorPos: number, width: number): string {
   const w = Math.max(1, width);
-  if (input === "") return "\u258d";
-  return cliTruncate(input, w - 1, { position: "start" }) + "\u258d";
+  const pos = clampCursor(cursorPos, input.length);
+  const before = input.slice(0, pos);
+  const after = input.slice(pos);
+  const full = before + "\u258d" + after;
+  const total = dispWidth(full);
+  const cursorCol = dispWidth(before); // 0-based display column of the ▍
+  if (total <= w) return full;
+  if (cursorCol < w) return sliceByWidth(full, 0, w); // cursor near the head
+  // Cursor beyond the head window: reserve one column for the head ellipsis.
+  const avail = w - 1;
+  const right = Math.min(total, cursorCol + avail);
+  const left = right - avail;
+  return "\u2026" + sliceByWidth(full, left, right);
 }
 
 /** One-line approval question ending in ' [y/N]', truncated to width. */
