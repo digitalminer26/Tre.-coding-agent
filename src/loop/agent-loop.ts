@@ -17,7 +17,10 @@
  * Behaviors (docs/01-walkthrough-harness-llm.md §4–5):
  *  - `length` guard: a response that hit the output cap has ALL its tool
  *    calls failed with an error result instead of executed (truncated args
- *    may parse — even validate — yet be incomplete).
+ *    may parse — even validate — yet be incomplete). A `length` stop with
+ *    NO tool calls (the reply died mid text/thinking) retries once with a
+ *    nudge — the partial stays in context — so one over-long reply cannot
+ *    kill a run; a second `length` with no calls stops.
  *  - Tool batches run in parallel by default; if ANY tool in the batch is
  *    `executionMode: "sequential"`, the whole batch runs in call order.
  *    Results are appended to context in call order, always.
@@ -73,6 +76,16 @@ const LENGTH_GUARD_TEXT =
   "limit, so they may be incomplete. Do not rely on them — re-issue the " +
   "tool call with complete arguments.";
 
+// C22 — a `length` stop with no tool calls means the reply died inside
+// text/thinking: nothing to salvage as a call. One nudge lets the model
+// re-issue the work in smaller pieces; a second `length` with no calls
+// stops the run (stopReason "length", as before).
+const LENGTH_NUDGE_TEXT =
+  "Your previous response hit the output token limit before any tool call. " +
+  "Continue from where it stopped — re-issue the work in smaller pieces (for " +
+  "example, split a large file write across several smaller calls) so each " +
+  "response fits under the limit.";
+
 function resultMessage(
   call: ToolCallBlock,
   result: ToolResult,
@@ -109,6 +122,7 @@ export async function* runLoop(
 
   let turn = 0;
   let stopReason: StopReason = "aborted"; // fallback: no assistant turn ran
+  let lengthNudged = false; // C22: the one retry for a no-call `length` stop
 
   while (true) {
     if (turn >= maxTurns) {
@@ -152,7 +166,21 @@ export async function* runLoop(
     if (message.stopReason === "error" || message.stopReason === "aborted") break;
 
     const calls = message.content.filter((b): b is ToolCallBlock => b.type === "toolCall");
-    if (calls.length === 0) break; // normal stop — or length with nothing to retry
+    if (calls.length === 0) {
+      if (message.stopReason === "length" && !lengthNudged && turn < maxTurns) {
+        // C22: no tool call to salvage — retry once. The partial is already
+        // in context (I2: pushed on start, replaced on done), so the model
+        // sees exactly where it stopped.
+        lengthNudged = true;
+        context.push({
+          role: "user",
+          content: LENGTH_NUDGE_TEXT,
+          timestamp: Date.now(),
+        });
+        continue; // consumes a turn like any other (maxTurns still caps)
+      }
+      break; // normal stop — or length with the nudge already spent
+    }
 
     // §4.1 guard: truncated args may parse yet be incomplete — never execute.
     if (message.stopReason === "length") {

@@ -10,7 +10,8 @@
  *     consistent partial)
  *   - I3: error/aborted stop cleanly (no throw); throwing tools become
  *     isError results
- *   - length guard: truncated tool calls are failed, never executed
+ *   - length guard: truncated tool calls are failed, never executed;
+ *     a no-call `length` stop retries once with a nudge (C22), then stops
  *   - batch dispatch: parallel by default, sequential when any tool opts
  *     in; results and end events always in call order
  *   - batch terminate, unknown tools, maxTurns, prepareNextTurn
@@ -292,6 +293,62 @@ test("length guard: calls failed (isError, 'truncated'), never executed, run con
   const result = toolResultMessages(end.messages)[0]!;
   assert.equal(result.toolCallId, "l1");
   assert.equal(result.isError, true);
+});
+
+test("length guard (C22): no tool calls → one nudge retry, run continues", async () => {
+  const turns: FakeTurn[] = [
+    { type: "length", text: "I was in the middle of" },
+    { type: "text", text: "recovered and finished" },
+  ];
+  const events = await drainLoop(turns, []);
+  const end = agentEnd(events);
+
+  assert.equal(end.stopReason, "stop", "the nudged turn runs and stops normally");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+
+  // Context: user, assistant(partial), user(nudge), assistant(stop).
+  const msgs = end.messages;
+  assert.equal(msgs.length, 4);
+  assert.equal(msgs[1]!.role, "assistant");
+  assert.ok(
+    (msgs[1]!.content[0] as { type: string }).type === "text",
+    "the partial assistant text stays in context",
+  );
+  const nudge = msgs[2]!;
+  assert.equal(nudge.role, "user", "the retry is driven by a user nudge");
+  assert.match(
+    nudge.role === "user" ? nudge.content : "",
+    /output token limit/i,
+  );
+});
+
+test("length guard (C22): no-call length twice → stops after the single nudge", async () => {
+  const turns: FakeTurn[] = [
+    { type: "length", text: "first truncation" },
+    { type: "length", text: "second truncation" },
+  ];
+  const events = await drainLoop(turns, []);
+  const end = agentEnd(events);
+
+  assert.equal(end.stopReason, "length", "the second no-call length stops the run");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+  // user, partial, nudge, partial — no second nudge
+  assert.equal(end.messages.length, 4);
+  assert.equal(
+    end.messages.filter((m) => m.role === "user").length,
+    2,
+  );
+});
+
+test("length guard (C22): no room for the retry on the last turn → stops with length", async () => {
+  const events = await drainLoop(
+    [{ type: "length", text: "truncated on the final turn" }],
+    [],
+    { maxTurns: 1 },
+  );
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "length");
+  assert.equal(end.messages.length, 2, "user + partial — no nudge pushed");
 });
 
 // ─────────────────────────── batch terminate ───────────────────────────
