@@ -1,4 +1,50 @@
-# HANDOFF — sandboxed self-improve loop fix (C21) on top of D20 (2026-09-20)
+# HANDOFF — length-guard nudge (C22) on top of C21 (2026-09-20)
+
+## C22 — the self-improve loop died at kickoff on `length` — FIXED (models.json pin + one nudge retry, 302 tests: 302 pass 0 fail; live one-shot verified)
+
+User report (2026-09-20): unable to kick off the self-improve process — the
+run stopped with `length: output limit hit — tool-call arguments may be
+truncated` (the TUI/CLI rendering of stopReason `length`).
+
+Root cause (measured against the live 172.30.70.13 server, Qwen3.8-27B):
+1. **Thinking ate the whole output budget.** tre sends no thinking params,
+   so the Qwen chat template's DEFAULT `reasoning_effort: xhigh` applies.
+   At a ~24k-token prompt the model spent **6,313 thinking tokens** before a
+   single 2-call reply; the failed run's prompt was ~62.8k tokens, where
+   xhigh thinking exhausts the 8,192 output budget with nothing left for
+   tool calls. The model itself is fine — at ≤24k prompt it acts in 100–300
+   tokens; the xhigh default is a tax that scales with context size.
+2. **The loop had no recovery for a no-call `length`.** The existing guard
+   handles `length` WITH tool calls (fail them, model re-issues) — but a
+   `length` with ZERO calls (the reply died mid text/thinking) broke the
+   loop immediately. One over-long reply = dead run.
+
+Fixes (two commits):
+- **`models.json` (7acfb4c):** `compat.extraParams.options.
+  reasoning_effort: "medium"` — pins thinking at the user's floor (NOT
+  lower: medium is the minimum by user instruction). Server-verified both
+  transports work (`options` and pi's `chat_template_kwargs`); measured
+  medium = 217–2,222 thinking tokens at the same 24k prompt (vs 6,313 for
+  xhigh) with instant tool calls. Also `maxTokens 8192 → 16384` (headroom
+  for thinking + big tool args, e.g. a 30KB file write ≈ 10k tokens) and
+  `contextWindow 98304 → 81920` (the file was STALE — the server's /props
+  says `n_ctx 81920`; the old value made shouldCompact's math wrong and
+  let a session overflow the real window).
+- **loop (4f2d24d, C22):** a `length` stop with no tool calls now retries
+  ONCE with a nudge user message ("your response hit the output limit
+  before any tool call — re-issue the work in smaller pieces"); the
+  partial stays in context (I2 already keeps it), so the model sees where
+  it stopped. A second no-call `length` stops as before (`length`, exit 1);
+  no nudge on the final allowed turn (budget boundary unchanged: `budget`).
+  The retry consumes a turn like any other. +3 loop tests (nudge recovery,
+  double-length stop, budget boundary) — 302 pass 0 fail.
+
+Verification: live one-shot `tre. run --session /tmp/tre-verify.jsonl` →
+thinking block present in the session (medium effort), clean stop.
+
+Next: kick off the loop — `tre. tui --session ~/.tre/sessions/self-improve-<utc-ts>.jsonl`
+with the self-improve skill prompt. The kickoff failure mode is gone on
+both axes (thinking budget + no-call length).
 
 ## C21 — the self-improve loop was dead under the kernel sandbox — FIXED (solution C, human-approved zone change, GUARDRAIL_BYPASS=1 commit)
 
