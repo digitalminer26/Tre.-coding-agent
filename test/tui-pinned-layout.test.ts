@@ -5,9 +5,9 @@
  * rendering in app.tsx; the App render tests pin the frame shape on
  * ink-testing-library's fake stdout (columns getter = 100, NO rows property →
  * effective 100×24). Frame contract: exactly `rows` lines — header on top,
- * hint / ─ separator / input line (plain, no prefix) / ─ separator / 3
- * bottom-display lines (D15: /display-bottom) pinned at the bottom (input row
- * exactly 4 lines above the screen bottom).
+ * hint / ─ separator / input line (plain, no prefix, ▍ cursor always at the
+ * end) / ─ separator / 3 bottom-display lines (D15: /display-bottom) pinned
+ * at the bottom (input row exactly 4 lines above the screen bottom).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +23,7 @@ import {
   itemHeight,
   itemsHeight,
   fitItems,
-  inputText,
+  inputCursor,
   approvalLine,
   bottomLines,
   handleSlashCommand,
@@ -234,16 +234,22 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
   assert.equal(r4.pad, 0);
 });
 
-// ── inputText / approvalLine ───────────────────────────────────────────
+// ── inputCursor / approvalLine ──────────────────────────────────────────
 
-test("inputText stays one row and keeps the tail", () => {
-  assert.equal(inputText("", 80), "");
-  assert.equal(inputText("hello", 80), "hello"); // short input passes through
+test("inputCursor: always one row, cursor at the end, keeps the tail", () => {
+  // empty input → the cursor alone (the row is never blank)
+  assert.equal(inputCursor("", 80), "\u258d");
 
-  const long = inputText("x".repeat(300), 80);
-  assert.notEqual(long, "x".repeat(300)); // was truncated
-  assert.ok(wrapLineCount(long, 80) <= 1); // one row: display width ≤ width
-  assert.ok(long.endsWith("xxxxx")); // position:'start' keeps the TAIL
+  // short input passes through + the cursor at the end
+  assert.equal(inputCursor("hello", 80), "hello\u258d");
+
+  // long input: truncated to width-1 (tail kept) + cursor = exactly one row
+  const long = inputCursor("x".repeat(300), 80);
+  assert.notEqual(long, "x".repeat(300) + "\u258d"); // was truncated
+  assert.ok(wrapLineCount(long, 80) <= 1); // one row at width
+  assert.ok(long.endsWith("\u258d")); // cursor at the end
+  assert.ok(long.startsWith("\u2026")); // position:'start' ellipsis
+  assert.ok(long.endsWith("xxxxx\u258d")); // position:'start' keeps the TAIL
 });
 
 // ── D15: bottom display ────────────────────────────────────────────────
@@ -480,9 +486,9 @@ test("App frame is exactly rows tall with the pinned block at the bottom", () =>
     assert.ok(lineAt(lines, 0).includes("turn 1")); // header row: "test-model — turn 1"
     assert.ok(lineAt(lines, 17).includes("enter send")); // hint line
     assert.equal(lineAt(lines, 18), SEP_LINE); // top separator (full width)
-    // input row (empty input → blank): exactly 4 above the bottom, no prefix
-    assert.ok(lineAt(lines, 19) === "" || lineAt(lines, 19) === " ",
-      `input row not blank: ${JSON.stringify(lineAt(lines, 19))}`);
+    // input row (empty input → the cursor alone): exactly 4 above the bottom
+    assert.equal(lineAt(lines, 19), "\u258d",
+      `input row not the bare cursor: ${JSON.stringify(lineAt(lines, 19))}`);
     assert.equal(lineAt(lines, 20), SEP_LINE); // bottom separator (full width)
     for (const i of [21, 22, 23]) {
       // Ink trims trailing whitespace per line, so the " " pad arrives as ""
@@ -508,7 +514,7 @@ test("App frame shows the approval question one line above the hint when pending
     // behavior, pinned by tui-app.test.tsx) — not "enter send"
     assert.ok(lineAt(lines, 17).includes("y approve"));
     assert.equal(lineAt(lines, 18), SEP_LINE);
-    assert.ok(lineAt(lines, 19) === "" || lineAt(lines, 19) === " "); // input row still pinned
+    assert.equal(lineAt(lines, 19), "\u258d"); // input row still pinned (bare cursor)
   } finally {
     app.unmount();
   }
@@ -524,7 +530,7 @@ test("App frame: input text on the input row, bottom fields in the reserved line
   try {
     const lines = frameLines(app.lastFrame());
     assert.equal(lines.length, H);
-    assert.equal(lineAt(lines, 19), "hello"); // typed text, no 'you ' prefix
+    assert.equal(lineAt(lines, 19), "hello\u258d"); // typed text + cursor, no 'you ' prefix
     assert.equal(lineAt(lines, 20), SEP_LINE);
     assert.equal(lineAt(lines, 21), "model: test-model");
     assert.equal(lineAt(lines, 22), "status: idle");
@@ -557,7 +563,7 @@ test("App frame: '/' shows the grey menu above the top separator, frame stays ro
     assert.ok(lineAt(lines, 16).startsWith("> /exit")); // selected (idx 1): marked
     assert.ok(lineAt(lines, 17).startsWith("  /quit"));
     assert.equal(lineAt(lines, 18), SEP_LINE); // top separator still full width
-    assert.equal(lineAt(lines, 19), "/"); // input row: the typed slash
+    assert.equal(lineAt(lines, 19), "/\u258d"); // input row: the typed slash + cursor
     assert.equal(lineAt(lines, 20), SEP_LINE); // bottom separator
   } finally {
     app.unmount();
@@ -575,7 +581,7 @@ test("App frame stays exactly rows tall when items grow (pad shrinks)", () => {
   try {
     const lines = frameLines(app.lastFrame());
     assert.equal(lines.length, H);
-    assert.ok(lineAt(lines, 19) === "" || lineAt(lines, 19) === " "); // input still pinned in place
+    assert.equal(lineAt(lines, 19), "\u258d"); // input still pinned in place (bare cursor)
     assert.ok(lineAt(lines, 17).includes("enter send"));
   } finally {
     app.unmount();

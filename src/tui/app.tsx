@@ -12,7 +12,7 @@ import {
   approvalLine,
   bottomLines,
   fitItems,
-  inputText,
+  inputCursor,
   suggestMenu,
   RESERVED_BOTTOM_LINES,
 } from "./state.js";
@@ -148,10 +148,10 @@ export function App(props: AppProps): React.ReactElement {
         <Text key={`menu-${i}`} dimColor={!m.selected}>{m.line}</Text>
       ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
-      {/* D15: no 'you' prefix — the input line is plain text. The fallback
-          space keeps an empty input at one rendered row (a zero-width <Text>
-          collapses and the frame would be a row short). */}
-      <Text>{inputText(state.input, width) || " "}</Text>
+      {/* D15: no 'you' prefix — the input line is plain text. The cursor
+          (inputCursor) is always present, so the row is never zero-width
+          and the frame keeps its exact height. */}
+      <Text>{inputCursor(state.input, width)}</Text>
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: the reserved lines are the user-configurable bottom display
           (/display-bottom) — blank when nothing is selected. */}

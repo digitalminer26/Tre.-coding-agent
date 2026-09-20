@@ -431,13 +431,17 @@ export function fitItems(
 }
 
 /**
- * The input line content, truncated so it is exactly one row at width.
- * Empty input -> ''. Keeps the TAIL of a long input (cli-truncate adds the
- * ellipsis and guarantees display width <= max(1, width)).
+ * The input line content: the input with the type cursor (▍) at the end.
+ * The cursor is ALWAYS shown — it marks where the next character lands,
+ * so an empty input renders as the cursor alone (the row is never blank).
+ * Truncated to exactly one row at width: the tail of a long input is kept
+ * (cli-truncate adds the ellipsis and guarantees display width <= max(1,
+ * width-1), leaving one column for the cursor).
  */
-export function inputText(input: string, width: number): string {
-  if (input === "") return "";
-  return cliTruncate(input, Math.max(1, width), { position: "start" });
+export function inputCursor(input: string, width: number): string {
+  const w = Math.max(1, width);
+  if (input === "") return "\u258d";
+  return cliTruncate(input, w - 1, { position: "start" }) + "\u258d";
 }
 
 /** One-line approval question ending in ' [y/N]', truncated to width. */

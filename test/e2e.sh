@@ -446,8 +446,9 @@ PY
   l=$(sed -n "$((base+1))p" "$D/plain.txt")
   echo "$l" | grep -qE '^─+$' || { echo "top separator wrong: '$l'"; return 1; }
   l=$(sed -n "$((base+2))p" "$D/plain.txt")
-  # input row: blank after the prompt was sent, or the /quit quit_retry typed
-  [ -z "$l" ] || [ "$l" = " " ] || case "$l" in /*) ;; *) echo "input row wrong: '$l'"; return 1;; esac
+  # input row: the bare cursor (▍) after the prompt was sent, or the
+  # /quit quit_retry typed (with the cursor at the end)
+  [ "$l" = "▍" ] || case "$l" in /*▍) ;; *) echo "input row wrong: '$l'"; return 1;; esac
   l=$(sed -n "$((base+3))p" "$D/plain.txt")
   echo "$l" | grep -qE '^─+$' || { echo "bottom separator wrong: '$l'"; return 1; }
   local ok=1
