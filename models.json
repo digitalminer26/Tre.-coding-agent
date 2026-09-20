@@ -7,9 +7,16 @@
       "baseUrl": "http://172.30.70.13:8080/v1",
       "api": "openai-completions",
       "apiKey": "not-needed",
-      "contextWindow": 98304,
-      "maxTokens": 8192,
-      "temperature": 0.6
+      "contextWindow": 81920,
+      "maxTokens": 16384,
+      "temperature": 0.6,
+      "compat": {
+        "extraParams": {
+          "options": {
+            "reasoning_effort": "medium"
+          }
+        }
+      }
     }
   ]
 }
