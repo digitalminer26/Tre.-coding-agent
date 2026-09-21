@@ -361,8 +361,13 @@ export function approvalAnswer(s: TuiState, ok: boolean): TuiState {
 
 /** Lines reserved (blank) below the input line — future status info. */
 export const RESERVED_BOTTOM_LINES = 3;
-/** Top separator + input line + bottom separator + RESERVED_BOTTOM_LINES. */
-export const PINNED_LINES = 6; // top separator + input line + bottom separator + RESERVED_BOTTOM_LINES
+/**
+ * Top separator + input line(1) + bottom separator + RESERVED_BOTTOM_LINES.
+ * The input WRAPS at the terminal width (inputWrap): the MINIMUM block is
+ * 1 input line; the caller adds the extra wrapped lines to the fitItems
+ * budget (extraLines), so the frame stays exactly `rows` tall.
+ */
+export const PINNED_LINES = 6; // top separator + input line(1) + bottom separator + RESERVED_BOTTOM_LINES
 /** header(1) + hint(1) + PINNED_LINES(6). */
 export const FIXED_NON_ITEM_LINES = 8; // header(1) + hint(1) + PINNED_LINES(6)
 
@@ -493,55 +498,67 @@ function dispWidth(s: string): number {
 }
 
 /**
- * Slice `s` to the display-column window [start, end) (clamped to the string).
- * Walks code points so wide/zero-width chars are counted by display width, not
- * code units. The window boundaries are always char boundaries (callers compute
- * them as sums of char widths), so no char is ever cut.
+ * The input line content as an ARRAY of display lines: the input with the
+ * type cursor (▍) rendered at `cursorPos` (where the next character lands),
+ * so the cursor's LOCATION is visible, not just at the end. The cursor is
+ * ALWAYS shown — an empty input renders as the cursor alone (one line).
+ *
+ * Wrapped to at most `width` display columns per line (wide/CJK chars count
+ * as 2). Wrapping is word-aware: an overflowing line breaks at the LAST space
+ * inside it (the space is consumed, never repeated); with no space it
+ * hard-breaks at the column limit. A space that would start a new line is
+ * dropped (no leading spaces). Every line is ≤ `width` display columns, so
+ * the frame geometry (fitItems) can count them exactly.
  */
-function sliceByWidth(s: string, start: number, end: number): string {
-  let out = "";
-  let col = 0;
-  for (const ch of s) {
+export function inputWrap(input: string, cursorPos: number, width: number): string[] {
+  const w = Math.max(1, width);
+  const pos = clampCursor(cursorPos, input.length);
+  const full = input.slice(0, pos) + "\u258d" + input.slice(pos);
+  const lines: string[] = [];
+  let cur = "";
+  let curW = 0;
+  for (const ch of full) {
     const cw = charWidth(ch.codePointAt(0)!);
-    const next = col + cw;
-    if (next > start && col < end) out += ch;
-    col = next;
-    if (col >= end) break;
+    if (curW + cw > w) {
+      // Overflow: break before `ch`, preferring the last space in `cur` at a
+      // display column > 0 (a space at column 0 would yield an empty line).
+      let breakAt = -1;
+      let col = 0;
+      let idx = 0;
+      for (const c of cur) {
+        if (c === " " && col > 0) breakAt = idx;
+        col += charWidth(c.codePointAt(0)!);
+        idx += c.length;
+      }
+      if (breakAt > 0) {
+        lines.push(cur.slice(0, breakAt));
+        cur = cur.slice(breakAt + 1);
+        curW = dispWidth(cur);
+      } else {
+        lines.push(cur);
+        cur = "";
+        curW = 0;
+      }
+      if (ch === " ") continue; // a space never starts a line
+      cur += ch;
+      curW += cw;
+    } else {
+      cur += ch;
+      curW += cw;
+    }
   }
-  return out;
+  lines.push(cur);
+  return lines;
 }
 
 /**
- * The input line content: the input with the type cursor (▍) rendered at
- * `cursorPos` (where the next character lands), so the cursor's LOCATION is
- * visible, not just at the end. The cursor is ALWAYS shown — an empty input
- * renders as the cursor alone (the row is never blank).
- *
- * Truncated to at most one row at `width`: a display-column window that always
- * contains the cursor is kept.
- *  - fits in `width` → the whole string (cursor at its position).
- *  - cursor within the first `width` columns → show columns [0, width) (from
- *    the head, no ellipsis); the tail is trimmed.
- *  - otherwise → a leading "…" (one column) marks the dropped head, then
- *    `width-1` columns of content ending no more than `width-1` columns after
- *    the cursor — so the cursor is always on the row, and a cursor at the END
- *    of a long input reduces to the old behavior (ellipsis + tail + cursor).
+ * How many display lines the input block renders at `width` (1 for empty or
+ * short input; more when the input wraps). MUST stay in lockstep with the
+ * App's input rendering (app.tsx) — it feeds the fitItems budget so the
+ * frame stays exactly `rows` tall while the input wraps.
  */
-export function inputCursor(input: string, cursorPos: number, width: number): string {
-  const w = Math.max(1, width);
-  const pos = clampCursor(cursorPos, input.length);
-  const before = input.slice(0, pos);
-  const after = input.slice(pos);
-  const full = before + "\u258d" + after;
-  const total = dispWidth(full);
-  const cursorCol = dispWidth(before); // 0-based display column of the ▍
-  if (total <= w) return full;
-  if (cursorCol < w) return sliceByWidth(full, 0, w); // cursor near the head
-  // Cursor beyond the head window: reserve one column for the head ellipsis.
-  const avail = w - 1;
-  const right = Math.min(total, cursorCol + avail);
-  const left = right - avail;
-  return "\u2026" + sliceByWidth(full, left, right);
+export function inputWrapLineCount(input: string, cursorPos: number, width: number): number {
+  return Math.max(1, inputWrap(input, cursorPos, width).length);
 }
 
 /** One-line approval question ending in ' [y/N]', truncated to width. */

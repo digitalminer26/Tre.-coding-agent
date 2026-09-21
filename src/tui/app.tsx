@@ -12,9 +12,8 @@ import {
   approvalLine,
   bottomLines,
   fitItems,
-  inputCursor,
+  inputWrap,
   suggestMenu,
-  RESERVED_BOTTOM_LINES,
 } from "./state.js";
 
 /** Truncate a line to at most `w` display columns (ellipsis at the end). */
@@ -50,11 +49,15 @@ export function App(props: AppProps): React.ReactElement {
   // renders BETWEEN the hint and the top separator, so it steals budget
   // from the item area exactly like the approval line does.
   const menu = suggestMenu(state, width);
+  // The input WRAPS at the terminal width (inputWrap): the extra lines beyond
+  // the one the pinned block reserves steal item budget, exactly like the
+  // approval line and the menu do — the frame stays exactly `rows` tall.
+  const inputLines = inputWrap(state.input, state.cursorPos, width);
   const layout = fitItems(
     state.items,
     width,
     rows,
-    (state.approval !== null ? 1 : 0) + menu.length,
+    (state.approval !== null ? 1 : 0) + menu.length + (inputLines.length - 1),
   );
 
   // The keybinding table: the ONLY place that maps keys to intents.
@@ -123,7 +126,7 @@ export function App(props: AppProps): React.ReactElement {
   // Frame, top -> bottom (exactly `rows` lines by construction):
   //   header(1) + visible items + pad + [approval(1)] + hint(1)
   //   + [D16 menu lines (0..MENU_MAX_LINES)]
-  //   + top separator(1) + input line(1) + bottom separator(1)
+  //   + top separator(1) + input (1..N lines, wraps at width) + bottom separator(1)
   //   + RESERVED_BOTTOM_LINES bottom-display lines (D15: /display-bottom).
   return (
     <Box flexDirection="column">
@@ -158,11 +161,14 @@ export function App(props: AppProps): React.ReactElement {
         <Text key={`menu-${i}`} dimColor={!m.selected}>{m.line}</Text>
       ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
-      {/* D15: no 'you' prefix — the input line is plain text. The cursor
-          (inputCursor) renders at state.cursorPos, so its LOCATION is visible
-          (not just at the end); it is always present, so the row is never
-          zero-width and the frame keeps its exact height. */}
-      <Text>{inputCursor(state.input, state.cursorPos, width)}</Text>
+      {/* D15: no 'you' prefix — the input is plain text. The cursor
+          (inputWrap) renders at state.cursorPos, so its LOCATION is visible
+          (not just at the end); it is always present, so the block is never
+          zero-height. The input WRAPS at the terminal width — each wrapped
+          line is one row (the fit budget above accounts for the extras). */}
+      {inputLines.map((line, i) => (
+        <Text key={`input-${i}`}>{line === "" ? " " : line}</Text>
+      ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: the reserved lines are the user-configurable bottom display
           (/display-bottom) — blank when nothing is selected. */}

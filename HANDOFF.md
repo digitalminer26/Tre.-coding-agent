@@ -1,3 +1,51 @@
+# HANDOFF — TUI input wraps at the terminal width (2026-09-21)
+
+## The input line WRAPS at the terminal width instead of truncating (317 tests: 309 pass 0 fail; PTY frame verified)
+
+Before (9c124b7): `inputCursor(input, cursorPos, width)` rendered ONE display
+line — a long input was windowed (head ellipsis + tail around the cursor), so
+the text beyond the window was invisible while editing. Now the input WRAPS:
+every line is ≤ `width` display columns, the whole input is visible, and the
+frame stays exactly `rows` tall (the extra wrapped lines steal item budget,
+exactly like the approval line and the D16 menu).
+
+What changed (one increment, 3 files):
+- **`src/tui/state.ts`** — `inputCursor` + `sliceByWidth` replaced by
+  `inputWrap(input, cursorPos, width): string[]` — the input with the type
+  cursor (▍) at `cursorPos`, wrapped to at most `width` display columns per
+  line (owned `charWidth`/`dispWidth`, wide CJK/Hangul = 2, combining = 0 —
+  no new dependency). Word-aware: an overflowing line breaks at the LAST
+  space inside it (the space is consumed, never repeated); with no space it
+  hard-breaks at the column limit; a space that would start a new line is
+  dropped (no leading spaces). The cursor always renders at its position,
+  across the wrapped lines. New `inputWrapLineCount` (feeds the fit budget).
+  `PINNED_LINES` stays 6 = the MINIMUM block (1 input line); the caller adds
+  the extras.
+- **`src/tui/app.tsx`** — the input row is now `inputLines.map(...)` (one
+  `<Text>` per wrapped line; `""` → `" "` so a line never vanishes); the
+  fitItems budget gains `(inputLines.length - 1)`. Frame comment updated.
+- **`test/tui-pinned-layout.test.ts`** — the `inputCursor` test rewritten as
+  `inputWrap`: empty/short/middle/start cursor, 300×'x' hard-break
+  (80+80+80+60+cursor), word-aware break at the last space, cursor riding
+  across lines, leading-space drop, CJK double-width, and
+  `inputWrapLineCount` (feeds the budget).
+
+Verification: `npm run build` clean; `npm test` 317 tests (309 pass / 0 fail
+/ 8 skip). PTY capture (80-col `script` pty, long 109-char input typed with
+NO trailing `\r` so it stays in the input line): the input renders as TWO
+rows — 76 cols + 33 cols (cursor at the end of the second), the break at the
+last space (space consumed), and the frame is EXACTLY 24 lines tall
+(header + 16 pad + hint + ─ + 2 input + ─ + 3 reserved). No guardrail-zone
+files touched; no new deps.
+
+Next candidates (input-line family): auto-scroll the wrap window when the
+cursor is on a non-visible line of a very long input (the whole input is
+visible now, but a 5000-char paste fills the item area with pad=0 — the
+frame may exceed rows, Ink scrolls); tab/space multi-space collapse at wrap
+points; a `/wrap off` toggle back to the old one-line truncation.
+
+---
+
 # HANDOFF — bash group-kill + sed-regex misparse (2026-09-21) — UNCOMMITTED (guardrail zone)
 
 ## Two fixes, both from 2026-09-20 incidents, both in the guardrail zone — committed by the human with `GUARDRAIL_BYPASS=1`

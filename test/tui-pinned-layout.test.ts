@@ -24,7 +24,8 @@ import {
   itemHeight,
   itemsHeight,
   fitItems,
-  inputCursor,
+  inputWrap,
+  inputWrapLineCount,
   inputMove,
   approvalLine,
   bottomLines,
@@ -95,10 +96,10 @@ const renderApp = (state: TuiState) =>
 
 test("layout constants pin the bottom block", () => {
   assert.equal(RESERVED_BOTTOM_LINES, 3);
-  // top separator + input line + bottom separator + reserved lines
+  // top separator + input line(1, MINIMUM — the input wraps at the terminal
+  // width; the extra wrapped lines are added by the fitItems caller) +
+  // bottom separator + reserved lines.
   // pinned block = top separator(1) + input line(1) + bottom separator(1) + reserved(3) = 6.
-  // (The original spec line said `4 + RESERVED` — off by one vs the design-doc
-  // frame equation 1+visible+pad+(appr?1:0)+1+1+1+1+3==rows, which pins FIXED=8.)
   assert.equal(PINNED_LINES, 3 + RESERVED_BOTTOM_LINES);
   // header (1) + hint (1) + pinned block
   assert.equal(FIXED_NON_ITEM_LINES, 2 + PINNED_LINES);
@@ -238,40 +239,52 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
   assert.equal(r4.pad, 0);
 });
 
-// ── inputCursor / approvalLine ──────────────────────────────────────────
+// ── inputWrap / approvalLine ───────────────────────────────────────────
 
-test("inputCursor: always one row, cursor at its LOCATION, keeps the visible window", () => {
-  // empty input → the cursor alone (the row is never blank)
-  assert.equal(inputCursor("", 0, 80), "\u258d");
+test("inputWrap: word-wraps at width, cursor at its LOCATION, every line ≤ width", () => {
+  // empty input → the cursor alone (one line, never blank)
+  assert.deepEqual(inputWrap("", 0, 80), ["\u258d"]);
 
-  // short input, cursor at the end → passes through + the cursor at the end
-  assert.equal(inputCursor("hello", 5, 80), "hello\u258d");
+  // short input, cursor at the end → one line, passes through + the cursor
+  assert.deepEqual(inputWrap("hello", 5, 80), ["hello\u258d"]);
 
   // cursor in the MIDDLE → the ▍ is at that position, not the end
-  assert.equal(inputCursor("hello", 2, 80), "he\u258dllo");
-  assert.equal(inputCursor("hello", 0, 80), "\u258dhello"); // at the start
+  assert.deepEqual(inputWrap("hello", 2, 80), ["he\u258dllo"]);
+  assert.deepEqual(inputWrap("hello", 0, 80), ["\u258dhello"]); // at the start
 
-  // long input, cursor at the END: tail kept + cursor = exactly one row
-  const long = inputCursor("x".repeat(300), 300, 80);
-  assert.notEqual(long, "x".repeat(300) + "\u258d"); // was truncated
-  assert.ok(wrapLineCount(long, 80) <= 1); // one row at width
-  assert.ok(long.endsWith("\u258d")); // cursor at the end
-  assert.ok(long.startsWith("\u2026")); // head dropped → ellipsis
-  assert.ok(long.endsWith("xxxxx\u258d")); // keeps the TAIL
+  // long input (no spaces) hard-breaks at the column limit: 300×'x' →
+  // 80 + 80 + 80 + (60 + cursor), the cursor at the end of the last line
+  const long = inputWrap("x".repeat(300), 300, 80);
+  assert.deepEqual(long, ["x".repeat(80), "x".repeat(80), "x".repeat(80), "x".repeat(60) + "\u258d"]);
+  for (const l of long) assert.ok(wrapLineCount(l, 80) <= 1);
 
-  // long input, cursor in the MIDDLE: the window is centered on the cursor —
-  // the cursor is visible (not the tail), head + tail both trimmed, one row.
-  const mid = inputCursor("a".repeat(100) + "b".repeat(100), 100, 80);
-  assert.ok(wrapLineCount(mid, 80) <= 1);
-  assert.ok(mid.includes("\u258d")); // the cursor is on the row
-  assert.ok(mid.startsWith("\u2026")); // head (the a's) dropped
-  assert.ok(mid.endsWith("\u258d" + "b".repeat(78))); // tail (b's) after the cursor
+  // word-aware: an overflowing line breaks at the LAST space inside it —
+  // the space is consumed (never repeated), a line never starts with a space.
+  // cursorPos 20 = right after the space before "eeee" → the cursor leads
+  // the last line.
+  const words = inputWrap("aaaa bbbb cccc dddd eeee", 20, 10);
+  assert.deepEqual(words, ["aaaa bbbb", "cccc dddd", "\u258deeee"]);
 
-  // long input, cursor near the START: shown from column 0 (no ellipsis head)
-  const nearStart = inputCursor("x".repeat(300), 3, 80);
-  assert.equal(nearStart.startsWith("\u2026"), false); // no head ellipsis
-  assert.ok(wrapLineCount(nearStart, 80) <= 1);
-  assert.ok(nearStart.includes("\u258d"));
+  // the cursor rides along at its position across the wrapped lines
+  // (cursorPos 9 = after the space following "cc")
+  const mid = inputWrap("aa bb cc dd ee ff", 9, 7);
+  assert.deepEqual(mid, ["aa bb", "cc \u258ddd", "ee ff"]);
+
+  // a space that would start a new line is dropped
+  const leadSpace = inputWrap("aaaaa bbbbb", 10, 6);
+  assert.deepEqual(leadSpace, ["aaaaa", "bbbb\u258db"]);
+
+  // wide (CJK) chars count as 2 display columns (8 chars = 16 cols; the
+  // cursor at pos 8 = the END of the string clamps to the end)
+  const wide = inputWrap("漢字漢字漢字漢字", 8, 10);
+  assert.deepEqual(wide, ["漢字漢字漢", "字漢字\u258d"]);
+  assert.equal(inputWrapLineCount("漢字漢字漢字漢字", 8, 10), 2);
+
+  // inputWrapLineCount: 1 for empty/short, more when wrapped (feeds the
+  // fitItems budget so the frame stays exactly `rows` tall)
+  assert.equal(inputWrapLineCount("", 0, 80), 1);
+  assert.equal(inputWrapLineCount("hello", 5, 80), 1);
+  assert.equal(inputWrapLineCount("x".repeat(300), 300, 80), 4);
 });
 
 test("inputMove: moves the cursor left/right, no-op at the ends", () => {
