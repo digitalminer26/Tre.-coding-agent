@@ -825,6 +825,48 @@ test("WS9: --no-compact keeps the context unsummarized (no summary call)", async
   assert.equal(replayed.entries.some((e) => e.type === "compaction"), false);
 });
 
+test("WS9: sessionless run still compacts (context management, not persistence)", async (t) => {
+  const { dir, models } = await workspace(t);
+  await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
+
+  const seen: { roles: string[]; first: string }[] = [];
+  const base = fakeStream([
+    // turns 1-2: small tool turns — build a multi-unit context (planCompaction
+    // needs ≥ 3 units: 1 foldable + 2 kept)
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo one" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo two" } }] },
+    // turn 3: usage trips the trigger (1900+100+1024 > 2000)
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo three" } }], usage: { input: 1890, output: 10, totalTokens: 1900 } },
+    // the SILENT summarizer call (no tools) — consumed between turns
+    { type: "text", text: "SUMMARY: the earlier turns were answered." },
+    // turn 4: the model answers in the compacted context
+    { type: "text", text: "final" },
+  ]);
+  const streamFn: StreamFn = (model, ctx, o) => {
+    const first = ctx.messages[0]!;
+    seen.push({
+      roles: ctx.messages.map((m) => m.role),
+      first: first.role === "user" ? first.content : String(first.role),
+    });
+    return base(model, ctx, o);
+  };
+
+  const S = mkSinks();
+  // NO --session / --resume: a fresh sessionless one-shot run.
+  const code = await main(["run", "do the thing", "--tools", "bash", "--yes", "--models", models], {
+    streamFn,
+    sinks: S.sinks,
+  });
+  assert.equal(code, 0);
+  assert.match(S.err(), /✂ context compacted/, "compaction is reported even without a session");
+  assert.equal(seen.length, 5, "turns 1-3 + silent summary + turn 4");
+  assert.deepEqual(seen[3]!.roles, ["user"], "the summary call carries only the summarizer prompt");
+  assert.match(seen[3]!.first, /summarize/i);
+  assert.deepEqual(seen[4]!.roles, ["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult"], "turn 4 sees [summary, a1, tr1, a2, tr2, a3, tr3]");
+  assert.match(seen[4]!.first, /Compaction summary of earlier context/);
+  assert.match(seen[4]!.first, /SUMMARY: the earlier turns were answered\./);
+});
+
 test("WS9: failed summary call → run continues uncompacted (I3)", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");

@@ -111,7 +111,7 @@ export interface CliOptions {
   local: boolean;
   /** --ask (pre-D13 default): prompt for every gated call. */
   ask: boolean;
-  /** --no-compact (WS9): disable auto-compaction (default: on with sessions). */
+  /** --no-compact (WS9): disable auto-compaction (default: always on). */
   noCompact: boolean;
   /** --compact-keep (WS9): estimated tokens kept after a compaction. */
   compactKeepTokens: number;
@@ -444,7 +444,8 @@ export async function runTurn(opts: {
   /** WS9: message → session entry id (session-lifetime; resume seeds it
    *  from the replayed context). */
   entryIds?: Map<AgentMessage, string>;
-  /** WS9: disable auto-compaction (default: on when a session exists). */
+  /** WS9: disable auto-compaction (default: on — compaction is context
+   *  management, independent of session persistence). */
   noCompact?: boolean;
   /** WS9: estimated tokens kept after a compaction (default 8192). */
   compactKeepTokens?: number;
@@ -466,11 +467,13 @@ export async function runTurn(opts: {
   // WS9 (D10): between LLM turns, if the last assistant usage would push
   // the next prompt past the window, fold the older messages into a
   // summary (one silent LLM call) and replace the context with
-  // [summary, …kept]. The session gets a `compaction` entry; the UI gets a
-  // context_compacted event. A failed/empty summary call skips compaction
-  // (context unchanged) — it never fails the run (I3).
+  // [summary, …kept]. Compaction is CONTEXT management — it runs whenever
+  // the trigger fires, with or without a session file; the session (when
+  // present) additionally gets a `compaction` entry so a resume replays the
+  // boundary. The UI gets a context_compacted event. A failed/empty summary
+  // call skips compaction (context unchanged) — it never fails the run (I3).
   let prepareNextTurn: ((ctx: AgentMessage[]) => Promise<AgentMessage[] | undefined>) | undefined;
-  if (session && !opts.noCompact) {
+  if (!opts.noCompact) {
     prepareNextTurn = async (ctx: AgentMessage[]) => {
       const r = await compactContext({
         streamFn: opts.streamFn,
@@ -500,14 +503,18 @@ export async function runTurn(opts: {
         }
         return undefined;
       }
-      const firstId = ids.get(r.kept[0]!);
-      if (!firstId) {
-        opts.sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");
-        return undefined;
-      }
-      const entryId = await session.appendCompaction(r.summary, firstId, r.tokensBefore);
       const summaryMsg = makeSummaryMessage(r.summary);
-      ids.set(summaryMsg, entryId);
+      if (session) {
+        // The compaction entry references the first kept message so a resume
+        // knows where the summary boundary is — session-only bookkeeping.
+        const firstId = ids.get(r.kept[0]!);
+        if (!firstId) {
+          opts.sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");
+          return undefined;
+        }
+        const entryId = await session.appendCompaction(r.summary, firstId, r.tokensBefore);
+        ids.set(summaryMsg, entryId);
+      }
       await report({
         type: "context_compacted",
         tokensBefore: r.tokensBefore,
@@ -581,7 +588,7 @@ Options:
   --yes              auto-approve ALL gated calls (except destructive bash)
   --no-approve       never prompt: gated tools are blocked with an error
                      result (fail-closed, for non-interactive runs)
-  --no-compact       disable auto-compaction (on by default with sessions)
+  --no-compact       disable auto-compaction (on by default — context management, session or not)
   --compact-keep <n> estimated tokens to keep after a compaction (default
                      8192)
   --no-sandbox       run bash without the kernel file-access sandbox
