@@ -462,6 +462,38 @@ test("bashOutsidePaths: quotes make text literal (no false outside hits)", () =>
   assert.deepEqual(bashOutsidePaths("cat 'src/a b.ts'", root), []);
 });
 
+test("bashOutsidePaths: sed/awk regex literals are not paths (no false outside hits)", () => {
+  // 2026-09-20 incident: `sed -n '/pat/,/pat2/p' file` mis-parsed the address
+  // RANGE as two absolute paths → "outside the workspace" prompt on a pure
+  // in-workspace command; the unanswered prompt stalled the run ~26 min.
+  const root = "/w";
+  const regexy = [
+    "sed -n '/pat/,/pat2/p' src/a.ts",
+    "sed -n '/opts.ui === \"tui\"/,/return/p' dist/main.js",
+    "sed -n '/pat/p' src/a.ts",
+    "sed -n '/pat/pg' src/a.ts",
+    "awk '/start/,/end/' log.txt",
+    "grep -n '/x/,/y/' notes.md",
+    "sed -i 's/old/new/g' src/a.ts",
+    "sed -i 's|old|new|g' src/a.ts",
+    "sed -i 's#old#new#' src/a.ts",
+  ];
+  for (const cmd of regexy) {
+    assert.deepEqual(bashOutsidePaths(cmd, root), [], `expected inside: ${cmd}`);
+  }
+});
+
+test("bashOutsidePaths: real paths next to regex literals are still flagged", () => {
+  const root = "/w";
+  // The regex exclusion must not swallow a genuine outside path in the same
+  // command (e.g. a sed that edits an in-workspace file then cats /etc/hosts).
+  assert.deepEqual(bashOutsidePaths("sed -n '/pat/p' src/a.ts; cat /etc/hosts", root), ["/etc/hosts"]);
+  // A 3+-letter tail is a path, not a sed flag: /etc/ssh stays promptable.
+  assert.deepEqual(bashOutsidePaths("ls /etc/ssh", root), ["/etc/ssh"]);
+  // A bare /re/ awk pattern without a flag tail stays promptable (conservative).
+  assert.deepEqual(bashOutsidePaths("awk '/home/other/x/' notes.md", root), ["/home/other/x/"]);
+});
+
 test("mode local (default): workspace bash auto-approves without prompting", async (t) => {
   const { root } = await ws(t);
   let asked = 0;

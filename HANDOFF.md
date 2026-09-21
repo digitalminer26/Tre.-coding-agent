@@ -1,4 +1,67 @@
-# HANDOFF — TUI input cursor renders at its position (2026-09-20)
+# HANDOFF — bash group-kill + sed-regex misparse (2026-09-21) — UNCOMMITTED (guardrail zone)
+
+## Two fixes, both from 2026-09-20 incidents, both in the guardrail zone — committed by the human with `GUARDRAIL_BYPASS=1`
+
+Working tree at handoff: dirty, changes in `src/tools/bash.ts`, `src/tools/safety.ts`,
+`src/tools/sandbox.ts`, `test/safety.test.ts`, new `test/bash-kill.test.ts`. Build + full
+suite green: `npm test` → 317 tests, 310 pass / 0 fail / 7 skip (skips are the pre-existing
+conditional ones). **Commit pending human review** — the files are in the guardrail zone
+(`bash.ts`, `safety.ts`, `sandbox.ts`); per self-improve protocol the human commits:
+`GUARDRAIL_BYPASS=1 git commit` after reviewing `git diff`.
+
+### 1 — bash timeout/abort orphaned pipeline children → tool promise never settled → agent loop hang
+
+Incident (proven 2026-09-21): a bash call with no `timeout` ran `sleep 30 | cat`; the
+abort path SIGKILL'd only the direct child (/bin/sh). `sleep` was reparented to launchd,
+kept running, and STILL HELD THE STDOUT PIPE → the child's `close` event never fired →
+`createBashTool`'s promise never resolved → the runLoop hung (the user saw "still
+running"; the session had to be killed).
+
+Fix (`src/tools/bash.ts` + `src/tools/sandbox.ts`):
+- both spawns (plain + `spawnSandboxedBash`) now pass `detached: true` — the shell (or
+  sandbox-exec) leads its OWN process group; `spawnSandboxedBash` gained an optional
+  `detached` pass-through.
+- new `killChild()`: SIGKILL the whole group (`process.kill(-pid)`), fall back to the
+  single child (Windows / group already gone). Timer + abort paths both call it.
+- `finish()` extracted from the `close` handler + a **force-settle backstop**
+  (`FORCE_SETTLE_MS = 10_000`, armed only on the kill paths): if a re-parented orphan
+  somehow keeps a pipe fd open, the promise still settles (as timed-out/aborted) instead
+  of hanging the loop forever.
+
+Verified (live probes on the built dist): timeout 1s on `sleep 55 | cat` — unsandboxed
+and sandboxed — settled in ~1.0s with `pgrep` clean (0 orphans); abort after 300ms —
+settled in ~300ms, 0 orphans; normal completion + exit-code reporting unchanged.
+New `test/bash-kill.test.ts` (4 tests) pins the contract: prompt settle (<10s, not at
+the command's own 55s), no orphans (pgrep marker), sandboxed variant (skips off-darwin),
+normal completion unaffected.
+
+### 2 — `bashOutsidePaths` mis-parsed sed/awk REGEX LITERALS as paths → spurious "outside the workspace" prompt
+
+Incident (2026-09-20): a pure in-workspace command
+`sed -n '/opts.ui === "tui"/,/return/p' dist/src/cli/main.js | head -40` prompted
+`bash: outside the workspace: /opts.ui === "tui"/,/return/p` — the sed ADDRESS RANGE was
+tokenized as two absolute paths. The unanswered prompt stalled the run ~26 minutes
+(the user wasn't watching; a `local`-mode prompt blocks the loop). Root cause:
+`isPathCandidate` flags every token containing `/`; regex literals full of slashes were
+never excluded.
+
+Fix (`src/tools/safety.ts`): new `isRegexLiteral(t)` checked FIRST in
+`isPathCandidate` — conservative (over-prompting is safe, under-prompting is not):
+1. address ranges `/pat/,/pat2/…` — no real path contains `/,`;
+2. flagged addresses `/pat/p`, `/pat/pg` — 1–2 letter flag tail (3+ letters keeps real
+   paths like `/etc/ssh` promptable);
+3. substitutions `s/pat/rep/flags` with ANY non-word delimiter (covers `s|…|…|`,
+   `s#…#…#`) — a relative `s/…/…/` token can only resolve INSIDE the workspace, so
+   skipping it never hides an outside path.
+Unresolvable shapes (bare `/re/` awk patterns, `$VAR`s) still prompt.
+
+Verified: the exact incident command → `[]` (no prompt); real paths in the same
+command still flagged (`sed -n '/pat/p' src/a.ts; cat /etc/hosts` → `["/etc/hosts"]`);
+`/usr/local/` is SAFE (in SAFE_PREFIXES) — a regression-test draft asserted otherwise,
+the test now uses `/home/other/x/`. `test/safety.test.ts` +2 tests (9 regex-literal
+commands → `[]`; real paths next to regex literals still flagged).
+
+## TUI input cursor renders at its position (2026-09-20)
 
 ## Cursor location — the input ▍ now shows WHERE the caret is, not just the end (303 tests: 303 pass 0 fail; PTY frame verified)
 

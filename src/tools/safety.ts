@@ -361,8 +361,33 @@ const STANDALONE_REDIRECTS = new Set([
   ">", ">>", "<", "<>", ">&", "2>", "1>", "2>>", "1>>", "&>", "&>>",
 ]);
 
+/**
+ * sed/awk/grep REGEX LITERALS masquerading as paths. They contain slashes
+ * but are program text, not filesystem locations; classifying them as paths
+ * made `sed -n '/pat/,/pat2/p' file` prompt "outside the workspace" on a
+ * pure in-workspace command (2026-09-20: one such prompt stalled the run
+ * ~26 min because the user wasn't watching).
+ *   1. address ranges:   /pat/,/pat2/flags — no real path contains "/,"
+ *   2. flagged addresses: /pat/p, /pat/pg  — a 1–2 letter flag tail
+ *      (3+ letters keeps real paths like /etc/ssh promptable)
+ *   3. substitutions:    s/pat/rep/flags with ANY non-word delimiter
+ *      (|, #, %, …) — a relative s/…/…/ token can only resolve INSIDE the
+ *      workspace, so skipping it never hides an outside path.
+ * Conservative by design: unresolvable shapes (bare /re/ awk patterns,
+ * $VARs) still prompt — over-prompting is safe, under-prompting is not.
+ */
+function isRegexLiteral(t: string): boolean {
+  if (t.startsWith("/")) {
+    if (t.includes("/,")) return true; // address range /pat/,/pat2/
+    if (/^\/.+\/[a-zA-Z]{1,2}$/.test(t)) return true; // flagged address /pat/p
+  }
+  if (t.length > 2 && t[0] === "s" && !/\w/.test(t[1]!)) return true; // s/…/…/flags
+  return false;
+}
+
 /** True when a bare token looks like (or may carry) a filesystem path. */
 function isPathCandidate(t: string): boolean {
+  if (isRegexLiteral(t)) return false;
   if (t === "~" || t.startsWith("~/")) return true;
   if (t.startsWith("/")) return true;
   if (t.startsWith("./") || t.startsWith("../")) return true;

@@ -281,9 +281,16 @@ export interface SandboxSpawn {
  * when present (its `cd` survives the policy; /bin/sh's does not — see
  * sandboxShell), else /bin/sh.
  */
+/**
+ * Spawn options for the sandboxed child. `detached` (bash tool,
+ * 2026-09-21): the child leads its own process group so the caller can
+ * SIGKILL the whole sandbox-exec→shell→cmd tree on timeout/abort —
+ * killing only sandbox-exec orphans the shell, which keeps the stdout
+ * pipe open and the caller's promise never settles.
+ */
 export async function spawnSandboxedBash(
   command: string,
-  opts: { cwd?: string; env: NodeJS.ProcessEnv },
+  opts: { cwd?: string; env: NodeJS.ProcessEnv; detached?: boolean },
 ): Promise<SandboxSpawn> {
   const dir = await mkdtemp(path.join(tmpdir(), "coding-agent-sb-"));
   const policyPath = path.join(dir, `policy-${randomBytes(8).toString("hex")}.sb`);
@@ -312,6 +319,7 @@ export async function spawnSandboxedBash(
     ? spawn(sandboxShell(), ["-c", command], {
         stdio: ["ignore", "pipe", "pipe"],
         env,
+        ...(opts.detached ? { detached: true } : {}),
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
       })
     : spawn(
@@ -320,6 +328,7 @@ export async function spawnSandboxedBash(
         {
           stdio: ["ignore", "pipe", "pipe"],
           env: { ...env, TRE_SANDBOX: "1" },
+          ...(opts.detached ? { detached: true } : {}),
           ...(opts.cwd ? { cwd: opts.cwd } : {}),
         },
       );

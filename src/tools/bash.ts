@@ -16,6 +16,15 @@
  * a kernel (Seatbelt) sandbox that confines file access to the workspace
  * plus system dirs — see `sandbox.ts` / D12. Off: `{ sandbox: false }`
  * (the CLI's --no-sandbox).
+ *
+ * Timeout/abort kill (2026-09-21): the shell is spawned DETACHED so the
+ * whole command tree (shell + its pipeline children) forms its own process
+ * group, and the kill targets that GROUP. Killing only the direct child
+ * left pipeline orphans alive (SIGKILL the /bin/sh of `sleep 30 | cat`
+ * → sleep keeps running, still holding the stdout pipe → the `close`
+ * event never fires → the tool promise never settles → the agent loop
+ * hangs; proven 2026-09-21). A force-settle timer is the last-resort
+ * backstop in case a re-parented orphan keeps a pipe fd open.
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -34,6 +43,9 @@ const text = (t: string) => [{ type: "text" as const, text: t }];
 
 const DEFAULT_TIMEOUT_S = 120;
 const MEMORY_CAP_BYTES = 1024 * 1024; // keep at most ~1MB per stream in RAM
+
+/** Backstop after a group kill: settle anyway if a pipe is still held. */
+const FORCE_SETTLE_MS = 10_000;
 
 /** Keep only the tail of a growing string, bounded to `cap` bytes, without
  *  splitting the first kept line. */
@@ -85,7 +97,13 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
     let disposePolicy: (() => Promise<void>) | undefined;
     try {
       if (sandboxOn) {
-        const s = await spawnSandboxedBash(a.command, { cwd, env: process.env });
+        const s = await spawnSandboxedBash(a.command, {
+          cwd,
+          env: process.env,
+          // detached: the sandbox-exec→shell→cmd tree forms its own process
+          // group so timeout/abort can kill it whole (see killChild).
+          detached: true,
+        });
         child = s.child;
         disposePolicy = s.dispose;
       } else {
@@ -93,6 +111,8 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
           shell: true,
           stdio: ["ignore", "pipe", "pipe"],
           env: process.env,
+          // detached: the shell leads its own process group (see killChild).
+          detached: true,
           ...(cwd ? { cwd } : {}),
         });
       }
@@ -105,21 +125,51 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
       };
     }
 
+    // SIGKILL the whole process group first (POSIX), then the child itself
+    // as fallback (Windows / already-dead group). Both spawns above are
+    // detached, so the group id IS the child's pid.
+    const killChild = () => {
+      if (child.pid !== undefined && process.platform !== "win32") {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+          return;
+        } catch {
+          /* group already gone — fall through to the single-child kill */
+        }
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already dead */
+      }
+    };
+
     return new Promise<ToolResult>((resolve) => {
       let stdout = "";
       let stderr = "";
       let settled = false;
       let timedOut = false;
       let aborted = false;
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+
+      // Last-resort backstop: a SIGKILL'd group can only fail to release the
+      // pipes if a re-parented orphan re-opened/kept an fd — settle anyway
+      // rather than hang the loop forever. Armed only on the kill paths.
+      const armForceSettle = () => {
+        if (forceTimer || settled) return;
+        forceTimer = setTimeout(() => finish(null, null), FORCE_SETTLE_MS);
+      };
 
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        killChild();
+        armForceSettle();
       }, timeoutS * 1000);
 
       const onAbort = () => {
         aborted = true;
-        child.kill("SIGKILL");
+        killChild();
+        armForceSettle();
       };
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
@@ -142,7 +192,9 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
         });
       });
 
-      child.on("close", (code, sig) => {
+      child.on("close", (code, sig) => finish(code, sig));
+
+      const finish = (code: number | null, sig: NodeJS.Signals | null) => {
         if (settled) return;
         settled = true;
         cleanup();
@@ -183,10 +235,11 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
             details: { truncated: true, fullOutputPath },
           });
         })();
-      });
+      };
 
       function cleanup(): void {
         clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
         signal.removeEventListener("abort", onAbort);
         if (disposePolicy) void disposePolicy();
       }
