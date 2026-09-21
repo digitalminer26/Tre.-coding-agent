@@ -1,4 +1,34 @@
-# HANDOFF — TUI input wraps at the terminal width (2026-09-21)
+# HANDOFF — auto-compaction is session-independent + TUI input wraps (2026-09-21)
+
+## Auto-compaction is ALWAYS ON now — `--no-compact` opts out (318 tests: 311 pass 0 fail 7 skip)
+
+Defect: compaction was gated in `runTurn` on `session && !opts.noCompact` —
+so a SESSIONLESS run (plain `tre. tui`, the default casual mode) had NO
+compaction at all. Context grew unbounded: the 2026-09-20 sessionless TUI run
+OOM'd at the 2GB Node ceiling after ~33 min (28-min "working…", heap at 2.03GB,
+"Ineffective mark-compacts near heap limit"), and HANDOFF's earlier 62.8k-token
+run 400'd at the model window. Compaction is CONTEXT management (staying under
+the model's window); the session file only records the `compaction` entry for
+resume. `compact.ts` was already session-agnostic — the gate was the only fence.
+
+What changed (one increment, 2 files, commit 2fbbddb):
+- **`src/cli/main.ts`** — `runTurn` gate is now `if (!opts.noCompact)`;
+  the `appendCompaction` + message→entry-id bookkeeping moved INSIDE
+  `if (session) { … }` (a sessionless compacted run still gets the context
+  replacement `[summary, …kept]` + the `context_compacted` event, it just
+  has no file to record the boundary in). Doc comments + `--no-compact`
+  usage line updated.
+- **`test/cli.test.ts`** — new WS9 test: a SESSIONLESS `run` with a
+  small-window fake model (3 tool turns, turn 3 usage trips the trigger)
+  → asserts the silent summary call happened, the report line was printed,
+  and turn 4's context starts with the `Compaction summary` user message.
+
+Caveat (still open, next increment): compaction bounds the CONTEXT, but a
+separate ~15-25MB/turn heap growth was measured in a long sessionless TUI
+run (live heap ≈ 2× the context size) — investigation with an instrumented
+repro was in flight (heap snapshots + render-path harness), see session
+notes. The OOM class is now much harder to hit (compaction keeps the context
+small), but the growth should still be pinned down.
 
 ## The input line WRAPS at the terminal width instead of truncating (317 tests: 309 pass 0 fail; PTY frame verified)
 
