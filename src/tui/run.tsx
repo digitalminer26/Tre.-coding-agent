@@ -34,6 +34,9 @@ import {
   menuNav,
   noteError,
   pushUser,
+  scrollBy,
+  scrollToBottom,
+  scrollToTop,
   setApproval,
   submitInput,
   type TuiState,
@@ -194,6 +197,26 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
     onApproval: (ok: boolean): void => setState(approvalAnswer(state, ok)),
     onQuit: (): void => quit(0),
+    // C27: output scrollback — pure state transitions (see state.ts).
+    onScrollBy: (delta: number): void => setState(scrollBy(state, delta)),
+    onScrollToTop: (): void => setState(scrollToTop(state)),
+    onScrollToBottom: (): void => setState(scrollToBottom(state)),
+  };
+
+  // C27: terminal mouse-wheel forwarding (SGR mode 1006) so wheel events
+  // reach the input parser. The DRIVER owns the terminal: enable once here
+  // (never inside a component — a raw write would corrupt the frame
+  // stream). Opt out with TRE_NO_MOUSE=1 (keeps terminal text selection).
+  let mouseMode = false;
+  if (!process.env.TRE_NO_MOUSE) {
+    process.stdout.write("\u001b[?1006h");
+    mouseMode = true;
+  }
+  const restoreMouseMode = (): void => {
+    if (mouseMode) {
+      mouseMode = false;
+      process.stdout.write("\u001b[?1006l");
+    }
   };
 
   app = render(React.createElement(App, { state, ...handlers }), { exitOnCtrlC: false });
@@ -217,12 +240,16 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     // Fallback for non-raw-mode stdin; in raw mode Ink delivers ctrl+c as
     // a key event (handlers.onCtrlC) instead of a process signal.
     if (state.busy) controller.abort();
-    else process.exit(130);
+    else {
+      restoreMouseMode(); // process.exit skips the finally below
+      process.exit(130);
+    }
   };
   process.on("SIGINT", onSigint);
   try {
     await app.waitUntilExit();
   } finally {
+    restoreMouseMode();
     stopPerfSweep();
     process.off("SIGINT", onSigint);
   }

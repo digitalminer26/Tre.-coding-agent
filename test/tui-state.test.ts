@@ -19,6 +19,9 @@ import {
   makeInitialState,
   noteError,
   pushUser,
+  scrollBy,
+  scrollToBottom,
+  scrollToTop,
   setApproval,
   submitInput,
   type TuiItem,
@@ -419,4 +422,53 @@ test("applyEvent: unknown/ignorable events are a no-op", () => {
     applyEvent(withTool, { type: "toolcall_start", index: 0, partial: asst() }),
     withTool,
   );
+});
+
+// ─────────────────────── C27: output scrollback ───────────────────────
+// scrollUp rows above the bottom (0 = follow). Pure transitions here; the
+// row math (clamping, gaps) is pinned in tui-pinned-layout.test.ts.
+
+test("C27: scrollBy moves up (positive) / down (negative), clamped at 0", () => {
+  const s = makeInitialState("m");
+  assert.equal(s.scrollUp, 0);
+  assert.equal(scrollBy(s, 3).scrollUp, 3);
+  assert.equal(scrollBy(s, -5).scrollUp, 0, "clamped at the bottom (0)");
+  const up = scrollBy(s, 10);
+  assert.equal(scrollBy(up, 4).scrollUp, 14);
+  assert.equal(scrollBy(up, -10).scrollUp, 0, "scrolling past the bottom lands at 0");
+});
+
+test("C27: scrollBy returns the SAME state on a no-op (no rerender churn)", () => {
+  const s = makeInitialState("m"); // scrollUp 0 (at the bottom)
+  assert.equal(scrollBy(s, -5), s, "scrolling down at the bottom is a no-op");
+  assert.equal(scrollBy(s, 0), s);
+  assert.equal(scrollToBottom(s), s);
+});
+
+test("C27: scrollToBottom resets; scrollToTop sets the render-clamped sentinel", () => {
+  const s = { ...makeInitialState("m"), scrollUp: 42 };
+  assert.equal(scrollToBottom(s).scrollUp, 0);
+  const top = scrollToTop(s);
+  assert.equal(top.scrollUp, Number.MAX_SAFE_INTEGER);
+  assert.equal(scrollToTop(top), top, "idempotent");
+});
+
+test("C27: submitting a prompt follows the bottom again", () => {
+  const s = { ...makeInitialState("m"), input: "do the thing", scrollUp: 30 };
+  const r = submitInput(s);
+  assert.ok(r !== null);
+  assert.equal(r.state.scrollUp, 0, "fresh run's output is at the bottom");
+  assert.equal(r.state.busy, true);
+});
+
+test("C27: a new run (agent_start) follows the bottom; new items stay frozen", () => {
+  const s = { ...makeInitialState("m"), scrollUp: 12, busy: true };
+  assert.equal(applyEvent(s, { type: "agent_start" }).scrollUp, 0, "agent_start → bottom");
+  // New output while scrolled up does NOT move the window (frozen view).
+  const frozen = applyEvent(s, { type: "text_delta", delta: "more output", partial: asst() });
+  assert.equal(frozen.scrollUp, 12, "output lands below the window");
+});
+
+test("C27: makeInitialState starts at the bottom (scrollUp 0)", () => {
+  assert.equal(makeInitialState("m").scrollUp, 0);
 });

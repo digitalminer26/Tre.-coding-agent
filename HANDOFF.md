@@ -1,3 +1,52 @@
+# HANDOFF — C27: output display scrolling (scrollback) in the TUI (2026-09-22)
+
+## C27 — the TUI output area is scrollable: wheel, PgUp/PgDn, Home/End (361 tests: 354 pass 0 fail 7 skip)
+
+Long runs pushed older output off the top of the frame with no way back —
+the item area only ever showed the TAIL that fit. Now the item area is a
+viewport over the FULL content:
+
+- **Keys** (app.tsx useInput, before the ctrl catch-all):
+  - mouse wheel up/down (SGR mode 1006 + X11 4-byte encodings) → ±3 lines
+  - PageUp/PageDown → ∓one item-area page (Shift halves the page)
+  - Home / Ctrl+Home → top; End / xterm Ctrl+End → bottom
+  - other SGR mouse events (clicks/drags/releases) are swallowed — never
+    typed into the input. Pinned quirk: the alternate Ctrl+End encoding
+    `[1;4~` is misparsed by Ink as shift+home → it goes to top (standard
+    xterm `[1;5F` works correctly; not worth a raw pre-route).
+- **State** (state.ts, pure): `scrollUp` rows above the bottom (0 = follow).
+  `scrollBy` (clamped at 0), `scrollToBottom`, `scrollToTop` (sentinel;
+  the render clamp lands it at the top). `submitInput` and `agent_start`
+  reset to 0 — a fresh run's output is at the bottom. New output while
+  scrolled does NOT move the view (frozen; it lands below the window).
+- **Fit math** (`fitItemsScrollable`): scrollUp 0 is byte-identical to the
+  legacy `fitItems` (every pre-C27 frame unchanged). Scrolled up, the
+  viewport cuts `scrollUp` rows off the bottom of the content; items
+  straddling the window edges are skipped and their rows become blank gap
+  lines (topPad above, pad below) — the frame stays exactly `rows` tall.
+  A window that fits no item degrades to the legacy tail view, never blank.
+- **Mouse mode** (run.tsx, the DRIVER): `\x1b[?1006h` once before render,
+  `\x1b[?1006l` on exit (and before the SIGINT process.exit path). Never in
+  a component — a raw write inside render corrupts the frame stream
+  (learned the hard way: 6 pinned-layout render tests broke). Opt out:
+  `TRE_NO_MOUSE=1` (keeps terminal text selection).
+- **Hint line doubles as scroll status**: at the bottom it now reads
+  `enter send · PgUp/PgDn/wheel scroll · ↑/↓ history · /quit exit`; while
+  frozen: `↑N/M scrolled — PgDn/wheel ↓ to bottom · Home top · /quit exit`.
+- **Scroll is locked while an approval is pending** (approval keys win —
+  they were always first in the key handler; pinned by test).
+- **Files:** `src/tui/state.ts` (scrollUp, fitItemsScrollable, itemAreaBudget,
+  scrollBy/scrollToBottom/scrollToTop), `src/tui/app.tsx` (key routing, gap
+  render, hint), `src/tui/run.tsx` (handlers + mouse mode), tests: 9 new
+  geometry tests, 6 state tests, 5 App key/frame tests, e2e scenario 15
+  (tui-scrollback: real pty, PgUp + SGR wheel + End, mouse-mode enable +
+  restore assertions). Verified in a real PTY: 30-line reply, `↑15/15
+  scrolled` at the top, rc=0.
+
+Known trade-off: SGR mouse mode means terminal text SELECTION inside the
+TUI area is captured by the app (opt out: TRE_NO_MOUSE=1). Wheel scroll is
+the point of enabling it.
+
 # HANDOFF — C26: the turn problem is solved structurally (auto-continue + loop detection) (2026-09-22)
 
 ## C26 — the turn cap is now per-cycle with auto-continue, and the real runaway guard is loop detection (341 tests: 334 pass 0 fail 7 skip)

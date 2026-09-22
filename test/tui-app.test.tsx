@@ -22,6 +22,9 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 50));
 interface Cbs {
   onChar?: (ch: string) => void;
   onBackspace?: () => void;
+  onScrollBy?: (delta: number) => void;
+  onScrollToTop?: () => void;
+  onScrollToBottom?: () => void;
   onMove?: (dir: -1 | 1) => void;
   onHistory?: (dir: -1 | 1) => void;
   onSubmit?: () => void;
@@ -36,6 +39,9 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       state,
       onChar: (ch: string) => cbs?.onChar?.(ch),
       onBackspace: () => cbs?.onBackspace?.(),
+      onScrollBy: (delta: number) => cbs?.onScrollBy?.(delta),
+      onScrollToTop: () => cbs?.onScrollToTop?.(),
+      onScrollToBottom: () => cbs?.onScrollToBottom?.(),
       onMove: (dir: -1 | 1) => cbs?.onMove?.(dir),
       onHistory: (dir: -1 | 1) => cbs?.onHistory?.(dir),
       onSubmit: () => cbs?.onSubmit?.(),
@@ -218,5 +224,122 @@ test("a folded event stream renders as the driver would fold it (state + app int
   assert.match(frame, /bash/);
   assert.match(frame, /ls -la/);
   assert.match(frame, /a\.txt b\.txt/);
+  app.unmount();
+});
+
+// ─────────────────────── C27: output scrollback keys ───────────────────────
+// Key → callback routing (the pure math is pinned in tui-pinned-layout /
+// tui-state). Fake terminal: rows=24 → item-area page = 24 − 8 = 16,
+// half-page = 8.
+
+test("C27: PageUp/PageDown route to onScrollBy with ±page (Shift halves)", async () => {
+  const calls: number[] = [];
+  const app = makeApp(makeInitialState("m"), {
+    onScrollBy: (d: number) => calls.push(d),
+  });
+  app.stdin.write("\x1b[5~"); // PageUp
+  await tick();
+  app.stdin.write("\x1b[6~"); // PageDown
+  await tick();
+  app.stdin.write("\x1b[5;2~"); // Shift+PageUp
+  await tick();
+  app.stdin.write("\x1b[6;2~"); // Shift+PageDown
+  await tick();
+  assert.deepEqual(calls, [16, -16, 8, -8]);
+  app.unmount();
+});
+
+test("C27: Home/End route to onScrollToTop/onScrollToBottom (incl. Ctrl-modified)", async () => {
+  let top = 0, bottom = 0;
+  const app = makeApp(makeInitialState("m"), {
+    onScrollToTop: () => top++,
+    onScrollToBottom: () => bottom++,
+  });
+  app.stdin.write("\x1b[H"); // Home
+  await tick();
+  app.stdin.write("\x1b[4~"); // End
+  await tick();
+  app.stdin.write("\x1b[1;5H"); // Ctrl+Home (parsed as home+ctrl)
+  await tick();
+  app.stdin.write("\x1b[1;5F"); // xterm Ctrl+End (parsed as end+ctrl)
+  await tick();
+  assert.equal(top, 2, "Home + Ctrl+Home → top");
+  assert.equal(bottom, 2, "End + xterm Ctrl+End → bottom");
+  // Pinned quirk: the alternate Ctrl+End encoding `[1;4~` is misparsed by
+  // Ink's keypress parser as shift+home — it lands on top, not bottom.
+  // (Standard xterm sends `[1;5F`, which works. Not worth a raw-input
+  // pre-route for the minority encoding.)
+  app.stdin.write("\x1b[1;4~");
+  await tick();
+  assert.equal(top, 3);
+  assert.equal(bottom, 2);
+  app.unmount();
+});
+
+test("C27: SGR/X11 mouse wheel routes to onScrollBy(±3); clicks are swallowed", async () => {
+  const calls: number[] = [];
+  const chars: string[] = [];
+  const app = makeApp(makeInitialState("m"), {
+    onScrollBy: (d: number) => calls.push(d),
+    onChar: (ch: string) => chars.push(ch),
+  });
+  app.stdin.write("\x1b[<64;10;20M"); // SGR wheel up
+  await tick();
+  app.stdin.write("\x1b[<65;10;20M"); // SGR wheel down
+  await tick();
+  app.stdin.write("\x1b[<62;3;7M"); // X11 wheel up
+  await tick();
+  app.stdin.write("\x1b[<63;3;7M"); // X11 wheel down
+  await tick();
+  app.stdin.write("\x1b[<0;10;20M"); // left click — must NOT be typed
+  await tick();
+  app.stdin.write("\x1b[<64;10;20m"); // wheel release — must NOT double-scroll
+  await tick();
+  assert.deepEqual(calls, [3, -3, 3, -3]);
+  assert.deepEqual(chars, [], "mouse SGR sequences never land in the input");
+  app.unmount();
+});
+
+test("C27: scroll keys are ignored while an approval is pending", async () => {
+  const calls: number[] = [];
+  let answered: boolean | null = null;
+  const s = setApproval(makeInitialState("m"), "run rm -rf / ?", () => {});
+  const app = makeApp(s, {
+    onScrollBy: (d: number) => calls.push(d),
+    onScrollToTop: () => calls.push(-1e9),
+    onScrollToBottom: () => calls.push(1e9),
+    onApproval: (ok: boolean) => {
+      answered = ok;
+    },
+  });
+  app.stdin.write("\x1b[5~");
+  await tick();
+  app.stdin.write("\x1b[H");
+  await tick();
+  assert.deepEqual(calls, [], "scrolling is locked while approving");
+  app.stdin.write("n\r");
+  await tick();
+  assert.equal(answered, false, "approval keys still work");
+  app.unmount();
+});
+
+test("C27: scrolled frame shows older items, the gap, and the scroll status", () => {
+  // Test terminal: width 100, rows 24 → item budget 16. 10 items of 2
+  // lines (200 chars each) = 20 lines total, maxScroll 4.
+  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
+    kind: "user",
+    text: `item-${i} ` + "x".repeat(192),
+  }));
+  const state = { ...makeInitialState("m"), items, scrollUp: 4 }; // at the top
+  const app = makeApp(state);
+  const frame = app.lastFrame() ?? "";
+  // Older items are visible now; the newest are cut off at the bottom.
+  assert.match(frame, /item-0/);
+  assert.match(frame, /item-7/);
+  assert.doesNotMatch(frame, /item-8/);
+  assert.doesNotMatch(frame, /item-9/);
+  // The hint line carries the scroll status.
+  assert.match(frame, /↑4\/4 scrolled/);
+  assert.doesNotMatch(frame, /enter send ·/);
   app.unmount();
 });

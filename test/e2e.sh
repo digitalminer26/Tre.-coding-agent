@@ -25,7 +25,7 @@ MODELS="$ROOT/models.json"
 # write-denied but /private/var/folders (the real $TMPDIR) is the v1 allow.
 # WORK also holds the scenario session files the tre. children must write.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/e2e-XXXXXX")"
-FIRST="${1:-1}"; LAST="${2:-14}"
+FIRST="${1:-1}"; LAST="${2:-15}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -403,6 +403,47 @@ scenario_13() { # eval baseline (D9: regression baseline, variance-annotated)
   echo "$passes/$passes tasks PASS"
 }
 
+scenario_15() { # TUI scrollback (C27): PgUp freezes the view + status hint;
+  # SGR wheel works (mouse mode 1006 on); End returns to the bottom; mouse
+  # mode restored on exit.
+  local D="$WORK/15"; mkdir -p "$D"
+  cat > "$D/feed.sh" <<'EOF'
+# 40 numbered lines at width 80 = ~40 content lines > the 24-row PTY's
+# item budget (24 − 8 = 16) → scrollable.
+printf 'Reply with exactly the numbers 1 through 40, each on its own line, in order. Do not add any other text.\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+# C27: one page up (the item-area budget) — the view freezes above the
+# bottom and the hint line carries the scroll status.
+printf '\x1b[5~'
+sleep 5
+# SGR mouse wheel up — only reachable if the driver enabled mode 1006.
+printf '\x1b[<64;10;20M'
+sleep 4
+# End — back to following the bottom.
+printf '\x1b[4~'
+sleep 4
+quit_retry
+EOF
+  pty_feed 15 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+    --session "$D/s.jsonl" --cwd "$D"
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  # The long reply rendered at all (else there was nothing to scroll).
+  grep -q $'\x1b[?1006h' "$D/out.log" || { echo "mouse mode 1006 never enabled in the pty capture"; return 1; }
+  grep -q $'\x1b[?1006l' "$D/out.log" || { echo "mouse mode 1006 not restored on exit"; return 1; }
+  python3 - "$D/out.log" "$D/plain.txt" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+clean = re.sub(r"\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\-_])", "", raw)
+clean = clean.replace("\r", "")
+open(sys.argv[2], "w").write(clean)
+PY
+  grep -qE '^40[.]?$' "$D/plain.txt" || { echo "line 40 of the reply never rendered — content too short to scroll?"; return 1; }
+  grep -q "scrolled — PgDn/wheel" "$D/plain.txt" || { echo "no scroll status in frames — PgUp/wheel did not scroll"; return 1; }
+  echo "rc=0, 40-line reply rendered, scroll status shown, mouse mode enabled+restored"
+}
+
 scenario_14() { # TUI pinned layout: input row exactly 4 lines above the bottom
   local D="$WORK/14"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
@@ -479,6 +520,7 @@ run_one() {
     12) name="tui-compaction(✂)" ;;
     13) name="eval-baseline" ;;
     14) name="tui-pinned-layout" ;;
+    15) name="tui-scrollback(C27)" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

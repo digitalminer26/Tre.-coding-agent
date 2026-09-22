@@ -74,6 +74,13 @@ export interface TuiState {
   totalTokens: number;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
+  /**
+   * C27: rows scrolled UP from the bottom of the output area (0 = follow
+   * the bottom — the default). The view is frozen while > 0: new output
+   * lands below the window until the user scrolls back down. Clamped to
+   * the scrollable range (total content height − viewport) at render time.
+   */
+  scrollUp: number;
 }
 
 export function makeInitialState(
@@ -94,6 +101,7 @@ export function makeInitialState(
     suggestIdx: null,
     totalTokens: 0,
     info,
+    scrollUp: 0,
   };
 }
 
@@ -101,7 +109,8 @@ export function makeInitialState(
 export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
   switch (ev.type) {
     case "agent_start":
-      return { ...state, busy: true };
+      // C27: a new run's output is the interesting thing — jump to bottom.
+      return { ...state, busy: true, scrollUp: 0 };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -355,7 +364,17 @@ export function submitInput(s: TuiState): { state: TuiState; prompt: string } | 
   const prompt = s.input.trim();
   if (prompt === "") return null;
   return {
-    state: { ...s, input: "", cursorPos: 0, historyIdx: null, history: [...s.history, prompt], busy: true },
+    state: {
+      ...s,
+      input: "",
+      cursorPos: 0,
+      historyIdx: null,
+      history: [...s.history, prompt],
+      busy: true,
+      // C27: a fresh prompt's output is the interesting thing — follow the
+      // bottom again.
+      scrollUp: 0,
+    },
     prompt,
   };
 }
@@ -381,6 +400,38 @@ export function approvalAnswer(s: TuiState, ok: boolean): TuiState {
 }
 
 // ---------------------------------------------------------------------------
+// C27 — output scrollback. Pure state transitions; the row MATH lives in
+// fitItemsScrollable above (it clamps to the scrollable range, so a
+// scrollUp larger than the content is harmless — e.g. after compaction
+// shrank the content, or scrollToTop's sentinel).
+// ---------------------------------------------------------------------------
+
+/**
+ * Scroll the viewport by `delta` ROWS (positive = up toward older content,
+ * negative = down toward the bottom), clamped at 0 (the bottom — the
+ * render-time clamp at the content top happens in fitItemsScrollable, which
+ * knows the content height; this does not).
+ */
+export function scrollBy(s: TuiState, delta: number): TuiState {
+  const next = Math.max(0, s.scrollUp + delta);
+  return next === s.scrollUp ? s : { ...s, scrollUp: next };
+}
+
+/** Back to following the bottom. */
+export function scrollToBottom(s: TuiState): TuiState {
+  return s.scrollUp === 0 ? s : { ...s, scrollUp: 0 };
+}
+
+/**
+ * To the top of the content. The state cannot know the content height,
+ * so this sets a sentinel larger than any terminal can hold; the render
+ * clamp (min(scrollUp, maxScroll)) lands it exactly at the top.
+ */
+export function scrollToTop(s: TuiState): TuiState {
+  return s.scrollUp === Number.MAX_SAFE_INTEGER ? s : { ...s, scrollUp: Number.MAX_SAFE_INTEGER };
+}
+
+// ---------------------------------------------------------------------------
 // D14 — pinned-input layout (frame geometry). Pure functions consumed by the
 // Ink renderer (app.tsx): they compute exact rendered line counts and which
 // tail of items fits the frame. The height math MUST stay in lockstep with
@@ -398,6 +449,15 @@ export const RESERVED_BOTTOM_LINES = 3;
 export const PINNED_LINES = 6; // top separator + input line(1) + bottom separator + RESERVED_BOTTOM_LINES
 /** header(1) + hint(1) + PINNED_LINES(6). */
 export const FIXED_NON_ITEM_LINES = 8; // header(1) + hint(1) + PINNED_LINES(6)
+
+/**
+ * C27: the item area's row budget for the given frame — rows available for
+ * output items after fixed chrome + caller-reserved lines. Exported so the
+ * renderer can size scroll page steps in the same rows the fit uses.
+ */
+export function itemAreaBudget(rows: number, extraLines: number): number {
+  return Math.max(1, rows - FIXED_NON_ITEM_LINES - extraLines);
+}
 
 /**
  * Exact line count Ink renders for a plain full-width `<Text>{text}</Text>`
@@ -492,6 +552,93 @@ export function fitItems(
   }
   const visible = items.slice(start);
   return { visible, pad: Math.max(0, budget - itemsHeight(visible, width)) };
+}
+
+/**
+ * C27 — fit result with scrollback. The item area is a viewport over the
+ * full content (all items, not just the tail): `scrollUp` rows are cut from
+ * the BOTTOM of the content (0 = follow the bottom, exactly the legacy
+ * `fitItems` window). Items straddling the window's edges are skipped —
+ * the rows they would have occupied become blank gap lines (`topPad`
+ * above, `pad` below), so the frame stays exactly `rows` tall. The window
+ * never reorders: `visible` is always a contiguous slice.
+ */
+export interface FitWithScroll {
+  /** Contiguous slice of `items` fully inside the viewport. */
+  visible: TuiItem[];
+  /** Blank lines ABOVE `visible` (top edge gap while scrolled up). */
+  topPad: number;
+  /** Blank lines BELOW `visible` (bottom edge gap / the usual pad). */
+  pad: number;
+  /** Total rendered lines of ALL items at `width` (0 when none). */
+  total: number;
+  /** Scrollable range: max(0, total − budget). */
+  maxScroll: number;
+  /** The scroll actually applied: min(max(0, scrollUp), maxScroll). */
+  eff: number;
+}
+
+export function fitItemsScrollable(
+  items: TuiItem[],
+  width: number,
+  rows: number,
+  extraLines: number,
+  scrollUp: number,
+): FitWithScroll {
+  const budget = itemAreaBudget(rows, extraLines);
+  const total = itemsHeight(items, width);
+  const maxScroll = Math.max(0, total - budget);
+  const eff = Math.min(Math.max(0, scrollUp), maxScroll);
+
+  // Follow-the-bottom (eff 0): byte-identical to the legacy fitItems so
+  // every pre-C27 frame is unchanged.
+  if (eff === 0) {
+    const legacy = fitItems(items, width, rows, extraLines);
+    return {
+      visible: legacy.visible,
+      topPad: 0,
+      pad: legacy.pad,
+      total,
+      maxScroll,
+      eff: 0,
+    };
+  }
+
+  // Scrolled up: the viewport covers content rows [windowTop, windowTop +
+  // budget). Items straddling either edge are skipped (gap lines).
+  const windowTop = maxScroll - eff;
+  const bottomEdge = total - eff;
+  let first = -1;
+  let last = -1;
+  let acc = 0;
+  for (let i = 0; i < items.length; i++) {
+    const h = itemHeight(items[i]!, width);
+    const start = acc;
+    const end = acc + h;
+    if (h > 0 && start >= windowTop && first === -1) first = i;
+    if (h > 0 && end <= bottomEdge) last = i;
+    acc = end;
+  }
+  if (first === -1 || first > last) {
+    // No item sits fully inside the window (e.g. the window lands inside a
+    // single item taller than the budget). Degrade to the legacy tail view
+    // (bottom-pinned, the last item kept whole) rather than a blank window.
+    const legacy = fitItems(items, width, rows, extraLines);
+    return {
+      visible: legacy.visible,
+      topPad: 0,
+      pad: legacy.pad,
+      total,
+      maxScroll,
+      eff,
+    };
+  }
+  const topRow = items.slice(0, first).reduce((a, it) => a + itemHeight(it, width), 0);
+  const topPad = topRow - windowTop;
+  const visible = items.slice(first, last + 1);
+  const bottomRow = items.slice(0, last + 1).reduce((a, it) => a + itemHeight(it, width), 0);
+  const pad = Math.max(0, bottomEdge - bottomRow);
+  return { visible, topPad, pad, total, maxScroll, eff };
 }
 
 /**

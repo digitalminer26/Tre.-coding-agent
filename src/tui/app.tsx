@@ -9,9 +9,10 @@ import { Box, Text, useInput, useStdout } from "ink";
 import cliTruncate from "cli-truncate";
 import type { TuiItem, TuiState } from "./state.js";
 import {
+  FIXED_NON_ITEM_LINES,
   approvalLine,
   bottomLines,
-  fitItems,
+  fitItemsScrollable,
   inputWrap,
   suggestMenu,
 } from "./state.js";
@@ -19,9 +20,25 @@ import {
 /** Truncate a line to at most `w` display columns (ellipsis at the end). */
 const oneLine = (s: string, w: number): string => cliTruncate(s, w, { position: "end" });
 
+// C27 — mouse-wheel scrolling. SGR (mode 1006) and X11 (4-byte) wheel
+// events arrive at Ink as RAW input text (no parsed `name`): button 64/65
+// (SGR) or 62/63 (X11), the `M` suffix = press (one event per notch); the
+// `m` release is ignored (anchored below) so a press+release pair scrolls
+// once. Clicks/drags are other SGR sequences — swallowed, never typed.
+const MOUSE_WHEEL_UP = /^\[<(64|62);\d+;\d+M$/;
+const MOUSE_WHEEL_DOWN = /^\[<(65|63);\d+;\d+M$/;
+const MOUSE_SGR = /^\[</;
+/** One wheel notch scrolls this many lines. */
+const SCROLL_LINES = 3;
+
 export interface AppProps {
   state: TuiState;
   onChar: (ch: string) => void;
+  /** C27: scroll the output area by `delta` rows (negative = up). */
+  onScrollBy: (delta: number) => void;
+  /** C27: jump to the top / bottom of the output. */
+  onScrollToTop: () => void;
+  onScrollToBottom: () => void;
   onBackspace: () => void;
   /** Move the input cursor left (-1) / right (1). */
   onMove: (dir: -1 | 1) => void;
@@ -53,12 +70,18 @@ export function App(props: AppProps): React.ReactElement {
   // the one the pinned block reserves steal item budget, exactly like the
   // approval line and the menu do — the frame stays exactly `rows` tall.
   const inputLines = inputWrap(state.input, state.cursorPos, width);
-  const layout = fitItems(
-    state.items,
-    width,
-    rows,
-    (state.approval !== null ? 1 : 0) + menu.length + (inputLines.length - 1),
-  );
+  // C27: the item area is a scrollable viewport (scrollUp rows above the
+  // bottom). `extra` = the lines reserved below the item area (approval,
+  // menu, wrapped input) — the SAME reservation the fit math uses.
+  const extra = (state.approval !== null ? 1 : 0) + menu.length + (inputLines.length - 1);
+  const layout = fitItemsScrollable(state.items, width, rows, extra, state.scrollUp);
+  // A page = one item-area budget (Shift halves it) — sized in the SAME
+  // rows the fit uses, so PgUp/PgDn move exactly one window of content.
+  // (Mouse-mode setup lives in run.tsx — the driver owns the terminal; a
+  // component must never write raw escapes to stdout, which would corrupt
+  // the frame stream.)
+  const page = Math.max(1, rows - FIXED_NON_ITEM_LINES - extra);
+  const halfPage = Math.max(1, Math.floor(page / 2));
 
   // The keybinding table: the ONLY place that maps keys to intents.
   useInput((input, key) => {
@@ -119,6 +142,40 @@ export function App(props: AppProps): React.ReactElement {
       props.onBackspace();
       return;
     }
+    // C27: scroll the output area. Placed BEFORE the ctrl catch-all below
+    // (Ctrl+Home/End arrive with key.ctrl set) and before the char path
+    // (mouse SGR sequences have no `name` and would be typed otherwise).
+    // delta = rows the viewport moves UP: wheel up / PageUp add, wheel
+    // down / PageDown subtract (scrollBy clamps at the bottom, 0).
+    if (MOUSE_WHEEL_UP.test(input)) {
+      props.onScrollBy(SCROLL_LINES);
+      return;
+    }
+    if (MOUSE_WHEEL_DOWN.test(input)) {
+      props.onScrollBy(-SCROLL_LINES);
+      return;
+    }
+    if (key.pageUp) {
+      props.onScrollBy(key.shift ? halfPage : page);
+      return;
+    }
+    if (key.pageDown) {
+      props.onScrollBy(key.shift ? -halfPage : -page);
+      return;
+    }
+    if (key.home) {
+      props.onScrollToTop();
+      return;
+    }
+    if (key.end) {
+      props.onScrollToBottom();
+      return;
+    }
+    // Any other SGR mouse event (clicks, drags, releases): ignore — it
+    // would otherwise land in the input line as garbage text.
+    if (MOUSE_SGR.test(input)) {
+      return;
+    }
     if (key.tab || key.escape || key.ctrl) return;
     if (input !== "" && !key.meta) props.onChar(input);
   });
@@ -136,6 +193,11 @@ export function App(props: AppProps): React.ReactElement {
           width
         )}
       </Text>
+      {/* C27: the top edge gap while scrolled up (items straddling the
+          window's top edge are skipped; their rows become this blank space). */}
+      {Array.from({ length: layout.topPad }, (_, i) => (
+        <Text key={`toppad-${i}`}> </Text>
+      ))}
       {layout.visible.map((item, i) => (
         // D19: hidden (quiet file-access) items are height-0 placeholders —
         // the fit math already counted them as nothing, so render nothing.
@@ -147,11 +209,15 @@ export function App(props: AppProps): React.ReactElement {
       {state.approval !== null && (
         <Text color="yellow">{approvalLine(state.approval.question, width)}</Text>
       )}
+      {/* C27: the hint line doubles as the scroll status — while the view
+          is frozen above the bottom, say where it is and how to get back. */}
       <Text dimColor>
         {oneLine(
           state.approval !== null
             ? "y approve · n/esc deny"
-            : "enter send · / commands · ↑/↓ history · ←/→ cursor · ctrl+c abort/quit · /quit exit",
+            : layout.eff > 0
+              ? `↑${layout.eff}/${layout.maxScroll} scrolled — PgDn/wheel ↓ to bottom · Home top · /quit exit`
+              : "enter send · PgUp/PgDn/wheel scroll · ↑/↓ history · /quit exit",
           width
         )}
       </Text>
