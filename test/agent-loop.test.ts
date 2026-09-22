@@ -19,7 +19,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fakeStream, type FakeTurn } from "./fake-stream.js";
-import { runLoop, type AgentLoopOptions } from "../src/loop/agent-loop.js";
+import {
+  deriveMaxTurns,
+  runLoop,
+  type AgentLoopOptions,
+} from "../src/loop/agent-loop.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -540,6 +544,87 @@ test("normal short run is unaffected: agent_end stopReason stop, no maxTurns on 
   const end = agentEnd(events);
   assert.equal(end.stopReason, "stop");
   assert.equal(end.maxTurns, undefined, "a normal stop carries no cap");
+});
+
+// ─────────────────────── C24: model-derived turn cap ───────────────────────
+
+test("deriveMaxTurns: scales with contextWindow/maxTokens, ample for large windows", () => {
+  // The headline case: a 200k-window / 8k-output model must get HUNDREDS of
+  // turns of runway (the old hardcoded 32 was far too tight for long jobs).
+  assert.equal(deriveMaxTurns(200_000, 8_000), 250);
+  // Scales with the window (same output cap): bigger window → more turns.
+  assert.ok(deriveMaxTurns(400_000, 8_000) > deriveMaxTurns(200_000, 8_000));
+  // Scales with the output cap (same window): bigger output → fewer turns.
+  assert.ok(deriveMaxTurns(200_000, 16_000) < deriveMaxTurns(200_000, 8_000));
+  // Smaller models scale down; the floor keeps them sane.
+  assert.equal(deriveMaxTurns(80_000, 16_000), 64); // 50 → floored to 64
+  assert.equal(deriveMaxTurns(32_000, 4_096), 78); // 7.8125 × 10 → 78
+});
+
+test("deriveMaxTurns: floor (64) and ceiling (4096) clamp degenerate configs", () => {
+  // Tiny window / huge output cap → ratio < 64 → floored to 64.
+  assert.equal(deriveMaxTurns(1_000, 16_000), 64);
+  // maxTokens <= 0 (degenerate) → no finite ratio → ceiling, not 0/Infinity.
+  assert.equal(deriveMaxTurns(200_000, 0), 4096);
+  assert.equal(deriveMaxTurns(200_000, -5), 4096);
+  // Huge window → ceiling, so a stuck loop still terminates in bounded time.
+  assert.equal(deriveMaxTurns(10_000_000, 8_000), 4096);
+  // Never below the floor, never above the ceiling, always a positive int.
+  for (const [w, m] of [[1, 100], [100, 1], [200_000, 8_000], [1, 1]] as const) {
+    const n = deriveMaxTurns(w, m);
+    assert.ok(Number.isInteger(n) && n >= 64 && n <= 4096, `(${w},${m}) -> ${n}`);
+  }
+});
+
+test("runLoop with NO maxTurns uses the model-derived cap (guard stays on)", async () => {
+  // A model with a small derived cap (32k/4k → 80) — but we make the model
+  // loop forever (always a tool call) and assert the run STOPS with
+  // stopReason "budget" and agent_end.maxTurns === the derived value.
+  // This proves the guard is ON even when maxTurns is not passed.
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = Array.from({ length: 90 }, (_, i) => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: "read", args: {} }],
+  }));
+  const events = await drainLoop(turns, [tool]); // no maxTurns → derived (78)
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "budget", "the derived cap is an explicit budget outcome");
+  assert.equal(end.maxTurns, 78, "agent_end carries the DERIVED cap it hit");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 78);
+});
+
+test("explicit maxTurns overrides the derived cap (smaller and larger)", async () => {
+  const { tool } = makeTool("read");
+  // Smaller than the derived 78: the explicit cap wins.
+  const small = await drainLoop(
+    Array.from({ length: 20 }, (_, i) => ({
+      type: "toolcall",
+      calls: [{ id: `s${i}`, name: "read", args: {} }],
+    })),
+    [tool],
+    { maxTurns: 3 },
+  );
+  assert.equal(agentEnd(small).stopReason, "budget");
+  assert.equal(agentEnd(small).maxTurns, 3);
+  assert.equal(small.filter((e) => e.type === "turn_start").length, 3);
+
+  // Larger than the derived 78: a run that would budget at 78 is allowed to
+  // run PAST it (90 tool turns + a final stop) and complete normally — proving
+  // the raised cap is honored, not the derived one.
+  const big = await drainLoop(
+    [
+      ...Array.from({ length: 90 }, (_, i) => ({
+        type: "toolcall" as const,
+        calls: [{ id: `b${i}`, name: "read", args: {} }],
+      })),
+      { type: "text", text: "done" },
+    ],
+    [tool],
+    { maxTurns: 500 },
+  );
+  assert.equal(agentEnd(big).stopReason, "stop");
+  assert.equal(agentEnd(big).maxTurns, undefined);
+  assert.equal(big.filter((e) => e.type === "turn_start").length, 91);
 });
 
 test("prepareNextTurn can rewrite the next turn's context", async () => {

@@ -27,6 +27,9 @@
  *  - Batch `terminate`: if EVERY result carries `terminate: true`, the run
  *    stops after the batch.
  *  - `prepareNextTurn` hook between turns (WS5 auto-compaction lands here).
+ *  - Turn cap (C24): the runaway-loop guard is ALWAYS on — `maxTurns`
+ *    defaults to `deriveMaxTurns(model.contextWindow, model.maxTokens)`
+ *    (hundreds of turns for a 200k/8k model); an explicit value overrides.
  */
 import type {
   AgentEvent,
@@ -56,7 +59,13 @@ export interface AgentLoopOptions {
   streamFn: StreamFn;
   apiKey?: string;
   signal: AbortSignal;
-  /** Safety cap on LLM turns. Default 32. */
+  /**
+   * Safety cap on LLM turns (the runaway-loop guard). Always on: when
+   * omitted, it is DERIVED from the model's window/output cap via
+   * `deriveMaxTurns` — the guard is never disabled, only resized. An
+   * explicit value (e.g. `--max-turns N`) overrides the derivation,
+   * smaller or larger.
+   */
   maxTurns?: number;
   /**
    * Hook between turns: return a reduced/rewritten context for the next
@@ -69,7 +78,41 @@ export interface AgentLoopOptions {
   executeToolCall?: ExecuteToolCall;
 }
 
-const DEFAULT_MAX_TURNS = 32;
+/**
+ * C24 — derive the runaway-loop turn cap from the model's contextWindow and
+ * maxTokens (the same two parameters auto-compaction keys off, WS9).
+ *
+ * Formula:  maxTurns = clamp( floor( (contextWindow / maxTokens) * 10 ), 64, 4096 )
+ *
+ * Rationale:
+ *  - contextWindow / maxTokens is "how many full responses (each up to
+ *    maxTokens) fit in this model's window" — a natural capability scale that
+ *    grows with the window and shrinks as the output cap grows (a model that
+ *    emits more per turn needs fewer turns for the same job).
+ *  - The cap is a RUNAWAY guard, not a context budget: compaction (WS9) keeps
+ *    the running context bounded, so a legitimate multi-step job's length is
+ *    NOT limited by the window — the cap only has to be large enough that no
+ *    real job ever hits it, and small enough that a genuinely stuck loop
+ *    (zero progress) still dies in bounded time.
+ *  - The ×10 multiplier is what makes it "ample": it gives a 200k-window /
+ *    8k-output model 200000/8000 × 10 = 250 turns — hundreds of turns of
+ *    runway, comfortably above any realistic legitimate job, while a truly
+ *    stuck loop still terminates after 250 calls. Smaller models scale down
+ *    (80k/16k → 50, floored to 64; 32k/4k → 80); the floor/ceiling keep
+ *    degenerate configs (tiny window, huge output cap) sane.
+ *  - Floor 64: even a small window must allow a real job to run (the old
+ *    hardcoded default was 32 — this floor is strictly more generous).
+ *    Ceiling 4096: a stuck loop must still terminate in bounded time.
+ *
+ * The cap stays ON all the time — this only sizes it; an explicit `maxTurns`
+ * option (or `--max-turns N`) overrides the derivation, smaller or larger.
+ */
+export function deriveMaxTurns(contextWindow: number, maxTokens: number): number {
+  const ratio =
+    maxTokens > 0 ? (contextWindow / maxTokens) * 10 : Number.POSITIVE_INFINITY;
+  const turns = Math.floor(ratio);
+  return Math.min(4096, Math.max(64, Number.isFinite(turns) ? turns : 4096));
+}
 
 const LENGTH_GUARD_TEXT =
   "Tool call arguments may be truncated: the response hit the output token " +
@@ -110,7 +153,11 @@ export async function* runLoop(
   options: AgentLoopOptions,
 ): AsyncGenerator<AgentEvent, void, unknown> {
   const { model, systemPrompt, tools, streamFn, apiKey, signal } = options;
-  const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
+  // C24: the runaway-loop guard is always on. An explicit maxTurns wins;
+  // otherwise the cap is DERIVED from the model's window/output cap — never
+  // a hardcoded constant, so the guard is session-independent (like
+  // auto-compaction, WS9).
+  const maxTurns = options.maxTurns ?? deriveMaxTurns(model.contextWindow, model.maxTokens);
   const executeToolCall: ExecuteToolCall =
     options.executeToolCall ??
     ((tool, call, sig, onUpdate) =>

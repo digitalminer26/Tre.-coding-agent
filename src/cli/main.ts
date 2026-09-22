@@ -22,7 +22,8 @@
  *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
  *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.pi/skills then
  *                      ~/.pi/agent/skills (project skills shadow user skills by name)
- *   --max-turns <n>    per-run LLM-turn safety cap (default: 32)
+ *   --max-turns <n>    per-run LLM-turn safety cap (default: derived from the
+ *                      model's contextWindow/maxTokens — see deriveMaxTurns)
  *
  * Behavior:
  *   - Streaming assistant text goes to stdout as deltas; tool lines to stdout;
@@ -100,7 +101,10 @@ export interface CliOptions {
   /** D20: fresh session under ~/.tre/sessions/ (outside any repository). */
   sessionAuto: boolean;
   skillDirs: string[];
-  maxTurns: number;
+  /** C24: undefined = derive from the model (contextWindow/maxTokens);
+   *  an explicit --max-turns N overrides the derivation, smaller or larger.
+   *  The runaway-loop guard is always on — there is no "no cap" state. */
+  maxTurns?: number;
   /** --yes: auto-approve gated tools (except destructive bash). */
   yes: boolean;
   /** --no-approve: never prompt; gated tools are blocked. */
@@ -136,7 +140,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     cwd: process.cwd(),
     sessionAuto: false,
     skillDirs: [],
-    maxTurns: 32,
+    // C24: undefined = derive from the model in runLoop (never hardcoded).
+    maxTurns: undefined,
     yes: false,
     noApprove: false,
     local: false,
@@ -439,7 +444,8 @@ export async function runTurn(opts: {
   session?: SessionType;
   prompt: string;
   sinks: PrintSinks;
-  maxTurns: number;
+  /** C24: undefined = derive the runaway-loop cap from the model. */
+  maxTurns?: number;
   executeToolCall?: ExecuteToolCall;
   /** WS9: message → session entry id (session-lifetime; resume seeds it
    *  from the replayed context). */
@@ -576,7 +582,9 @@ Options:
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
   --skills <dir>     skills dir (repeatable)
-  --max-turns <n>    per-run LLM-turn cap (default 32)
+  --max-turns <n>    per-run LLM-turn cap (default: derived from the model's
+                     contextWindow/maxTokens — hundreds of turns for a large
+                     window; the runaway guard is always on)
   --local            (DEFAULT since D13) auto-approve gated calls scoped to
                      the workspace: bash runs un-prompted while every path it
                      references stays inside the project root or a system

@@ -63,7 +63,8 @@ export interface TuiRunOptions {
   context: AgentMessage[];
   /** Message → session entry id (resume-seeded; runTurn fills new ones). */
   entryIds: Map<AgentMessage, string>;
-  maxTurns: number;
+  /** C24: undefined = derive the runaway-loop cap from the model. */
+  maxTurns?: number;
   /** Builds the safety-wired tool executor for the given approver. */
   buildExecutor: (ask: AskApproval) => ExecuteToolCall;
   noCompact?: boolean;

@@ -29,6 +29,7 @@ import {
   type PrintSinks,
 } from "../src/cli/main.js";
 import { Session, replaySession } from "../src/session/session.js";
+import { deriveMaxTurns } from "../src/loop/agent-loop.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -104,6 +105,16 @@ test("parseArgs: one-shot prompt + flags", () => {
   assert.equal(a.tools, "bash");
   assert.equal(a.modelId, "m1");
   assert.equal(a.maxTurns, 8);
+});
+
+test("parseArgs: C24 — maxTurns defaults to undefined (derive from model); --max-turns overrides", () => {
+  // No --max-turns → undefined, so runLoop derives the cap from the model's
+  // contextWindow/maxTokens (the runaway guard is still on, just resized).
+  assert.equal(parseArgs(["run", "x"]).maxTurns, undefined);
+  assert.equal(parseArgs([]).maxTurns, undefined);
+  // An explicit --max-turns N (smaller or larger) is preserved.
+  assert.equal(parseArgs(["run", "x", "--max-turns", "5"]).maxTurns, 5);
+  assert.equal(parseArgs(["run", "x", "--max-turns", "999"]).maxTurns, 999);
 });
 
 test("parseArgs: REPL mode has no prompt requirement", () => {
@@ -436,6 +447,36 @@ test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
   assert.equal(code, 3);
   assert.match(S.err(), /budget: max 1 turns reached/);
   assert.match(S.err(), /\(resume: --resume .+s\.jsonl\)/);
+});
+
+test("main: C24 — no --max-turns → cap DERIVED from the model (guard stays on)", async (t) => {
+  // A model whose derived cap is the floor (64): 1000-window / 16000-output
+  // → 1000/16000 × 10 = 0.625 → floored to 64. The model loops forever (a
+  // tool call every turn), so the run must STOP at the DERIVED 64 with
+  // stopReason "budget" and exit 3 — proving the guard is on even though the
+  // user passed no --max-turns.
+  const { dir } = await workspace(t);
+  const smallModel: ModelConfig = { ...MODEL, id: "small-model", contextWindow: 1000, maxTokens: 16000 };
+  const models = join(dir, "models.json");
+  await writeFile(models, JSON.stringify({ default: smallModel.id, models: [smallModel] }));
+  const derived = deriveMaxTurns(smallModel.contextWindow, smallModel.maxTokens);
+  assert.equal(derived, 64, "sanity: this model's derived cap is the floor");
+
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--models", models], // NO --max-turns
+    {
+      streamFn: fakeStream(
+        Array.from({ length: 70 }, (_, i) => ({
+          type: "toolcall",
+          calls: [{ name: "ghost", args: {} }],
+        })),
+      ),
+      sinks: S.sinks,
+    },
+  );
+  assert.equal(code, 3, "the derived cap is an explicit budget outcome (exit 3)");
+  assert.match(S.err(), new RegExp(`budget: max ${derived} turns reached`));
 });
 
 test("main: bad model id / missing models file → exit 2", async (t) => {

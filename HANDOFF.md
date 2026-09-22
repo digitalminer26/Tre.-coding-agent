@@ -1,5 +1,37 @@
 # HANDOFF — auto-compaction is session-independent + TUI input wraps (2026-09-21)
 
+## The runaway-loop turn cap is session-independent — derived from the model when `--max-turns` is omitted (325 tests: 317 pass 0 fail 8 skip)
+
+Before: the agent loop's runaway guard used a HARDCODED cap (80 turns) unless
+the caller passed an explicit one — so a large model window still stopped at 80
+and a tiny one still allowed 80; the cap had nothing to do with the model.
+Now (mirrors the auto-compaction fix, commit 2fbbddb) the cap is DERIVED from
+the model's `contextWindow` / `maxTokens` — the same two fields `compact.ts`
+uses — when the user omits `--max-turns`. An explicit `--max-turns N` still
+overrides. The guard stays ALWAYS ON; only its size now tracks the model.
+
+What changed (one increment, 5 files):
+- **`src/loop/agent-loop.ts`** — new `deriveMaxTurns(contextWindow, maxTokens)`:
+  `max(64, min(4096, round(contextWindow / maxTokens × 10)))` — ~10 turns per
+  full context re-fill, floored at 64 (ample for long work) and ceilinged at
+  4096. `runLoop`'s `maxTurns` is now optional: `undefined` → derive from the
+  model. `stopReason: "budget"` + `agent_end.maxTurns` unchanged.
+- **`src/cli/main.ts`** — `--max-turns` is now optional (default `undefined`);
+  `runLoop` receives `args.maxTurns` (undefined → derive). Help/usage updated.
+- **`src/tui/run.tsx`** — `TuiRunOptions.maxTurns` optional (undefined → derive).
+- **`test/agent-loop.test.ts`** — `deriveMaxTurns` unit tests (formula, floor/
+  ceiling clamps, degenerate configs) + a runLoop test: no `maxTurns` → derived
+  cap (78 for the 32k/4096 test model), `stopReason budget`, `agent_end.maxTurns
+  78`; explicit `maxTurns 500` overrides (91 turns complete normally).
+- **`test/cli.test.ts`** — parseArgs: `maxTurns` defaults `undefined`,
+  `--max-turns` preserved; e2e: no `--max-turns` with a small-window model
+  (derived cap 64) → run stops at 64 with `budget`, exit 3.
+
+Caveat: the derived cap is a HEURISTIC (turns-per-context-refill), not a hard
+token budget — a model that emits near-zero tokens per turn still gets the full
+derived cap before the guard trips. Compaction bounds the CONTEXT; this bounds
+the turn COUNT. Both stay on.
+
 ## Auto-compaction is ALWAYS ON now — `--no-compact` opts out (318 tests: 311 pass 0 fail 7 skip)
 
 Defect: compaction was gated in `runTurn` on `session && !opts.noCompact` —
