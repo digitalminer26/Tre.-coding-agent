@@ -434,10 +434,14 @@ test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
   const session = join(dir, "s.jsonl");
   const S = mkSinks();
   const code = await main(
-    ["run", "x", "--tools", "none", "--max-turns", "1", "--models", models, "--session", session],
+    ["run", "x", "--tools", "none", "--max-turns", "1", "--max-continuations", "0",
+     "--models", models, "--session", session],
     {
       streamFn: fakeStream([
         // The model wants another round; the cap breaks the loop first.
+        // --max-continuations 0 pins the pre-C26 hard-stop (C26's default
+        // would auto-continue — and this identical-batch model would trip
+        // loop detection on the 3rd repeat instead).
         { type: "toolcall", calls: [{ name: "ghost", args: {} }] },
         { type: "text", text: "never reached" },
       ]),
@@ -447,6 +451,45 @@ test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
   assert.equal(code, 3);
   assert.match(S.err(), /budget: max 1 turns reached/);
   assert.match(S.err(), /\(resume: --resume .+s\.jsonl\)/);
+});
+
+test("main: C26 — default auto-continue: budget note on stderr, run continues", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--max-turns", "1", "--models", models],
+    {
+      streamFn: fakeStream([
+        { type: "toolcall", calls: [{ name: "ghost", args: { n: 1 } }] },
+        { type: "toolcall", calls: [{ name: "ghost", args: { n: 2 } }] },
+        { type: "text", text: "done after the continuation" },
+      ]),
+      sinks: S.sinks,
+    },
+  );
+  assert.equal(code, 0, "the run completes past the first budget hit");
+  assert.match(S.err(), /turn budget \(1\) reached — continuing \(cycle 1\/4\)/);
+  assert.doesNotMatch(S.err(), /budget: max 1 turns reached/);
+});
+
+test("main: C26 — every continuation spent → budget note names cycles, exit 3", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--max-turns", "1", "--max-continuations", "1", "--models", models],
+    {
+      streamFn: fakeStream(
+        Array.from({ length: 5 }, (_, i) => ({
+          type: "toolcall",
+          calls: [{ name: "ghost", args: { n: i } }],
+        })),
+      ),
+      sinks: S.sinks,
+    },
+  );
+  assert.equal(code, 3);
+  assert.match(S.err(), /turn budget \(1\) reached — continuing \(cycle 1\/2\)/);
+  assert.match(S.err(), /budget: max 1 turns × 2 cycles reached/);
 });
 
 test("main: C24 — no --max-turns → cap DERIVED from the model (guard stays on)", async (t) => {
@@ -464,12 +507,15 @@ test("main: C24 — no --max-turns → cap DERIVED from the model (guard stays o
 
   const S = mkSinks();
   const code = await main(
-    ["run", "x", "--tools", "none", "--models", models], // NO --max-turns
+    ["run", "x", "--tools", "none", "--max-continuations", "0", "--models", models], // NO --max-turns
     {
+      // Distinct args per turn so C26 loop detection (identical batch 3×)
+      // never fires; --max-continuations 0 pins the pre-C26 hard stop so
+      // the test isolates the DERIVED CAP, not the auto-continue.
       streamFn: fakeStream(
         Array.from({ length: 70 }, (_, i) => ({
           type: "toolcall",
-          calls: [{ name: "ghost", args: {} }],
+          calls: [{ name: "ghost", args: { n: i } }],
         })),
       ),
       sinks: S.sinks,

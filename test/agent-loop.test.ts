@@ -20,6 +20,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fakeStream, type FakeTurn } from "./fake-stream.js";
 import {
+  BUDGET_CONTINUE_TEXT,
+  LOOP_GUARD_TEXT,
+  batchSignature,
   deriveMaxTurns,
   runLoop,
   type AgentLoopOptions,
@@ -508,12 +511,13 @@ test("tool that throws (I3 violation) → error result, run survives", async () 
 // ─────────────────────────── caps & hooks ───────────────────────────
 
 test("maxTurns caps the number of LLM turns (cap-hit is an explicit budget outcome)", async () => {
+  // maxContinuations: 0 — the pre-C26 hard-stop semantics (no auto-continue).
   const { tool } = makeTool("read");
   const turns: FakeTurn[] = [
     { type: "toolcall", calls: [{ id: "c1", name: "read", args: {} }] },
     { type: "text", text: "never reached" },
   ];
-  const events = await drainLoop(turns, [tool], { maxTurns: 1 });
+  const events = await drainLoop(turns, [tool], { maxTurns: 1, maxContinuations: 0 });
   const end = agentEnd(events);
   assert.equal(events.filter((e) => e.type === "turn_start").length, 1);
   assert.equal(end.stopReason, "budget", "the cap-hit is an explicit budget outcome");
@@ -527,7 +531,7 @@ test("maxTurns=2 with a model that keeps issuing tool calls → agent_end stopRe
     { type: "toolcall", calls: [{ id: "c2", name: "read", args: {} }] },
     { type: "text", text: "never reached" },
   ];
-  const events = await drainLoop(turns, [tool], { maxTurns: 2 });
+  const events = await drainLoop(turns, [tool], { maxTurns: 2, maxContinuations: 0 });
   const end = agentEnd(events);
   assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
   assert.equal(end.stopReason, "budget");
@@ -581,12 +585,15 @@ test("runLoop with NO maxTurns uses the model-derived cap (guard stays on)", asy
   // loop forever (always a tool call) and assert the run STOPS with
   // stopReason "budget" and agent_end.maxTurns === the derived value.
   // This proves the guard is ON even when maxTurns is not passed.
+  // maxContinuations: 0 pins the pre-C26 semantics for this test (the
+  // point here is the DERIVED cap, not auto-continuation). Distinct args
+  // per turn so C26 loop detection (identical batch 3×) never interferes.
   const { tool } = makeTool("read");
   const turns: FakeTurn[] = Array.from({ length: 90 }, (_, i) => ({
     type: "toolcall",
-    calls: [{ id: `c${i}`, name: "read", args: {} }],
+    calls: [{ id: `c${i}`, name: "read", args: { n: i } }],
   }));
-  const events = await drainLoop(turns, [tool]); // no maxTurns → derived (78)
+  const events = await drainLoop(turns, [tool], { maxContinuations: 0 }); // no maxTurns → derived (78)
   const end = agentEnd(events);
   assert.equal(end.stopReason, "budget", "the derived cap is an explicit budget outcome");
   assert.equal(end.maxTurns, 78, "agent_end carries the DERIVED cap it hit");
@@ -599,10 +606,10 @@ test("explicit maxTurns overrides the derived cap (smaller and larger)", async (
   const small = await drainLoop(
     Array.from({ length: 20 }, (_, i) => ({
       type: "toolcall",
-      calls: [{ id: `s${i}`, name: "read", args: {} }],
+      calls: [{ id: `s${i}`, name: "read", args: { n: i } }], // distinct: no loop detection
     })),
     [tool],
-    { maxTurns: 3 },
+    { maxTurns: 3, maxContinuations: 0 }, // pre-C26 hard stop (this test is about the cap)
   );
   assert.equal(agentEnd(small).stopReason, "budget");
   assert.equal(agentEnd(small).maxTurns, 3);
@@ -615,7 +622,7 @@ test("explicit maxTurns overrides the derived cap (smaller and larger)", async (
     [
       ...Array.from({ length: 90 }, (_, i) => ({
         type: "toolcall" as const,
-        calls: [{ id: `b${i}`, name: "read", args: {} }],
+        calls: [{ id: `b${i}`, name: "read", args: { n: i } }], // distinct: no loop detection
       })),
       { type: "text", text: "done" },
     ],
@@ -682,4 +689,171 @@ test("prepareNextTurn can rewrite the next turn's context", async () => {
       timestamp: 0,
     },
   ]);
+});
+
+// ─────────────────────── C26: smart turn budget ───────────────────────
+// The turn cap is per-CYCLE: at exhaustion the loop injects a continuation
+// nudge and resets the counter (up to maxContinuations times). The real
+// runaway protection is LOOP DETECTION: the same batch 3× in a row is not
+// executed on the third repeat and the run stops with stopReason "loop".
+
+test("C26: budget exhaustion auto-continues — nudge injected, counter reset, run completes", async () => {
+  const { tool, calls } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { n: 1 } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "read", args: { n: 2 } }] },
+    { type: "text", text: "done after the continuation" },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 2 }); // default continuations
+  const end = agentEnd(events);
+  // Turn 3 was only possible because the budget hit auto-continued.
+  assert.equal(end.stopReason, "stop", "the run completes past the first budget hit");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 3);
+  const budget = events.filter((e) => e.type === "turn_budget");
+  assert.equal(budget.length, 1, "one turn_budget event at the first exhaustion");
+  assert.deepEqual(
+    budget[0],
+    { type: "turn_budget", turn: 2, cycle: 1, maxCycles: 4, maxTurns: 2 },
+  );
+  // The nudge text is in the final context (the model saw it).
+  const nudges = end.messages.filter(
+    (m) => m.role === "user" && m.content === BUDGET_CONTINUE_TEXT,
+  );
+  assert.equal(nudges.length, 1, "BUDGET_CONTINUE_TEXT injected into context");
+  // Both tool calls executed (the budget hit happened BETWEEN turns).
+  assert.equal(calls.length, 2);
+});
+
+test("C26: every continuation spent → stopReason budget + maxCycles on agent_end", async () => {
+  const { tool, calls } = makeTool("read");
+  const turns: FakeTurn[] = Array.from({ length: 5 }, (_, i) => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: "read", args: { n: i } }],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 1, maxContinuations: 1 });
+  const end = agentEnd(events);
+  // Cycle 1: turn 1. Budget. Continuation 1: turn 2. Budget. Spent → stop.
+  assert.equal(end.stopReason, "budget");
+  assert.equal(end.maxTurns, 1);
+  assert.equal(end.maxCycles, 2, "agent_end carries the cycle count");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+  assert.equal(events.filter((e) => e.type === "turn_budget").length, 1);
+  assert.equal(calls.length, 2);
+});
+
+test("C26: maxContinuations 0 → legacy hard stop at the first budget hit", async () => {
+  const { tool, calls } = makeTool("read");
+  const turns: FakeTurn[] = Array.from({ length: 5 }, (_, i) => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: "read", args: { n: i } }],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 2, maxContinuations: 0 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "budget");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+  assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
+});
+
+test("C26: loop detection — same batch 3× → third NOT executed, stopReason loop", async () => {
+  const { tool, calls } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
+    type: "toolcall",
+    calls: [same],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop", "three identical batches stop the run");
+  assert.equal(end.maxTurns, undefined, "a loop stop is not a budget stop");
+  // Only the first TWO repeats executed — the third was guarded.
+  assert.equal(calls.length, 2, "the 3rd identical batch was not executed");
+  // The guarded batch still got in-band error results (I3).
+  const guardedResults = events.filter(
+    (e) => e.type === "tool_execution_end" && e.result.isError === true,
+  );
+  assert.equal(guardedResults.length, 1, "the guarded call got one error result");
+  const text = (guardedResults[0] as Extract<AgentEvent, { type: "tool_execution_end" }>)
+    .result.content[0] as { type: "text"; text: string };
+  assert.match(text.text, /Runaway loop detected/);
+  // No turn_budget was involved.
+  assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
+});
+
+test("C26: two identical batches are ALLOWED (legit retry) — only 3 in a row trips", async () => {
+  const { tool, calls } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "read", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "read", args: { path: "y" } }] },
+    { type: "text", text: "ok" },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(calls.length, 3, "all three batches executed (2×x then y)");
+  assert.equal(events.filter((e) => e.type === "tool_execution_end").length, 3);
+});
+
+test("C26: loop history resets when a DIFFERENT batch intervenes", async () => {
+  const { tool, calls } = makeTool("read");
+  const a = { id: "a", name: "read", args: { path: "a" } };
+  const b = { id: "b", name: "read", args: { path: "b" } };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [a] },
+    { type: "toolcall", calls: [a] }, // two a's — not yet a loop
+    { type: "toolcall", calls: [b] }, // different batch breaks the chain
+    { type: "toolcall", calls: [a] }, // a again — chain is [b, a], no loop
+    { type: "text", text: "ok" },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  assert.equal(agentEnd(events).stopReason, "stop");
+  assert.equal(calls.length, 4);
+});
+
+test("C26: length-guarded batches count toward the loop signature too", async () => {
+  // A model stuck re-issuing the SAME truncated call: length-guard errors
+  // on repeats 1–2, loop detection stops it on repeat 3 (not after the
+  // full cycle budget).
+  const { tool, calls } = makeTool("read");
+  const truncated = { id: "t1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
+    type: "length",
+    calls: [truncated],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop", "3× identical truncated batch → loop");
+  assert.equal(calls.length, 0, "truncated calls are never executed");
+  // Repeats 1–2 got the length-guard text, repeat 3 got the loop text.
+  const ends = events.filter(
+    (e) => e.type === "tool_execution_end" && e.result.isError === true,
+  ) as Extract<AgentEvent, { type: "tool_execution_end" }>[];
+  assert.equal(ends.length, 3);
+  assert.match(ends[0]!.result.content[0]!.text, /truncated/);
+  assert.match(ends[1]!.result.content[0]!.text, /truncated/);
+  assert.match(ends[2]!.result.content[0]!.text, /Runaway loop detected/);
+});
+
+test("C26: batchSignature — stable across key order, sensitive to tool/args", () => {
+  const s1 = batchSignature([{ type: "toolCall", id: "x", name: "read", arguments: { a: 1, b: [2, 3] } }]);
+  const s2 = batchSignature([{ type: "toolCall", id: "y", name: "read", arguments: { b: [2, 3], a: 1 } }]);
+  assert.equal(s1, s2, "key order and call ids do not change identity");
+  assert.notEqual(
+    s1,
+    batchSignature([{ type: "toolCall", id: "x", name: "read", arguments: { a: 2, b: [2, 3] } }]),
+    "different args → different signature",
+  );
+  assert.notEqual(
+    s1,
+    batchSignature([{ type: "toolCall", id: "x", name: "write", arguments: { a: 1, b: [2, 3] } }]),
+    "different tool → different signature",
+  );
+  assert.notEqual(
+    s1,
+    batchSignature([
+      { type: "toolCall", id: "x", name: "read", arguments: { a: 1 } },
+      { type: "toolCall", id: "z", name: "read", arguments: { b: 2 } },
+    ]),
+    "different batch shape → different signature",
+  );
 });

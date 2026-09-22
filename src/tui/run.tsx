@@ -64,8 +64,11 @@ export interface TuiRunOptions {
   context: AgentMessage[];
   /** Message → session entry id (resume-seeded; runTurn fills new ones). */
   entryIds: Map<AgentMessage, string>;
-  /** C24: undefined = derive the runaway-loop cap from the model. */
+  /** C24: undefined = derive the runaway-loop cap from the model.
+   *  C26: per-cycle budget (the loop auto-continues on exhaustion). */
   maxTurns?: number;
+  /** C26: undefined = default continuation count; 0 = legacy hard stop. */
+  maxContinuations?: number;
   /** Builds the safety-wired tool executor for the given approver. */
   buildExecutor: (ask: AskApproval) => ExecuteToolCall;
   noCompact?: boolean;
@@ -117,6 +120,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         prompt,
         sinks: NULL_SINKS,
         maxTurns: opts.maxTurns,
+        maxContinuations: opts.maxContinuations,
         executeToolCall: executor,
         entryIds: opts.entryIds,
         noCompact: opts.noCompact,

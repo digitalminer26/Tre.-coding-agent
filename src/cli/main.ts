@@ -22,8 +22,13 @@
  *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
  *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.pi/skills then
  *                      ~/.pi/agent/skills (project skills shadow user skills by name)
- *   --max-turns <n>    per-run LLM-turn safety cap (default: derived from the
+ *   --max-turns <n>    per-cycle LLM-turn budget (default: derived from the
  *                      model's contextWindow/maxTokens — see deriveMaxTurns)
+ *   --max-continuations <n>
+ *                      C26: how many times the loop auto-continues when a
+ *                      cycle's budget is exhausted (default 3 → 4 cycles).
+ *                      The runaway-loop guard (3 identical batches in a row)
+ *                      is always on, regardless of this value.
  *
  * Behavior:
  *   - Streaming assistant text goes to stdout as deltas; tool lines to stdout;
@@ -103,8 +108,12 @@ export interface CliOptions {
   skillDirs: string[];
   /** C24: undefined = derive from the model (contextWindow/maxTokens);
    *  an explicit --max-turns N overrides the derivation, smaller or larger.
+   *  C26: the cap is per-CYCLE — the loop auto-continues on exhaustion.
    *  The runaway-loop guard is always on — there is no "no cap" state. */
   maxTurns?: number;
+  /** C26: undefined = default (3 auto-continuations → 4 cycles).
+   *  0 restores the old hard-stop-at-first-budget-hit behavior. */
+  maxContinuations?: number;
   /** --yes: auto-approve gated tools (except destructive bash). */
   yes: boolean;
   /** --no-approve: never prompt; gated tools are blocked. */
@@ -142,6 +151,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     skillDirs: [],
     // C24: undefined = derive from the model in runLoop (never hardcoded).
     maxTurns: undefined,
+    // C26: undefined = default continuation count (4 cycles) in runLoop.
+    maxContinuations: undefined,
     yes: false,
     noApprove: false,
     local: false,
@@ -162,7 +173,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
-               a === "--compact-keep") {
+               a === "--max-continuations" || a === "--compact-keep") {
       const v = argv[i + 1];
       if (v === undefined) {
         opts.errors.push(`${a} needs a value`);
@@ -180,6 +191,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
         const n = Number(v);
         if (!Number.isInteger(n) || n <= 0) opts.errors.push("--max-turns must be a positive integer");
         else opts.maxTurns = n;
+      } else if (a === "--max-continuations") {
+        // C26: 0 is valid (legacy hard-stop) — non-negative integer.
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0) opts.errors.push("--max-continuations must be a non-negative integer");
+        else opts.maxContinuations = n;
       } else {
         const n = Number(v);
         if (!Number.isInteger(n) || n <= 0) opts.errors.push("--compact-keep must be a positive integer");
@@ -280,6 +296,8 @@ export interface RunAgentOptions {
     | undefined
     | Promise<AgentMessage[] | undefined>;
   maxTurns?: number;
+  /** C26: undefined = default (3 auto-continuations); 0 = legacy hard stop. */
+  maxContinuations?: number;
   /** Tool pipeline (WS7 safety hooks); default: raw tool.execute. */
   executeToolCall?: ExecuteToolCall;
 }
@@ -307,6 +325,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunOutcome> {
     signal: opts.signal,
     prepareNextTurn: opts.prepareNextTurn,
     maxTurns: opts.maxTurns,
+    maxContinuations: opts.maxContinuations,
     executeToolCall: opts.executeToolCall,
   })) {
     await opts.onEvent?.(ev);
@@ -339,8 +358,13 @@ export function exitCodeFor(stopReason: StopReason): number {
       // Ran out of turns while the model still wanted to call a tool.
       return 1;
     case "budget":
-      // The per-run turn cap was reached — explicit, resumable (distinct
-      // from 0 = done, 1 = provider error, 2 = usage error).
+      // C26: every cycle's turn budget was exhausted (the loop auto-
+      // continues per cycle) — explicit, resumable (distinct from 0 =
+      // done, 1 = provider error, 2 = usage error).
+      return 3;
+    case "loop":
+      // C26: runaway-loop detection stopped the run (3 identical batches
+      // in a row) — resumable like budget: a new prompt breaks the pattern.
       return 3;
   }
 }
@@ -394,6 +418,12 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         `\n✂ context compacted: ~${Math.round(ev.tokensBefore / 100) / 10}k tokens → summary (${ev.summaryChars} chars) + last ${ev.messagesKept} message(s) kept\n`,
       );
       break;
+    case "turn_budget":
+      // C26: informational — the run continues on a fresh cycle.
+      sinks.err.write(
+        `\n⏳ turn budget (${ev.maxTurns}) reached — continuing (cycle ${ev.cycle}/${ev.maxCycles})\n`,
+      );
+      break;
     case "agent_end":
       if (ev.stopReason === "error") {
         const last = ev.messages[ev.messages.length - 1]!;
@@ -404,12 +434,20 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       } else if (ev.stopReason === "length") {
         sinks.err.write(`\n${lengthEndNote(ev.messages)}\n`);
       } else if (ev.stopReason === "budget") {
+        // C26: name the cycles only when more than one actually ran.
         const note =
           ev.maxTurns !== undefined
-            ? `budget: max ${ev.maxTurns} turns reached`
+            ? ev.maxCycles !== undefined && ev.maxCycles > 1
+              ? `budget: max ${ev.maxTurns} turns × ${ev.maxCycles} cycles reached`
+              : `budget: max ${ev.maxTurns} turns reached`
             : "budget: turn cap reached";
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(`\n${note}${resume}\n`);
+      } else if (ev.stopReason === "loop") {
+        const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
+        sinks.err.write(
+          `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${resume}\n`,
+        );
       }
       break;
     default:
@@ -444,8 +482,11 @@ export async function runTurn(opts: {
   session?: SessionType;
   prompt: string;
   sinks: PrintSinks;
-  /** C24: undefined = derive the runaway-loop cap from the model. */
+  /** C24: undefined = derive the runaway-loop cap from the model.
+   *  C26: per-cycle budget (the loop auto-continues on exhaustion). */
   maxTurns?: number;
+  /** C26: undefined = default continuation count; 0 = legacy hard stop. */
+  maxContinuations?: number;
   executeToolCall?: ExecuteToolCall;
   /** WS9: message → session entry id (session-lifetime; resume seeds it
    *  from the replayed context). */
@@ -555,6 +596,7 @@ export async function runTurn(opts: {
     onEvent,
     prepareNextTurn,
     maxTurns: opts.maxTurns,
+    maxContinuations: opts.maxContinuations,
     executeToolCall: opts.executeToolCall,
   });
 
@@ -827,6 +869,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       context,
       entryIds,
       maxTurns: args.maxTurns,
+      maxContinuations: args.maxContinuations,
       buildExecutor,
       noCompact: args.noCompact,
       compactKeepTokens: args.compactKeepTokens,
@@ -856,7 +899,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
       const { outcome } = await runTurn({
         model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-        prompt: args.prompt!, sinks, maxTurns: args.maxTurns,
+        prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
         executeToolCall: executor,
         entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
       });
@@ -951,7 +994,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       try {
         const result = await runTurn({
           model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-          prompt, sinks, maxTurns: args.maxTurns,
+          prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
           executeToolCall: executor,
           entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
         });

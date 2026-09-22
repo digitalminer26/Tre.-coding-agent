@@ -58,10 +58,14 @@ export interface Usage {
  *   toolUse  — model wants to call tools
  *   error    — provider/transport failure; see errorMessage
  *   aborted  — AbortSignal fired; the partial is kept in context
- *   budget   — the loop's per-run maxTurns cap was hit; set by the LOOP
- *              (never a wire finish_reason); the run is resumable
+ *   budget   — C26: EVERY cycle's turn budget was exhausted (the loop
+ *              auto-continues per cycle; this is the final stop); set by
+ *              the LOOP (never a wire finish_reason); the run is resumable
+ *   loop     — C26: the model issued the same tool-call batch 3 times in
+ *              a row (runaway-loop detection); the third repeat was not
+ *              executed; set by the LOOP; the run is resumable
  */
-export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted" | "budget";
+export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted" | "budget" | "loop";
 
 export interface UserMessage {
   role: "user";
@@ -153,11 +157,33 @@ export type AgentEvent =
       /** Final context — what the session layer appends to the JSONL file. */
       messages: AgentMessage[];
       /**
-       * Present when stopReason === "budget": the per-run cap that was hit
-       * (so the UI can name it). The cap is per-run — a new prompt starts
-       * a new run with a fresh count.
+       * Present when stopReason === "budget": the per-CYCLE cap that was
+       * hit (so the UI can name it). A new prompt starts a new run with a
+       * fresh count.
        */
       maxTurns?: number;
+      /**
+       * Present when stopReason === "budget": how many cycles the run got
+       * (maxContinuations + 1) — the UI says "max N turns × M cycles
+       * reached".
+       */
+      maxCycles?: number;
+    }
+  | {
+      /**
+       * C26 — a cycle's turn budget was exhausted and the loop auto-
+       * continues (counter reset). Informational, not an error: the run
+       * keeps going. Emitted by the loop between turns.
+       */
+      type: "turn_budget";
+      /** Turn counter at the moment of exhaustion. */
+      turn: number;
+      /** Continuation number, 1-based (1 = the 2nd cycle begins). */
+      cycle: number;
+      /** Total cycles allowed (maxContinuations + 1). */
+      maxCycles: number;
+      /** The per-cycle cap that was exhausted. */
+      maxTurns: number;
     }
   | { type: "turn_start"; turn: number }
   | { type: "turn_end"; turn: number }

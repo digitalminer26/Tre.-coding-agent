@@ -37,8 +37,20 @@ Rules:
 - **`toolCall.arguments` is a parsed object** — the wire layer owns JSON
   parse + salvage; everything downstream gets an object or an error.
 - **`stopReason` is the outcome channel**: `stop | length | toolUse |
-  error | aborted`. `length` is load-bearing: the loop must fail *all* tool
-  calls in that message (truncated args may parse yet be incomplete).
+  error | aborted | budget | loop` (C26 added the last two). `length` is
+  load-bearing: the loop must fail *all* tool calls in that message
+  (truncated args may parse yet be incomplete). `budget`/`loop` are set by
+  the LOOP (never a wire finish_reason) and both are resumable.
+- **C26 — the turn budget is per-cycle, and the runaway guard is
+  pattern-based.** `maxTurns` (derived or explicit) caps one *cycle*; at
+  exhaustion the loop injects `BUDGET_CONTINUE_TEXT` (a user message) and
+  resets the counter, emitting `turn_budget`, up to `maxContinuations`
+  times (default 3 → 4 cycles). Only when every continuation is spent does
+  the run stop with `budget`. Independently, the same tool-call batch
+  (tool names + stable-JSON arguments, in order) issued 3 times in a row
+  is a runaway-loop signature: the third repeat is failed in-band with
+  `LOOP_GUARD_TEXT` (never executed) and the run stops with `loop`.
+  Two identical batches remain allowed (legit retries exist).
 
 ## Contract 2 — Events
 
@@ -72,7 +84,8 @@ Invariants:
 | `tool_execution_update`   | optional progress            | `toolCallId`, `text`                       |
 | `tool_execution_end`      | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
 | `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars` |
-| `agent_end`               | run ends                     | `stopReason`, `messages` (final context)   |
+| `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
+| `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"` |
 
 ## Contract 3 — `StreamFn`
 

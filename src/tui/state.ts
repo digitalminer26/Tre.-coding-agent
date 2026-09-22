@@ -116,16 +116,44 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       } else if (ev.stopReason === "length") {
         items = [...items, { kind: "error", text: lengthEndNote(ev.messages) }];
       } else if (ev.stopReason === "budget") {
-        // Cap hit is an outcome, not a dead end: the TUI stays usable —
-        // the next prompt is a NEW run whose cap resets (the generic
-        // agent_end path above clears busy/approval).
-        const cap = ev.maxTurns !== undefined ? `max ${ev.maxTurns} turns` : "turns";
+        // C26: the loop auto-continues per cycle — reaching "budget" means
+        // EVERY cycle was exhausted. Still an outcome, not a dead end: the
+        // TUI stays usable and the next prompt starts a new run.
+        // C26: name the cycles only when more than one actually ran.
+        const cap =
+          ev.maxTurns !== undefined
+            ? ev.maxCycles !== undefined && ev.maxCycles > 1
+              ? `max ${ev.maxTurns} turns × ${ev.maxCycles} cycles`
+              : `max ${ev.maxTurns} turns`
+            : "turns";
         items = [...items, { kind: "error", text: `budget: ${cap} reached — send another prompt to continue` }];
+      } else if (ev.stopReason === "loop") {
+        // C26: runaway-loop detection (3 identical batches in a row). The
+        // third repeat was NOT executed; a new prompt breaks the pattern.
+        items = [
+          ...items,
+          {
+            kind: "error",
+            text: "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue",
+          },
+        ];
       }
       return { ...state, busy: false, approval: null, items };
     }
     case "turn_start":
       return { ...state, turn: ev.turn };
+    case "turn_budget":
+      // C26: informational — the run continues on a fresh cycle.
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          {
+            kind: "info",
+            text: `turn budget (${ev.maxTurns}) reached — continuing (cycle ${ev.cycle}/${ev.maxCycles})`,
+          },
+        ],
+      };
     case "start": {
       // First assistant event of a turn — open a streaming item.
       if (lastAssistantStreaming(state.items)) return state;

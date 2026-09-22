@@ -1,4 +1,50 @@
-# HANDOFF — the `length` banner is accurate + the output cap fits thinking models (2026-09-22)
+# HANDOFF — C26: the turn problem is solved structurally (auto-continue + loop detection) (2026-09-22)
+
+## C26 — the turn cap is now per-cycle with auto-continue, and the real runaway guard is loop detection (341 tests: 334 pass 0 fail 7 skip)
+
+The user hit `budget: max 64 turns reached — send another prompt to continue`
+mid-job in the TUI. The old design treated the turn count as a per-run hard
+stop: a long legitimate job that crossed the cap died and forced a manual
+"continue" prompt, while a genuinely STUCK model (re-issuing the same call)
+would burn the ENTIRE cycle budget before anything noticed. Raising the cap
+only delays the first problem and makes the second worse.
+
+What changed (one increment):
+- **Per-cycle budget + auto-continue.** `maxTurns` (derived from the model,
+or explicit) now caps one CYCLE. At exhaustion the loop injects a
+  continuation nudge (`BUDGET_CONTINUE_TEXT`: "summarize if done, else keep
+  working") as a user message, emits a `turn_budget` event, and resets the
+  counter — up to `maxContinuations` times (default 3 → 4 cycles). Only when
+  every continuation is spent does the run stop with `stopReason: "budget"`
+  (now carrying `maxTurns` + `maxCycles`). `maxContinuations: 0` (or CLI
+  `--max-continuations 0`) restores the old hard-stop.
+- **Loop detection (the real runaway guard).** The same tool-call batch —
+  tool names + stable-JSON (key-order-insensitive) arguments, in call order
+  — issued 3 times in a row is a runaway signature: the third repeat is
+  failed in-band with `LOOP_GUARD_TEXT` (NEVER executed; I3 keeps every call
+  answered) and the run stops with the new `stopReason: "loop"` (resumable,
+  exit 3). Two identical batches stay allowed (legit retries exist). The
+  signature counts length-guarded (truncated) batches too, so a model stuck
+  re-issuing the same truncated call stops at the 3rd repeat, not after the
+  whole budget.
+- **Files:** `src/loop/agent-loop.ts` (cycle bookkeeping, `batchSignature`,
+  `stableJson`, the guard, `DEFAULT_MAX_CONTINUATIONS`, the `BUDGET`/
+  `LOOP_GUARD` texts), `src/types.ts` (`loop` stopReason, `turn_budget`
+  event, `maxCycles` on agent_end), `src/cli/main.ts` (`--max-continuations`
+  flag, exit-3 for `loop`, notes on stderr), `src/tui/state.ts` (`loop`
+  error item, `turn_budget` info item, "N turns × M cycles" wording —
+  cycles named only when > 1), `src/tui/run.tsx` + `main.ts` plumbing,
+  `docs/02-contracts.md`, tests: 8 new agent-loop tests, 3 new CLI tests,
+  3 new TUI-state assertions; 4 old cap tests re-pinned (distinct args / 
+  `maxContinuations: 0` so they isolate the cap from the new behaviors).
+- **Exit codes:** `loop` exits 3 like `budget` (both resumable). CLI prints
+  `⏳ turn budget (N) reached — continuing (cycle i/M)` on `turn_budget`.
+
+Known trade-off: a model that legitimately issues the SAME call 3× in a row
+(e.g. polling a flaky endpoint with identical args) will be stopped — it
+must change its approach (a different arg) to continue. That is the intended
+semantics: identical repeats with unchanged inputs are almost always a
+stuck model.
 
 ## The `length` banner no longer blames truncated tool calls when thinking ate the budget (329 tests: 322 pass 0 fail 7 skip)
 

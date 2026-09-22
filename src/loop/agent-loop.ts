@@ -27,9 +27,16 @@
  *  - Batch `terminate`: if EVERY result carries `terminate: true`, the run
  *    stops after the batch.
  *  - `prepareNextTurn` hook between turns (WS5 auto-compaction lands here).
- *  - Turn cap (C24): the runaway-loop guard is ALWAYS on — `maxTurns`
- *    defaults to `deriveMaxTurns(model.contextWindow, model.maxTokens)`
- *    (hundreds of turns for a 200k/8k model); an explicit value overrides.
+ *  - Turn cap (C24, refined by C26): the turn budget is ALWAYS on —
+ *    `maxTurns` defaults to `deriveMaxTurns(model.contextWindow,
+ *    model.maxTokens)` (hundreds of turns for a 200k/8k model); an
+ *    explicit value overrides. C26 makes the cap per-CYCLE: when it is hit,
+ *    the loop injects a continuation nudge ("you're out of this cycle's
+ *    budget — summarize if done, else keep working") and resets the counter,
+ *    up to `maxContinuations` times (default 3 → 4 cycles). A genuinely
+ *    stuck model is caught by LOOP DETECTION instead of a count: the same
+ *    tool-call batch signature issued 3 times in a row is NOT executed on
+ *    the third repeat, and the run stops with stopReason "loop".
  */
 import type {
   AgentEvent,
@@ -67,6 +74,14 @@ export interface AgentLoopOptions {
    * smaller or larger.
    */
   maxTurns?: number;
+  /**
+   * C26 — how many times the loop auto-continues after a cycle's turn
+   * budget is exhausted (each continuation resets the counter). Default 3
+   * (4 cycles total). 0 restores the old behavior: the run stops at the
+   * first budget hit. The real runaway protection is loop detection
+   * (3 identical batches in a row), not this count.
+   */
+  maxContinuations?: number;
   /**
    * Hook between turns: return a reduced/rewritten context for the next
    * turn, or undefined to keep the current one.
@@ -129,6 +144,53 @@ const LENGTH_NUDGE_TEXT =
   "example, split a large file write across several smaller calls) so each " +
   "response fits under the limit.";
 
+// C26 — injected when a cycle's turn budget is exhausted. The run does NOT
+// stop: the counter resets and the model is told to either finish (text
+// only, no tools) or keep working. This replaces the old hard stop that
+// forced the user to resend a prompt mid-job.
+export const BUDGET_CONTINUE_TEXT =
+  "Cycle turn budget exhausted — the run continues automatically. " +
+  "If the task is complete, reply with a final summary and do NOT call any " +
+  "more tools. Otherwise keep working: briefly state what remains, then make " +
+  "your next tool call.";
+
+// C26 — loop detection: the same tool-call batch (same tools, same
+// arguments, same order) issued 3 times in a row. The third repeat is a
+// runaway-loop signature (a model stuck re-issuing identical work), so it
+// is NOT executed and the run stops with stopReason "loop". Two identical
+// batches are still allowed (legitimate retries exist).
+export const LOOP_GUARD_TEXT =
+  "Runaway loop detected: the same tool call(s) were issued 3 times in a " +
+  "row. This repeat was not executed. Change your approach — re-read the " +
+  "latest results, pick a different action, or finish with a text-only " +
+  "response explaining the situation.";
+
+/**
+ * C26 — the identity of one tool-call batch: tool names + stable-JSON
+ * arguments, in call order. Two batches are "the same" iff their
+ * signatures match. Exported for tests.
+ */
+export function batchSignature(calls: ToolCallBlock[]): string {
+  return calls.map((c) => `${c.name}:${stableJson(c.arguments)}`).join("\u0000");
+}
+
+/** Deep JSON.stringify with sorted object keys (argument identity that
+ *  does not depend on key order). */
+function stableJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v !== null && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+        out[k] = sort((v as Record<string, unknown>)[k]);
+      }
+      return out;
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
 function resultMessage(
   call: ToolCallBlock,
   result: ToolResult,
@@ -170,13 +232,39 @@ export async function* runLoop(
   let turn = 0;
   let stopReason: StopReason = "aborted"; // fallback: no assistant turn ran
   let lengthNudged = false; // C22: the one retry for a no-call `length` stop
+  // C26 — cycle bookkeeping: the budget is per-cycle, not per-run.
+  const maxContinuations =
+    options.maxContinuations !== undefined
+      ? options.maxContinuations
+      : DEFAULT_MAX_CONTINUATIONS;
+  const maxCycles = maxContinuations + 1;
+  let cycleStart = 0; // turn at which the current cycle began
+  let continuations = 0;
+  // C26 — loop detection: signatures of the last two issued batches.
+  let sigHistory: string[] = [];
 
   while (true) {
-    if (turn >= maxTurns) {
-      // Cap hit: make it an explicit, audible outcome — not the previous
-      // message's stopReason (usually "toolUse"). The run is resumable.
-      stopReason = "budget";
-      break;
+    if (turn - cycleStart >= maxTurns) {
+      // Budget hit. C26: the cap is a CYCLE trigger, not a hard stop —
+      // nudge + reset, up to maxContinuations times. Only when every
+      // continuation is spent does the run stop (stopReason "budget",
+      // resumable, as before).
+      if (continuations >= maxContinuations) {
+        stopReason = "budget";
+        break;
+      }
+      continuations += 1;
+      cycleStart = turn;
+      lengthNudged = false; // the no-call length retry is per-cycle
+      context.push({ role: "user", content: BUDGET_CONTINUE_TEXT, timestamp: Date.now() });
+      yield {
+        type: "turn_budget",
+        turn,
+        cycle: continuations,
+        maxCycles,
+        maxTurns,
+      };
+      continue; // the nudge consumes no turn (it is not an LLM call)
     }
     turn += 1;
     yield { type: "turn_start", turn };
@@ -214,7 +302,11 @@ export async function* runLoop(
 
     const calls = message.content.filter((b): b is ToolCallBlock => b.type === "toolCall");
     if (calls.length === 0) {
-      if (message.stopReason === "length" && !lengthNudged && turn < maxTurns) {
+      if (
+        message.stopReason === "length" &&
+        !lengthNudged &&
+        turn - cycleStart < maxTurns
+      ) {
         // C22: no tool call to salvage — retry once. The partial is already
         // in context (I2: pushed on start, replaced on done), so the model
         // sees exactly where it stopped.
@@ -228,6 +320,35 @@ export async function* runLoop(
       }
       break; // normal stop — or length with the nudge already spent
     }
+
+    // C26 loop detection: the same batch 3× in a row is a runaway loop.
+    // The third repeat is failed in-band (I3: every call still gets a
+    // result) and NOT executed, then the run stops with stopReason "loop".
+    const signature = batchSignature(calls);
+    {
+      const n = sigHistory.length;
+      if (
+        n >= 2 &&
+        sigHistory[n - 1] === signature &&
+        sigHistory[n - 2] === signature
+      ) {
+        for (const call of calls) {
+          yield { type: "tool_execution_start", toolCall: call };
+        }
+        for (const call of calls) {
+          const msg = resultMessage(
+            call,
+            { content: [{ type: "text", text: LOOP_GUARD_TEXT }] },
+            true,
+          );
+          context.push(msg);
+          yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
+        }
+        stopReason = "loop";
+        break;
+      }
+    }
+    sigHistory = [...sigHistory.slice(-1), signature];
 
     // §4.1 guard: truncated args may parse yet be incomplete — never execute.
     if (message.stopReason === "length") {
@@ -331,6 +452,9 @@ export async function* runLoop(
     type: "agent_end",
     stopReason,
     messages: context,
-    ...(stopReason === "budget" ? { maxTurns } : {}),
+    ...(stopReason === "budget" ? { maxTurns, maxCycles } : {}),
   };
 }
+
+/** C26 — default auto-continuations per run (4 cycles total). */
+export const DEFAULT_MAX_CONTINUATIONS = 3;

@@ -287,6 +287,45 @@ test("agent_end: budget → error item, busy + approval clear, TUI stays usable"
   const text2 = last2.kind === "error" ? last2.text : "<not an error item>";
   assert.match(text2, /^budget: turns reached/);
   assert.equal(s2.busy, false);
+
+  // C26: with maxCycles the note names both dimensions (max N turns × M
+  // cycles) — the loop auto-continued per cycle before this final stop.
+  const s3 = applyEvent(makeInitialState("m"), {
+    type: "agent_end",
+    stopReason: "budget",
+    maxTurns: 64,
+    maxCycles: 4,
+    messages: [],
+  });
+  const last3 = s3.items[s3.items.length - 1]!;
+  assert.equal(last3.kind, "error");
+  const text3 = last3.kind === "error" ? last3.text : "<not an error item>";
+  assert.match(text3, /budget: max 64 turns × 4 cycles reached/);
+});
+
+test("agent_end: loop → error item explaining the runaway stop (C26)", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    { type: "agent_end", stopReason: "loop", messages: [] },
+  );
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "error");
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
+  assert.match(text, /send another prompt to continue/);
+  assert.equal(s.busy, false);
+});
+
+test("turn_budget → info item, run stays busy (C26 auto-continue)", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    { type: "turn_budget", turn: 64, cycle: 1, maxCycles: 4, maxTurns: 64 },
+  );
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "info", "a continuation is informational, not an error");
+  const text = last.kind === "info" ? last.text : "<not an info item>";
+  assert.match(text, /turn budget \(64\) reached — continuing \(cycle 1\/4\)/);
+  assert.equal(s.busy, true, "the run continues — still busy");
 });
 
 test("agent_end: stop adds no noise and clears busy", () => {
