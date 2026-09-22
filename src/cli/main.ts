@@ -71,7 +71,7 @@ import {
   type Session as SessionType,
 } from "../session/session.js";
 
-import { QUIET_ON_SUCCESS_TOOLS } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -402,7 +402,7 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       } else if (ev.stopReason === "aborted") {
         sinks.err.write("\naborted\n");
       } else if (ev.stopReason === "length") {
-        sinks.err.write("\nlength: output limit hit — tool-call arguments may be truncated\n");
+        sinks.err.write(`\n${lengthEndNote(ev.messages)}\n`);
       } else if (ev.stopReason === "budget") {
         const note =
           ev.maxTurns !== undefined

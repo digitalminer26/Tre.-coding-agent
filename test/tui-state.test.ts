@@ -206,6 +206,47 @@ test("agent_end: error/aborted/length become error items; busy + approval clear"
     [{ type: "agent_end", stopReason: "aborted", messages: [] }, "aborted"],
     [{ type: "agent_end", stopReason: "length", messages: [] }, "length"],
   ];
+  // length-end wording is accurate per failure mode: with a tool call the
+  // args may be truncated; without one (thinking ate the budget) it must not
+  // claim a tool call was truncated.
+  const noCall = applyEvent(
+    makeInitialState("m"),
+    {
+      type: "agent_end",
+      stopReason: "length",
+      messages: [asst([{ type: "thinking", thinking: "..." }], { stopReason: "length" })],
+    },
+  );
+  {
+    const item = noCall.items[noCall.items.length - 1]!;
+    assert.equal(item.kind, "error");
+    assert.ok(item.kind === "error" && item.text.includes("before any tool call"));
+  }
+  const withCall = applyEvent(
+    makeInitialState("m"),
+    {
+      type: "agent_end",
+      stopReason: "length",
+      messages: [
+        asst(
+          [
+            {
+              type: "toolCall",
+              id: "c1",
+              name: "write",
+              arguments: { path: "a.txt", content: "cut" },
+            },
+          ],
+          { stopReason: "length" },
+        ),
+      ],
+    },
+  );
+  {
+    const item = withCall.items[withCall.items.length - 1]!;
+    assert.equal(item.kind, "error");
+    assert.ok(item.kind === "error" && item.text.includes("tool-call arguments may be truncated"));
+  }
   for (const [ev, msg] of cases) {
     const s = applyEvent(withApproval, ev);
     const last = s.items[s.items.length - 1]!;

@@ -174,6 +174,23 @@ export type AgentEvent =
     }
   | AssistantStreamEvent;
 
+/**
+ * One-line explanation of a run that ended with stopReason "length".
+ * The wording must be accurate for BOTH failure modes: the last assistant
+ * message may hold a tool call whose arguments were truncated, or the model
+ * may have spent the whole output budget on thinking/text and emitted NO
+ * call at all (thinking models with a small maxTokens). The UI must not
+ * claim one when the other is what happened.
+ */
+export function lengthEndNote(messages: AgentMessage[]): string {
+  const lastAsst = [...messages].reverse().find((m) => m.role === "assistant");
+  const hadCall =
+    lastAsst !== undefined && lastAsst.content.some((b) => b.type === "toolCall");
+  return hadCall
+    ? "length: output limit hit — tool-call arguments may be truncated"
+    : "length: output limit hit — response cut off before any tool call (thinking/text consumed the output budget)";
+}
+
 // ─────────────────── 3. The loop's two dependencies ───────────────────
 
 /** What one LLM call needs. Built by the loop; consumed by the wire layer. */

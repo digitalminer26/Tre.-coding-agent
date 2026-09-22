@@ -1,4 +1,49 @@
-# HANDOFF — auto-compaction is session-independent + TUI input wraps (2026-09-21)
+# HANDOFF — the `length` banner is accurate + the output cap fits thinking models (2026-09-22)
+
+## The `length` banner no longer blames truncated tool calls when thinking ate the budget (329 tests: 322 pass 0 fail 7 skip)
+
+The user hit `length: output limit hit — tool-call arguments may be truncated`
+in the TUI. Two root causes, two fixes (this section) — plus the maxTokens
+bump (previous section, config only).
+
+The message was WRONG in one of its two failure modes. A run ends with
+`stopReason: length` either (a) the last assistant message carries a tool call
+whose arguments were cut mid-JSON, or (b) the model spent the entire output
+budget on thinking/text and never emitted a call — observed in
+`/tmp/tre-child2/wordwrap.jsonl`: a response of 60,096 chars of thinking hit
+`output: 16384` with zero tool calls. Both the TUI (`src/tui/state.ts`
+agent_end) and the CLI (`src/cli/main.ts` printEvent) claimed (a) unconditionally.
+
+What changed (one increment, 4 files):
+- **`src/types.ts`** — `lengthEndNote(messages)`: walks back to the last
+  assistant message; a `toolCall` block → the truncated-arguments wording;
+  none → `…response cut off before any tool call (thinking/text consumed the
+  output budget)`. Shared by both UIs so they can't drift.
+- **`src/tui/state.ts`** + **`src/cli/main.ts`** — the agent_end length
+  branch now emits `lengthEndNote(ev.messages)`.
+- **`test/tui-state.test.ts`** — pins both wordings (no-call → "before any
+  tool call"; with-call → "tool-call arguments may be truncated").
+
+The loop's guard behavior is unchanged: with-call length → calls discarded as
+isError results, model re-issues (C22); no-call length → one nudge retry, then
+stop. The nudge already worked in the observed session (the run continued to
+turn 49). With maxTokens now 32768 the no-call case needs >32k tokens of
+thinking in ONE response to recur.
+
+## models.json: maxTokens 16384 → 32768 so the output cap covers thinking
+
+Qwen3.8-27B (UD Q4_K_S, radeon) runs `reasoning_effort: medium`. Its thinking
+alone regularly consumes 12–15k tokens (child2 session: two responses ended at
+`stopReason: length` with `output: 16384` — exactly the cap — one of them
+60k chars of thinking with no tool call at all). A 16384 output budget leaves
+no room for text + tool-call arguments after thinking, so length stops were
+routine. Bumped `maxTokens` to 32768 in `models.json` (the radeon default
+model). The server's actual context (radeon slot `n_ctx`) is 81920 = the
+declared `contextWindow`, and the auto-compaction trigger
+(`totalTokens + maxTokens + 1024 > window`) still keeps prompt + max output
+inside the window — it now fires at ~48k total instead of ~64k, which only
+makes compaction EARLIER, never later. No code change; verified via
+`loadModelsFile` + full gate.
 
 ## C25 — the 2GB OOM crash is fixed: React's User-Timing entries are swept (329 tests: 322 pass 0 fail)
 

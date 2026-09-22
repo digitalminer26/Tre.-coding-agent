@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, type AgentEvent } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent } from "../types.js";
 import { renderEditDiff } from "./diff.js";
 import wrapAnsi from "wrap-ansi";
 import cliTruncate from "cli-truncate";
@@ -114,7 +114,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       } else if (ev.stopReason === "aborted") {
         items = [...items, { kind: "error", text: "aborted" }];
       } else if (ev.stopReason === "length") {
-        items = [...items, { kind: "error", text: "length: output limit hit — tool-call arguments may be truncated" }];
+        items = [...items, { kind: "error", text: lengthEndNote(ev.messages) }];
       } else if (ev.stopReason === "budget") {
         // Cap hit is an outcome, not a dead end: the TUI stays usable —
         // the next prompt is a NEW run whose cap resets (the generic
