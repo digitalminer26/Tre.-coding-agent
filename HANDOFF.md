@@ -2,9 +2,9 @@
 
 ## The runaway-loop turn cap is session-independent — derived from the model when `--max-turns` is omitted (325 tests: 317 pass 0 fail 8 skip)
 
-Before: the agent loop's runaway guard used a HARDCODED cap (80 turns) unless
-the caller passed an explicit one — so a large model window still stopped at 80
-and a tiny one still allowed 80; the cap had nothing to do with the model.
+Before: the agent loop's runaway guard used a HARDCODED cap (32 turns) unless
+the caller passed an explicit one — so a large model window still stopped at 32
+and a tiny one still allowed 32; the cap had nothing to do with the model.
 Now (mirrors the auto-compaction fix, commit 2fbbddb) the cap is DERIVED from
 the model's `contextWindow` / `maxTokens` — the same two fields `compact.ts`
 uses — when the user omits `--max-turns`. An explicit `--max-turns N` still
@@ -12,7 +12,7 @@ overrides. The guard stays ALWAYS ON; only its size now tracks the model.
 
 What changed (one increment, 5 files):
 - **`src/loop/agent-loop.ts`** — new `deriveMaxTurns(contextWindow, maxTokens)`:
-  `max(64, min(4096, round(contextWindow / maxTokens × 10)))` — ~10 turns per
+  `max(64, min(4096, floor(contextWindow / maxTokens × 10)))` — ~10 turns per
   full context re-fill, floored at 64 (ample for long work) and ceilinged at
   4096. `runLoop`'s `maxTurns` is now optional: `undefined` → derive from the
   model. `stopReason: "budget"` + `agent_end.maxTurns` unchanged.
