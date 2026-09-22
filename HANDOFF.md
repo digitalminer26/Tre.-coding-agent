@@ -1,3 +1,53 @@
+# HANDOFF — the /stats slash command (session turns, tokens, tool calls, session size) (2026-09-22)
+
+## /stats — one info line reporting session turn count, total tokens, tool-call count, and session file size in bytes (365 tests: 357 pass 0 fail 8 skip)
+
+The TUI had no way to see how a session was shaping up mid-run — turns,
+token burn, and how many tool calls had fired were only visible in the
+bottom-line `tokens` field (and only if the user had pinned it). `/stats`
+adds an on-demand report: type `/stats` (it now appears in the "/"
+completion menu, alphabetically last), and ONE info line lands in the
+output area:
+`stats: N turn(s), T tokens, C tool call(s), session: <path> (<bytes> bytes)`.
+
+- **State** (state.ts, pure): `TuiState.toolCalls` (new field, 0 in
+  `makeInitialState`) is incremented on every `tool_execution_start` —
+  including the QUIET file-access tools that render no line, so the count
+  is the true number of executions started, not the number of visible
+  tool rows. `turn` (turn_start) and `totalTokens` (done) were already
+  tracked. `statsLine(state, sessionBytes?)` builds the line; `?` for the
+  bytes when the caller could not measure them, `—` for the whole session
+  part when no session path is configured. `handleSlashCommand` gained an
+  optional third arg `sessionBytes` and a `/stats` branch (exact match,
+  whitespace-trimmed; `/stats …` with args is NOT handled → falls through
+  to the unknown-command error).
+- **Driver** (run.tsx): the I/O lives here, not in state.ts.
+  `sessionSizeBytes(opts.sessionPath)` does a `statSync` (try/catch →
+  undefined when the path is unset or the file is missing/unreadable) and
+  is passed into `handleSlashCommand` at the dispatch site. The session
+  file is only ever READ for its size — never parsed or written.
+- **Menu:** `/stats` is a fourth `SLASH_COMMANDS` entry, so the "/" menu
+  now has 4 lines (still under `MENU_MAX_LINES` 5). Pinned-layout render
+  test updated for the 4th line (hint moves to row 13) and the
+  candidate/nav/complete tests for the new alphabetical position.
+- **Files:** `src/tui/state.ts` (toolCalls, statsLine, handleSlashCommand
+  /stats branch + sessionBytes arg), `src/tui/run.tsx` (statSync size
+  helper + dispatch), tests: 3 new in `test/tui-state.test.ts`
+  (toolCalls tally incl. quiet tools, statsLine formatting, handleSlash
+  /stats isolation), 1 new in `test/tui-pinned-layout.test.ts` (handleSlash
+  /stats), plus 4 existing menu tests re-pinned for the 4th candidate.
+- **Verified in a real PTY** (local `node dist/src/cli/main.js tui`): the
+  "/" menu renders all 4 candidates with `/stats` last; submitting
+  `/stats` appends exactly one info line with the live session byte size
+  (293 bytes for a fresh session), the pinned block (hint/─/input/─/3
+  reserved) stays intact, and `/quit` still exits 0.
+
+Note: the session SIZE is a single `statSync` at submit time (not live) —
+it reflects the file at the moment `/stats` is sent, which is the honest
+"how big is my session file right now" reading. The skip count in the
+header is environment-dependent (live-endpoint + the OS sandbox probe),
+not a regression: 0 fail.
+
 # HANDOFF — C27: output display scrolling (scrollback) in the TUI (2026-09-22)
 
 ## C27 — the TUI output area is scrollable: wheel, PgUp/PgDn, Home/End (361 tests: 354 pass 0 fail 7 skip)

@@ -72,6 +72,8 @@ export interface TuiState {
   suggestIdx: number | null;
   /** Cumulative Usage.totalTokens across assistant `done` events. */
   totalTokens: number;
+  /** Count of tool executions started (tool_execution_start events). */
+  toolCalls: number;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -100,6 +102,7 @@ export function makeInitialState(
     bottom: [],
     suggestIdx: null,
     totalTokens: 0,
+    toolCalls: 0,
     info,
     scrollUp: 0,
   };
@@ -215,6 +218,9 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         quiet ? undefined : ev.toolCall.name === "edit" ? renderEditDiff(ev.toolCall.arguments) : undefined;
       return {
         ...state,
+        // /stats: count every tool execution that started (including the
+        // quiet file-access tools that render no line).
+        toolCalls: state.toolCalls + 1,
         items: [
           ...state.items,
           {
@@ -776,6 +782,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "quit", summary: "end the session" },
+  { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
 ];
 
 /** At most this many lines the menu may take (more candidates → first N). */
@@ -890,23 +897,47 @@ export function bottomLines(state: TuiState, width: number): string[] {
 }
 
 /**
- * Handle a submitted `/…` line. Currently one command:
+ * The one-line report `/stats` appends as an info item: session turn
+ * count, cumulative tokens, tool-call count, and the session file size
+ * (bytes, when the caller could measure it — the driver does the I/O;
+ * this stays pure). "—" marks a value the session does not carry: no
+ * session file was configured (info.session absent) or its size is
+ * unknown (undefined) — a missing/unreadable file reports as unknown.
+ */
+export function statsLine(state: TuiState, sessionBytes?: number): string {
+  const session = state.info.session !== undefined ? `${state.info.session} (${sessionBytes ?? "?"} bytes)` : "—";
+  return `stats: ${state.turn} turn(s), ${state.totalTokens} tokens, ${state.toolCalls} tool call(s), session: ${session}`;
+}
+
+/**
+ * Handle a submitted `/…` line. Two commands:
  *   /display-bottom            report current selection + the field menu
  *   /display-bottom off|none   clear the bottom lines
  *   /display-bottom f1 f2 …    set the fields (deduped, order preserved)
+ *   /stats                     one info line: turns, tokens, tool calls,
+ *                              session file (path + size in bytes)
  * Feedback lands as an `info` item in the output area. `/quit` and `/exit`
  * are NOT handled here — the driver owns them (it must unmount). Returns
- * `handled: false` for every other line.
+ * `handled: false` for every other line. `sessionBytes` is the session
+ * file size in bytes, measured by the CALLER (the driver does the I/O —
+ * this stays pure); undefined → the size renders as "?" (unknown).
  */
-export function handleSlashCommand(s: TuiState, line: string): { state: TuiState; handled: boolean } {
-  const m = /^\/display-bottom(?:\s+(.*))?$/.exec(line.trim());
-  if (m === null) return { state: s, handled: false };
-  const words = (m[1] ?? "").split(/\s+/).filter((w) => w !== "");
-  const menu = BOTTOM_FIELDS.join(" ");
+export function handleSlashCommand(
+  s: TuiState,
+  line: string,
+  sessionBytes?: number,
+): { state: TuiState; handled: boolean } {
   const withInfo = (st: TuiState, text: string): TuiState => ({
     ...st,
     items: [...st.items, { kind: "info", text }],
   });
+  if (line.trim() === "/stats") {
+    return { state: withInfo(s, statsLine(s, sessionBytes)), handled: true };
+  }
+  const m = /^\/display-bottom(?:\s+(.*))?$/.exec(line.trim());
+  if (m === null) return { state: s, handled: false };
+  const words = (m[1] ?? "").split(/\s+/).filter((w) => w !== "");
+  const menu = BOTTOM_FIELDS.join(" ");
   if (words.length === 0) {
     const cur = s.bottom.length > 0 ? s.bottom.join(" ") : "(none)";
     return { state: withInfo(s, `display-bottom: ${cur} — fields: ${menu}`), handled: true };

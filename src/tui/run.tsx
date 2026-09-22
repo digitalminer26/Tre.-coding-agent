@@ -18,6 +18,7 @@
  * into the state via makeInitialState.
  */
 import React from "react";
+import { statSync } from "node:fs";
 import { render } from "ink";
 import { App } from "./app.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
@@ -56,6 +57,20 @@ const NULL_SINKS: PrintSinks = {
   out: { write: () => true },
   err: { write: () => true },
 };
+
+/**
+ * The session file's size in bytes for /stats — the DRIVER does the I/O
+ * (state.ts stays pure). undefined when no session path is configured or
+ * the file is missing/unreadable (the line then shows "?" for the size).
+ */
+function sessionSizeBytes(sessionPath: string | undefined): number | undefined {
+  if (sessionPath === undefined) return undefined;
+  try {
+    return statSync(sessionPath).size;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface TuiRunOptions {
   model: ModelConfig;
@@ -178,8 +193,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         return;
       }
       // D15: slash commands are UI commands, not runs — dispatch through the
-      // pure handler, then clear the busy flag submitInput raised.
-      const slash = handleSlashCommand(r.state, prompt);
+      // pure handler, then clear the busy flag submitInput raised. The
+      // driver measures the session file (I/O) for /stats.
+      const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath));
       if (slash.handled) {
         setState({ ...slash.state, busy: false });
         return;

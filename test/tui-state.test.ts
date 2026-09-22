@@ -13,6 +13,7 @@ import type {
 import {
   approvalAnswer,
   applyEvent,
+  handleSlashCommand,
   inputBackspace,
   inputChar,
   inputHistory,
@@ -23,6 +24,7 @@ import {
   scrollToBottom,
   scrollToTop,
   setApproval,
+  statsLine,
   submitInput,
   type TuiItem,
   type TuiState,
@@ -471,4 +473,70 @@ test("C27: a new run (agent_start) follows the bottom; new items stay frozen", (
 
 test("C27: makeInitialState starts at the bottom (scrollUp 0)", () => {
   assert.equal(makeInitialState("m").scrollUp, 0);
+});
+
+// ── /stats: tool-call tally + the pure stats line ─────────────────────────
+
+test("applyEvent: tool_execution_start increments toolCalls (quiet tools too)", () => {
+  let s = makeInitialState("m");
+  assert.equal(s.toolCalls, 0);
+  s = applyEvent(s, toolStart("1", "bash", { command: "ls" }));
+  assert.equal(s.toolCalls, 1);
+  // quiet file-access tools start as hidden placeholders — still counted
+  s = applyEvent(s, toolStart("2", "read", { path: "a.txt" }));
+  assert.equal(s.toolCalls, 2);
+  s = applyEvent(s, toolEnd("1", "ok"));
+  s = applyEvent(s, toolEnd("2", "ok"));
+  assert.equal(s.toolCalls, 2, "tool_execution_end does not change the count");
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  assert.equal(s.toolCalls, 2, "agent_end does not reset the count");
+});
+
+test("statsLine: one line with turns, tokens, tool calls, session size", () => {
+  const base = makeInitialState("m");
+  // no session path → "—"; unknown size → "?"
+  assert.equal(
+    statsLine(base),
+    "stats: 0 turn(s), 0 tokens, 0 tool call(s), session: —",
+  );
+  const withVals = { ...base, turn: 3, totalTokens: 12345, toolCalls: 7, info: { session: "/tmp/s.jsonl" } };
+  assert.equal(
+    statsLine(withVals, 4321),
+    "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/s.jsonl (4321 bytes)",
+  );
+  // session path set, size unknown (missing/unreadable file) → "?"
+  const noSize = { ...withVals, info: { session: "/tmp/missing.jsonl" } };
+  assert.equal(
+    statsLine(noSize),
+    "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/missing.jsonl (? bytes)",
+  );
+  // size 0 is a real value, not unknown
+  const zero = { ...noSize, info: { session: "/tmp/empty.jsonl" } };
+  assert.equal(
+    statsLine(zero, 0),
+    "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/empty.jsonl (0 bytes)",
+  );
+});
+
+test("handleSlashCommand: /stats appends one info line and touches nothing else", () => {
+  const s = {
+    ...makeInitialState("m", { session: "/tmp/s.jsonl" }),
+    turn: 2,
+    totalTokens: 99,
+    toolCalls: 4,
+    input: "left alone",
+  };
+  const r = handleSlashCommand(s, "/stats", 42);
+  assert.equal(r.handled, true);
+  assert.equal(r.state.items.length, s.items.length + 1, "exactly one item appended");
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.equal(
+    (info as { text: string }).text,
+    "stats: 2 turn(s), 99 tokens, 4 tool call(s), session: /tmp/s.jsonl (42 bytes)",
+  );
+  // the rest of the state is untouched
+  assert.equal(r.state.input, "left alone");
+  assert.deepEqual(r.state.bottom, []);
+  assert.equal(r.state.toolCalls, 4);
 });

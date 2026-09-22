@@ -440,6 +440,46 @@ test("handleSlashCommand: /display-bottom set, clear, report, unknown, passthrou
   assert.equal(handleSlashCommand(s, "not a command").handled, false);
 });
 
+test("handleSlashCommand: /stats appends one info line (turns, tokens, tool calls, session size)", () => {
+  // no session configured → session part is "—", size unknown
+  const r0 = handleSlashCommand(makeInitialState("m"), "/stats");
+  assert.equal(r0.handled, true);
+  const info0 = r0.state.items[r0.state.items.length - 1];
+  assert.equal(info0?.kind, "info");
+  assert.equal(
+    (info0 as { text: string }).text,
+    "stats: 0 turn(s), 0 tokens, 0 tool call(s), session: —",
+  );
+
+  // a state with values + a session path, size supplied by the caller
+  const withVals = (info: Record<string, string>): TuiState => ({
+    ...makeInitialState("m", info),
+    turn: 3,
+    totalTokens: 12345,
+    toolCalls: 7,
+  });
+  const r1 = handleSlashCommand(withVals({ session: "/tmp/s.jsonl" }), "/stats", 4321);
+  assert.equal(r1.handled, true);
+  assert.equal(
+    (r1.state.items[r1.state.items.length - 1] as { text: string }).text,
+    "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/s.jsonl (4321 bytes)",
+  );
+
+  // session path but unknown size (file missing/unreadable) → "?"
+  const r2 = handleSlashCommand(withVals({ session: "/tmp/missing.jsonl" }), "/stats");
+  assert.equal(
+    (r2.state.items[r2.state.items.length - 1] as { text: string }).text,
+    "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/missing.jsonl (? bytes)",
+  );
+
+  // whitespace-padded form is the same command; args are not
+  assert.equal(handleSlashCommand(makeInitialState("m"), "  /stats  ").handled, true);
+  assert.equal(handleSlashCommand(makeInitialState("m"), "/stats now").handled, false);
+  // state otherwise untouched by the command
+  assert.deepEqual(r1.state.bottom, []);
+  assert.equal(r1.state.input, "");
+});
+
 test("applyEvent done accumulates Usage.totalTokens", () => {
   let s = makeInitialState("m");
   const done = (total: number) => ({
@@ -470,10 +510,11 @@ test("slashCandidates: bare command words only, alphabetical prefix filter", () 
   assert.deepEqual(slashCandidates(""), []); // no slash
   assert.deepEqual(slashCandidates("quit"), []); // no leading slash
   assert.deepEqual(slashCandidates("/quit"), ["/quit"]);
-  assert.deepEqual(slashCandidates("/"), ["/display-bottom", "/exit", "/quit"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/"), ["/display-bottom", "/exit", "/quit", "/stats"]); // all, alphabetical
   assert.deepEqual(slashCandidates("/d"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/di"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/display-bottom"), ["/display-bottom"]); // exact
+  assert.deepEqual(slashCandidates("/st"), ["/stats"]);
   assert.deepEqual(slashCandidates("/zz"), []); // no match
   assert.deepEqual(slashCandidates("/display-bottom m"), []); // space → arguments, menu hides
   assert.deepEqual(slashCandidates("/quit "), []); // completed word (trailing space)
@@ -486,20 +527,21 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
 
   // "/" → all commands, first selected ("> "), the rest ("  ")
   const all = suggestMenu({ ...s, input: "/" }, 80);
-  assert.equal(all.length, 3);
-  assert.deepEqual(all.map((m) => m.selected), [true, false, false]);
+  assert.equal(all.length, 4);
+  assert.deepEqual(all.map((m) => m.selected), [true, false, false, false]);
   assert.ok(all[0]!.line.startsWith("> /display-bottom — "));
   assert.ok(all[1]!.line.startsWith("  /exit — "));
   assert.ok(all[2]!.line.startsWith("  /quit — "));
+  assert.ok(all[3]!.line.startsWith("  /stats — "));
 
   // each line is exactly one row at width
   for (const m of all) assert.ok(wrapLineCount(m.line, 80) <= 1);
 
   // selection moves with suggestIdx (and clamps when it overruns)
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 2 }, 80).map((m) => m.selected),
-    [false, false, true]);
+    [false, false, true, false]);
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 9 }, 80).map((m) => m.selected),
-    [false, false, true]); // clamp to last
+    [false, false, false, true]); // clamp to last
 
   // truncated to one row at a narrow width (marker survives)
   const narrow = suggestMenu({ ...s, input: "/" }, 20)[0]!;
@@ -538,10 +580,10 @@ test("menuNav: arrows move the selection with wrap-around, null off-menu", () =>
   // on-menu: down from null → 1, up from null → last (wrap)
   const base: TuiState = { ...s, input: "/" };
   assert.equal(menuNav(base, 1)!.suggestIdx, 1);
-  assert.equal(menuNav(base, -1)!.suggestIdx, 2);
+  assert.equal(menuNav(base, -1)!.suggestIdx, 3);
   // wrap at both ends
-  assert.equal(menuNav({ ...base, suggestIdx: 2 }, 1)!.suggestIdx, 0);
-  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 2);
+  assert.equal(menuNav({ ...base, suggestIdx: 3 }, 1)!.suggestIdx, 0);
+  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 3);
   // a stale (overrun) index is clamped before moving
   assert.equal(menuNav({ ...base, suggestIdx: 9 }, 1)!.suggestIdx, 0);
   // state otherwise untouched
@@ -568,6 +610,8 @@ test("menuComplete: enter completes the selected word, exact match submits", () 
   // the selected (navigated) candidate is the one completed
   const c3 = menuComplete({ ...s, input: "/", suggestIdx: 2 });
   assert.equal(c3!.input, "/quit ");
+  const c4 = menuComplete({ ...s, input: "/", suggestIdx: 3 });
+  assert.equal(c4!.input, "/stats ");
 
   // exact match → null (Enter submits; the completed trailing-space form
   // also has no menu → null)
@@ -673,13 +717,14 @@ test("App frame: '/' shows the grey menu above the top separator, frame stays ro
   const app = renderApp(mkState([], { input: "/", cursorPos: 1, suggestIdx: 1 }));
   try {
     const lines = frameLines(app.lastFrame());
-    assert.equal(lines.length, H); // exactly rows (budget shrank by 3)
-    // the menu sits between the hint and the top separator: with 3 menu
-    // lines the hint moves up to row 14, the block stays pinned at the end
-    assert.ok(lineAt(lines, 14).includes("enter send")); // hint line
-    assert.ok(lineAt(lines, 15).startsWith("  /display-bottom")); // unselected: dim, two spaces
-    assert.ok(lineAt(lines, 16).startsWith("> /exit")); // selected (idx 1): marked
-    assert.ok(lineAt(lines, 17).startsWith("  /quit"));
+    assert.equal(lines.length, H); // exactly rows (budget shrank by 4)
+    // the menu sits between the hint and the top separator: with 4 menu
+    // lines the hint moves up to row 13, the block stays pinned at the end
+    assert.ok(lineAt(lines, 13).includes("enter send")); // hint line
+    assert.ok(lineAt(lines, 14).startsWith("  /display-bottom")); // unselected: dim, two spaces
+    assert.ok(lineAt(lines, 15).startsWith("> /exit")); // selected (idx 1): marked
+    assert.ok(lineAt(lines, 16).startsWith("  /quit"));
+    assert.ok(lineAt(lines, 17).startsWith("  /stats"));
     assert.equal(lineAt(lines, 18), SEP_LINE); // top separator still full width
     assert.equal(lineAt(lines, 19), "/\u258d"); // input row: the typed slash + cursor
     assert.equal(lineAt(lines, 20), SEP_LINE); // bottom separator
