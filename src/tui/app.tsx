@@ -7,7 +7,8 @@
 import React from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import cliTruncate from "cli-truncate";
-import type { TuiItem, TuiState } from "./state.js";
+import type { TuiState, VisibleSlice } from "./state.js";
+import { itemLines } from "./lines.js";
 import {
   FIXED_NON_ITEM_LINES,
   approvalLine,
@@ -34,8 +35,9 @@ const SCROLL_LINES = 3;
 export interface AppProps {
   state: TuiState;
   onChar: (ch: string) => void;
-  /** C27: scroll the output area by `delta` rows (negative = up). */
-  onScrollBy: (delta: number) => void;
+  /** C28: scroll the output by `delta` rows; `maxScroll` = the current
+   * scrollable range (total content height − item budget, from the fit). */
+  onScrollBy: (delta: number, maxScroll: number) => void;
   /** C27: jump to the top / bottom of the output. */
   onScrollToTop: () => void;
   onScrollToBottom: () => void;
@@ -70,11 +72,12 @@ export function App(props: AppProps): React.ReactElement {
   // the one the pinned block reserves steal item budget, exactly like the
   // approval line and the menu do — the frame stays exactly `rows` tall.
   const inputLines = inputWrap(state.input, state.cursorPos, width);
-  // C27: the item area is a scrollable viewport (scrollUp rows above the
-  // bottom). `extra` = the lines reserved below the item area (approval,
-  // menu, wrapped input) — the SAME reservation the fit math uses.
+  // C28: the item area is a scrollable viewport pinned at content row
+  // viewTop (null = follow the bottom). `extra` = the lines reserved below
+  // the item area (approval, menu, wrapped input) — the SAME reservation
+  // the fit math uses.
   const extra = (state.approval !== null ? 1 : 0) + menu.length + (inputLines.length - 1);
-  const layout = fitItemsScrollable(state.items, width, rows, extra, state.scrollUp);
+  const layout = fitItemsScrollable(state.items, width, rows, extra, state.viewTop);
   // A page = one item-area budget (Shift halves it) — sized in the SAME
   // rows the fit uses, so PgUp/PgDn move exactly one window of content.
   // (Mouse-mode setup lives in run.tsx — the driver owns the terminal; a
@@ -142,25 +145,26 @@ export function App(props: AppProps): React.ReactElement {
       props.onBackspace();
       return;
     }
-    // C27: scroll the output area. Placed BEFORE the ctrl catch-all below
-    // (Ctrl+Home/End arrive with key.ctrl set) and before the char path
-    // (mouse SGR sequences have no `name` and would be typed otherwise).
-    // delta = rows the viewport moves UP: wheel up / PageUp add, wheel
-    // down / PageDown subtract (scrollBy clamps at the bottom, 0).
+    // C27/C28: scroll the output area. Placed BEFORE the ctrl catch-all
+    // below (Ctrl+Home/End arrive with key.ctrl set) and before the char
+    // path (mouse SGR sequences have no `name` and would be typed
+    // otherwise). delta = rows the viewport moves UP: wheel up / PageUp
+    // add, wheel down / PageDown subtract (scrollBy clamps; reaching the
+    // bottom resumes following).
     if (MOUSE_WHEEL_UP.test(input)) {
-      props.onScrollBy(SCROLL_LINES);
+      props.onScrollBy(SCROLL_LINES, layout.maxScroll);
       return;
     }
     if (MOUSE_WHEEL_DOWN.test(input)) {
-      props.onScrollBy(-SCROLL_LINES);
+      props.onScrollBy(-SCROLL_LINES, layout.maxScroll);
       return;
     }
     if (key.pageUp) {
-      props.onScrollBy(key.shift ? halfPage : page);
+      props.onScrollBy(key.shift ? halfPage : page, layout.maxScroll);
       return;
     }
     if (key.pageDown) {
-      props.onScrollBy(key.shift ? -halfPage : -page);
+      props.onScrollBy(key.shift ? -halfPage : -page, layout.maxScroll);
       return;
     }
     if (key.home) {
@@ -193,15 +197,8 @@ export function App(props: AppProps): React.ReactElement {
           width
         )}
       </Text>
-      {/* C27: the top edge gap while scrolled up (items straddling the
-          window's top edge are skipped; their rows become this blank space). */}
-      {Array.from({ length: layout.topPad }, (_, i) => (
-        <Text key={`toppad-${i}`}> </Text>
-      ))}
-      {layout.visible.map((item, i) => (
-        // D19: hidden (quiet file-access) items are height-0 placeholders —
-        // the fit math already counted them as nothing, so render nothing.
-        item.kind === "tool" && item.hidden ? null : <Item key={i} item={item} />
+      {layout.visible.map((slice, i) => (
+        <Item key={i} slice={slice} width={width} />
       ))}
       {Array.from({ length: layout.pad }, (_, i) => (
         <Text key={`pad-${i}`}> </Text>
@@ -245,60 +242,25 @@ export function App(props: AppProps): React.ReactElement {
   );
 }
 
-function Item({ item }: { item: TuiItem }): React.ReactElement {
-  switch (item.kind) {
-    case "user":
-      // D15: plain text at full width — no 'you' prefix (the dedicated input
-      // line already marks where typing happens).
-      return <Text>{item.text || " "}</Text>;
-    case "assistant":
-      return (
-        <Box flexDirection="column">
-          {item.thinking && <Text dimColor>
-            thinking…
-          </Text>}
-          <Text>
-            {item.text}
-            {item.streaming ? "▍" : ""}
-          </Text>
-        </Box>
-      );
-    case "tool": {
-      const mark = item.resultText !== undefined ? (item.isError ? "✗" : "✓") : item.running ? "→" : "·";
-      const color = item.isError ? "red" : item.resultText !== undefined ? "green" : "gray";
-      return (
-        <Box flexDirection="column">
-          <Box>
-            <Text color={color}>{mark}</Text>
-            <Text>
-              {" "}
-              {item.name} {item.argsText}
+/**
+ * One visible slice of an item (C28): draws EXACTLY lines [from, to) of
+ * `itemLines(item, width)` — the same lines the fit math counted, so a
+ * straddling item is clipped, never dropped, and the frame stays exactly
+ * `rows` tall. (D15/D19 notes moved to lines.ts with the line shapes.)
+ */
+function Item({ slice, width }: { slice: VisibleSlice; width: number }): React.ReactElement {
+  const lines = itemLines(slice.item, width).slice(slice.from, slice.to);
+  return (
+    <Box flexDirection="column">
+      {lines.map((line, i) => (
+        <Text key={i}>
+          {line.spans.map((sp, j) => (
+            <Text key={j} color={sp.color} dimColor={sp.dim}>
+              {sp.text}
             </Text>
-          </Box>
-          {item.diff !== undefined &&
-            item.diff.map((line, i) => (
-              <Text key={i} color={line.startsWith("+") ? "green" : line.startsWith("-") ? "red" : undefined}>
-                {line}
-              </Text>
-            ))}
-          {item.resultText !== undefined && (
-            <Box>
-              <Text dimColor>  {item.resultText}</Text>
-            </Box>
-          )}
-        </Box>
-      );
-    }
-    case "compaction":
-      return (
-        <Text color="magenta">
-          ✂ compacted: ~{Math.round(item.tokensBefore / 100) / 10}k tokens → summary (
-          {item.summaryChars} chars) + last {item.messagesKept} message(s) kept
+          ))}
         </Text>
-      );
-    case "error":
-      return <Text color="red">{item.text}</Text>;
-    case "info":
-      return <Text dimColor>{item.text}</Text>;
-  }
+      ))}
+    </Box>
+  );
 }

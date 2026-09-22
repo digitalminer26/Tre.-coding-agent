@@ -22,7 +22,7 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 50));
 interface Cbs {
   onChar?: (ch: string) => void;
   onBackspace?: () => void;
-  onScrollBy?: (delta: number) => void;
+  onScrollBy?: (delta: number, maxScroll: number) => void;
   onScrollToTop?: () => void;
   onScrollToBottom?: () => void;
   onMove?: (dir: -1 | 1) => void;
@@ -39,7 +39,7 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       state,
       onChar: (ch: string) => cbs?.onChar?.(ch),
       onBackspace: () => cbs?.onBackspace?.(),
-      onScrollBy: (delta: number) => cbs?.onScrollBy?.(delta),
+      onScrollBy: (delta: number, maxScroll: number) => cbs?.onScrollBy?.(delta, maxScroll),
       onScrollToTop: () => cbs?.onScrollToTop?.(),
       onScrollToBottom: () => cbs?.onScrollToBottom?.(),
       onMove: (dir: -1 | 1) => cbs?.onMove?.(dir),
@@ -323,23 +323,26 @@ test("C27: scroll keys are ignored while an approval is pending", async () => {
   app.unmount();
 });
 
-test("C27: scrolled frame shows older items, the gap, and the scroll status", () => {
+test("C28: pinned frame shows older items, clipped straddlers, and the scroll status", () => {
   // Test terminal: width 100, rows 24 → item budget 16. 10 items of 2
   // lines (200 chars each) = 20 lines total, maxScroll 4.
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
     kind: "user",
     text: `item-${i} ` + "x".repeat(192),
   }));
-  const state = { ...makeInitialState("m"), items, scrollUp: 4 }; // at the top
+  const state = { ...makeInitialState("m"), items, viewTop: 1 }; // window [1,17)
   const app = makeApp(state);
   const frame = app.lastFrame() ?? "";
-  // Older items are visible now; the newest are cut off at the bottom.
-  assert.match(frame, /item-0/);
-  assert.match(frame, /item-7/);
-  assert.doesNotMatch(frame, /item-8/);
+  // item-0 straddles the top edge: its FIRST line is above the window —
+  // only its 2nd line (the clipped x-run) may appear, never the "item-0"
+  // label. item-8 straddles the bottom edge: its "item-8" label shows
+  // (line 0 is inside), but item-9 is fully below the window.
+  assert.doesNotMatch(frame, /item-0/);
+  assert.match(frame, /item-1/);
+  assert.match(frame, /item-8/);
   assert.doesNotMatch(frame, /item-9/);
-  // The hint line carries the scroll status.
-  assert.match(frame, /↑4\/4 scrolled/);
+  // The hint line carries the scroll status (3 rows above the bottom).
+  assert.match(frame, /↑3\/4 scrolled/);
   assert.doesNotMatch(frame, /enter send ·/);
   app.unmount();
 });

@@ -403,9 +403,11 @@ scenario_13() { # eval baseline (D9: regression baseline, variance-annotated)
   echo "$passes/$passes tasks PASS"
 }
 
-scenario_15() { # TUI scrollback (C27): PgUp freezes the view + status hint;
+scenario_15() { # TUI scrollback (C28): PgUp freezes the view + status hint;
   # SGR wheel works (mouse mode 1006 on); End returns to the bottom; mouse
-  # mode restored on exit.
+  # mode restored on exit; and a single reply TALLER than the item budget
+  # actually scrolls (the C27 defect: straddle-skip left every scroll
+  # position rendering the same overflow frame).
   local D="$WORK/15"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
 # 40 numbered lines at width 80 = ~40 content lines > the 24-row PTY's
@@ -441,7 +443,25 @@ open(sys.argv[2], "w").write(clean)
 PY
   grep -qE '^40[.]?$' "$D/plain.txt" || { echo "line 40 of the reply never rendered — content too short to scroll?"; return 1; }
   grep -q "scrolled — PgDn/wheel" "$D/plain.txt" || { echo "no scroll status in frames — PgUp/wheel did not scroll"; return 1; }
-  echo "rc=0, 40-line reply rendered, scroll status shown, mouse mode enabled+restored"
+  # The pinned frame (last "scrolled" hint) must show MIDDLE lines of the
+  # reply, not line 40: the view actually moved. (C27's fallback kept the
+  # bottom 16 lines at every scroll position — line 40 would still be here.)
+  python3 - "$D/plain.txt" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+lines = text.split("\n")
+hints = [i for i, l in enumerate(lines) if "scrolled — PgDn/wheel" in l]
+assert hints, "no pinned frame found"
+window = lines[hints[-1] - 20 : hints[-1]]  # one frame is 24 lines
+assert any(re.match(r"^\s*(2[0-9]|1[3-9])[.]?\s*$", l) for l in window), \
+  f"pinned frame does not show middle reply lines (13-29): {window[-6:]}"
+assert not any(re.match(r"^\s*40[.]?\s*$", l) for l in window), \
+  "pinned frame still shows line 40 — the single tall reply did not scroll (C27 defect)"
+assert not any(re.match(r"^\s*1[.]?\s*$", l) for l in window), \
+  "pinned frame shows line 1 — PgUp/wheel moved too far?"
+PY
+  [ $? -eq 0 ] || { echo "single tall reply did not scroll (pinned frame content wrong)"; return 1; }
+  echo "rc=0, 40-line reply rendered AND scrolled (middle lines in the pinned frame), mouse mode enabled+restored"
 }
 
 scenario_14() { # TUI pinned layout: input row exactly 4 lines above the bottom

@@ -426,53 +426,62 @@ test("applyEvent: unknown/ignorable events are a no-op", () => {
   );
 });
 
-// ─────────────────────── C27: output scrollback ───────────────────────
-// scrollUp rows above the bottom (0 = follow). Pure transitions here; the
-// row math (clamping, gaps) is pinned in tui-pinned-layout.test.ts.
+// ─────────────────────── C28: output scrollback (content-anchored viewport) ───────────────────────
+// viewTop = the content row at the viewport's top edge (null = follow).
+// Pure transitions here; the row math (clipping, pinning) is pinned in
+// tui-pinned-layout.test.ts.
 
-test("C27: scrollBy moves up (positive) / down (negative), clamped at 0", () => {
+test("C28: scrollBy pins the view in CONTENT space (no drift on growth)", () => {
+  const s = makeInitialState("m"); // viewTop null = follow
+  const up = scrollBy(s, 3, 100); // 3 rows up from the bottom
+  assert.equal(up.viewTop, 97);
+  assert.equal(scrollBy(up, 4, 100).viewTop, 93, "scrolling up moves the pinned top");
+  // Content appended (maxScroll 100 → 120): the pinned view stays put —
+  // the C27 "rows above bottom" offset would have slid here.
+  assert.equal(scrollBy(up, 0, 120).viewTop, 97, "no drift as output appends");
+  // Scrolling back to the bottom resumes following.
+  assert.equal(scrollBy(up, -20, 100).viewTop, null, "reaching the bottom follows again");
+  // Clamped at the top of the content.
+  assert.equal(scrollBy(s, 500, 100).viewTop, 0);
+  // Content shrank to the bottom (compaction): a stale pin resolves to follow.
+  assert.equal(scrollBy({ ...s, viewTop: 42 }, 0, 10).viewTop, null);
+});
+
+test("C28: scrollBy returns the SAME state on a no-op (no rerender churn)", () => {
   const s = makeInitialState("m");
-  assert.equal(s.scrollUp, 0);
-  assert.equal(scrollBy(s, 3).scrollUp, 3);
-  assert.equal(scrollBy(s, -5).scrollUp, 0, "clamped at the bottom (0)");
-  const up = scrollBy(s, 10);
-  assert.equal(scrollBy(up, 4).scrollUp, 14);
-  assert.equal(scrollBy(up, -10).scrollUp, 0, "scrolling past the bottom lands at 0");
+  assert.equal(scrollBy(s, -5, 100), s, "scrolling down at the bottom is a no-op");
+  assert.equal(scrollBy(s, 0, 100), s);
+  const pinned = { ...s, viewTop: 42 };
+  assert.equal(scrollBy(pinned, 0, 100), pinned);
+  assert.equal(scrollToBottom(s), s, "already following");
 });
 
-test("C27: scrollBy returns the SAME state on a no-op (no rerender churn)", () => {
-  const s = makeInitialState("m"); // scrollUp 0 (at the bottom)
-  assert.equal(scrollBy(s, -5), s, "scrolling down at the bottom is a no-op");
-  assert.equal(scrollBy(s, 0), s);
-  assert.equal(scrollToBottom(s), s);
-});
-
-test("C27: scrollToBottom resets; scrollToTop sets the render-clamped sentinel", () => {
-  const s = { ...makeInitialState("m"), scrollUp: 42 };
-  assert.equal(scrollToBottom(s).scrollUp, 0);
+test("C28: scrollToBottom resumes following; scrollToTop pins content row 0", () => {
+  const s = { ...makeInitialState("m"), viewTop: 42 };
+  assert.equal(scrollToBottom(s).viewTop, null);
   const top = scrollToTop(s);
-  assert.equal(top.scrollUp, Number.MAX_SAFE_INTEGER);
+  assert.equal(top.viewTop, 0);
   assert.equal(scrollToTop(top), top, "idempotent");
 });
 
-test("C27: submitting a prompt follows the bottom again", () => {
-  const s = { ...makeInitialState("m"), input: "do the thing", scrollUp: 30 };
+test("C28: submitting a prompt follows the bottom again", () => {
+  const s = { ...makeInitialState("m"), input: "do the thing", viewTop: 30 };
   const r = submitInput(s);
   assert.ok(r !== null);
-  assert.equal(r.state.scrollUp, 0, "fresh run's output is at the bottom");
+  assert.equal(r.state.viewTop, null, "fresh run's output is at the bottom");
   assert.equal(r.state.busy, true);
 });
 
-test("C27: a new run (agent_start) follows the bottom; new items stay frozen", () => {
-  const s = { ...makeInitialState("m"), scrollUp: 12, busy: true };
-  assert.equal(applyEvent(s, { type: "agent_start" }).scrollUp, 0, "agent_start → bottom");
-  // New output while scrolled up does NOT move the window (frozen view).
+test("C28: a new run (agent_start) follows the bottom; pinned view stays frozen", () => {
+  const s = { ...makeInitialState("m"), viewTop: 12, busy: true };
+  assert.equal(applyEvent(s, { type: "agent_start" }).viewTop, null, "agent_start → follow");
+  // New output while pinned does NOT move the view (frozen window).
   const frozen = applyEvent(s, { type: "text_delta", delta: "more output", partial: asst() });
-  assert.equal(frozen.scrollUp, 12, "output lands below the window");
+  assert.equal(frozen.viewTop, 12, "output lands below the window");
 });
 
-test("C27: makeInitialState starts at the bottom (scrollUp 0)", () => {
-  assert.equal(makeInitialState("m").scrollUp, 0);
+test("C28: makeInitialState starts following the bottom (viewTop null)", () => {
+  assert.equal(makeInitialState("m").viewTop, null);
 });
 
 // ── /stats: tool-call tally + the pure stats line ─────────────────────────

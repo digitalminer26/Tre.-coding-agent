@@ -25,6 +25,8 @@ import {
   itemsHeight,
   fitItems,
   fitItemsScrollable,
+  scrollBy,
+  scrollToBottom,
   itemAreaBudget,
   inputWrap,
   inputWrapLineCount,
@@ -41,6 +43,7 @@ import {
   makeInitialState,
   setApproval,
 } from "../src/tui/state.js";
+import { itemLines } from "../src/tui/lines.js";
 import type { TuiItem, TuiState } from "../src/tui/state.js";
 
 /**
@@ -750,11 +753,12 @@ test("App frame stays exactly rows tall when items grow (pad shrinks)", () => {
     app.unmount();
   }
 });
-
-// ─────────────────────── C27: output scrollback ───────────────────────
-// The item area is a viewport over ALL content: scrollUp rows are cut from
-// the bottom (0 = follow). Items straddling the window's edges are skipped
-// (gap lines); the frame stays exactly `rows` tall.
+// ─────────────────────── C28: output scrollback (content-anchored viewport) ───────────────────────
+// viewTop = the CONTENT row the viewport's top edge sits at (null = follow
+// the bottom — exactly the legacy fitItems window). Pinned windows CLIP
+// straddling items to the visible rows (no gap lines): the window always
+// renders exactly `budget` content rows, so even a single item taller than
+// the budget scrolls.
 
 /** A user item that renders exactly 2 lines at width 80 (100 chars). */
 const twoLineUser = (i: number): TuiItem => ({
@@ -762,102 +766,175 @@ const twoLineUser = (i: number): TuiItem => ({
   text: `item-${i} ` + "x".repeat(91), // 7 + 91 = 100 chars → 2 lines at 80
 });
 
-test("C27: fitItemsScrollable at scrollUp 0 is byte-identical to fitItems", () => {
+test("C28: fitItemsScrollable following the bottom is byte-identical to fitItems", () => {
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
   for (const extra of [0, 1, 3]) {
     const legacy = fitItems(items, 80, 24, extra);
-    const s = fitItemsScrollable(items, 80, 24, extra, 0);
-    assert.deepEqual(s.visible, legacy.visible, `visible identical (extra=${extra})`);
+    const s = fitItemsScrollable(items, 80, 24, extra, null);
+    assert.deepEqual(
+      s.visible.map((v) => v.item),
+      legacy.visible,
+      `visible identical (extra=${extra})`,
+    );
+    assert.ok(s.visible.every((v) => v.from === 0), "full items (no clip)");
     assert.equal(s.pad, legacy.pad, `pad identical (extra=${extra})`);
-    assert.equal(s.topPad, 0, "no top gap at the bottom");
     assert.equal(s.eff, 0);
     assert.equal(s.total, 20);
   }
 });
 
-test("C27: maxScroll is total−budget; 0 when the content fits", () => {
+test("C28: maxScroll is total−budget; 0 when the content fits (even a stale pin follows)", () => {
   const ten = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
   assert.equal(fitItemsScrollable(ten, 80, 24, 0, 0).maxScroll, 4); // 20 − 16
   const four = Array.from({ length: 4 }, (_, i) => twoLineUser(i)); // 8 ≤ 16
   assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).maxScroll, 0);
   assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).eff, 0, "clamped to the range");
+  assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).pad, 8, "legacy tail window + pad");
 });
 
-test("C27: scroll up 2 rows shifts the window up one item (no gaps)", () => {
+test("C28: a pinned window holds exactly the budget rows (straddlers clipped, no gaps)", () => {
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  const s = fitItemsScrollable(items, 80, 24, 0, 2);
-  // window [2,18): items 1..8 (8 items, 16 lines), no straddlers → no gaps
-  assert.deepEqual(s.visible, items.slice(1, 9));
-  assert.equal(s.topPad, 0);
-  assert.equal(s.pad, 0);
-  assert.equal(s.eff, 2);
-});
-
-test("C27: scroll up 1 row → both edges straddle → 1 gap line top and bottom", () => {
-  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
+  // maxScroll 4, viewTop 1 → window [1,17): item0 [0,2) straddles top
+  // (clip line 1); item1 [2,4)…item7 [14,16) full; item8 [16,18) straddles
+  // bottom (clip line 0). 9 pieces, 16 lines, pad 0.
   const s = fitItemsScrollable(items, 80, 24, 0, 1);
-  // window [3,19): item0 [0,2) above; item1 [2,4) straddles top; item9
-  // [18,20) straddles bottom → visible items 2..8 (7 items, 14 lines)
-  assert.deepEqual(s.visible, items.slice(2, 9));
-  assert.equal(s.topPad, 1, "the straddled top row becomes a gap line");
-  assert.equal(s.pad, 1, "the straddled bottom row becomes a gap line");
-  // The window stays exactly the budget tall: topPad + items + pad = 16.
-  assert.equal(s.topPad + itemsHeight(s.visible, 80) + s.pad, 16);
+  assert.deepEqual(s.visible.map((v) => v.item), items.slice(0, 9));
+  assert.equal(s.visible[0]!.from, 1, "top straddler clipped from its 2nd line");
+  assert.equal(s.visible[0]!.to, 2);
+  assert.equal(s.visible[8]!.from, 0);
+  assert.equal(s.visible[8]!.to, 1, "bottom straddler clipped to its 1st line");
+  assert.equal(s.pad, 0, "no gap lines — the window is full");
+  const shown = s.visible.reduce((a, v) => a + (v.to - v.from), 0);
+  assert.equal(shown, 16, "exactly the budget rows");
+  assert.equal(s.eff, 3, "3 rows between the window bottom and the content bottom");
 });
 
-test("C27: scrolling past the range clamps to the top of the content", () => {
-  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  const s = fitItemsScrollable(items, 80, 24, 0, 100000);
-  assert.equal(s.eff, 4, "eff clamped to maxScroll");
-  // window [0,16): items 0..7
-  assert.deepEqual(s.visible, items.slice(0, 8));
-  assert.equal(s.topPad, 0);
-  assert.equal(s.pad, 0);
+test("C28: a SINGLE item taller than the budget scrolls (the C27 defect)", () => {
+  // 40 lines > the 16-row budget: C27's straddle-skip left every scroll
+  // position rendering the identical overflow frame. C28 clips.
+  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 40 lines at 80
+  const atTop = fitItemsScrollable([huge], 80, 24, 0, 0);
+  assert.equal(atTop.maxScroll, 24);
+  assert.deepEqual(atTop.visible, [{ item: huge, from: 0, to: 16 }]);
+  const mid = fitItemsScrollable([huge], 80, 24, 0, 12);
+  assert.deepEqual(mid.visible, [{ item: huge, from: 12, to: 28 }], "window [12,28)");
+  const atBottom = fitItemsScrollable([huge], 80, 24, 0, 24);
+  assert.deepEqual(atBottom.visible, [{ item: huge, from: 24, to: 40 }]);
+  assert.equal(atBottom.eff, 0, "at the bottom");
+  assert.notDeepEqual(mid.visible, atTop.visible, "different positions render different rows");
 });
 
-test("C27: a scrollUp sentinel (scrollToTop) lands exactly at the top", () => {
-  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  const s = fitItemsScrollable(items, 80, 24, 0, Number.MAX_SAFE_INTEGER);
-  assert.equal(s.eff, 4);
-  assert.deepEqual(s.visible, items.slice(0, 8));
-  assert.equal(s.topPad, 0);
+test("C28: pinned view stays put as content appends (no drift), follows when it reaches the bottom", () => {
+  // A pinned viewTop is an ABSOLUTE content row. Simulate output appending:
+  // the window [2,18) at 20 lines is still [2,18) at 30 lines (eff grows).
+  const items10 = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
+  const items15 = [...items10, ...Array.from({ length: 5 }, (_, i) => twoLineUser(10 + i))]; // 30
+  const a = fitItemsScrollable(items10, 80, 24, 0, 2);
+  const b = fitItemsScrollable(items15, 80, 24, 0, 2);
+  assert.deepEqual(
+    b.visible.map((v) => [v.item, v.from, v.to]),
+    a.visible.map((v) => [v.item, v.from, v.to]),
+    "same window, same clips — the view did not slide",
+  );
+  assert.equal(b.eff, 12, "new output landed BELOW the window (14 − 2)");
+  // scrollBy(0, larger maxScroll) on the C28 value keeps the same content row.
+  const s = scrollBy(scrollToBottom({ ...makeInitialState("m") }), 2, 4);
+  assert.equal(s.viewTop, 2, "2 rows up from the bottom");
+  assert.equal(scrollBy(s, 0, 14).viewTop, 2, "still row 2 at 30 lines");
+  assert.equal(scrollBy(s, -2, 14).viewTop, 4, "scrolling DOWN moves the pinned top toward the bottom");
+  assert.equal(scrollBy(s, -12, 14).viewTop, null, "reached the bottom → follow");
 });
 
-test("C27: a single item taller than the budget → legacy tail view, never blank", () => {
-  const monster: TuiItem = { kind: "user", text: "y".repeat(500) }; // 7 lines at 80
-  const s = fitItemsScrollable([monster], 80, 24, 0, 3);
-  // budget 16 > 7: the content fits — maxScroll 0, eff clamps to 0.
-  assert.equal(s.maxScroll, 0);
-  assert.deepEqual(s.visible, [monster]);
-  // Now a genuinely oversized item (40 lines > 16 budget):
-  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) };
-  const s2 = fitItemsScrollable([huge], 80, 24, 0, 5);
-  assert.equal(s2.eff, 5, "5 < maxScroll (40 − 16) — no clamp needed");
-  assert.deepEqual(s2.visible, [huge], "degenerate window falls back to the tail item");
-  assert.equal(s2.topPad, 0);
-  const s3 = fitItemsScrollable([huge], 80, 24, 0, 1000);
-  assert.equal(s3.eff, 24, "clamped to maxScroll");
-  assert.deepEqual(s3.visible, [huge], "still the tail item at the top");
-});
-
-test("C27: the frame stays exactly rows tall while scrolled (App render)", () => {
-  // 10 × 2-line items at width 100: text of 100 chars → 1 line at 100. Use
-  // 200-char user text → 2 lines at the test width.
+test("C28: a pinned window renders exactly the budget rows (no gaps)", () => {
+  // 100×24 → item budget 16. 10 items × 2 lines = 20, maxScroll 4,
+  // viewTop 3 → window [3,19): item0 above; item1 [2,4) clips to its 2nd
+  // line; items 2..8 full; item9 [18,20) clips to its 1st line. (The
+  // App-level rendering of a pinned window is pinned in tui-app.test.tsx —
+  // no JSX in this .ts file.)
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
     kind: "user",
     text: `item-${i} ` + "x".repeat(192), // 200 chars → 2 lines at 100
   }));
   const s = fitItemsScrollable(items, 100, 24, 0, 3);
-  // total 20, budget 16, maxScroll 4, eff 3 → window [1,17): item0 above;
-  // item1 [2,4) straddles top (start 2 ≥ 1? yes → first=1); item8 [16,18)
-  // straddles bottom (end 18 > 17 → last=7). visible 1..7, topPad 1, pad 1.
-  assert.deepEqual(s.visible, items.slice(1, 8));
-  assert.equal(s.topPad, 1);
-  assert.equal(s.pad, 1);
-  assert.equal(s.topPad + itemsHeight(s.visible, 100) + s.pad, 16, "window exactly budget tall");
+  assert.deepEqual(s.visible.map((v) => [v.item, v.from, v.to]), [
+    [items[1]!, 1, 2],
+    [items[2]!, 0, 2],
+    [items[3]!, 0, 2],
+    [items[4]!, 0, 2],
+    [items[5]!, 0, 2],
+    [items[6]!, 0, 2],
+    [items[7]!, 0, 2],
+    [items[8]!, 0, 2],
+    [items[9]!, 0, 1],
+  ]);
+  const shown = s.visible.reduce((a, v) => a + (v.to - v.from), 0);
+  assert.equal(shown + s.pad, 16, "window exactly budget tall (no gaps)");
 });
 
-test("C27: itemAreaBudget mirrors the fit reservation", () => {
+test("C28: the rendered lines of a slice are EXACTLY the counted lines (the lockstep contract)", () => {
+  const mk = (t: string): TuiItem => ({ kind: "user", text: t });
+  // Contract: itemLines(item, w).length === itemHeight(item, w) for every
+  // kind and every width — the fit counts lines, the renderer slices them.
+  const samples: TuiItem[] = [
+    mk(""),
+    mk("x".repeat(200)),
+    { kind: "assistant", text: "x".repeat(161), streaming: false, thinking: false },
+    { kind: "assistant", text: "x".repeat(161), streaming: true, thinking: false },
+    { kind: "assistant", text: "", streaming: true, thinking: false },
+    { kind: "assistant", text: "hello", streaming: true, thinking: true },
+    { kind: "tool", id: "1", name: "bash", argsText: "a".repeat(300), running: true },
+    {
+      kind: "tool",
+      id: "2",
+      name: "edit",
+      argsText: '{ path: "a.txt" }',
+      running: false,
+      diff: ["+added line that is quite long and wraps at the width", "-removed", "+short"],
+      resultText: "ok",
+    },
+    { kind: "tool", id: "3", name: "read", argsText: '{ path: "a.txt" }', running: false, hidden: true },
+    { kind: "compaction", tokensBefore: 12345, summaryChars: 999, messagesKept: 7 },
+    { kind: "error", text: "boom" },
+    { kind: "info", text: "note" },
+  ];
+  for (const item of samples) {
+    for (const width of [1, 7, 23, 80]) {
+      assert.equal(itemLines(item, width).length, itemHeight(item, width), `${JSON.stringify(item.kind)} w=${width}`);
+    }
+  }
+});
+
+test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
+  // user: one plain span per wrapped line; empty text → one blank line.
+  assert.deepEqual(itemLines({ kind: "user", text: "" }, 80), [{ spans: [{ text: " " }] }]);
+  assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "hi" }] }]);
+  // assistant: the cursor is part of the text (and of the height).
+  const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false }, 80);
+  assert.deepEqual(streamed, [{ spans: [{ text: "ab\u258d" }] }]);
+  // tool running: colored mark span + rest; hard wrap splits the line.
+  const run = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "a".repeat(100), running: true }, 80);
+  assert.equal(run.length, 2);
+  // line 1 = mark(1) + " bash "(6) + 73 args chars = 80 display columns.
+  assert.deepEqual(run[0]!.spans, [{ text: "\u2192", color: "gray" }, { text: " bash " + "a".repeat(73) }]);
+  assert.equal(run[1]!.spans[0]!.text.length, 27, "remaining args on line 2");
+  // tool done with diff + result: colored diff runs, dim result (2-col indent).
+  const done = itemLines(
+    { kind: "tool", id: "t", name: "edit", argsText: "{}", running: false, diff: ["+a", "-b"], resultText: "ok" },
+    80,
+  );
+  assert.deepEqual(done[0]!.spans, [{ text: "\u2713", color: "green" }, { text: " edit {}" }]);
+  assert.deepEqual(done[1]!.spans, [{ text: "+a", color: "green" }]);
+  assert.deepEqual(done[2]!.spans, [{ text: "-b", color: "red" }]);
+  assert.deepEqual(done[3]!.spans, [{ text: "  ok", dim: true }]);
+  // hidden tool: no lines at all.
+  assert.deepEqual(itemLines({ kind: "tool", id: "h", name: "read", argsText: "{}", running: true, hidden: true }, 80), []);
+  // compaction / error / info colors.
+  assert.equal(itemLines({ kind: "compaction", tokensBefore: 2000, summaryChars: 5, messagesKept: 1 }, 80)[0]!.spans[0]!.color, "magenta");
+  assert.equal(itemLines({ kind: "error", text: "x" }, 80)[0]!.spans[0]!.color, "red");
+  assert.equal(itemLines({ kind: "info", text: "x" }, 80)[0]!.spans[0]!.dim, true);
+});
+
+test("C28: itemAreaBudget mirrors the fit reservation", () => {
   assert.equal(itemAreaBudget(24, 0), 16);
   assert.equal(itemAreaBudget(24, 3), 13);
   assert.equal(itemAreaBudget(3, 0), 1, "clamped at 1");

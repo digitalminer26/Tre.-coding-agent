@@ -9,6 +9,7 @@
  */
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent } from "../types.js";
 import { renderEditDiff } from "./diff.js";
+import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
 import cliTruncate from "cli-truncate";
 
@@ -77,12 +78,13 @@ export interface TuiState {
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
-   * C27: rows scrolled UP from the bottom of the output area (0 = follow
-   * the bottom — the default). The view is frozen while > 0: new output
-   * lands below the window until the user scrolls back down. Clamped to
-   * the scrollable range (total content height − viewport) at render time.
+   * C28: the CONTENT row the viewport's top edge sits at (absolute in the
+   * content), or null = follow the bottom (the default). While pinned, new
+   * output lands BELOW the window — the view stays put until the user
+   * scrolls back down (a C27 "rows above bottom" offset would drift as
+   * output appends). Clamped to the scrollable range at render time.
    */
-  scrollUp: number;
+  viewTop: number | null;
 }
 
 export function makeInitialState(
@@ -104,7 +106,7 @@ export function makeInitialState(
     totalTokens: 0,
     toolCalls: 0,
     info,
-    scrollUp: 0,
+    viewTop: null,
   };
 }
 
@@ -112,8 +114,8 @@ export function makeInitialState(
 export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
   switch (ev.type) {
     case "agent_start":
-      // C27: a new run's output is the interesting thing — jump to bottom.
-      return { ...state, busy: true, scrollUp: 0 };
+      // C27/C28: a new run's output is the interesting thing — follow the bottom.
+      return { ...state, busy: true, viewTop: null };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -377,9 +379,9 @@ export function submitInput(s: TuiState): { state: TuiState; prompt: string } | 
       historyIdx: null,
       history: [...s.history, prompt],
       busy: true,
-      // C27: a fresh prompt's output is the interesting thing — follow the
-      // bottom again.
-      scrollUp: 0,
+      // C27/C28: a fresh prompt's output is the interesting thing — follow
+      // the bottom again.
+      viewTop: null,
     },
     prompt,
   };
@@ -406,35 +408,41 @@ export function approvalAnswer(s: TuiState, ok: boolean): TuiState {
 }
 
 // ---------------------------------------------------------------------------
-// C27 — output scrollback. Pure state transitions; the row MATH lives in
-// fitItemsScrollable above (it clamps to the scrollable range, so a
-// scrollUp larger than the content is harmless — e.g. after compaction
-// shrank the content, or scrollToTop's sentinel).
+// C28 — output scrollback (content-anchored viewport). Pure state
+// transitions; the row MATH lives in fitItemsScrollable below.
+//
+// C27 stored `scrollUp` (rows above the bottom). That offset drifts: as
+// output appends, "N rows above the bottom" points at different content,
+// and an item straddling the window edge could only be dropped whole, so
+// content dominated by ONE item taller than the budget — a single long
+// reply, the common shape — could not be scrolled at all. C28 stores the
+// CONTENT row the viewport's top edge sits at (`viewTop`): absolute, so a
+// pinned view stays pinned as output appends, and straddling items are
+// clipped (see fitItemsScrollable).
 // ---------------------------------------------------------------------------
 
 /**
  * Scroll the viewport by `delta` ROWS (positive = up toward older content,
- * negative = down toward the bottom), clamped at 0 (the bottom — the
- * render-time clamp at the content top happens in fitItemsScrollable, which
- * knows the content height; this does not).
+ * negative = down toward the bottom). `maxScroll` is the current scrollable
+ * range (total content height − item budget, from the last fit). Reaching
+ * the bottom resumes following (null), so new output keeps streaming into
+ * the view.
  */
-export function scrollBy(s: TuiState, delta: number): TuiState {
-  const next = Math.max(0, s.scrollUp + delta);
-  return next === s.scrollUp ? s : { ...s, scrollUp: next };
+export function scrollBy(s: TuiState, delta: number, maxScroll: number): TuiState {
+  const cur = s.viewTop === null ? maxScroll : Math.min(s.viewTop, maxScroll);
+  const next = Math.max(0, Math.min(maxScroll, cur - delta));
+  const resolved = next >= maxScroll ? null : next;
+  return resolved === s.viewTop ? s : { ...s, viewTop: resolved };
 }
 
-/** Back to following the bottom. */
+/** Back to following the bottom (new output appears at the bottom). */
 export function scrollToBottom(s: TuiState): TuiState {
-  return s.scrollUp === 0 ? s : { ...s, scrollUp: 0 };
+  return s.viewTop === null ? s : { ...s, viewTop: null };
 }
 
-/**
- * To the top of the content. The state cannot know the content height,
- * so this sets a sentinel larger than any terminal can hold; the render
- * clamp (min(scrollUp, maxScroll)) lands it exactly at the top.
- */
+/** To the top of the content (content row 0). */
 export function scrollToTop(s: TuiState): TuiState {
-  return s.scrollUp === Number.MAX_SAFE_INTEGER ? s : { ...s, scrollUp: Number.MAX_SAFE_INTEGER };
+  return s.viewTop === 0 ? s : { ...s, viewTop: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +493,13 @@ export function itemHeight(item: TuiItem, width: number): number {
       // No prefix (D15): the user's text renders plain at full width.
       // Empty text still renders one line (a bare space in app.tsx).
       return item.text ? wrapLineCount(item.text, width) : 1;
-    case "assistant":
-      return (item.thinking ? 1 : 0) + (item.text ? wrapLineCount(item.text, width) : 0);
+    case "assistant": {
+      // The streaming cursor renders as part of the text — count it (C28:
+      // before, the cursor line rendered but did not count, overflowing the
+      // frame by one row mid-stream).
+      const text = item.text + (item.streaming ? "\u258d" : "");
+      return (item.thinking ? 1 : 0) + wrapLineCount(text, width);
+    }
     case "tool": {
       if (item.hidden) return 0; // D19: quiet tool mid-flight — renders nothing
       const mark =
@@ -561,26 +574,34 @@ export function fitItems(
 }
 
 /**
- * C27 — fit result with scrollback. The item area is a viewport over the
- * full content (all items, not just the tail): `scrollUp` rows are cut from
- * the BOTTOM of the content (0 = follow the bottom, exactly the legacy
- * `fitItems` window). Items straddling the window's edges are skipped —
- * the rows they would have occupied become blank gap lines (`topPad`
- * above, `pad` below), so the frame stays exactly `rows` tall. The window
- * never reorders: `visible` is always a contiguous slice.
+ * C28 — fit result with scrollback. The item area is a viewport over the
+ * full content (all items, not just the tail). `viewTop` is the CONTENT row
+ * the viewport's top edge sits at (null = follow the bottom — exactly the
+ * legacy `fitItems` window). While pinned, items straddling a window edge
+ * are CLIPPED to their visible rows (sliced), never skipped: the viewport
+ * renders exactly `budget` content rows, so any content — including a
+ * single item taller than the budget — scrolls. `visible` is always a
+ * contiguous slice (no reordering).
  */
+/** One visible piece of an item: rendered lines [from, to) of itemLines. */
+export interface VisibleSlice {
+  item: TuiItem;
+  /** First rendered line of `item` shown by the viewport. */
+  from: number;
+  /** One past the last rendered line shown. */
+  to: number;
+}
+
 export interface FitWithScroll {
-  /** Contiguous slice of `items` fully inside the viewport. */
-  visible: TuiItem[];
-  /** Blank lines ABOVE `visible` (top edge gap while scrolled up). */
-  topPad: number;
-  /** Blank lines BELOW `visible` (bottom edge gap / the usual pad). */
+  /** Contiguous slice of `items` intersecting the viewport (clipped). */
+  visible: VisibleSlice[];
+  /** Blank lines below the window (follow path only; 0 while pinned). */
   pad: number;
   /** Total rendered lines of ALL items at `width` (0 when none). */
   total: number;
   /** Scrollable range: max(0, total − budget). */
   maxScroll: number;
-  /** The scroll actually applied: min(max(0, scrollUp), maxScroll). */
+  /** Rows between the viewport's bottom edge and the content's bottom. */
   eff: number;
 }
 
@@ -589,20 +610,28 @@ export function fitItemsScrollable(
   width: number,
   rows: number,
   extraLines: number,
-  scrollUp: number,
+  viewTop: number | null,
 ): FitWithScroll {
   const budget = itemAreaBudget(rows, extraLines);
-  const total = itemsHeight(items, width);
+  // One wrap pass: the per-item rendered line lists — both the height
+  // counts AND the sliceable rows (re-wrapping via itemHeight would do the
+  // work twice per frame).
+  const lineLists = items.map((it) => itemLines(it, width));
+  const total = lineLists.reduce((a, l) => a + l.length, 0);
   const maxScroll = Math.max(0, total - budget);
-  const eff = Math.min(Math.max(0, scrollUp), maxScroll);
 
-  // Follow-the-bottom (eff 0): byte-identical to the legacy fitItems so
-  // every pre-C27 frame is unchanged.
-  if (eff === 0) {
+  // Follow the bottom (or nothing to scroll): the legacy fitItems tail
+  // window + pad, expressed as full-item slices — every pre-C28 frame is
+  // unchanged (except the now-counted streaming cursor row).
+  if (viewTop === null || total <= budget) {
     const legacy = fitItems(items, width, rows, extraLines);
+    const start = items.length - legacy.visible.length;
     return {
-      visible: legacy.visible,
-      topPad: 0,
+      visible: legacy.visible.map((item, i) => ({
+        item,
+        from: 0,
+        to: lineLists[start + i]!.length,
+      })),
       pad: legacy.pad,
       total,
       maxScroll,
@@ -610,41 +639,23 @@ export function fitItemsScrollable(
     };
   }
 
-  // Scrolled up: the viewport covers content rows [windowTop, windowTop +
-  // budget). Items straddling either edge are skipped (gap lines).
-  const windowTop = maxScroll - eff;
-  const bottomEdge = total - eff;
-  let first = -1;
-  let last = -1;
+  // Pinned: the viewport covers content rows [W, W + budget). Straddlers
+  // are clipped to the window, so the frame holds exactly `budget` content
+  // rows — even when one item taller than the budget dominates the content.
+  const W = Math.max(0, Math.min(viewTop, maxScroll));
+  const bottomEdge = W + budget;
+  const out: VisibleSlice[] = [];
   let acc = 0;
   for (let i = 0; i < items.length; i++) {
-    const h = itemHeight(items[i]!, width);
+    const h = lineLists[i]!.length;
     const start = acc;
     const end = acc + h;
-    if (h > 0 && start >= windowTop && first === -1) first = i;
-    if (h > 0 && end <= bottomEdge) last = i;
     acc = end;
+    const from = Math.max(start, W) - start;
+    const to = Math.min(end, bottomEdge) - start;
+    if (to > from) out.push({ item: items[i]!, from, to });
   }
-  if (first === -1 || first > last) {
-    // No item sits fully inside the window (e.g. the window lands inside a
-    // single item taller than the budget). Degrade to the legacy tail view
-    // (bottom-pinned, the last item kept whole) rather than a blank window.
-    const legacy = fitItems(items, width, rows, extraLines);
-    return {
-      visible: legacy.visible,
-      topPad: 0,
-      pad: legacy.pad,
-      total,
-      maxScroll,
-      eff,
-    };
-  }
-  const topRow = items.slice(0, first).reduce((a, it) => a + itemHeight(it, width), 0);
-  const topPad = topRow - windowTop;
-  const visible = items.slice(first, last + 1);
-  const bottomRow = items.slice(0, last + 1).reduce((a, it) => a + itemHeight(it, width), 0);
-  const pad = Math.max(0, bottomEdge - bottomRow);
-  return { visible, topPad, pad, total, maxScroll, eff };
+  return { visible: out, pad: 0, total, maxScroll, eff: maxScroll - W };
 }
 
 /**

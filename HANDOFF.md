@@ -1,3 +1,71 @@
+# HANDOFF — C28: scrollback rework — content-anchored viewport, clip straddlers (2026-09-22)
+
+## C28 — the scroll viewport pins an ABSOLUTE content row and CLIPS straddling items; a single tall reply now actually scrolls (365 tests: 358 pass 0 fail 7 skip)
+
+C27 (the first scrollback pass, built by a tre dogfood run) had a
+reviewer-found defect: the viewport SKIPPED items straddling the window
+edge (gap lines). A reply that is ONE item taller than the 16-row item
+budget — the most common long-output shape — therefore could not be
+scrolled at all: every scroll position rendered the identical overflow
+frame, and the "scrolled" hint lied. C28 reworks the viewport math and,
+with it, the height/render split that made the bug possible.
+
+- **State** (state.ts): `TuiState.scrollUp: number` (rows above the
+  bottom) → `viewTop: number | null` (the CONTENT row at the viewport's
+  top edge; null = follow). Content-anchored, so a pinned view STAYS
+  PUT as output appends — the C27 offset slid under new content.
+  `scrollBy(s, delta, maxScroll)` takes the current scrollable range
+  (from the last fit): scroll UP decreases viewTop, DOWN increases it,
+  reaching maxScroll resumes following (null). `scrollToTop` is now
+  exact (viewTop 0) — no MAX_SAFE_INTEGER sentinel. submitInput /
+  agent_start reset to follow, as before.
+- **New module src/tui/lines.ts**: `itemLines(item, width): RLine[]` —
+  the rendered lines of an item as data (spans with color/dim). It is
+  the SINGLE SOURCE OF TRUTH for both the height COUNTS (the fit math)
+  and the RENDERING (the App). Contract, pinned in
+  tui-pinned-layout.test.ts: `itemLines(item, w).length ===
+  itemHeight(item, w)` for every kind/width. This is what lets the
+  viewport slice a straddler to its visible lines instead of dropping it.
+- **Viewport** (state.ts `fitItemsScrollable`): follow (viewTop null or
+  content ≤ budget) = the legacy `fitItems` tail window, byte-identical
+  (expressed as full-item slices). Pinned = window [W, W+budget) over
+  the per-item line lists; every straddler is CLIPPED to [from, to),
+  so the window always renders exactly `budget` rows (no gap lines).
+  One wrap pass per frame (the old code wrapped once for the counts and
+  the renderer wrapped AGAIN). `FitWithScroll.visible` is now
+  `VisibleSlice[]` ({item, from, to}); `topPad` is gone.
+- **Renderer** (app.tsx): `Item` draws exactly `itemLines(item, w)
+  .slice(from, to)` — spans become nested Ink `<Text>` runs. No other
+  rendering logic moved; key routing, approval lock, hints unchanged
+  (the hint's `↑eff/maxScroll` now reads "rows between the window bottom
+  and the content bottom").
+- **Cursor counted** (state.ts `itemHeight`): the streaming cursor (▍)
+  was always rendered but never counted — a cursor-only frame
+  (`text:""` at stream start) overflowed the frame by one row. The
+  cursor is now part of the counted text.
+- **Terminal hygiene** (run.tsx): mouse mode 1006 restore now also runs
+  on `process.exit` (covers uncaught errors + hard exits) and
+  SIGTERM/SIGHUP are routed through `process.exit` so the finally-based
+  restore runs (previously: bare-kill default → mode left ON for the
+  shell). SIGKILL is uncatchable — the pty_feed watchdog's kill -9
+  tears the PTY down with it.
+- **Files:** `src/tui/lines.ts` (new), `src/tui/state.ts` (viewTop,
+  scrollBy/ToTop/ToBottom, itemLines-based fit, cursor counting),
+  `src/tui/app.tsx` (slice rendering, maxScroll plumbing), `src/tui/
+  run.tsx` (exit handlers), tests: C28 sections in
+  `test/tui-state.test.ts` + `test/tui-pinned-layout.test.ts` (the
+  lockstep contract, clipping, drift, the single-tall-item case),
+  `test/tui-app.test.tsx` (key routing with maxScroll; pinned frame
+  render), `test/e2e.sh` scenario 15 strengthened to assert the pinned
+  frame shows MIDDLE lines of a 40-line reply (line 40 gone) — the old
+  assertion passed even with the defect, because the hint showed
+  regardless.
+- **Verified in a real PTY** (local 27B, 40-line reply in a 24-row PTY):
+  PgUp + wheel pins the view; the pinned frame shows reply lines 14–29
+  with line 40 absent (under C27 it was still present — the defect);
+  End returns to the bottom (line 40 visible, follow hint restored);
+  mouse mode 1006 enabled on entry, restored on exit.
+
 # HANDOFF — the /stats slash command (session turns, tokens, tool calls, session size) (2026-09-22)
 
 ## /stats — one info line reporting session turn count, total tokens, tool-call count, and session file size in bytes (365 tests: 357 pass 0 fail 8 skip)

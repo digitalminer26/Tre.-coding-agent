@@ -213,8 +213,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
     onApproval: (ok: boolean): void => setState(approvalAnswer(state, ok)),
     onQuit: (): void => quit(0),
-    // C27: output scrollback — pure state transitions (see state.ts).
-    onScrollBy: (delta: number): void => setState(scrollBy(state, delta)),
+    // C28: output scrollback — pure state transitions (see state.ts).
+    onScrollBy: (delta: number, maxScroll: number): void =>
+      setState(scrollBy(state, delta, maxScroll)),
     onScrollToTop: (): void => setState(scrollToTop(state)),
     onScrollToBottom: (): void => setState(scrollToBottom(state)),
   };
@@ -234,6 +235,15 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       process.stdout.write("\u001b[?1006l");
     }
   };
+  // C28: restore the terminal on EVERY death path, not just the finally
+  // above. 'exit' fires on process.exit / uncaught errors / normal exit;
+  // SIGTERM/SIGHUP (service manager, terminal close) default to a bare
+  // kill, so route them through process.exit to run the 'exit' handlers.
+  // (SIGKILL can't run anything — nothing to be done; the pty_feed
+  // watchdog's kill -9 is the only one we hit, and it tears the PTY down.)
+  process.on("exit", restoreMouseMode);
+  process.on("SIGTERM", () => process.exit(143));
+  process.on("SIGHUP", () => process.exit(129));
 
   app = render(React.createElement(App, { state, ...handlers }), { exitOnCtrlC: false });
 
