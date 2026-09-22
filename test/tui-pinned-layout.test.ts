@@ -287,6 +287,61 @@ test("inputWrap: word-wraps at width, cursor at its LOCATION, every line ≤ wid
   assert.equal(inputWrapLineCount("x".repeat(300), 300, 80), 4);
 });
 
+test("inputWrap: no trailing space at a wrap point, no leading space on a wrapped line", () => {
+  // The fuzz bug: the break lands on the LAST space, but an earlier space of
+  // the same run would otherwise TRAIL the line ("aaa "). Trim at the wrap
+  // point — the last line is never trimmed.
+  const dbl = inputWrap("aaa  bbb", 8, 8);
+  assert.deepEqual(dbl, ["aaa", "bbb\u258d"]);
+  assert.ok(!dbl[0]!.endsWith(" "));
+
+  // cursor inside the space run: the wrap trims the trailing space, the
+  // cursor keeps its position (after the first space).
+  assert.deepEqual(inputWrap("aaa  bbb", 4, 8), ["aaa \u258d", "bbb"]);
+
+  // a leading space of the input is kept on line 0 only (it mirrors the
+  // input), and is NOT repeated as a leading space on a wrapped line.
+  const lead = inputWrap(" aaa bbb", 8, 8);
+  assert.deepEqual(lead, [" aaa", "bbb\u258d"]);
+  assert.equal(lead[0], " aaa"); // line 0 may start with a space
+  assert.ok(!lead[1]!.startsWith(" ")); // line 1 must not
+
+  // cursor at the very start, leading space present
+  assert.deepEqual(inputWrap(" aaa bbb", 0, 8), ["\u258d aaa", "bbb"]);
+
+  // hard-break (no space) still trims a trailing space that would otherwise
+  // sit at the column limit; the cursor rides along.
+  assert.deepEqual(inputWrap("aaaaaa b", 8, 8), ["aaaaaa", "b\u258d"]);
+  assert.deepEqual(inputWrap("aaaaaa b", 7, 8), ["aaaaaa", "\u258db"]);
+
+  // the plain single-space case the fuzz named: at w=8 "aaa bbb" fits on one
+  // line (cursor included); at w=7 it wraps cleanly with no trailing space.
+  assert.deepEqual(inputWrap("aaa bbb", 7, 8), ["aaa bbb\u258d"]);
+  assert.deepEqual(inputWrap("aaa bbb", 4, 8), ["aaa \u258dbbb"]);
+
+  // a SPACE RUN after the break point must not leak extra spaces onto the
+  // start of the next line (only line 0 may start with a space).
+  const run = inputWrap("a   b   c", 8, 6);
+  assert.deepEqual(run, ["a   b", "\u258dc"]);
+  assert.ok(!run[1]!.startsWith(" "));
+
+  // invariant sweep: no non-last line ends with a space, no wrapped line
+  // starts with a space, every line ≤ width (checked by the fuzzer too).
+  const sweep: [string, number, number][] = [
+    ["aaa  bbb", 8, 8], [" aaa bbb", 8, 8], ["aaaaaa b", 8, 8],
+    ["aa bb cc dd ee ff", 9, 7], ["a   b   c", 8, 6],
+  ];
+  for (const [s, p, w] of sweep) {
+    const lines = inputWrap(s, p, w);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (i < lines.length - 1) assert.ok(!line.endsWith(" "), `line ${i} of ${JSON.stringify(s)} trailing space`);
+      if (i > 0) assert.ok(!line.startsWith(" "), `line ${i} of ${JSON.stringify(s)} leading space`);
+      assert.ok(wrapLineCount(line, w) <= 1, `line ${i} of ${JSON.stringify(s)} over width`);
+    }
+  }
+});
+
 test("inputMove: moves the cursor left/right, no-op at the ends", () => {
   const s0 = { ...makeInitialState("m"), input: "hello", cursorPos: 5 };
   // left from the end → 4, right back → 5

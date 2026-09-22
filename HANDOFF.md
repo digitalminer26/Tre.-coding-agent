@@ -74,6 +74,15 @@ visible now, but a 5000-char paste fills the item area with pad=0 — the
 frame may exceed rows, Ink scrolls); tab/space multi-space collapse at wrap
 points; a `/wrap off` toggle back to the old one-line truncation.
 
+Follow-up hardening (found by a tre child's own fuzzer, `dist/fuzz-inputwrap.mjs`):
+three real edge bugs — (1) a space run at a wrap point trailed the previous
+line ("aaa  bbb" w=8 → line 0 "aaa "); (2) a trailing space after a wide/CJK
+char at the break; (3) extra spaces of the run leaked to the START of the
+next line. Fix in `inputWrap` (src/tui/state.ts): trim trailing spaces at
+each wrap point (the LAST line is never trimmed), and a space never starts a
+WRAPPED line (line 0 may keep the input's leading space). Regression tests
+in test/tui-pinned-layout.test.ts cover all three classes; full suite green.
+
 ---
 
 # HANDOFF — bash group-kill + sed-regex misparse (2026-09-21) — UNCOMMITTED (guardrail zone)

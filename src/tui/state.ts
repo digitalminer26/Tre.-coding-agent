@@ -506,9 +506,11 @@ function dispWidth(s: string): number {
  * Wrapped to at most `width` display columns per line (wide/CJK chars count
  * as 2). Wrapping is word-aware: an overflowing line breaks at the LAST space
  * inside it (the space is consumed, never repeated); with no space it
- * hard-breaks at the column limit. A space that would start a new line is
- * dropped (no leading spaces). Every line is ≤ `width` display columns, so
- * the frame geometry (fitItems) can count them exactly.
+ * hard-breaks at the column limit. A space that would start a wrapped line is
+ * dropped (no leading spaces on lines 1+). Trailing spaces are trimmed at each
+ * wrap point (the LAST line is never trimmed), so no wrapped line has leading
+ * or trailing whitespace. Every line is ≤ `width` display columns, so the
+ * frame geometry (fitItems) can count them exactly.
  */
 export function inputWrap(input: string, cursorPos: number, width: number): string[] {
   const w = Math.max(1, width);
@@ -531,17 +533,26 @@ export function inputWrap(input: string, cursorPos: number, width: number): stri
         idx += c.length;
       }
       if (breakAt > 0) {
-        lines.push(cur.slice(0, breakAt));
+        // Trim trailing spaces at the wrap point: the break lands on the LAST
+        // space, but an earlier space of the same run would otherwise trail
+        // the line (the "aaa " bug). The LAST line is never trimmed.
+        lines.push(cur.slice(0, breakAt).replace(/ +$/, ""));
         cur = cur.slice(breakAt + 1);
         curW = dispWidth(cur);
       } else {
-        lines.push(cur);
+        lines.push(cur.replace(/ +$/, ""));
         cur = "";
         curW = 0;
       }
       if (ch === " ") continue; // a space never starts a line
       cur += ch;
       curW += cw;
+    } else if (ch === " " && cur === "" && lines.length > 0) {
+      // A space never starts a WRAPPED line. Only line 0 may start with a
+      // space (it mirrors a leading space of the input). Without this, a
+      // space run after the break point leaked its extra spaces onto the
+      // start of the next line.
+      continue;
     } else {
       cur += ch;
       curW += cw;
