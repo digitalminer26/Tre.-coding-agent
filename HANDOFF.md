@@ -1,5 +1,41 @@
 # HANDOFF — auto-compaction is session-independent + TUI input wraps (2026-09-21)
 
+## C25 — the 2GB OOM crash is fixed: React's User-Timing entries are swept (329 tests: 322 pass 0 fail)
+
+Root cause of the recurring `JavaScript heap out of memory` crash (reproduced
+live three times): the DEV build of react-reconciler — what ink runs under —
+calls `performance.measure()` for EVERY component mount/update/render, and
+Node keeps User-Timing marks/measures in an UNBOUNDED buffer. A TUI
+re-renders constantly (every streamed token), so entries accumulated ~450/s;
+each entry holds strings (component names, `tooltipText`) plus a detail
+object — the heap grew ~40MB per turn and died at the ~2GB limit. Proven two
+ways: (a) the crashed child's 3.3GB heap snapshot shows 53M nodes whose
+strings are held under `track` / `color` / `tooltipText` / `trackGroup`
+properties — fields that exist ONLY in react-reconciler's development.js
+(reusable-component dev-tool details); (b) a live 10-minute session held
+~600k `performance.getEntries()` entries, all React's `Mount`/`Update`
+measures.
+
+What changed (one increment, 3 files):
+- **`src/tui/perf-sweep.ts`** (new) — `sweepPerfEntries()` (clearMeasures +
+  clearMarks) and `startPerfEntrySweep(intervalMs=5000)` (unref'd interval,
+  returns a stop fn). Safe: nothing in tre or ink ever reads these entries
+  back — they exist for browser DevTools, which a TUI has no; production
+  React builds create no entries, so the sweep is a no-op there.
+- **`src/tui/run.tsx`** — starts the sweep after `render(...)`, stops it in
+  the exit `finally`.
+- **`test/perf-sweep.test.ts`** (new) — sweep clears planted marks/measures,
+  no-op on empty buffer, live interval clears late entries, stop halts it,
+  stop is idempotent.
+
+Verification: full gate green (329 tests, 0 fail). LIVE before/after under an
+identical TUI session: before — 742,662 entries / 604MB heap at 28 min,
+growing ~450 entries/s; after — **1 entry / 18MB heap at 6+ min, flat**.
+`/quit` exits cleanly (no lifecycle regression). This makes long
+self-improvement runs (and any long interactive session) viable regardless
+of model or work length; the compaction fix bounds the CONTEXT, this bounds
+the RENDERING side effect.
+
 ## The runaway-loop turn cap is session-independent — derived from the model when `--max-turns` is omitted (325 tests: 317 pass 0 fail 8 skip)
 
 Before: the agent loop's runaway guard used a HARDCODED cap (32 turns) unless

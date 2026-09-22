@@ -20,6 +20,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./app.js";
+import { startPerfEntrySweep } from "./perf-sweep.js";
 import {
   approvalAnswer,
   applyEvent,
@@ -193,6 +194,11 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
 
   app = render(React.createElement(App, { state, ...handlers }), { exitOnCtrlC: false });
 
+  // C25: React's DEV build fills Node's unbounded performance (User-Timing)
+  // buffer with one entry per component render — the 40MB/turn heap growth
+  // behind the 2GB OOM crash. Sweep it so long sessions stay flat.
+  const stopPerfSweep = startPerfEntrySweep();
+
   // ── approval + executor ──────────────────────────────────────────────────
   const ask: AskApproval =
     opts.deps?.askApproval ??
@@ -213,6 +219,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   try {
     await app.waitUntilExit();
   } finally {
+    stopPerfSweep();
     process.off("SIGINT", onSigint);
   }
   return exitCode;
