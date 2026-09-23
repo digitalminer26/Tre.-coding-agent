@@ -20,7 +20,20 @@ const oneLine = (s: string, n: number): string => {
 
 export type TuiItem =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string; streaming: boolean; thinking: boolean }
+  | {
+      kind: "assistant";
+      text: string;
+      streaming: boolean;
+      /** A reasoning model is emitting (or emitted) thinking. */
+      thinking: boolean;
+      /**
+       * Accumulated `thinking_delta` text (the model's reasoning, from the
+       * wire's `reasoning_content`). Rendered dimmed above the reply; kept
+       * after `done` so the reasoning stays visible. Empty when the model
+       * did not think.
+       */
+      thinkingText: string;
+    }
   | {
       kind: "tool";
       id: string;
@@ -173,7 +186,10 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       if (lastAssistantStreaming(state.items)) return state;
       return {
         ...state,
-        items: [...state.items, { kind: "assistant", text: "", streaming: true, thinking: false }],
+        items: [
+          ...state.items,
+          { kind: "assistant", text: "", streaming: true, thinking: false, thinkingText: "" },
+        ],
       };
     }
     case "text_delta": {
@@ -182,17 +198,20 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       if (last !== undefined && last.kind === "assistant" && last.streaming) {
         items[items.length - 1] = { ...last, text: last.text + ev.delta, thinking: false };
       } else {
-        items.push({ kind: "assistant", text: ev.delta, streaming: true, thinking: false });
+        items.push({ kind: "assistant", text: ev.delta, streaming: true, thinking: false, thinkingText: "" });
       }
       return { ...state, items };
     }
     case "thinking_delta": {
+      // Accumulate the reasoning text (the wire's `reasoning_content`):
+      // before, only the `thinking` flag was set, so the TUI showed a static
+      // "thinking…" hint and the actual thinking was never visible.
       const items = [...state.items];
       const last = items[items.length - 1];
       if (last !== undefined && last.kind === "assistant" && last.streaming) {
-        items[items.length - 1] = { ...last, thinking: true };
+        items[items.length - 1] = { ...last, thinking: true, thinkingText: last.thinkingText + ev.delta };
       } else {
-        items.push({ kind: "assistant", text: "", streaming: true, thinking: true });
+        items.push({ kind: "assistant", text: "", streaming: true, thinking: true, thinkingText: ev.delta });
       }
       return { ...state, items };
     }
@@ -200,8 +219,9 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
     case "toolcall_delta":
       return state; // arguments stream in silently — shown at execution start
     case "done": {
-      // Close the streaming item; drop the "thinking" indicator (the plain
-      // CLI shows thinking text never — the TUI only hints at it live).
+      // Close the streaming item. The live "thinking" flag clears, but the
+      // accumulated thinkingText STAYS — the reasoning is part of the
+      // record (the plain CLI prints nothing; the TUI shows it dimmed).
       // D15: tally usage for the optional `tokens` bottom field.
       const used = ev.message.usage?.totalTokens ?? 0;
       return {
@@ -498,7 +518,11 @@ export function itemHeight(item: TuiItem, width: number): number {
       // before, the cursor line rendered but did not count, overflowing the
       // frame by one row mid-stream).
       const text = item.text + (item.streaming ? "\u258d" : "");
-      return (item.thinking ? 1 : 0) + wrapLineCount(text, width);
+      // The accumulated reasoning renders dimmed above the reply (lines.ts):
+      // one header line ("thinking…" / "thinking:") + the wrapped text —
+      // count exactly what the renderer draws.
+      const think = item.thinkingText !== "" ? 1 + wrapLineCount(item.thinkingText, width) : 0;
+      return think + wrapLineCount(text, width);
     }
     case "tool": {
       if (item.hidden) return 0; // D19: quiet tool mid-flight — renders nothing

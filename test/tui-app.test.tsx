@@ -54,7 +54,7 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
 test("renders header, items (user/assistant/tool/diff/compaction/error), prompt and hints", async () => {
   const items: TuiItem[] = [
     { kind: "user", text: "fix the bug" },
-    { kind: "assistant", text: "On it.", streaming: false, thinking: false },
+    { kind: "assistant", text: "On it.", streaming: false, thinking: false, thinkingText: "" },
     { kind: "tool", id: "t1", name: "edit", argsText: '{ path: "a.txt", … }', diff: ["- x = 1", "+ x = 2"], running: false, resultText: "edited", isError: false },
     { kind: "compaction", tokensBefore: 25341, messagesKept: 4, summaryChars: 809 },
     { kind: "error", text: "error: boom" },
@@ -78,7 +78,7 @@ test("renders a busy indicator and the streaming caret", () => {
   const state = {
     ...makeInitialState("m"),
     busy: true,
-    items: [{ kind: "assistant", text: "partial", streaming: true, thinking: false } as TuiItem],
+    items: [{ kind: "assistant", text: "partial", streaming: true, thinking: false, thinkingText: "" } as TuiItem],
   };
   const app = makeApp(state);
   assert.match(app.lastFrame() ?? "", /working…/);

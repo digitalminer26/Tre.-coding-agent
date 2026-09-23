@@ -134,19 +134,24 @@ test("itemHeight per kind at width 80", () => {
   const userEmpty: TuiItem = { kind: "user", text: "" };
   assert.equal(itemHeight(userEmpty, 80), 1);
 
-  // assistant: thinking adds exactly one line; 200×'x' alone → 3 (80+80+40)
+  // assistant: 200×'x' alone → 3 (80+80+40)
   const asstPlain: TuiItem = {
     kind: "assistant",
     text: "x".repeat(200),
     streaming: false,
     thinking: false,
+    thinkingText: "",
   };
   assert.equal(itemHeight(asstPlain, 80), 3);
   // NOTE (see farm report): the spec bullet reads "thinking + 200×'x' → 3"
-  // but the lockstep formula is (thinking?1:0) + wrapLineCount(text) = 4.
-  // Encode the FORMULA additively so either reading fails loudly at worst.
-  const asstThink: TuiItem = { ...asstPlain, thinking: true };
-  assert.equal(itemHeight(asstThink, 80), itemHeight(asstPlain, 80) + 1);
+  // but the lockstep formula is additive — encode the FORMULA so drift
+  // fails loudly. The reasoning renders as a dimmed header line + the
+  // wrapped thinking text (lines.ts), so the height counts both.
+  const asstThink: TuiItem = { ...asstPlain, thinking: true, thinkingText: "hmm" };
+  assert.equal(itemHeight(asstThink, 80), 1 + 1 + itemHeight(asstPlain, 80)); // header + "hmm" + 3
+  // A bare `thinking` flag with NO accumulated text renders nothing extra.
+  const asstFlagOnly: TuiItem = { ...asstPlain, thinking: true };
+  assert.equal(itemHeight(asstFlagOnly, 80), itemHeight(asstPlain, 80));
 
   // tool (running): '→ bash a…a' (7 prefix cols + 100 args) hard-wraps to 2
   const toolRun: TuiItem = {
@@ -188,7 +193,7 @@ test("itemHeight per kind at width 80", () => {
 
 test("itemsHeight is the sum of itemHeights", () => {
   const a: TuiItem = { kind: "user", text: "hello" }; // 1 at w80
-  const b: TuiItem = { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false }; // 3 at w80
+  const b: TuiItem = { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false, thinkingText: "" }; // 3 at w80
   const c: TuiItem = { kind: "error", text: "boom" }; // 1 at w80
   assert.equal(itemsHeight([a, b, c], 80), itemHeight(a, 80) + itemHeight(b, 80) + itemHeight(c, 80));
   assert.equal(itemsHeight([a, b, c], 80), 5);
@@ -199,7 +204,7 @@ test("itemsHeight is the sum of itemHeights", () => {
 test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", () => {
   const oneLiners: TuiItem[] = [
     { kind: "user", text: "q0" },
-    { kind: "assistant", text: "a1", streaming: false, thinking: false },
+    { kind: "assistant", text: "a1", streaming: false, thinking: false, thinkingText: "" },
     { kind: "user", text: "q2" },
   ];
 
@@ -225,6 +230,7 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
     text: "y".repeat(360),
     streaming: false,
     thinking: false,
+    thinkingText: "",
   }));
   assert.equal(itemHeight(big[29] as TuiItem, 80), 5); // sanity: exactly 5 lines each
   const r3 = fitItems(big, 80, 24, 0);
@@ -239,7 +245,7 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
   assert.equal(r3.visible[r3.visible.length - 1], big[29] as TuiItem); // newest last
 
   // a single item that alone exceeds the budget → keep just it, pad = 0
-  const monster: TuiItem = { kind: "assistant", text: "z".repeat(4000), streaming: false, thinking: false };
+  const monster: TuiItem = { kind: "assistant", text: "z".repeat(4000), streaming: false, thinking: false, thinkingText: "" };
   assert.equal(itemHeight(monster, 80), 50); // sanity: exactly 50 lines (50×80)
   const r4 = fitItems([monster], 80, 24, 0);
   assert.equal(r4.visible.length, 1);
@@ -641,7 +647,7 @@ test("App frame is exactly rows tall with the pinned block at the bottom", () =>
   const app = renderApp(
     mkState([
       { kind: "user", text: "hello" },
-      { kind: "assistant", text: "On it.", streaming: false, thinking: false },
+      { kind: "assistant", text: "On it.", streaming: false, thinking: false, thinkingText: "" },
     ]),
   );
   try {
@@ -741,7 +747,7 @@ test("App frame stays exactly rows tall when items grow (pad shrinks)", () => {
     mkState([
       { kind: "user", text: "fill it up" },
       // 200×'x' wraps to 2 lines at width 100 — pad must shrink, frame not grow
-      { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false },
+      { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false, thinkingText: "" },
     ]),
   );
   try {
@@ -878,10 +884,13 @@ test("C28: the rendered lines of a slice are EXACTLY the counted lines (the lock
   const samples: TuiItem[] = [
     mk(""),
     mk("x".repeat(200)),
-    { kind: "assistant", text: "x".repeat(161), streaming: false, thinking: false },
-    { kind: "assistant", text: "x".repeat(161), streaming: true, thinking: false },
-    { kind: "assistant", text: "", streaming: true, thinking: false },
-    { kind: "assistant", text: "hello", streaming: true, thinking: true },
+    { kind: "assistant", text: "x".repeat(161), streaming: false, thinking: false, thinkingText: "" },
+    { kind: "assistant", text: "x".repeat(161), streaming: true, thinking: false, thinkingText: "" },
+    { kind: "assistant", text: "", streaming: true, thinking: false, thinkingText: "" },
+    { kind: "assistant", text: "hello", streaming: true, thinking: true, thinkingText: "" },
+    // reasoning: dimmed header + wrapped thinking text, live and settled
+    { kind: "assistant", text: "hello", streaming: true, thinking: true, thinkingText: "thinking" },
+    { kind: "assistant", text: "hello", streaming: false, thinking: false, thinkingText: "let me think about this for a while" },
     { kind: "tool", id: "1", name: "bash", argsText: "a".repeat(300), running: true },
     {
       kind: "tool",
@@ -909,8 +918,28 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
   assert.deepEqual(itemLines({ kind: "user", text: "" }, 80), [{ spans: [{ text: " " }] }]);
   assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "hi" }] }]);
   // assistant: the cursor is part of the text (and of the height).
-  const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false }, 80);
+  const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false, thinkingText: "" }, 80);
   assert.deepEqual(streamed, [{ spans: [{ text: "ab\u258d" }] }]);
+  // reasoning: dimmed header + dimmed wrapped thinking text, above the reply
+  // — live ("thinking…") while streaming, settled ("thinking:") after done.
+  const think = itemLines(
+    { kind: "assistant", text: "ok", streaming: true, thinking: true, thinkingText: "hmm, check" },
+    80,
+  );
+  assert.deepEqual(think, [
+    { spans: [{ text: "thinking\u2026", dim: true }] },
+    { spans: [{ text: "hmm, check", dim: true }] },
+    { spans: [{ text: "ok\u258d" }] },
+  ]);
+  const thinkDone = itemLines(
+    { kind: "assistant", text: "ok", streaming: false, thinking: false, thinkingText: "hmm, check" },
+    80,
+  );
+  assert.deepEqual(thinkDone, [
+    { spans: [{ text: "thinking:", dim: true }] },
+    { spans: [{ text: "hmm, check", dim: true }] },
+    { spans: [{ text: "ok" }] },
+  ]);
   // tool running: colored mark span + rest; hard wrap splits the line.
   const run = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "a".repeat(100), running: true }, 80);
   assert.equal(run.length, 2);

@@ -1,3 +1,50 @@
+# HANDOFF — TUI shows the model's reasoning text (2026-09-23)
+
+## The TUI renders the model's actual thinking, not just a static `thinking…` hint (359 tests: 351 pass 0 fail 8 skip)
+
+Before: the wire emits `thinking_delta` events carrying the model's
+reasoning (`reasoning_content` from the OpenAI-completions wire), but the
+TUI state machine only flipped a `thinking: true` flag and threw the text
+away — so a reasoning model (e.g. the default Qwen3.8-27B with
+`reasoning_effort: medium`) produced a static `thinking…` line and the
+actual reasoning was never visible.
+
+- **state.ts** — the assistant `TuiItem` now carries `thinkingText:
+  string` (accumulated `thinking_delta` text). `thinking_delta` appends
+  `ev.delta` to it (and opens a streaming assistant item if none exists);
+  `start`/`text_delta` initialize it empty. On `done` the live `thinking`
+  flag clears but `thinkingText` STAYS — the reasoning is part of the
+  record. `itemHeight` counts exactly what the renderer draws:
+  `1 + wrapLineCount(thinkingText, width)` when non-empty (header +
+  wrapped text), keeping the height/lockstep contract with lines.ts.
+- **lines.ts** — the assistant renderer emits, above the reply: a dimmed
+  header line (`thinking…` while live, `thinking:` after done) plus the
+  dimmed, width-wrapped `thinkingText`. No lines at all when the model
+  did not think (`thinkingText === ""`), so non-reasoning models render
+  exactly as before.
+- **Resume path checked**: `replaySession` rebuilds only the LLM
+  `context` (AgentMessage[]), never TuiItems — the TUI always starts from
+  `makeInitialState` (empty items) and rebuilds items live via
+  `applyEvent`, so there is no second place to initialize `thinkingText`.
+- **Tests** — tui-state.test.ts: accumulation across deltas, persistence
+  after `done` (reply streams in via `text_delta` first, then `done`
+  closes the item with the reasoning intact), and a first
+  `thinking_delta` opening a streaming assistant item with text.
+  tui-pinned-layout.test.ts: `thinkingText: "hmm"` adds header + wrapped
+  text to the item-height sample; a bare `thinking` flag with no text
+  adds 0; two new lockstep samples (live + settled reasoning); itemLines
+  shape assertions for the dimmed header + wrapped text above the reply
+  (live `thinking…`/cursor and settled `thinking:`). All assistant-item
+  literals updated for the new required field.
+
+**Verification**: `npm run build` clean; `npm test` 359 tests: 351 pass
+0 fail 8 skip (the 8 skips are the pre-existing network/TTY skips). PTY
+capture (real prompt against the default Qwen thinking model): mid-stream
+frame shows `thinking…` + accumulating reasoning + `▍` cursor; settled
+frame shows `thinking:` + full wrapped reasoning + the `ok` reply.
+
+---
+
 # HANDOFF — read unrestricted + approval default `ask` (2026-09-23)
 
 ## `read` is now unrestricted (any file/directory, no prompt); `write`/`edit`/`bash` prompt by default (358 tests: 350 pass 0 fail 8 skip)

@@ -53,7 +53,14 @@ export function itemLines(item: TuiItem, width: number): RLine[] {
       return item.text ? wrapRows(item.text, width).map(plain) : [plain(" ")];
     case "assistant": {
       const lines: RLine[] = [];
-      if (item.thinking) lines.push({ spans: [{ text: "thinking…", dim: true }] });
+      // The model's reasoning (the wire's `reasoning_content`), accumulated
+      // by the state machine. Shown dimmed above the reply: a live "thinking…"
+      // header while it streams, a settled "thinking:" header after done.
+      // Empty when the model did not think (no lines at all).
+      if (item.thinkingText !== "") {
+        lines.push({ spans: [{ text: item.thinking ? "thinking…" : "thinking:", dim: true }] });
+        for (const l of wrapRows(item.thinkingText, width)) lines.push({ spans: [{ text: l, dim: true }] });
+      }
       // The streaming cursor is part of the rendered text — and of the
       // height (itemHeight counts it): before C28 the cursor line rendered
       // but did not count, overflowing the frame by one row mid-stream.

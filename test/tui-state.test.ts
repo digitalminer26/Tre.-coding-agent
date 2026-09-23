@@ -102,12 +102,30 @@ test("streaming: second assistant message after a tool round-trip is a new item"
   assert.equal(asAsst(s.items[1]!).text, "done!");
 });
 
-test("thinking_delta shows a live hint, dropped on done", () => {
-  const s = fold([startEv(), { type: "thinking_delta", delta: "hmm", partial: asst() }]);
+test("thinking_delta accumulates the reasoning text; the live flag drops on done but the text stays", () => {
+  const s = fold([
+    startEv(),
+    { type: "thinking_delta", delta: "hmm", partial: asst() },
+    { type: "thinking_delta", delta: ", let me check", partial: asst() },
+  ]);
   assert.equal(asAsst(s.items[0]!).thinking, true);
+  assert.equal(asAsst(s.items[0]!).thinkingText, "hmm, let me check");
   assert.equal(asAsst(s.items[0]!).text, "");
-  const done = applyEvent(s, doneEv([{ type: "text", text: "ok" }]));
+  // the reply then streams in (text_delta), and done closes the item
+  const s2 = applyEvent(s, deltaEv("ok"));
+  assert.equal(asAsst(s2.items[0]!).text, "ok");
+  const done = applyEvent(s2, doneEv([{ type: "text", text: "ok" }]));
   assert.equal(asAsst(done.items[0]!).thinking, false);
+  assert.equal(asAsst(done.items[0]!).thinkingText, "hmm, let me check");
+  assert.equal(asAsst(done.items[0]!).text, "ok");
+});
+
+test("thinking_delta before any assistant item opens a streaming item with the text", () => {
+  const s = fold([{ type: "thinking_delta", delta: "first", partial: asst() }]);
+  assert.equal(s.items.length, 1);
+  assert.equal(asAsst(s.items[0]!).thinking, true);
+  assert.equal(asAsst(s.items[0]!).thinkingText, "first");
+  assert.equal(asAsst(s.items[0]!).streaming, true);
 });
 
 test("tool: start shows args; end matches by id (order-independent) with isError", () => {
