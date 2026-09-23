@@ -1,3 +1,64 @@
+# HANDOFF — read unrestricted + approval default `ask` (2026-09-23)
+
+## `read` is now unrestricted (any file/directory, no prompt); `write`/`edit`/`bash` prompt by default (358 tests: 350 pass 0 fail 8 skip)
+
+The user's rule: **reading is always allowed; writing and running
+commands require explicit approval.** This reverses the D13 default and
+removes `read` from both permission boundaries.
+
+- **`read` — unrestricted** (safety.ts): removed from `PATH_TOOLS`
+  (no root sandbox, no path rewrite) and from `GATED_TOOLS` (no
+  approval prompt in any mode). The hook now passes `read` calls
+  through untouched — `undefined`, never a block. The tool itself
+  (read.ts) gained directory support: an `EISDIR` read lists the
+  entries (`d` = directory, `-` = file, size in bytes) instead of
+  erroring, so "read any file **or directory**" holds. Binary guard
+  and paging are unchanged.
+- **Approval default is `ask`** (safety.ts): `ApprovalMode` is
+  `"ask" | "yes" | "no"` — the D13 `"local"` mode (workspace-scoped
+  auto-approve + `bashOutsidePaths` scanner) is gone, along with the
+  scanner's export. `makeSafetyHooks` defaults to `"ask"`: every
+  gated call (bash/write/edit) prompts; anything but `y` denies
+  (fail-closed). `"yes"` auto-approves non-destructive gated calls;
+  destructive bash still confirms in EVERY mode (D8, unchanged).
+  `"no"` blocks gated calls outright.
+- **`write`/`edit`** stay sandboxed to the project root (lexical +
+  realpath checks) AND gated — the sandbox is the boundary, the
+  prompt is the permission. **`bash`** stays gated and, on macOS,
+  runs under the D12 Seatbelt profile (sandbox.ts untouched).
+- **CLI** (main.ts): `--local` flag removed (unknown option now).
+  `--ask` is the default (explicit flag still accepted), `--yes`
+  auto-approves, `--no-approve` blocks; the three remain mutually
+  exclusive. Mode selection: `noApprove → "no" : yes → "yes" : "ask"`.
+  Help text updated to match.
+- **Tests**: safety.test.ts — the D13 section (bashOutsidePaths unit
+  tests + 7 `local`-mode tests) is replaced with: read passes through
+  untouched in all three modes (absolute outside + `../` escape),
+  read never prompts, pipeline integration (outside-root read
+  executes), directory listing, missing-path error result, default
+  mode is `ask` (bash + write prompt), write/edit sandboxed in every
+  mode. cli.test.ts — the two D13 parse tests now assert the
+  ask/yes/no-approve flags and that `--local` is rejected.
+  e2e.sh — scenario_10's prompt now forces **bash** (`cat ...`):
+  with `read` unrestricted, "Read the file X" would legitimately
+  succeed and false-fail the canary check; scenarios 04/05 comments
+  updated (their prompts now work because the default is `ask`, not
+  because the path is outside the workspace).
+
+**Guardrail zone**: `src/tools/safety.ts` (and `src/cli/main.ts`
+wiring) are in the DO-NOT-MODIFY zone — the pre-commit hook rejects
+this commit. **The user commits it with `GUARDRAIL_BYPASS=1`.**
+`git status --short` after this increment: `src/cli/main.ts`,
+`src/tools/read.ts`, `src/tools/safety.ts`, `test/cli.test.ts`,
+`test/e2e.sh`, `test/safety.test.ts`.
+
+**Verification**: `npm run build` clean; `npm test` (quality-check +
+tsc + node --test) 358 tests: 350 pass 0 fail 8 skip (the 8 skips
+are the pre-existing network/TTY skips). No `src/tui/*` changes → no
+PTY capture needed.
+
+---
+
 # HANDOFF — C28: scrollback rework — content-anchored viewport, clip straddlers (2026-09-22)
 
 ## C28 — the scroll viewport pins an ABSOLUTE content row and CLIPS straddling items; a single tall reply now actually scrolls (365 tests: 358 pass 0 fail 7 skip)

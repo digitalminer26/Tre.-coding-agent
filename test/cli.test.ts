@@ -123,19 +123,23 @@ test("parseArgs: REPL mode has no prompt requirement", () => {
   assert.equal(a.oneShot, false);
 });
 
-test("parseArgs: D13 approval flags (--local / --ask) parse; default is neither", () => {
-  assert.equal(parseArgs(["--local"]).local, true);
+test("parseArgs: approval flags parse; default is ask (no flag set)", () => {
   assert.equal(parseArgs(["--ask"]).ask, true);
-  assert.equal(parseArgs([]).local, false);
+  assert.equal(parseArgs(["--yes"]).yes, true);
+  assert.equal(parseArgs(["--no-approve"]).noApprove, true);
   assert.equal(parseArgs([]).ask, false);
+  assert.equal(parseArgs([]).yes, false);
+  assert.equal(parseArgs([]).noApprove, false);
+  // --local no longer exists.
+  assert.notDeepEqual(parseArgs(["--local"]).errors, []);
 });
 
-test("parseArgs: D13 approval flags are mutually exclusive", () => {
-  assert.match(parseArgs(["--local", "--yes"]).errors.join(" "), /mutually exclusive/);
+test("parseArgs: approval flags are mutually exclusive", () => {
+  assert.match(parseArgs(["--yes", "--no-approve"]).errors.join(" "), /mutually exclusive/);
   assert.match(parseArgs(["--ask", "--no-approve"]).errors.join(" "), /mutually exclusive/);
-  assert.match(parseArgs(["--local", "--ask", "--yes"]).errors.join(" "), /mutually exclusive/);
+  assert.match(parseArgs(["--ask", "--yes"]).errors.join(" "), /mutually exclusive/);
   // A single flag (or none) is fine.
-  assert.deepEqual(parseArgs(["--local"]).errors, []);
+  assert.deepEqual(parseArgs(["--ask"]).errors, []);
   assert.deepEqual(parseArgs(["--no-approve"]).errors, []);
 });
 
@@ -628,8 +632,8 @@ test("WS7: gated bash denied (--ask) → run completes, model gets an isError re
   ]);
   const S = mkSinks();
   const asked: string[] = [];
-  // D13: the default mode is "local" (this command would auto-approve),
-  // so the pre-D13 prompt-per-call behavior is exercised via --ask.
+  // The default mode is "ask" (prompt per gated call); --ask is explicit
+  // here to be unambiguous that we are exercising the prompt-per-call path.
   const code = await main(
     ["run", "run it", "--tools", "bash", "--models", models, "--session", session, "--ask"],
     {

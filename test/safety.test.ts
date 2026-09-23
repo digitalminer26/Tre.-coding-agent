@@ -21,11 +21,11 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  bashOutsidePaths,
   checkPathWithinRoot,
   destructiveBashPatterns,
   makeSafetyHooks,
   makeAskQueue,
+  type ApprovalMode,
 } from "../src/tools/safety.js";
 import { makeToolExecutor } from "../src/tools/pipeline.js";
 import { bashTool } from "../src/tools/bash.js";
@@ -201,8 +201,8 @@ test("mode ask: bash approved → allow (undefined)", async (t) => {
   assert.equal(r, undefined);
 });
 
-test("mode ask: read is NOT gated — never asked, path rewritten", async (t) => {
-  const { root } = await ws(t);
+test("mode ask: read is NOT gated — never asked, path passed through untouched", async (t) => {
+  const { root, outside } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
     root,
@@ -212,10 +212,14 @@ test("mode ask: read is NOT gated — never asked, path rewritten", async (t) =>
       return true;
     },
   });
+  // Inside the root: path is passed through exactly as given (no rewrite).
   const r = await hooks(readTool, call("read", { path: "sub/a.txt" }));
   assert.equal(asked, 0);
-  assert.ok(argsOf(r));
-  assert.equal(argsOf(r)!.path, join(root, "sub", "a.txt"));
+  assert.equal(r, undefined, "no rewrite — read is unrestricted");
+  // Outside the root: also passed through, never blocked, never asked.
+  const r2 = await hooks(readTool, call("read", { path: join(outside, "secret.txt") }));
+  assert.equal(asked, 0);
+  assert.equal(r2, undefined, "reads outside the root are unrestricted");
 });
 
 test("mode yes: non-destructive bash/write auto-approve (ask never called)", async (t) => {
@@ -279,11 +283,14 @@ test("mode no: gated tools blocked without prompting", async (t) => {
   assert.equal(asked, 0);
 });
 
-test("mode no: read still works (sandboxed, ungated)", async (t) => {
-  const { root } = await ws(t);
+test("mode no: read still works (ungated, unrestricted)", async (t) => {
+  const { root, outside } = await ws(t);
   const hooks = makeSafetyHooks({ root, mode: "no" });
-  const r = await hooks(readTool, call("read", { path: "a.txt" }));
-  assert.ok(argsOf(r));
+  assert.equal(await hooks(readTool, call("read", { path: "a.txt" })), undefined);
+  assert.equal(
+    await hooks(readTool, call("read", { path: join(outside, "x.txt") })),
+    undefined,
+  );
 });
 
 test("sandbox applies in every mode: --yes cannot write outside the root", async (t) => {
@@ -411,177 +418,122 @@ test("non-gated, non-path tools pass through untouched", async (t) => {
   assert.equal(r, undefined);
 });
 
-// ─────────────────────────── D13: workspace-scoped (local) mode ───────────────────────────
 
-/** bashOutsidePaths unit tests — root is a fixed string, no fs needed. */
-test("bashOutsidePaths: workspace-relative and system-safe paths → []", () => {
-  const root = "/w";
-  const inside = [
-    "ls", "ls src/", "npm ci", "git status",
-    "cat src/a.ts", "mkdir -p build && touch build/x.txt",
-    "echo hi > notes.txt", "echo hi >> build/log.txt",
-    "cat $PWD/x.txt", "cat ${PWD}/x.txt",
-    "cat /tmp/x.log", "cat /private/tmp/x.log",
-    "cat /var/folders/ab/cd/x", 
-    "cat /usr/bin/node", "cat /System/Library/CoreServices/SystemVersion.plist",
-    "cat /opt/homebrew/bin/node", "cat /Library/Preferences/com.apple.plist",
-    "touch /dev/null", "cat /dev/null",
-    "cat 2>&1", "echo ok > /dev/null",
-  ];
-  for (const cmd of inside) {
-    assert.deepEqual(bashOutsidePaths(cmd, root), [], `expected inside: ${cmd}`);
+// ──────────────── read: unrestricted (no sandbox, no gate) ────────────────
+
+test("read: any path on the system passes through untouched in every mode", async (t) => {
+  const { root, outside } = await ws(t);
+  const modes: ApprovalMode[] = ["ask", "yes", "no"];
+  for (const mode of modes) {
+    const hooks = makeSafetyHooks({ root, mode, ask: async () => true });
+    // Absolute path outside the root.
+    assert.equal(
+      await hooks(readTool, call("read", { path: join(outside, "secret.txt") })),
+      undefined,
+      `mode ${mode}: absolute outside path must pass through`,
+    );
+    // ../ escape out of the root.
+    assert.equal(
+      await hooks(readTool, call("read", { path: "../outside/secret.txt" })),
+      undefined,
+      `mode ${mode}: ../ escape must pass through`,
+    );
   }
 });
 
-test("bashOutsidePaths: paths outside the safe locations are listed", () => {
-  const root = "/w";
-  const home = process.env.HOME!;
-  assert.deepEqual(bashOutsidePaths("cat /etc/hosts", root), ["/etc/hosts"]);
-  assert.deepEqual(bashOutsidePaths("echo hi >/etc/hosts", root), ["/etc/hosts"]);
-  assert.deepEqual(bashOutsidePaths("echo hi > /etc/hosts", root), ["/etc/hosts"]);
-  assert.deepEqual(bashOutsidePaths("cat < /etc/passwd", root), ["/etc/passwd"]);
-  assert.deepEqual(bashOutsidePaths("cp /etc/hosts /tmp/copy", root), ["/etc/hosts"]);
-  assert.deepEqual(bashOutsidePaths(`cat ${home}/notes.txt`, root), [`${home}/notes.txt`]);
-  assert.deepEqual(bashOutsidePaths("cat ~/notes.txt", root), [`${home}/notes.txt`]);
-  assert.deepEqual(bashOutsidePaths("cat $HOME/notes.txt", root), [`${home}/notes.txt`]);
-  assert.deepEqual(bashOutsidePaths("cat $HOME/x.txt $PWD/y.txt", root), [`${home}/x.txt`]);
-  // A plain flag, a relative filename, and a URL (no leading /) stay quiet.
-  assert.deepEqual(bashOutsidePaths("npm ci --save-dev foo", root), []);
-  assert.deepEqual(bashOutsidePaths("cat notes.txt", root), []);
-});
-
-test("bashOutsidePaths: unresolvable env-var paths fail toward the prompt", () => {
-  const root = "/w";
-  const r = bashOutsidePaths("cat $SOME_VAR/x.txt", root);
-  assert.ok(r.includes("$SOME_VAR/x.txt"));
-});
-
-test("bashOutsidePaths: quotes make text literal (no false outside hits)", () => {
-  const root = "/w";
-  assert.deepEqual(bashOutsidePaths(`echo "a /etc/hosts b"`, root), []);
-  assert.deepEqual(bashOutsidePaths("cat 'src/a b.ts'", root), []);
-});
-
-test("bashOutsidePaths: sed/awk regex literals are not paths (no false outside hits)", () => {
-  // 2026-09-20 incident: `sed -n '/pat/,/pat2/p' file` mis-parsed the address
-  // RANGE as two absolute paths → "outside the workspace" prompt on a pure
-  // in-workspace command; the unanswered prompt stalled the run ~26 min.
-  const root = "/w";
-  const regexy = [
-    "sed -n '/pat/,/pat2/p' src/a.ts",
-    "sed -n '/opts.ui === \"tui\"/,/return/p' dist/main.js",
-    "sed -n '/pat/p' src/a.ts",
-    "sed -n '/pat/pg' src/a.ts",
-    "awk '/start/,/end/' log.txt",
-    "grep -n '/x/,/y/' notes.md",
-    "sed -i 's/old/new/g' src/a.ts",
-    "sed -i 's|old|new|g' src/a.ts",
-    "sed -i 's#old#new#' src/a.ts",
-  ];
-  for (const cmd of regexy) {
-    assert.deepEqual(bashOutsidePaths(cmd, root), [], `expected inside: ${cmd}`);
-  }
-});
-
-test("bashOutsidePaths: real paths next to regex literals are still flagged", () => {
-  const root = "/w";
-  // The regex exclusion must not swallow a genuine outside path in the same
-  // command (e.g. a sed that edits an in-workspace file then cats /etc/hosts).
-  assert.deepEqual(bashOutsidePaths("sed -n '/pat/p' src/a.ts; cat /etc/hosts", root), ["/etc/hosts"]);
-  // A 3+-letter tail is a path, not a sed flag: /etc/ssh stays promptable.
-  assert.deepEqual(bashOutsidePaths("ls /etc/ssh", root), ["/etc/ssh"]);
-  // A bare /re/ awk pattern without a flag tail stays promptable (conservative).
-  assert.deepEqual(bashOutsidePaths("awk '/home/other/x/' notes.md", root), ["/home/other/x/"]);
-});
-
-test("mode local (default): workspace bash auto-approves without prompting", async (t) => {
+test("read: never prompts, even in mode ask (the ask callback is never called)", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
-  const ask = async () => { asked++; return true; };
-  // NO mode given — D13 changed the default from "ask" to "local".
-  const hooks = makeSafetyHooks({ root, ask });
-  for (const cmd of ["ls", "cat src/a.ts", "npm ci", "cat /usr/bin/node", "echo hi > notes.txt"]) {
-    assert.equal(await hooks(bashTool, call("bash", { command: cmd })), undefined, cmd);
-  }
-  assert.equal(asked, 0);
-});
-
-test("mode local: explicit --local behaves the same as the default", async (t) => {
-  const { root } = await ws(t);
-  const hooks = makeSafetyHooks({ root, mode: "local", ask: async () => true });
-  assert.equal(await hooks(bashTool, call("bash", { command: "ls" })), undefined);
-});
-
-test("mode local: bash touching an outside path prompts, naming it", async (t) => {
-  const { root } = await ws(t);
-  let question = "";
   const hooks = makeSafetyHooks({
-    root, mode: "local", ask: async (q) => { question = q; return true; },
+    root,
+    mode: "ask",
+    ask: async () => {
+      asked++;
+      return false;
+    },
   });
-  const r = await hooks(bashTool, call("bash", { command: "cat /etc/hosts" }));
-  assert.equal(r, undefined); // approved
-  assert.match(question, /outside the workspace: \/etc\/hosts/);
-  assert.match(question, /Approve bash/);
+  assert.equal(await hooks(readTool, call("read", { path: "/etc/hosts" })), undefined);
+  assert.equal(asked, 0, "read must never reach the approval prompt");
 });
 
-test("mode local: outside-path prompt denied → blocked, nothing executed", async (t) => {
-  const { root } = await ws(t);
-  const hooks = makeSafetyHooks({ root, mode: "local", ask: async () => false });
-  const r = await hooks(bashTool, call("bash", { command: "cat /etc/hosts" }));
-  assert.ok(blockedOf(r));
-  assert.match(blockedOf(r)!, /denied/);
+test("read: pipeline integration — an outside-root read executes", async (t) => {
+  const { root, outside } = await ws(t);
+  const outsideFile = join(outside, "sys.txt");
+  await writeFile(outsideFile, "system file content");
+  const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => true });
+  const exec = makeToolExecutor({ beforeToolCall: hooks });
+  const res = await exec(readTool, call("read", { path: outsideFile }), sig());
+  assert.ok(!res.isError, "reading outside the root is not an error");
+  assert.match(res.content.map((c) => c.text).join(" "), /system file content/);
 });
 
-test("mode local: write/edit auto-approve (the path sandbox already confines them)", async (t) => {
+test("read: a directory lists its entries (EISDIR → listing, not an error)", async (t) => {
+  const { root, outside } = await ws(t);
+  const dir = join(outside, "somedir");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "a.txt"), "x");
+  await mkdir(join(dir, "nested"));
+  const res = await readTool.execute("c1", { path: dir }, new AbortController().signal, () => {});
+  assert.ok(!res.isError, "listing a directory is not an error");
+  const text = res.content.map((c) => c.text).join(" ");
+  assert.match(text, /a\.txt/);
+  assert.match(text, /nested/);
+  assert.match(text, /is a directory/);
+});
+
+test("read: a missing path is a clean error result (not a throw)", async () => {
+  const res = await readTool.execute(
+    "c1",
+    { path: "/definitely/not/here.txt" },
+    new AbortController().signal,
+    () => {},
+  );
+  assert.ok(res.isError, "missing file is an error result");
+  assert.match(res.content.map((c) => c.text).join(" "), /cannot read/);
+});
+
+// ─────────────────────────── default mode is "ask" ───────────────────────────
+
+test("default mode (no mode option) is ask: bash prompts, denial blocks", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
-    root, mode: "local",
-    ask: async () => { asked++; return true; },
+    root,
+    ask: async () => {
+      asked++;
+      return false;
+    },
+  });
+  const r = await hooks(bashTool, call("bash", { command: "ls" }));
+  assert.ok(blockedOf(r));
+  assert.equal(asked, 1, "the default mode must prompt");
+});
+
+test("default mode (no mode option) is ask: write prompts, approval rewrites path", async (t) => {
+  const { root } = await ws(t);
+  let asked = 0;
+  const hooks = makeSafetyHooks({
+    root,
+    ask: async () => {
+      asked++;
+      return true;
+    },
   });
   const r = await hooks(writeTool, call("write", { path: "a.txt", content: "x" }));
   assert.ok(argsOf(r));
   assert.equal(argsOf(r)!.path, join(root, "a.txt"));
-  assert.equal(asked, 0);
+  assert.equal(asked, 1, "the default mode must prompt for writes");
 });
 
-test("mode local: destructive bash still confirms even INSIDE the workspace (D8)", async (t) => {
-  const { root } = await ws(t);
-  let question = "";
-  const hooks = makeSafetyHooks({
-    root, mode: "local",
-    ask: async (q) => { question = q; return true; },
-  });
-  const r = await hooks(bashTool, call("bash", { command: "rm -rf build" }));
-  assert.equal(r, undefined); // confirmed
-  assert.match(question, /DESTRUCTIVE: recursive rm/);
-});
-
-test("mode local: destructive OUTSIDE the workspace prompts with both tags", async (t) => {
-  const { root } = await ws(t);
-  let question = "";
-  const hooks = makeSafetyHooks({
-    root, mode: "local",
-    ask: async (q) => { question = q; return false; },
-  });
-  const r = await hooks(bashTool, call("bash", { command: "rm -rf /etc" }));
-  assert.ok(blockedOf(r));
-  assert.match(question, /DESTRUCTIVE: recursive rm/);
-  assert.match(question, /outside the workspace: \/etc/);
-});
-
-test("mode local: an unresolvable $VAR path prompts (conservative)", async (t) => {
-  const { root } = await ws(t);
-  let asked = 0;
-  const hooks = makeSafetyHooks({ root, mode: "local", ask: async () => { asked++; return true; } });
-  assert.equal(await hooks(bashTool, call("bash", { command: "cat $SOME_VAR/x.txt" })), undefined);
-  assert.equal(asked, 1);
-});
-
-test("mode ask is unchanged by D13: even plain 'ls' prompts (--ask regression)", async (t) => {
-  const { root } = await ws(t);
-  let asked = 0;
-  const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => { asked++; return true; } });
-  assert.equal(await hooks(bashTool, call("bash", { command: "ls" })), undefined);
-  assert.equal(asked, 1);
+test("write/edit are still sandboxed to the root in every mode", async (t) => {
+  const { root, outside } = await ws(t);
+  for (const mode of ["ask", "yes", "no"] as ApprovalMode[]) {
+    const hooks = makeSafetyHooks({ root, mode, ask: async () => true });
+    const r = await hooks(
+      writeTool,
+      call("write", { path: join(outside, "evil.txt"), content: "x" }),
+    );
+    assert.ok(blockedOf(r), `mode ${mode}: write outside must be blocked`);
+    assert.match(blockedOf(r)!, /outside the project root/);
+  }
 });

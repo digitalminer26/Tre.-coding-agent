@@ -178,8 +178,8 @@ EOF
 }
 
 scenario_04() { # TUI deny: 'n' → isError result (✗) → run continues → rc=0
-  # D13 `local` default auto-approves workspace-scoped bash, so the command
-  # must reach OUTSIDE the workspace to get an approval prompt at all.
+  # The default mode is "ask", so EVERY bash call prompts — including
+  # workspace-scoped ones. The prompt is exercised here via a denial.
   local D="$WORK/04"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
 printf 'Run the bash command: cat /etc/hostname\r'
@@ -201,8 +201,8 @@ EOF
 }
 
 scenario_05() { # TUI ctrl+c: aborts the running turn, prompt returns, rc=0
-  # D13 `local` default auto-approves workspace-scoped bash, so the command
-  # must reach OUTSIDE the workspace to get the 'y approve' prompt first.
+  # The default mode is "ask", so the bash call prompts first; the 'y'
+  # approval starts the (long) command, then ctrl+c aborts it mid-run.
   local D="$WORK/05"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
 printf 'Run the bash command: sleep 40 && cat /etc/hostname\r'
@@ -292,7 +292,11 @@ scenario_09() { # --no-approve: gated bash blocked as isError, run completes
   echo "rc=0, gated tool blocked as isError result"
 }
 
-scenario_10() { # sandbox: path escape (file outside the workspace) blocked even with --yes
+scenario_10() { # sandbox: bash path escape (file outside the workspace) blocked even with --yes
+  # NOTE: the prompt forces BASH — `read` is unrestricted by design (any file
+  # on the system), so a "Read the file" prompt would legitimately succeed
+  # and false-fail this scenario. The bash sandbox (Seatbelt on macOS) is
+  # what must block the escape here.
   # The leak check uses a random CANARY file OUTSIDE the workspace, not a
   # grep for "root:": the model KNOWS the standard first line of /etc/passwd
   # from training, so it can "answer" the old prompt from parametric knowledge
@@ -317,7 +321,7 @@ scenario_10() { # sandbox: path escape (file outside the workspace) blocked even
   local D="$WORK/10"; mkdir -p "$D"
   local CANARY="CANARY-10-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   printf '%s\n' "$CANARY" > "$ROOT/outside-canary-10.txt"
-  guarded_run 300 "$D" run "Read the file $ROOT/outside-canary-10.txt and tell me the first line." --yes \
+  guarded_run 300 "$D" run "Run the bash command: cat $ROOT/outside-canary-10.txt and tell me the first line." --yes \
     --session "$D/s.jsonl" --cwd "$D"
   local rc=$?
   rm -f "$ROOT/outside-canary-10.txt"

@@ -2,8 +2,13 @@
  * WS3 — the `read` tool. Reads a file, pages via offset/limit, truncates
  * from the head (you want the beginning), never splits a line, and offers
  * a temp-file recovery path when truncated.
+ *
+ * `read` is UNRESTRICTED by design (see safety.ts): it may read ANY file or
+ * directory on the system — no project-root restriction, no approval
+ * prompt. Pointing it at a directory lists its entries (name, `d` for
+ * directory / `-` for file, size in bytes) instead of reading it.
  */
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import type { Tool, ToolResult } from "../types.js";
 import {
   saveFullOutput,
@@ -13,16 +18,38 @@ import {
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
 
+/** List a directory's entries: `- name` (file) or `d name` (dir) + size. */
+async function listDir(dir: string): Promise<string> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const lines: string[] = [];
+  for (const e of entries) {
+    let size = "";
+    if (!e.isSymbolicLink()) {
+      try {
+        const s = await stat(`${dir}/${e.name}`);
+        size = ` (${s.size} bytes)`;
+      } catch {
+        size = ""; // broken entries are listed anyway
+      }
+    }
+    lines.push(`${e.isDirectory() ? "d" : "-"} ${e.name}${size}`);
+  }
+  lines.sort();
+  return lines.join("\n") + (lines.length > 0 ? "\n" : "");
+}
+
 export const readTool: Tool = {
   name: "read",
   description:
     "Read a text file from disk. Returns the content (up to 2000 lines / 50KB; " +
-    "truncation keeps the head and tells you how to continue). " +
-    "Use offset (1-based line) and limit to read further into large files.",
+    "truncation keeps the head and tells you how to continue). Use offset " +
+    "(1-based line) and limit to read further into large files. May read any " +
+    "file on the system (no project-root restriction, no approval prompt). " +
+    "Reading a directory lists its entries (d = directory, - = file, size in bytes).",
   parameters: {
     type: "object",
     properties: {
-      path: { type: "string", description: "Path to the file to read" },
+      path: { type: "string", description: "Path to the file (or directory) to read" },
       offset: {
         type: "integer",
         description: "1-based line number to start reading from",
@@ -41,6 +68,22 @@ export const readTool: Tool = {
     try {
       raw = await readFile(a.path, "utf8");
     } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "EISDIR") {
+        // Directory: list its entries instead of reading it.
+        try {
+          const listing = await listDir(a.path);
+          return {
+            content: text(
+              (listing === "" ? "(empty directory)" : listing) +
+                `\n[${a.path} is a directory — read a file inside it to see its content]`,
+            ),
+          };
+        } catch (derr) {
+          const msg = derr instanceof Error ? derr.message : String(derr);
+          return { content: text(`read: cannot list ${a.path}: ${msg}`), isError: true };
+        }
+      }
       const msg = err instanceof Error ? err.message : String(err);
       return {
         content: text(`read: cannot read ${a.path}: ${msg}`),
@@ -70,8 +113,7 @@ export const readTool: Tool = {
     // in the file (every line but the file's last one; the last one iff the
     // file ends with a newline).
     const lastIdx = start + slice.length - 1;
-    const trailing =
-      slice.length > 0 && (lastIdx < total - 1 || raw.endsWith("\n"));
+    const trailing = slice.length > 0 && (lastIdx < total - 1 || raw.endsWith("\n"));
     const paged = slice.join("\n") + (trailing ? "\n" : "");
 
     const t = truncateHead(paged);
