@@ -169,7 +169,31 @@ test("parseArgs: tui subcommand", () => {
   assert.deepEqual(a.errors, []);
   assert.equal(a.ui, "tui");
   assert.equal(a.oneShot, false);
-  assert.equal(parseArgs(["run", "x"]).ui, "plain");
+  assert.equal(parseArgs(["run", "x"]).ui, "auto");
+});
+
+test("parseArgs: bare launch defaults to ui auto (TTY→TUI, piped→REPL resolved in main)", () => {
+  assert.deepEqual(parseArgs([]).errors, []);
+  assert.equal(parseArgs([]).ui, "auto");
+  assert.equal(parseArgs([]).oneShot, false);
+});
+
+test("parseArgs: --plain forces the plain REPL (even on a TTY)", () => {
+  const a = parseArgs(["--plain"]);
+  assert.deepEqual(a.errors, []);
+  assert.equal(a.ui, "plain");
+  assert.equal(a.oneShot, false);
+  // --plain composes with the other interactive flags.
+  const b = parseArgs(["--plain", "--yes", "--session-auto"]);
+  assert.deepEqual(b.errors, []);
+  assert.equal(b.ui, "plain");
+  assert.equal(b.yes, true);
+  assert.equal(b.sessionAuto, true);
+});
+
+test("parseArgs: tui and --plain are mutually exclusive (either order)", () => {
+  assert.match(parseArgs(["tui", "--plain"]).errors.join(" "), /conflict/);
+  assert.match(parseArgs(["--plain", "tui"]).errors.join(" "), /conflict/);
 });
 
 test("resolveTools: all / none / filter / unknown", () => {
@@ -202,6 +226,25 @@ test("main: tui without a TTY fails cleanly (exit 2, I3 — no Ink raw-mode dump
   assert.equal(code, 2);
   assert.match(S.err(), /interactive terminal/);
   assert.doesNotMatch(S.out(), /unreachable/); // the fake stream was never used
+});
+
+test("main: bare launch on piped stdin → plain REPL (ui auto), exits 0 on EOF", async (t) => {
+  // node --test runs with non-TTY stdin; under a real TTY the auto resolver
+  // would pick the TUI, so skip there.
+  if (process.stdin.isTTY) t.skip("stdin is a TTY");
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  // Feed one prompt + EOF into the real (piped) stdin the REPL reads — the
+  // same burst the e2e harness sends to a piped `tre.` (WS10 s8).
+  process.stdin.push("say hi\n");
+  process.stdin.push(null);
+  const code = await main(["--tools", "none", "--models", models, "--cwd", dir], {
+    streamFn: fakeStream([{ type: "text", text: "hi there" }]),
+    sinks: S.sinks,
+  });
+  assert.equal(code, 0);
+  assert.match(S.err(), /REPL/); // the plain REPL banner, not the Ink TUI
+  assert.match(S.out(), /hi there/); // the scripted turn's text was streamed
 });
 
 // ─────────────────────────────── printer ───────────────────────────────

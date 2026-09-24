@@ -7,7 +7,10 @@
  *
  * Usage:
  *   tre. run "prompt"     one-shot: run to completion, exit
- *   tre.                  interactive REPL (one prompt per line)
+ *   tre.                  interactive: the Ink TUI on a TTY, the plain REPL
+ *                         when stdin is piped (--plain forces the REPL)
+ *   tre. tui              interactive Ink TUI (explicit)
+ *   tre. --plain          interactive plain REPL (explicit, even on a TTY)
  *
  * (Tre Coding Agent — the legacy `coding-agent` command is an alias for `tre.`)
  *
@@ -93,8 +96,9 @@ import type {
 
 export interface CliOptions {
   oneShot: boolean;
-  /** WS10: interactive UI — "plain" (readline REPL) or "tui" (Ink). */
-  ui: "plain" | "tui";
+  /** Interactive UI: "auto" (default — TUI on a TTY, plain REPL when stdin
+   *  is piped), "tui" (the `tui` subcommand), or "plain" (--plain). */
+  ui: "auto" | "plain" | "tui";
   prompt?: string;
   modelId?: string;
   /** D19: undefined = auto-locate (nearest models.json above cwd, then ~/.tre/). */
@@ -140,7 +144,7 @@ const KNOWN_TOOLS = new Set(DEFAULT_TOOLS.map((t) => t.name));
 export function parseArgs(argv: string[]): ParsedArgs {
   const opts: ParsedArgs = {
     oneShot: false,
-    ui: "plain",
+    ui: "auto",
     tools: "all",
     cwd: process.cwd(),
     sessionAuto: false,
@@ -158,6 +162,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     errors: [],
   };
   let i = 0;
+  let plainFlag = false; // tracked separately so `tui --plain` / `--plain tui`
+  // is a conflict either way (not a silent last-one-wins overwrite).
   while (i < argv.length) {
     const a = argv[i]!;
     if (a === "run") {
@@ -198,12 +204,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       i += 2;
     } else if (a === "--yes" || a === "--no-approve" || a === "--ask" ||
-               a === "--no-compact" || a === "--no-sandbox" || a === "--session-auto") {
+               a === "--no-compact" || a === "--no-sandbox" || a === "--session-auto" ||
+               a === "--plain") {
       if (a === "--yes") opts.yes = true;
       else if (a === "--no-approve") opts.noApprove = true;
       else if (a === "--ask") opts.ask = true;
       else if (a === "--no-compact") opts.noCompact = true;
       else if (a === "--session-auto") opts.sessionAuto = true;
+      else if (a === "--plain") plainFlag = true;
       else opts.noSandbox = true;
       i++;
     } else if (a === "--help" || a === "-h") {
@@ -219,6 +227,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (opts.oneShot && opts.prompt === undefined) {
     opts.errors.push("`run` needs a prompt: tre. run \"your prompt\"");
+  }
+  if (plainFlag) {
+    if (opts.ui === "tui") {
+      opts.errors.push("conflict: `tui` and --plain are mutually exclusive");
+    } else {
+      opts.ui = "plain";
+    }
   }
   if (opts.ui === "tui" && opts.prompt !== undefined) {
     opts.errors.push("`tui` takes no prompt: tre. tui [--flags]");
@@ -602,9 +617,11 @@ const HELP = `tre. — Tre Coding Agent: a small, fully-owned coding-agent harne
 
 Usage:
   tre. run "prompt"             one-shot run (exit when the run ends)
-  tre.                          interactive REPL
+  tre.                          interactive: the Ink TUI on a TTY, the plain
+                                REPL when stdin is piped
   tre. tui                      interactive Ink TUI (streaming,
                                 ↑/↓ history, ctrl+c abort/quit)
+  tre. --plain                  interactive plain REPL (even on a TTY)
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")
@@ -630,6 +647,8 @@ Options:
                      8192)
   --no-sandbox       run bash without the kernel file-access sandbox
                      (on by default on macOS; no-op elsewhere)
+  --plain            interactive plain REPL (one prompt per line) instead of
+                     the TUI — the default when stdin is piped anyway
 
 Safety (WS7/WS11): the read tool is UNRESTRICTED — it may read any file on
 the system (no root restriction, no approval prompt). write/edit are
@@ -833,14 +852,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const buildExecutor = (ask: AskApproval) =>
     makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
 
+  // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
+  // is piped (a pipe has no terminal for raw mode — the REPL is the
+  // non-interactive fallback). Explicit `tui` / `--plain` skip this.
+  const ui: "plain" | "tui" =
+    args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";
+
   // WS10: the Ink TUI — same setup as the REPL, different presentation.
   // It installs its own SIGINT handling (abort while busy / exit 130 idle).
-  if (args.ui === "tui") {
+  if (ui === "tui") {
     // Ink needs raw-mode stdin, which only a TTY provides — fail cleanly
     // (I3) instead of dumping Ink's raw-mode error.
     if (!process.stdin.isTTY) {
       sinks.err.write(
-        "error: `tui` needs an interactive terminal; use `tre. run \"...\"` or the REPL without one\n",
+        "error: `tui` needs an interactive terminal; use `tre. run \"...\"` or `tre. --plain` without one\n",
       );
       return 2;
     }

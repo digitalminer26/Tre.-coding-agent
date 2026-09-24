@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 14, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 16, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -25,7 +25,7 @@ MODELS="$ROOT/models.json"
 # write-denied but /private/var/folders (the real $TMPDIR) is the v1 allow.
 # WORK also holds the scenario session files the tre. children must write.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/e2e-XXXXXX")"
-FIRST="${1:-1}"; LAST="${2:-15}"
+FIRST="${1:-1}"; LAST="${2:-16}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -525,6 +525,27 @@ PY
   echo "rc=0, PONG-14 rendered, pinned block (hint[/menu]/─/input/─/3×blank) at the bottom"
 }
 
+scenario_16() { # bare `tre.` on a TTY → the Ink TUI (ui auto), not the REPL
+  local D="$WORK/16"; mkdir -p "$D"
+  cat > "$D/feed.sh" <<'EOF'
+printf 'Reply with exactly: PONG-16\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  # NO `tui` subcommand: the bare launch must auto-resolve to the TUI on the
+  # pty. `--models` keeps the real 27B (the default models.json).
+  pty_feed 16 480 "$D/out.log" "$D/feed.sh" --yes --models "$MODELS" \
+    --session "$D/s.jsonl" --cwd "$D"
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  # The TUI rendered (its hint line), and the REPL banner did NOT.
+  grep -qF "enter send" "$D/out.log" || { echo "no TUI hint line — bare launch did not open the TUI"; return 1; }
+  grep -qF "REPL" "$D/out.log" && { echo "REPL banner present — bare launch fell through to the plain REPL"; return 1; }
+  grep -qF "PONG-16" "$D/out.log" || { echo "no PONG-16 in frames"; return 1; }
+  echo "rc=0, bare launch opened the TUI (hint line), no REPL banner, PONG-16 rendered"
+}
+
 # ───────────────────────────── runner ─────────────────────────────
 
 run_one() {
@@ -545,6 +566,7 @@ run_one() {
     13) name="eval-baseline" ;;
     14) name="tui-pinned-layout" ;;
     15) name="tui-scrollback(C27)" ;;
+    16) name="bare-tty-launches-tui" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?
