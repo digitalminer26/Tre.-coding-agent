@@ -17,6 +17,14 @@ import {
   readTool,
   writeTool,
 } from "../src/tools/index.js";
+import {
+  destructiveBashPatterns,
+  isReadOnlyBash,
+  isReversibleBash,
+  makeSafetyHooks,
+  sensitiveBashPatterns,
+  type ApprovalMode,
+} from "../src/tools/safety.js";
 import { runLoop } from "../src/loop/agent-loop.js";
 import { fakeStream, type FakeTurn } from "./fake-stream.js";
 import type {
@@ -406,4 +414,276 @@ test("bash: byte limit (1000 × 60B lines ≈ 60KB) truncates even under 2000 li
   const text = resultText(r);
   assert.match(text, /\[truncated: showing last \d+ of 1000 lines/);
   assert.match(text, /full output saved to/);
+});
+
+// ─────────────────────────── WS7: safety ───────────────────────────
+
+// Pure classifiers (destructive → sensitive → read-only → reversible).
+
+test("safety: destructive patterns — recursive rm, git push/reset/clean/branch -D/checkout ./restore", () => {
+  // recursive rm (any flag form)
+  assert.deepEqual(destructiveBashPatterns("rm -r build/"), ["recursive rm"]);
+  assert.deepEqual(destructiveBashPatterns("rm -rf node_modules"), ["recursive rm"]);
+  assert.deepEqual(destructiveBashPatterns("rm -Rv out"), ["recursive rm"]);
+  assert.deepEqual(destructiveBashPatterns("rm --recursive dist"), ["recursive rm"]);
+  // plain rm is NOT destructive (it's mutating, not irreversible-by-design)
+  assert.deepEqual(destructiveBashPatterns("rm file.txt"), []);
+  // ANY git push (force or not)
+  assert.deepEqual(destructiveBashPatterns("git push origin main"), ["git push (publishes to a remote)"]);
+  assert.deepEqual(destructiveBashPatterns("git push"), ["git push (publishes to a remote)"]);
+  assert.deepEqual(destructiveBashPatterns("git push --force origin main"), ["git push --force"]);
+  assert.deepEqual(destructiveBashPatterns("git push -f main"), ["git push --force"]);
+  // git reset --hard
+  assert.deepEqual(destructiveBashPatterns("git reset --hard HEAD~1"), ["git reset --hard"]);
+  assert.deepEqual(destructiveBashPatterns("git reset --soft HEAD~1"), []);
+  // forced git clean
+  assert.deepEqual(destructiveBashPatterns("git clean -fd"), ["git clean (removes untracked files)"]);
+  assert.deepEqual(destructiveBashPatterns("git clean -x"), ["git clean (removes untracked files)"]);
+  assert.deepEqual(destructiveBashPatterns("git clean -n"), []);
+  // git branch -D (force-delete)
+  assert.deepEqual(destructiveBashPatterns("git branch -D feature"), ["git branch -D (force-delete a branch)"]);
+  assert.deepEqual(destructiveBashPatterns("git branch --delete feature"), ["git branch -D (force-delete a branch)"]);
+  assert.deepEqual(destructiveBashPatterns("git branch -d feature"), []);
+  // git checkout . / checkout -- <path> / restore (without --source)
+  assert.deepEqual(destructiveBashPatterns("git checkout ."), ["git checkout . / -- <path> (discards uncommitted work)"]);
+  assert.deepEqual(destructiveBashPatterns("git checkout -- src/main.ts"), ["git checkout . / -- <path> (discards uncommitted work)"]);
+  assert.deepEqual(destructiveBashPatterns("git checkout feature"), []);
+  assert.deepEqual(destructiveBashPatterns("git restore src/main.ts"), ["git restore (discards uncommitted work)"]);
+  assert.deepEqual(destructiveBashPatterns("git restore --source HEAD~1 src/main.ts"), []);
+  // dd to /dev/*, raw-device redirects, mkfs, fork bomb, shutdown
+  assert.deepEqual(destructiveBashPatterns("dd if=disk.img of=/dev/sda"), ["dd writing to a raw device"]);
+  assert.deepEqual(destructiveBashPatterns("dd if=disk.img of=/dev/nvme0n1"), ["dd writing to a raw device"]);
+  assert.deepEqual(destructiveBashPatterns("dd if=disk.img of=copy.img"), []);
+  assert.deepEqual(destructiveBashPatterns("cat iso > /dev/sdb"), ["write to a raw block device"]);
+  assert.deepEqual(destructiveBashPatterns("echo x > /dev/null"), []);
+  assert.deepEqual(destructiveBashPatterns("mkfs.ext4 /dev/sdb1"), ["mkfs (filesystem creation)"]);
+  assert.deepEqual(destructiveBashPatterns("mkfs /dev/sdb1"), ["mkfs (filesystem creation)"]);
+  assert.deepEqual(destructiveBashPatterns(":(){ :|:& };:"), ["fork bomb"]);
+  assert.deepEqual(destructiveBashPatterns("sudo shutdown -h now"), ["system shutdown/reboot"]);
+  assert.deepEqual(destructiveBashPatterns("reboot"), ["system shutdown/reboot"]);
+  // unrecognized → not destructive (it may still be mutating)
+  assert.deepEqual(destructiveBashPatterns("mv a b"), []);
+});
+
+test("safety: sensitive patterns — bash token scan + read path", () => {
+  // PATH patterns (need a path-like token)
+  assert.deepEqual(sensitiveBashPatterns("cat ~/.ssh/id_rsa"), ["id_rsa*", "~/.ssh/"]);
+  assert.deepEqual(sensitiveBashPatterns("cat /etc/shadow"), ["/etc/shadow"]);
+  assert.deepEqual(sensitiveBashPatterns("ls ~/.aws/credentials"), ["~/.aws/"]);
+  assert.deepEqual(sensitiveBashPatterns("cat ~/.netrc"), ["~/.netrc"]);
+  assert.deepEqual(sensitiveBashPatterns("cat ~/.docker/config.json"), ["~/.docker/config.json"]);
+  // FILENAME patterns (match ANY token, no path context)
+  assert.deepEqual(sensitiveBashPatterns("cat server.key"), ["*.key"]);
+  assert.deepEqual(sensitiveBashPatterns("cat .env"), [".env*"]);
+  assert.deepEqual(sensitiveBashPatterns("cat .env.production"), [".env*"]);
+  assert.deepEqual(sensitiveBashPatterns("cat prod.env"), [".env*"]);
+  assert.deepEqual(sensitiveBashPatterns("openssl req -in cert.pem"), ["*.pem"]);
+  assert.deepEqual(sensitiveBashPatterns("cat id_ed25519"), ["id_ed25519*"]);
+  // plain commands are not sensitive
+  assert.deepEqual(sensitiveBashPatterns("ls -la"), []);
+  assert.deepEqual(sensitiveBashPatterns("cat README.md"), []);
+  // a bare token that is not a path and not a sensitive filename
+  assert.deepEqual(sensitiveBashPatterns("echo hello"), []);
+});
+
+test("safety: read-only verbs + git/kubectl/docker subcommands", () => {
+  assert.equal(isReadOnlyBash("ls -la"), true);
+  assert.equal(isReadOnlyBash("cat src/main.ts"), true);
+  assert.equal(isReadOnlyBash("grep -r foo src/"), true);
+  assert.equal(isReadOnlyBash("pwd"), true);
+  assert.equal(isReadOnlyBash("git status"), true);
+  assert.equal(isReadOnlyBash("git log --oneline -5"), true);
+  assert.equal(isReadOnlyBash("git diff"), true);
+  assert.equal(isReadOnlyBash("git branch"), true); // list
+  assert.equal(isReadOnlyBash("git tag"), true); // list
+  assert.equal(isReadOnlyBash("git stash list"), true);
+  assert.equal(isReadOnlyBash("git -C /tmp/repo status"), true);
+  assert.equal(isReadOnlyBash("kubectl get pods"), true);
+  assert.equal(isReadOnlyBash("docker ps"), true);
+  assert.equal(isReadOnlyBash("ip addr"), true);
+  // git subcommand BOUNDARIES: anything beyond the listed form is not read-only
+  assert.equal(isReadOnlyBash("git branch -D feature"), false);
+  assert.equal(isReadOnlyBash("git branch feature"), false); // create = mutating
+  assert.equal(isReadOnlyBash("git tag v1.0"), false); // create = mutating
+  assert.equal(isReadOnlyBash("git stash push"), false); // push = mutating
+  assert.equal(isReadOnlyBash("git push"), false);
+  assert.equal(isReadOnlyBash("git commit -m x"), false);
+  assert.equal(isReadOnlyBash("kubectl apply -f x.yaml"), false);
+  assert.equal(isReadOnlyBash("docker run nginx"), false);
+  assert.equal(isReadOnlyBash("ip link set eth0 down"), false);
+  // non-verbs are not read-only (fail-closed)
+  assert.equal(isReadOnlyBash("mv a b"), false);
+  assert.equal(isReadOnlyBash("curl https://example.com"), false);
+  assert.equal(isReadOnlyBash("npm install"), false);
+  assert.equal(isReadOnlyBash(""), false);
+});
+
+test("safety: compound commands, redirects, $( ), backticks, sudo disqualify read-only", () => {
+  assert.equal(isReadOnlyBash("ls && cat x"), true); // every segment read-only
+  assert.equal(isReadOnlyBash("ls; pwd"), true);
+  assert.equal(isReadOnlyBash("cat x | grep y"), true);
+  assert.equal(isReadOnlyBash("ls && rm -rf x"), false); // a mutating segment
+  assert.equal(isReadOnlyBash("ls && git push"), false);
+  // output redirect to a real path
+  assert.equal(isReadOnlyBash("echo hi > out.txt"), false);
+  assert.equal(isReadOnlyBash("ls > /dev/null"), true); // /dev/null is fine
+  assert.equal(isReadOnlyBash("cat x 2>&1"), true); // fd dup is fine
+  // command substitution / backticks / sudo
+  assert.equal(isReadOnlyBash("echo $(rm -rf x)"), false);
+  assert.equal(isReadOnlyBash("echo `id`"), false);
+  assert.equal(isReadOnlyBash("sudo ls"), false);
+});
+
+test("safety: reversible git/npm ops", () => {
+  assert.equal(isReversibleBash("git add ."), true);
+  assert.equal(isReversibleBash("git commit -m 'msg'"), true);
+  assert.equal(isReversibleBash("git stash"), true);
+  assert.equal(isReversibleBash("git stash push -m wip"), true);
+  assert.equal(isReversibleBash("git stash list"), true);
+  assert.equal(isReversibleBash("git switch feature"), true);
+  assert.equal(isReversibleBash("git checkout feature"), true);
+  assert.equal(isReversibleBash("git branch feature"), true); // create
+  assert.equal(isReversibleBash("git tag v1.0"), true); // create
+  assert.equal(isReversibleBash("npm run build"), true);
+  assert.equal(isReversibleBash("npm test"), true);
+  // boundaries
+  assert.equal(isReversibleBash("git checkout ."), false); // destructive
+  assert.equal(isReversibleBash("git checkout -- x"), false); // destructive
+  assert.equal(isReversibleBash("git branch -D x"), false); // destructive
+  assert.equal(isReversibleBash("git branch -d x"), false); // delete = mutating
+  assert.equal(isReversibleBash("git tag -d v1.0"), false); // delete = mutating
+  assert.equal(isReversibleBash("git stash pop"), false); // mutating
+  assert.equal(isReversibleBash("git switch"), false); // needs a branch
+  assert.equal(isReversibleBash("npm install"), false);
+  assert.equal(isReversibleBash("npm run"), false); // needs a script
+  assert.equal(isReversibleBash("git add && git push"), false); // compound
+  assert.equal(isReversibleBash("ls"), false);
+});
+
+// The mode matrix, exercised through makeSafetyHooks.
+
+const FAKE_TOOL: Tool = { name: "bash", description: "", parameters: { type: "object" }, execute: async () => ({ content: [{ type: "text" as const, text: "ran" }] }) };
+const FAKE_READ: Tool = { name: "read", description: "", parameters: { type: "object" }, execute: async () => ({ content: [{ type: "text" as const, text: "ran" }] }) };
+const FAKE_WRITE: Tool = { name: "write", description: "", parameters: { type: "object" }, execute: async () => ({ content: [{ type: "text" as const, text: "ran" }] }) };
+
+async function gateDecision(
+  mode: ApprovalMode,
+  tool: Tool,
+  args: Record<string, unknown>,
+  answer: boolean,
+): Promise<{ blocked?: string; asked: string[] }> {
+  const asked: string[] = [];
+  const hook = makeSafetyHooks({ root: dir, mode, ask: async (q) => { asked.push(q); return answer; } });
+  const decision = await hook(tool, { type: "toolCall", id: "1", name: tool.name, arguments: args });
+  return { blocked: decision && "blocked" in decision ? decision.blocked : undefined, asked };
+}
+
+test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive/reversible/mutating)", async () => {
+  const ro = "ls -la";
+  const sens = "cat ~/.ssh/id_rsa";
+  const destr = "git push origin main";
+  const rev = "git add .";
+  const mut = "mv a b";
+
+  // ask (default): read-only + reversible run free; mutating prompts.
+  for (const [label, cmd] of [["read-only", ro], ["reversible", rev]] as const) {
+    const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `ask: ${label} runs without a prompt`);
+    assert.equal(d.blocked, undefined, `ask: ${label} is allowed`);
+  }
+  const askMut = await gateDecision("ask", FAKE_TOOL, { command: mut }, true);
+  assert.equal(askMut.asked.length, 1, "ask: mutating prompts");
+  assert.equal(askMut.blocked, undefined, "ask: mutating is allowed when approved");
+  const askMutDenied = await gateDecision("ask", FAKE_TOOL, { command: mut }, false);
+  assert.equal(askMutDenied.asked.length, 1);
+  assert.match(askMutDenied.blocked!, /denied/i, "ask: a denied mutating call is blocked");
+  for (const [label, cmd] of [["sensitive", sens], ["destructive", destr]] as const) {
+    const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 1, `ask: ${label} prompts`);
+    assert.equal(d.blocked, undefined, `ask: ${label} is allowed when approved`);
+  }
+  // ask: denying a destructive/sensitive call blocks it with a denial reason.
+  const denied = await gateDecision("ask", FAKE_TOOL, { command: destr }, false);
+  assert.equal(denied.asked.length, 1);
+  assert.match(denied.blocked!, /DENIED.*destructive/);
+  const deniedSens = await gateDecision("ask", FAKE_TOOL, { command: sens }, false);
+  assert.match(deniedSens.blocked!, /DENIED.*sensitive/);
+
+  // yes: sensitive + destructive STILL confirm; everything else auto-allowed.
+  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["mutating", mut]] as const) {
+    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `yes: ${label} is auto-approved`);
+    assert.equal(d.blocked, undefined);
+  }
+  for (const [label, cmd] of [["sensitive", sens], ["destructive", destr]] as const) {
+    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 1, `yes: ${label} confirms`);
+    assert.equal(d.blocked, undefined);
+  }
+  const yesDenied = await gateDecision("yes", FAKE_TOOL, { command: destr }, false);
+  assert.equal(yesDenied.asked.length, 1);
+  assert.match(yesDenied.blocked!, /DENIED.*destructive/);
+
+  // no: ONLY read-only, non-sensitive bash is allowed; no prompts, ever.
+  for (const [label, cmd] of [["reversible", rev], ["sensitive", sens], ["destructive", destr], ["mutating", mut]] as const) {
+    const d = await gateDecision("no", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `no: ${label} never prompts`);
+    assert.match(d.blocked!, /no-approve/, `no: ${label} is blocked`);
+  }
+  const noRo = await gateDecision("no", FAKE_TOOL, { command: ro }, true);
+  assert.equal(noRo.asked.length, 0);
+  assert.equal(noRo.blocked, undefined, "no: read-only bash is allowed");
+  const noSensRo = await gateDecision("no", FAKE_TOOL, { command: "cat ~/.ssh/id_rsa" }, true);
+  assert.match(noSensRo.blocked!, /no-approve/, "no: sensitive bash is blocked even if read-only-looking");
+});
+
+test("safety: mode matrix — write/edit (sandboxed, no prompt in ask/yes, blocked in no)", async () => {
+  const args = { path: "notes.md", content: "hi" };
+  // ask: in-workspace write/edit runs without a prompt (path-sandboxed).
+  const ask = await gateDecision("ask", FAKE_WRITE, args, true);
+  assert.equal(ask.asked.length, 0, "ask: in-workspace write is not prompted");
+  assert.equal(ask.blocked, undefined);
+  // yes: same.
+  const yes = await gateDecision("yes", FAKE_WRITE, args, true);
+  assert.equal(yes.asked.length, 0);
+  assert.equal(yes.blocked, undefined);
+  // no: blocked without prompting.
+  const no = await gateDecision("no", FAKE_WRITE, args, true);
+  assert.equal(no.asked.length, 0);
+  assert.match(no.blocked!, /no-approve/);
+});
+
+test("safety: mode matrix — read (unrestricted except sensitive; sensitive confirms in every mode)", async () => {
+  const plain = { path: path.join(dir, "plain.txt") };
+  const secret = { path: "~/.ssh/id_rsa" };
+  // ask: plain reads are unrestricted; sensitive reads prompt.
+  const askPlain = await gateDecision("ask", FAKE_READ, plain, true);
+  assert.equal(askPlain.asked.length, 0, "ask: plain read is unrestricted");
+  assert.equal(askPlain.blocked, undefined);
+  const askSens = await gateDecision("ask", FAKE_READ, secret, true);
+  assert.equal(askSens.asked.length, 1, "ask: sensitive read prompts");
+  assert.match(askSens.asked[0]!, /SENSITIVE/);
+  assert.equal(askSens.blocked, undefined);
+  // yes: sensitive reads STILL confirm (deny → blocked).
+  const yesSens = await gateDecision("yes", FAKE_READ, secret, false);
+  assert.equal(yesSens.asked.length, 1);
+  assert.match(yesSens.blocked!, /DENIED.*sensitive/);
+  const yesPlain = await gateDecision("yes", FAKE_READ, plain, true);
+  assert.equal(yesPlain.asked.length, 0);
+  assert.equal(yesPlain.blocked, undefined);
+  // no: even plain reads are blocked (only read-only BASH is allowed).
+  const noPlain = await gateDecision("no", FAKE_READ, plain, true);
+  assert.equal(noPlain.asked.length, 0);
+  assert.match(noPlain.blocked!, /no-approve/);
+});
+
+test("safety: no ask function → sensitive/destructive are denied (fail-closed)", async () => {
+  const hook = makeSafetyHooks({ root: dir, mode: "ask" }); // no ask
+  const d = await hook(FAKE_TOOL, { type: "toolCall", id: "1", name: "bash", arguments: { command: "git push" } });
+  assert.ok(d && "blocked" in d, "destructive without a human is blocked");
+  const d2 = await hook(FAKE_READ, { type: "toolCall", id: "2", name: "read", arguments: { path: "~/.ssh/id_rsa" } });
+  assert.ok(d2 && "blocked" in d2, "sensitive read without a human is blocked");
+  // read-only still passes (no human needed).
+  const d3 = await hook(FAKE_TOOL, { type: "toolCall", id: "3", name: "bash", arguments: { command: "ls" } });
+  assert.equal(d3, undefined, "read-only bash needs no human");
 });

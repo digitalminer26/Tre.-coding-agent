@@ -145,7 +145,10 @@ test("destructiveBashPatterns: force-push variants", () => {
     destructiveBashPatterns("git push --force-with-lease origin main"),
     ["git push --force"],
   );
-  assert.deepEqual(destructiveBashPatterns("git push origin main"), []);
+  // ANY push publishes to a remote → destructive (not just force-push)
+  assert.deepEqual(destructiveBashPatterns("git push origin main"), [
+    "git push (publishes to a remote)",
+  ]);
 });
 
 test("destructiveBashPatterns: raw device writes", () => {
@@ -186,10 +189,10 @@ test("destructiveBashPatterns: over-triggering is documented (echoed rm)", () =>
 
 // ─────────────────────────────── approval gate ───────────────────────────────
 
-test("mode ask: bash denied → block reason; nothing executed", async (t) => {
+test("mode ask: mutating bash denied → block reason; nothing executed", async (t) => {
   const { root } = await ws(t);
   const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
-  const r = await hooks(bashTool, call("bash", { command: "echo hi" }));
+  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /denied/);
 });
@@ -277,18 +280,27 @@ test("mode no: gated tools blocked without prompting", async (t) => {
       return true;
     },
   });
-  const r = await hooks(bashTool, call("bash", { command: "ls" }));
+  // read-only bash (e.g. `ls`) is now ALLOWED in no mode — use a mutating
+  // command for the block case.
+  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /no-approve/);
   assert.equal(asked, 0);
 });
 
-test("mode no: read still works (ungated, unrestricted)", async (t) => {
+test("mode no: read is blocked (fail-closed); ask/yes: plain reads unrestricted", async (t) => {
   const { root, outside } = await ws(t);
-  const hooks = makeSafetyHooks({ root, mode: "no" });
-  assert.equal(await hooks(readTool, call("read", { path: "a.txt" })), undefined);
+  // no mode allows only read-only bash — even plain reads are blocked
+  // (reads are unrestricted by design, so no human oversight = fail-closed).
+  const hooksNo = makeSafetyHooks({ root, mode: "no" });
+  const rNo = await hooksNo(readTool, call("read", { path: "a.txt" }));
+  assert.ok(blockedOf(rNo));
+  assert.match(blockedOf(rNo)!, /no-approve/);
+  // ask: plain reads remain unrestricted (inside and outside the root).
+  const hooksAsk = makeSafetyHooks({ root, mode: "ask" });
+  assert.equal(await hooksAsk(readTool, call("read", { path: "a.txt" })), undefined);
   assert.equal(
-    await hooks(readTool, call("read", { path: join(outside, "x.txt") })),
+    await hooksAsk(readTool, call("read", { path: join(outside, "x.txt") })),
     undefined,
   );
 });
@@ -318,7 +330,7 @@ test("a throwing ask() is treated as denial (fail-closed)", async (t) => {
       throw new Error("stdin gone");
     },
   });
-  const r = await hooks(bashTool, call("bash", { command: "ls" }));
+  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /denied/);
 });
@@ -358,7 +370,7 @@ test("blocked bash → isError result whose text IS the block reason", async (t)
   const { root } = await ws(t);
   const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
   const exec = makeToolExecutor({ beforeToolCall: hooks });
-  const res = await exec(bashTool, call("bash", { command: "echo hi" }), sig());
+  const res = await exec(bashTool, call("bash", { command: "mv a b" }), sig());
   assert.equal(res.isError, true);
   const text = res.content.map((c) => c.text).join(" ");
   assert.match(text, /Tool "bash" was blocked/);
@@ -421,10 +433,9 @@ test("non-gated, non-path tools pass through untouched", async (t) => {
 
 // ──────────────── read: unrestricted (no sandbox, no gate) ────────────────
 
-test("read: any path on the system passes through untouched in every mode", async (t) => {
+test("read: any non-sensitive path passes through untouched (ask/yes); blocked in no", async (t) => {
   const { root, outside } = await ws(t);
-  const modes: ApprovalMode[] = ["ask", "yes", "no"];
-  for (const mode of modes) {
+  for (const mode of ["ask", "yes"] as ApprovalMode[]) {
     const hooks = makeSafetyHooks({ root, mode, ask: async () => true });
     // Absolute path outside the root.
     assert.equal(
@@ -439,6 +450,12 @@ test("read: any path on the system passes through untouched in every mode", asyn
       `mode ${mode}: ../ escape must pass through`,
     );
   }
+  // no mode is fail-closed: reads are unrestricted by design, so without a
+  // human to confirm, even plain reads are blocked.
+  const hooksNo = makeSafetyHooks({ root, mode: "no" });
+  const r = await hooksNo(readTool, call("read", { path: join(outside, "secret.txt") }));
+  assert.ok(r && "blocked" in r, "mode no: read is blocked");
+  assert.match(r.blocked, /no-approve/);
 });
 
 test("read: never prompts, even in mode ask (the ask callback is never called)", async (t) => {
@@ -494,7 +511,7 @@ test("read: a missing path is a clean error result (not a throw)", async () => {
 
 // ─────────────────────────── default mode is "ask" ───────────────────────────
 
-test("default mode (no mode option) is ask: bash prompts, denial blocks", async (t) => {
+test("default mode (no mode option) is ask: mutating bash prompts, denial blocks", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -504,12 +521,12 @@ test("default mode (no mode option) is ask: bash prompts, denial blocks", async 
       return false;
     },
   });
-  const r = await hooks(bashTool, call("bash", { command: "ls" }));
+  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
   assert.ok(blockedOf(r));
-  assert.equal(asked, 1, "the default mode must prompt");
+  assert.equal(asked, 1, "the default mode must prompt for mutating bash");
 });
 
-test("default mode (no mode option) is ask: write prompts, approval rewrites path", async (t) => {
+test("default mode (no mode option) is ask: write runs without a prompt, path rewritten", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -522,7 +539,7 @@ test("default mode (no mode option) is ask: write prompts, approval rewrites pat
   const r = await hooks(writeTool, call("write", { path: "a.txt", content: "x" }));
   assert.ok(argsOf(r));
   assert.equal(argsOf(r)!.path, join(root, "a.txt"));
-  assert.equal(asked, 1, "the default mode must prompt for writes");
+  assert.equal(asked, 0, "in-workspace writes are not prompted (reversible via git)");
 });
 
 test("write/edit are still sandboxed to the root in every mode", async (t) => {

@@ -121,11 +121,14 @@ export interface CliOptions {
   /** C26: undefined = default (3 auto-continuations → 4 cycles).
    *  0 restores the old hard-stop-at-first-budget-hit behavior. */
   maxContinuations?: number;
-  /** --yes: auto-approve gated tools (except destructive bash). */
+  /** --yes: auto-approve everything EXCEPT sensitive + destructive (those
+   *  confirm in every mode). */
   yes: boolean;
-  /** --no-approve: never prompt; gated tools are blocked. */
+  /** --no-approve: never prompt; only read-only, non-sensitive bash is
+   *  allowed, everything else is blocked. */
   noApprove: boolean;
-  /** --ask (default): prompt for every gated call. */
+  /** --ask (default): prompt only for sensitive + destructive; read-only,
+   *  reversible, and in-workspace write/edit run without a prompt. */
   ask: boolean;
   /** --no-compact (WS9): disable auto-compaction (default: always on). */
   noCompact: boolean;
@@ -640,10 +643,14 @@ Options:
   --max-turns <n>    per-run LLM-turn cap (default: derived from the model's
                      contextWindow/maxTokens — hundreds of turns for a large
                      window; the runaway guard is always on)
-  --ask              (DEFAULT) prompt for EVERY gated call (bash/write/edit)
-  --yes              auto-approve ALL gated calls (except destructive bash,
-                     which confirms in every mode)
-  --no-approve       never prompt: gated tools are blocked with an error
+  --ask              (DEFAULT) prompt only for SENSITIVE reads and
+                     DESTRUCTIVE/irreversible actions; read-only bash,
+                     reversible git/npm ops, and in-workspace write/edit
+                     run without a prompt
+  --yes              auto-approve everything except SENSITIVE and
+                     DESTRUCTIVE (both confirm in every mode)
+  --no-approve       never prompt: only read-only, non-sensitive bash is
+                     allowed; everything else is blocked with an error
                      result (fail-closed, for non-interactive runs)
   --no-compact       disable auto-compaction (on by default — context management, session or not)
   --compact-keep <n> estimated tokens to keep after a compaction (default
@@ -653,15 +660,25 @@ Options:
   --plain            interactive plain REPL (one prompt per line) instead of
                      the TUI — the default when stdin is piped anyway
 
-Safety (WS7/WS11): the read tool is UNRESTRICTED — it may read any file on
-the system (no root restriction, no approval prompt). write/edit are
-sandboxed to the project root (--cwd or the process cwd) — paths that
-escape it (../, absolute paths, symlinks) are refused. On macOS the bash
-tool runs in the project root under a kernel (Seatbelt) sandbox with the
-same boundary; elsewhere it runs in the project root unsandboxed.
-Approval (D8): the default mode (ask) prompts for EVERY gated call
-(bash/write/edit); --yes auto-approves everything (except destructive
-bash, which confirms in every mode); --no-approve blocks all gated calls.
+Safety (WS7/WS11): the read tool may read any file on the system (no root
+restriction) — EXCEPT sensitive material (secret/key paths: ~/.ssh/,
+~/.aws/, ~/.gnupg/, ~/.kube/, ~/.config/gcloud/, ~/.docker/config.json,
+~/.netrc, /etc/shadow, id_rsa*/id_ed25519*, *.pem/*.key/*.p12/*.pfx,
+.env-family), which confirms in every mode. write/edit are sandboxed to
+the project root (--cwd or the process cwd) — paths that escape it (../,
+absolute paths, symlinks) are refused. On macOS the bash tool runs in the
+project root under a kernel (Seatbelt) sandbox with the same boundary;
+elsewhere it runs in the project root unsandboxed.
+Approval (D8): the user is only prompted to confirm SENSITIVE reads and
+DESTRUCTIVE/irreversible actions (recursive rm, ANY git push,
+git reset --hard, forced git clean, git branch -D, git checkout . /
+checkout -- <path> / git restore, dd to /dev/*, raw-device redirects,
+mkfs, fork bomb, shutdown/reboot). The default mode (ask) runs everything
+else without a prompt — read-only bash (ls/cat/grep/… and read-only
+git/kubectl/docker subcommands), reversible bash (git add/commit/stash/
+switch/checkout <branch>/branch <new>/tag <new>, npm run/test), and
+in-workspace write/edit. --yes auto-approves everything except sensitive
+and destructive; --no-approve allows ONLY read-only, non-sensitive bash.
 Anything but y is a denial, and a denial comes back to the model as an
 error result.
 
@@ -848,8 +865,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const streamFn = deps.streamFn ?? openAiStream;
 
   // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
-  // tool pipeline. Default mode is "ask" (prompt per gated call); --yes
-  // auto-approves (except destructive); --no-approve blocks.
+  // tool pipeline. Default mode is "ask" (prompt only sensitive +
+  // destructive); --yes auto-approves everything except sensitive +
+  // destructive; --no-approve allows only read-only non-sensitive bash.
   const mode: ApprovalMode =
     args.noApprove ? "no" : args.yes ? "yes" : "ask";
   const buildExecutor = (ask: AskApproval) =>

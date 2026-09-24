@@ -1,3 +1,58 @@
+# HANDOFF — approval gate loosened: confirm only sensitive + destructive (2026-09-24)
+
+## The default mode now runs read-only bash, reversible git/npm ops, and in-workspace write/edit WITHOUT a prompt; the user is only confirmed on SENSITIVE reads and DESTRUCTIVE/irreversible actions (376 tests: 369 pass 0 fail 7 skip)
+
+Before: `ask` (default) prompted for EVERY bash/write/edit call, even
+`ls`/`git status`/`git commit`. This change reclassifies every call into
+five classes and gates each per mode (all in `src/tools/safety.ts`):
+
+| classification  | ask (default)      | yes                | no                 |
+|-----------------|--------------------|--------------------|--------------------|
+| read-only bash  | no prompt          | no prompt          | ALLOW (only class) |
+| reversible bash | no prompt          | no prompt          | block              |
+| mutating bash   | prompt             | no prompt          | block              |
+| write/edit      | no prompt          | no prompt          | block              |
+| read (plain)    | no prompt          | no prompt          | block (fail-closed)|
+| sensitive       | prompt [SENSITIVE] | prompt [SENSITIVE] | block              |
+| destructive     | prompt [DESTRUCTIVE]| prompt [DESTRUCTIVE] | block           |
+
+- **Classifiers (pure, exported, unit-tested)**: `destructiveBashPatterns`,
+  `sensitiveBashPatterns`/`sensitivePathPatterns`, `isReadOnlyBash`,
+  `isReversibleBash` (new). Bash check order: destructive → sensitive →
+  read-only → reversible → mutating. Fail-closed everywhere: unrecognized
+  commands, `$( )`, backticks, `sudo`, and output redirects to real paths
+  disqualify read-only; `--no-approve` allows only read-only non-sensitive
+  bash (reads are blocked too — they are unrestricted by design, so no
+  human oversight = fail-closed).
+- **Destructive list grew** (publishing/discarding is irreversible): ANY
+  `git push` (not just force), `git reset --hard`, forced `git clean`
+  (-f/-fd/-x; `-n` dry-run is NOT destructive), `git branch -D`,
+  `git checkout . / -- <path> / git restore` (without --source). Existing
+  patterns (recursive rm, dd to /dev/*, raw-device redirects, mkfs, fork
+  bomb, shutdown/reboot) unchanged.
+- **Sensitive class is new**: bash touching ~/.ssh/, ~/.aws/, ~/.gnupg/,
+  ~/.kube/, ~/.config/gcloud/, ~/.docker/config.json, ~/.netrc, /etc/shadow,
+  id_rsa*/id_ed25519*, *.pem/*.key/*.p12/*.pfx, .env-family files — and the
+  `read` tool on resolved paths matching the same patterns. Confirms in
+  EVERY mode (fail-closed denial when there is no human). All other reads
+  stay unrestricted (no root restriction, no prompt).
+- **write/edit**: still path-sandboxed to the project root in every mode
+  (unchanged), but no prompt in ask/yes — reversible via git; still blocked
+  under `--no-approve`.
+- **Docs**: main.ts help (`--ask/--yes/--no-approve` + Safety/Approval
+  paragraphs) and this HANDOFF updated.
+- **Tests**: test/tools.test.ts gained pure-classifier suites (read-only
+  verbs + git/kubectl/docker subcommands, compound/redirect/$( )/sudo
+  disqualification, reversible list, sensitive patterns, new destructive
+  patterns, full mode matrix incl. read, fail-closed without a human);
+  test/safety.test.ts + test/cli.test.ts WS7 cases updated to the new spec.
+
+**Verification**: `npm run build` clean; `npm test` 376 tests: 369 pass
+0 fail 7 skip (live). Note: this increment was dogfooded — tre. itself ran
+the self-improve loop (4 runs, session-resumed between 27-min windows);
+its own run 3 was denied fail-closed when a command it built contained the
+literal string `git clean -x` — live proof of the new destructive gate.
+
 # HANDOFF — TUI user item is now cyan (2026-09-24)
 
 ## The echoed user prompt renders CYAN in the TUI, so it is distinguishable from the assistant's plain reply (366 tests: 358 pass 0 fail 8 skip; PTY verified)

@@ -8,9 +8,11 @@
  *     messages after) and resume (second run seeded with replayed context)
  *   - error-as-data: provider error → exit 1, no throw (I3)
  *   - arg parsing failures → exit 2
- *   - WS7: gated tool calls (bash/write/edit) go through the safety hooks —
- *     approval (injected askApproval / --yes / --no-approve), denial →
- *     isError result, path sandbox (absolute & ../ escapes, --cwd root)
+ *   - WS7: bash/write/edit/read go through the safety hooks — the
+ *     classification + mode matrix (read-only/reversible run without a
+ *     prompt; sensitive + destructive confirm in every mode; --no-approve
+ *     allows only read-only non-sensitive bash), denial → isError result,
+ *     path sandbox (absolute & ../ escapes, --cwd root)
  * Live vertical slice: test/cli-live.test.ts (RUN_LIVE=1).
  */
 import test from "node:test";
@@ -666,17 +668,18 @@ test("parseArgs: --yes / --no-approve flags (mutually exclusive)", () => {
   assert.notDeepEqual(parseArgs(["run", "x", "--yes", "--no-approve"]).errors, []);
 });
 
-test("WS7: gated bash denied (--ask) → run completes, model gets an isError result", async (t) => {
+test("WS7: mutating bash denied (--ask) → run completes, model gets an isError result", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo should-not-run" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "mv a.txt b.txt" } }] },
     { type: "text", text: "the command was denied" },
   ]);
   const S = mkSinks();
   const asked: string[] = [];
-  // The default mode is "ask" (prompt per gated call); --ask is explicit
-  // here to be unambiguous that we are exercising the prompt-per-call path.
+  // The default mode is "ask" (prompt only sensitive + destructive); --ask
+  // is explicit here to be unambiguous that we are exercising the
+  // prompt-per-call path for a MUTATING command.
   const code = await main(
     ["run", "run it", "--tools", "bash", "--models", models, "--session", session, "--ask"],
     {
@@ -689,7 +692,7 @@ test("WS7: gated bash denied (--ask) → run completes, model gets an isError re
     },
   );
   assert.equal(code, 0, "a denial is data — the run continues");
-  assert.equal(asked.length, 1, "the gated call was prompted");
+  assert.equal(asked.length, 1, "the mutating call was prompted");
   assert.match(asked[0]!, /bash/);
   assert.match(S.out(), /✗/, "blocked call prints an error line");
   assert.match(S.out(), /denied/);
@@ -701,31 +704,15 @@ test("WS7: gated bash denied (--ask) → run completes, model gets an isError re
   assert.match(tr.content.map((c) => c.text).join(" "), /denied/);
 });
 
-test("WS7: gated bash approved via injected ask → executes", async (t) => {
+test("WS7: read-only bash runs WITHOUT a prompt in default (ask) mode", async (t) => {
   const { dir, models } = await workspace(t);
   const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo approved-yes" } }] },
-    { type: "text", text: "ok" },
-  ]);
-  const S = mkSinks();
-  const code = await main(["run", "run it", "--tools", "bash", "--models", models], {
-    streamFn,
-    sinks: S.sinks,
-    askApproval: async () => true,
-  });
-  assert.equal(code, 0);
-  assert.match(S.out(), /approved-yes/);
-});
-
-test("WS7: --yes auto-approves non-destructive bash (ask never called)", async (t) => {
-  const { dir, models } = await workspace(t);
-  const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo auto" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "ls -la" } }] },
     { type: "text", text: "ok" },
   ]);
   const S = mkSinks();
   let asked = 0;
-  const code = await main(["run", "run it", "--tools", "bash", "--yes", "--models", models], {
+  const code = await main(["run", "list files", "--tools", "bash", "--models", models], {
     streamFn,
     sinks: S.sinks,
     askApproval: async () => {
@@ -734,19 +721,83 @@ test("WS7: --yes auto-approves non-destructive bash (ask never called)", async (
     },
   });
   assert.equal(code, 0);
-  assert.equal(asked, 0, "--yes must not prompt for non-destructive calls");
-  assert.match(S.out(), /auto/);
+  assert.equal(asked, 0, "read-only bash must not prompt in ask mode");
+  assert.match(S.out(), /total/, "the ls output is in the transcript");
 });
 
-test("WS7: --no-approve blocks gated bash without prompting", async (t) => {
+test("WS7: --yes still confirms destructive bash (ask called, deny → isError)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const session = join(dir, "s.jsonl");
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "git push origin main" } }] },
+    { type: "text", text: "denied" },
+  ]);
+  const S = mkSinks();
+  const asked: string[] = [];
+  const code = await main(
+    ["run", "push it", "--tools", "bash", "--yes", "--models", models, "--session", session],
+    {
+      streamFn,
+      sinks: S.sinks,
+      askApproval: async (q) => {
+        asked.push(q);
+        return false;
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.equal(asked.length, 1, "destructive bash confirms even under --yes");
+  assert.match(asked[0]!, /DESTRUCTIVE/);
+  const replayed = await replaySession(session);
+  const tr = replayed.context.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult");
+  assert.equal(tr.isError, true);
+  assert.match(tr.content.map((c) => c.text).join(" "), /DENIED/);
+});
+
+test("WS7: sensitive read confirms even under --yes (deny → isError)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const session = join(dir, "s.jsonl");
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "read", args: { path: "~/.ssh/id_rsa" } }] },
+    { type: "text", text: "denied" },
+  ]);
+  const S = mkSinks();
+  const asked: string[] = [];
+  const code = await main(
+    ["run", "read the key", "--tools", "read", "--yes", "--models", models, "--session", session],
+    {
+      streamFn,
+      sinks: S.sinks,
+      askApproval: async (q) => {
+        asked.push(q);
+        return false;
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.equal(asked.length, 1, "sensitive reads confirm even under --yes");
+  assert.match(asked[0]!, /SENSITIVE/);
+  const replayed = await replaySession(session);
+  const tr = replayed.context.find((m) => m.role === "toolResult");
+  assert.ok(tr && tr.role === "toolResult");
+  assert.equal(tr.isError, true);
+  assert.match(tr.content.map((c) => c.text).join(" "), /DENIED/);
+});
+
+test("WS7: --no-approve allows read-only bash but blocks mutating (no prompts)", async (t) => {
   const { dir, models } = await workspace(t);
   const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo no" } }] },
-    { type: "text", text: "blocked" },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "pwd" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "mv a b" } }] },
+    { type: "text", text: "done" },
   ]);
   const S = mkSinks();
   let asked = 0;
-  const code = await main(["run", "run it", "--tools", "bash", "--no-approve", "--models", models], {
+  const code = await main([
+    "run", "run it", "--tools", "bash", "--no-approve", "--models", models,
+    "--cwd", dir, "--session", join(dir, "s.jsonl"),
+  ], {
     streamFn,
     sinks: S.sinks,
     askApproval: async () => {
@@ -756,7 +807,8 @@ test("WS7: --no-approve blocks gated bash without prompting", async (t) => {
   });
   assert.equal(code, 0);
   assert.equal(asked, 0, "--no-approve must never prompt");
-  assert.match(S.out(), /✗.*no-approve/);
+  assert.match(S.out(), /✗.*no-approve/, "the mutating call is blocked");
+  assert.match(S.out(), new RegExp(dir), "the read-only call ran (pwd printed the root)");
 });
 
 test("WS7: sandbox — absolute path outside root is refused even with --yes", async (t) => {

@@ -1,8 +1,8 @@
 /**
  * WS7 — safety & permissions (PLAN.md §WS7).
  *
- * This is the `beforeToolCall` hook that gives the agent its two permission
- * boundaries, plus the destructive-command classifier:
+ * This is the `beforeToolCall` hook that gives the agent its permission
+ * boundaries. Two layers:
  *
  *   1. PATH SANDBOX — write/edit are confined to the project root.
  *      The hook resolves each path argument against the root and REWRITES
@@ -15,33 +15,88 @@
  *        - realpath: the deepest EXISTING ancestor is realpath'd and must
  *          stay under the REAL root (kills symlinks that point outside)
  *      A refused path is a BLOCK → an isError result the model reads (I3).
- *      `read` is NOT sandboxed: by design it may read any file on the
- *      system (no root restriction, no approval prompt).
+ *      `read` is NOT path-sandboxed: by design it may read any file on the
+ *      system (no root restriction).
  *
- *   2. APPROVAL GATE — bash/write/edit are "gated". Default mode `ask`:
- *      prompt per gated call; anything but y denies.
- *        - mode "ask" (default): prompt per gated call
- *        - mode "yes": auto-approve gated calls — EXCEPT destructive
- *          bash commands (see 3)
- *        - mode "no": never prompt; gated calls are blocked outright
- *          (fail-closed; for non-interactive runs)
+ *   2. APPROVAL GATE — a classification + mode matrix. Every call is
+ *      classified first, then the mode decides:
+ *
+ *        classification  ask (default)          yes                    no
+ *        ─────────────── ─────────────────────  ─────────────────────  ─────────────────────
+ *        read-only bash  allow, no prompt       allow, no prompt       ALLOW (only bash class)
+ *        reversible bash allow, no prompt       allow, no prompt       block
+ *        mutating bash   prompt                 allow, no prompt       block
+ *        write/edit      allow, no prompt       allow, no prompt       block
+ *        read (plain)   allow, no prompt       allow, no prompt       block (fail-closed)
+ *        sensitive       prompt [SENSITIVE]     prompt [SENSITIVE]     block
+ *        destructive     prompt [DESTRUCTIVE]   prompt [DESTRUCTIVE]   block
+ *
+ *      The user is only prompted for SENSITIVE reads and DESTRUCTIVE /
+ *      irreversible actions. Everything routine (read-only inspection,
+ *      reversible git/npm ops, in-workspace writes) runs without a prompt
+ *      in "ask" mode.
+ *
+ *      - mode "ask" (default): prompt only for sensitive and destructive
+ *      - mode "yes": auto-approve everything EXCEPT sensitive and
+ *        destructive (both confirm; deny when there is no human)
+ *      - mode "no" (fail-closed): allow ONLY read-only, non-sensitive bash;
+ *        everything else is blocked outright (no prompts, ever)
  *      A denial is a BLOCK → an isError result the model reads.
  *
- *   3. DESTRUCTIVE CONFIRMATION — DECISION (D8, PLAN.md): bash commands
- *      matching a destructive pattern require an explicit human confirm
- *      in EVERY mode (even when the target path is inside the workspace). Rationale: `--yes` is convenience for "let the
- *      agent work in my project", not a standing permission to destroy
- *      the machine. The patterns are intentionally conservative —
- *      over-prompting is safe, under-prompting is not:
+ *   3. CLASSIFIERS (pure, exported for tests). Bash check order:
+ *      destructive → sensitive → read-only → reversible → mutating.
+ *
+ *      DESTRUCTIVE — irreversible; prompts in EVERY mode (D8):
  *        - rm with a recursive flag (-r / -R / --recursive), force or not
- *        - git push -f / --force / --force-with-lease
+ *        - git push (ANY — publishing to a remote is irreversible)
+ *        - git reset --hard
+ *        - git clean with a force flag (-f / -fd / -x)
+ *        - git branch -D (force-delete a branch)
+ *        - git checkout . / git checkout -- <path> / git restore (without
+ *          --source) — all discard uncommitted work
  *        - dd writing to /dev/* (raw block device)
  *        - shell redirection to raw block devices (>/dev/sd*, ...)
  *        - mkfs* (filesystem creation)
  *        - the classic fork bomb
  *        - shutdown / reboot / halt / poweroff
- *      Deliberately NOT listed: "dangerous but not destructive" (curl|sh,
- *      sudo, exfiltration) — the approval gate covers those whenever
+ *
+ *      SENSITIVE — reading secret/key material; prompts in EVERY mode:
+ *        - bash whose arguments reference sensitive paths: ~/.ssh/, ~/.aws/,
+ *          ~/.gnupg/, ~/.kube/, ~/.config/gcloud/, ~/.docker/config.json,
+ *          ~/.netrc, /etc/shadow, id_rsa*, id_ed25519*, *.pem, *.key,
+ *          *.p12, *.pfx, and .env-family files (.env, .env.*, *.env)
+ *        - the `read` tool when the RESOLVED path matches the same
+ *          patterns (read stays unrestricted for all non-sensitive paths)
+ *
+ *      READ-ONLY — inspection; no prompt in any mode that allows it:
+ *        - read-only verbs: ls, cat, head, tail, wc, file, stat, du, df,
+ *          pwd, whoami, id, echo, printf, which, type, date, uname, grep,
+ *          egrep, fgrep, rg, ag, find, tree, sort, uniq, diff, cmp, cut,
+ *          column, basename, dirname, realpath, readlink, md5sum, sha1sum,
+ *          sha256sum, xxd, od, ps, lsof, netstat, ifconfig
+ *        - git read-only subcommands: status, diff, log, show, branch
+ *          (list), tag (list), remote, rev-parse, ls-files, describe,
+ *          blame, stash list
+ *        - kubectl get/describe/version/top
+ *        - docker ps/images/inspect/logs/version
+ *        - `ip addr` (the read-only form of `ip`)
+ *      A compound command (; && || |) counts as read-only ONLY if EVERY
+ *      segment is read-only. Anything containing $( ), backticks, sudo, or
+ *      an output redirect to a real path (redirects to /dev/null and fd
+ *      dups like 2>&1 are fine) is NOT read-only. Anything unrecognized is
+ *      never read-only (fail-closed).
+ *
+ *      REVERSIBLE — safe to undo via git; no prompt in ask/yes:
+ *        - git add, git commit, git stash (push/list), git switch <branch>,
+ *          git checkout <branch> (but NOT `checkout .` / `checkout --
+ *          <path>` — those are destructive), git branch <newname>,
+ *          git tag <newname>, npm run <script>, npm test
+ *
+ *      MUTATING — everything else (mv, chmod, curl, pip, unrecognized
+ *      verbs): prompts in ask, auto-allowed in yes, blocked in no.
+ *
+ *      Deliberately NOT destructive: "dangerous but not destructive"
+ *      (curl|sh, exfiltration) — the approval gate covers those whenever
  *      "yes" mode is off.
  *
  * I3: this hook never throws. A failing ask() (closed stdin, throw) is
@@ -49,6 +104,7 @@
  * `Tool "<name>" was blocked: <reason>` — an isError ToolResult the
  * model reads and adapts to (D7).
  */
+import os from "node:os";
 import path from "node:path";
 import { realpath } from "node:fs/promises";
 import type { BeforeToolCall } from "./pipeline.js";
@@ -56,24 +112,29 @@ import type { BeforeToolCall } from "./pipeline.js";
 /** Human prompt. `false` (or a throw) means "no". */
 export type AskApproval = (question: string) => boolean | Promise<boolean>;
 
-/** ask = prompt per gated call (default); yes = auto-approve except
- *  destructive; no = never prompt, always block gated calls. */
+/** ask = prompt only sensitive+destructive (default); yes = auto-approve
+ *  except sensitive+destructive; no = allow only read-only non-sensitive
+ *  bash, block everything else. */
 export type ApprovalMode = "ask" | "yes" | "no";
 
 export interface SafetyOptions {
   /** Project root. Must exist — checked per call, fail-closed if not. */
   root: string;
   mode?: ApprovalMode;
-  /** Human prompt. Required for mode "ask" (and destructive under "yes");
-   *  if absent, those calls are denied (fail-closed). */
+  /** Human prompt. Required for sensitive/destructive confirmations (and
+   *  mutating bash in "ask"); if absent, those calls are denied
+   *  (fail-closed). */
   ask?: AskApproval;
 }
 
 /** Tools whose `path` argument is sandboxed to the root. `read` is NOT
- *  here: it may read any file on the system (no root restriction, no
- *  approval prompt) — see the module header. */
+ *  here: it may read any file on the system (no root restriction) — see
+ *  the module header. */
 const PATH_TOOLS = new Set(["write", "edit"]);
-/** Tools that require approval. `read` is ungated (unrestricted reads). */
+/** Tools that go through the approval gate. `read` goes through the gate
+ *  too, but only as a SENSITIVE check in ask/yes (sensitive paths prompt in
+ *  every mode; all other reads are unrestricted) — and in no mode even
+ *  plain reads are blocked (fail-closed: no human to confirm anything). */
 const GATED_TOOLS = new Set(["bash", "write", "edit"]);
 
 export type PathCheck =
@@ -138,6 +199,8 @@ async function realpathExisting(p: string): Promise<string> {
   }
 }
 
+// ─────────────────────────── classification ───────────────────────────
+
 /**
  * Classify a bash command for destructiveness. Returns the human-readable
  * labels of every matched pattern (empty = not destructive). Patterns are
@@ -166,7 +229,8 @@ export function destructiveBashPatterns(command: string): string[] {
     if (recursive) hits.push("recursive rm");
   }
 
-  // git push -f / --force / --force-with-lease
+  // git push — ANY push (publishing to a remote is irreversible; force
+  // pushes are the obvious subset)
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
@@ -177,7 +241,72 @@ export function destructiveBashPatterns(command: string): string[] {
       if (f === "--force" || f === "--force-with-lease") return true;
       return f.startsWith("-") && !f.startsWith("--") && f.slice(1).includes("f");
     });
-    if (force) hits.push("git push --force");
+    hits.push(force ? "git push --force" : "git push (publishes to a remote)");
+  }
+
+  // git reset --hard (discards uncommitted work + moves the branch)
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t !== "git" && !/\/git$/.test(t)) continue;
+    const rest = tokens.slice(i + 1);
+    const ri = rest.indexOf("reset");
+    if (ri === -1) continue;
+    if (rest.slice(ri + 1).includes("--hard")) hits.push("git reset --hard");
+  }
+
+  // git clean with a force flag (-f / -fd / -x): removes untracked files
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t !== "git" && !/\/git$/.test(t)) continue;
+    const rest = tokens.slice(i + 1);
+    const ci = rest.indexOf("clean");
+    if (ci === -1) continue;
+    const forced = rest.slice(ci + 1).some((f) => {
+      if (f === "--force") return true;
+      if (f.startsWith("--")) return false; // other long flags
+      // short flags: an "f" or "x" means force (-f, -fd, -fx, -x, ...);
+      // -n / --dry-run does NOT remove anything → not destructive
+      return f.startsWith("-") && /f|x/.test(f.slice(1));
+    });
+    if (forced) hits.push("git clean (removes untracked files)");
+  }
+
+  // git branch -D (force-delete a branch)
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t !== "git" && !/\/git$/.test(t)) continue;
+    const rest = tokens.slice(i + 1);
+    const bi = rest.indexOf("branch");
+    if (bi === -1) continue;
+    if (rest.slice(bi + 1).some((f) => f === "-D" || f === "--delete")) {
+      hits.push("git branch -D (force-delete a branch)");
+    }
+  }
+
+  // git checkout . / git checkout -- <path> (discard uncommitted work)
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t !== "git" && !/\/git$/.test(t)) continue;
+    const rest = tokens.slice(i + 1);
+    const ci = rest.indexOf("checkout");
+    if (ci === -1) continue;
+    const args = rest.slice(ci + 1);
+    if (args.includes(".") || args.includes("--")) {
+      hits.push("git checkout . / -- <path> (discards uncommitted work)");
+    }
+  }
+
+  // git restore (without --source: restores from the index/HEAD, discarding
+  // uncommitted work)
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t !== "git" && !/\/git$/.test(t)) continue;
+    const rest = tokens.slice(i + 1);
+    const ri = rest.indexOf("restore");
+    if (ri === -1) continue;
+    if (!rest.slice(ri + 1).includes("--source")) {
+      hits.push("git restore (discards uncommitted work)");
+    }
   }
 
   if (/\bdd\b/.test(command) && /of=\/dev\//.test(command)) {
@@ -196,15 +325,235 @@ export function destructiveBashPatterns(command: string): string[] {
   return hits;
 }
 
+/** Sensitive path patterns, in priority order (first match labels the
+ *  prompt). Two groups:
+ *  - FILENAME: matches the basename of ANY command token (e.g. `cat
+ *    server.key`, `cat .env`, `cat file.env`) — no path context needed.
+ *  - PATH: needs a path-like token (starts with ~, /, . or contains /) —
+ *    e.g. `cat ~/.ssh/id_rsa`, `cat /etc/shadow`.
+ *  Each: a label for the [SENSITIVE: …] tag + a matcher over the path's
+ *  segments (split on "/"). */
+const SENSITIVE_FILENAME: { label: string; test: (segs: string[]) => boolean }[] = [
+  { label: "~/.netrc", test: (s) => s[s.length - 1] === ".netrc" },
+  { label: "id_rsa*", test: (s) => s.some((x) => /^id_rsa/.test(x)) },
+  { label: "id_ed25519*", test: (s) => s.some((x) => /^id_ed25519/.test(x)) },
+  { label: "*.pem", test: (s) => s.some((x) => x.endsWith(".pem")) },
+  { label: "*.key", test: (s) => s.some((x) => x.endsWith(".key")) },
+  { label: "*.p12", test: (s) => s.some((x) => x.endsWith(".p12")) },
+  { label: "*.pfx", test: (s) => s.some((x) => x.endsWith(".pfx")) },
+  { label: ".env*", test: (s) => s.some((x) => x === ".env" || /^\.env\./.test(x) || /\.env$/.test(x)) },
+];
+const SENSITIVE_PATH: { label: string; test: (segs: string[]) => boolean }[] = [
+  { label: "~/.ssh/", test: (s) => s.includes(".ssh") },
+  { label: "~/.aws/", test: (s) => s.includes(".aws") },
+  { label: "~/.gnupg/", test: (s) => s.includes(".gnupg") },
+  { label: "~/.kube/", test: (s) => s.includes(".kube") },
+  { label: "~/.config/gcloud/", test: (s) => s.includes("gcloud") },
+  { label: "~/.docker/config.json", test: (s) => s.includes(".docker") && s[s.length - 1] === "config.json" },
+  { label: "/etc/shadow", test: (s) => s[s.length - 1] === "shadow" && s[s.length - 2] === "etc" },
+];
+
+/** Expand a leading "~" (or "~user") to the home directory. */
+function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+/** Sensitive patterns matched by a (possibly relative) path. Used for the
+ *  `read` tool's RESOLVED path argument. */
+function sensitivePathPatterns(p: string): string[] {
+  const segs = expandHome(p).split("/").filter((s) => s.length > 0);
+  const hits: string[] = [];
+  for (const pat of [...SENSITIVE_FILENAME, ...SENSITIVE_PATH]) {
+    if (pat.test(segs)) hits.push(pat.label);
+  }
+  return hits;
+}
+
+/**
+ * Classify a bash command for sensitive-path access. Returns the labels of
+ * every sensitive pattern referenced by a command argument (empty = none).
+ * FILENAME patterns are checked against every token (a bare `server.key` or
+ * `.env` names a file); PATH patterns need a path-like token (starts with
+ * ~, /, or . or contains / — e.g. `cat /etc/shadow`, `cat ~/.ssh/id_rsa`).
+ */
+export function sensitiveBashPatterns(command: string): string[] {
+  const hits: string[] = [];
+  for (const t of command.split(/\s+/).filter((x) => x.length > 0)) {
+    const segs = expandHome(t).split("/").filter((s) => s.length > 0);
+    const pathLike = t.startsWith("~") || t.startsWith("/") || t.startsWith(".") || t.includes("/");
+    const pats = pathLike ? [...SENSITIVE_FILENAME, ...SENSITIVE_PATH] : SENSITIVE_FILENAME;
+    for (const pat of pats) {
+      if (pat.test(segs) && !hits.includes(pat.label)) hits.push(pat.label);
+    }
+  }
+  return hits;
+}
+
+/** Read-only verbs (whole command = one of these, with any arguments). */
+const READONLY_VERBS = new Set([
+  "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "pwd",
+  "whoami", "id", "echo", "printf", "which", "type", "date", "uname",
+  "grep", "egrep", "fgrep", "rg", "ag", "find", "tree", "sort", "uniq",
+  "diff", "cmp", "cut", "column", "basename", "dirname", "realpath",
+  "readlink", "md5sum", "sha1sum", "sha256sum", "xxd", "od", "ps", "lsof",
+  "netstat", "ifconfig",
+]);
+
+/** git subcommands that are read-only. */
+const GIT_READONLY_SUBS = new Set([
+  "status", "diff", "log", "show", "remote", "rev-parse", "ls-files",
+  "describe", "blame",
+]);
+/** git subcommands that are read-only ONLY in their listed form. */
+const GIT_READONLY_RESTRICTED: Record<string, (rest: string[]) => boolean> = {
+  branch: (r) => r.length === 0, // `git branch` (list)
+  tag: (r) => r.length === 0, // `git tag` (list)
+  stash: (r) => r.length >= 1 && r[0] === "list", // `git stash list`
+};
+
+/** kubectl subcommands that are read-only. */
+const KUBECTL_READONLY = new Set(["get", "describe", "version", "top"]);
+/** docker subcommands that are read-only. */
+const DOCKER_READONLY = new Set(["ps", "images", "inspect", "logs", "version"]);
+
+/**
+ * Is this bash command read-only (inspection)?
+ *
+ * Rules (fail-closed — anything unrecognized is NOT read-only):
+ *  - a compound command (; && || |) is read-only ONLY if EVERY segment is
+ *  - $( ), backticks, sudo, and output redirects to a real path
+ *    (>/dev/null and fd dups like 2>&1 are fine) disqualify
+ *  - each segment: a read-only verb, or a read-only git/kubectl/docker/ip
+ *    subcommand form
+ */
+export function isReadOnlyBash(command: string): boolean {
+  if (command.length === 0) return false;
+  // Disqualifiers anywhere in the command.
+  if (command.includes("`") || /\$\s*\(/.test(command) || /\$\(/.test(command)) return false;
+  if (/\bsudo\b/.test(command)) return false;
+  // Output redirect to a real path (not /dev/null, not a pure fd dup).
+  for (const m of command.matchAll(/>{1,2} *([^|\s;&)]*)/g)) {
+    const target = (m[1] ?? "").trim();
+    if (target === "" || target === "/dev/null") continue;
+    if (/^\d+$/.test(target)) continue; // fd dup (2>&1 has no target here)
+    return false;
+  }
+  // Compound: every segment must be read-only.
+  const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).filter((s) => s.trim().length > 0);
+  if (segments.length === 0) return false;
+  return segments.every((seg) => isReadOnlySegment(seg.trim()));
+}
+
+/** One (non-compound) segment: a single command with its arguments. */
+function isReadOnlySegment(seg: string): boolean {
+  const tokens = seg.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return false;
+  const base = path.basename(tokens[0]!);
+  const rest = tokens.slice(1);
+  if (base === "git") return isReadOnlyGit(rest);
+  if (base === "kubectl") return rest.length > 0 && KUBECTL_READONLY.has(rest[0]!);
+  if (base === "docker") return rest.length > 0 && DOCKER_READONLY.has(rest[0]!);
+  if (base === "ip") return rest[0] === "addr"; // `ip addr` (read-only form)
+  return READONLY_VERBS.has(base);
+}
+
+/** `git <sub> …` — read-only only for the listed subcommand forms. */
+function isReadOnlyGit(rest: string[]): boolean {
+  if (rest.length === 0) return false;
+  // Skip global flags (e.g. `git -C dir status`) — fail-closed on anything
+  // we don't recognize as a flag.
+  let i = 0;
+  while (rest[i]!.startsWith("-")) {
+    if (rest[i] === "-C") i += 2; // -C <path>
+    else i += 1;
+    if (i >= rest.length) return false;
+  }
+  const sub = rest[i]!;
+  const subRest = rest.slice(i + 1);
+  if (GIT_READONLY_SUBS.has(sub)) return true;
+  const restricted = GIT_READONLY_RESTRICTED[sub];
+  if (restricted) return restricted(subRest);
+  return false;
+}
+
+/**
+ * Is this bash command reversible (safe to undo via git / re-run)?
+ * Fail-closed: only the explicitly listed forms qualify.
+ *  - git add, git commit, git stash (push/list), git switch <branch>,
+ *    git checkout <branch> (NOT `checkout .` / `checkout -- <path>` —
+ *    those are destructive), git branch <newname>, git tag <newname>,
+ *    npm run <script>, npm test
+ */
+export function isReversibleBash(command: string): boolean {
+  if (command.length === 0) return false;
+  // Only single-segment commands qualify (a compound with a destructive or
+  // mutating part is not reversible).
+  if (/\s*(?:&&|\|\||[;|])\s*/.test(command)) return false;
+  const tokens = command.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length < 2) return false;
+  const base = path.basename(tokens[0]!);
+  const rest = tokens.slice(1);
+  if (base === "npm") {
+    if (rest[0] === "test") return true;
+    // npm run <script> — rest = ["run", "<script>"] (at least 2 tokens)
+    if (rest[0] === "run" && rest.length >= 2) return true;
+    return false;
+  }
+  if (base !== "git") return false;
+  // Skip global flags (e.g. `git -C dir add .`).
+  let i = 0;
+  while (rest[i]!.startsWith("-")) {
+    if (rest[i] === "-C") i += 2;
+    else i += 1;
+    if (i >= rest.length) return false;
+  }
+  const sub = rest[i]!;
+  const subRest = rest.slice(i + 1);
+  switch (sub) {
+    case "add":
+      return true;
+    case "commit":
+      return true;
+    case "switch":
+      return subRest.length >= 1; // git switch <branch>
+    case "stash":
+      return subRest.length === 0 || subRest[0] === "push" || subRest[0] === "list";
+    case "branch":
+      // git branch <newname> — create (NOT -d/-D/-m/-c/-M: destructive or
+      // rename; those go to the destructive classifier or stay mutating)
+      return subRest.length === 1 && !subRest[0]!.startsWith("-");
+    case "tag":
+      // git tag <newname> — create (NOT -d: delete)
+      return subRest.length === 1 && !subRest[0]!.startsWith("-");
+    case "checkout":
+      // git checkout <branch> — switch branches. NOT `checkout .` /
+      // `checkout -- <path>` (discard uncommitted work — destructive).
+      return (
+        subRest.length >= 1 &&
+        !subRest.includes("--") &&
+        !subRest.includes(".") &&
+        !subRest[0]!.startsWith("-")
+      );
+    default:
+      return false;
+  }
+}
+
+// ─────────────────────────── approval gate ───────────────────────────
+
 /** The question shown to the human for a gated call. */
 function approvalQuestion(
   toolName: string,
   args: Record<string, unknown>,
   destructive: string[],
+  sensitive: string[],
   outside: string[] = [],
 ): string {
   const tags: string[] = [];
   if (destructive.length > 0) tags.push(`DESTRUCTIVE: ${destructive.join(", ")}`);
+  if (sensitive.length > 0) tags.push(`SENSITIVE: ${sensitive.join(", ")}`);
   if (outside.length > 0) tags.push(`outside the workspace: ${outside.join(", ")}`);
   const tag = tags.length > 0 ? ` [${tags.join("; ")}]` : "";
   if (toolName === "bash") {
@@ -222,35 +571,56 @@ function approvalQuestion(
  */
 export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
   const root = opts.root;
-  const mode = opts.mode ?? "ask"; // default: prompt per gated call
+  const mode = opts.mode ?? "ask"; // default: prompt only sensitive+destructive
 
-  /** Gate a call; returns a block reason or undefined (allow). */
+  /** Prompt the human; fail-closed on any failure (no ask → deny). */
+  const confirm = async (question: string): Promise<boolean> => {
+    if (!opts.ask) return false;
+    try {
+      return (await opts.ask(question)) === true;
+    } catch {
+      return false; // fail-closed: a broken prompt is a denial
+    }
+  };
+
+  /**
+   * Gate a call; returns a block reason or undefined (allow).
+   * `needsConfirm` (destructive or sensitive) prompts in EVERY mode;
+   * `gated` (mutating bash, write/edit) prompts only in "ask";
+   * `readOnly` is the ONLY class "no" mode allows.
+   */
   const gate = async (
     toolName: string,
     args: Record<string, unknown>,
     destructive: string[],
+    sensitive: string[],
+    readOnly: boolean,
+    gated: boolean,
     outside: string[] = [],
   ): Promise<string | undefined> => {
+    const needsConfirm = destructive.length > 0 || sensitive.length > 0;
+
     if (mode === "no") {
+      if (readOnly && !needsConfirm) return undefined; // the only allowed class
       return (
         `approval is disabled (--no-approve): the "${toolName}" tool requires ` +
         `approval — re-run without --no-approve to allow it`
       );
     }
-    if (mode === "yes" && destructive.length === 0) return undefined; // auto-approve
-    const question = approvalQuestion(toolName, args, destructive, outside);
-    let ok = false;
-    if (opts.ask) {
-      try {
-        ok = (await opts.ask(question)) === true;
-      } catch {
-        ok = false; // fail-closed: a broken prompt is a denial
-      }
-    }
+    if (!needsConfirm && !(gated && mode === "ask")) return undefined; // allow
+
+    // Prompt: sensitive/destructive confirm (every mode) or a gated call
+    // in "ask" mode.
+    const question = approvalQuestion(toolName, args, destructive, sensitive, outside);
+    const ok = await confirm(question);
     if (!ok) {
-      return destructive.length > 0
-        ? `the user DENIED this destructive command (${destructive.join(", ")}) — do not retry it`
-        : `the user denied the "${toolName}" call — do not retry it unchanged`;
+      if (destructive.length > 0) {
+        return `the user DENIED this destructive command (${destructive.join(", ")}) — do not retry it`;
+      }
+      if (sensitive.length > 0) {
+        return `the user DENIED access to sensitive material (${sensitive.join(", ")}) — do not retry it`;
+      }
+      return `the user denied the "${toolName}" call — do not retry it unchanged`;
     }
     return undefined;
   };
@@ -258,7 +628,7 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
   return async (tool, call) => {
     const args = call.arguments;
 
-    // 1. path sandbox (read/write/edit)
+    // 1. path sandbox (write/edit)
     if (PATH_TOOLS.has(tool.name)) {
       const p = args.path;
       if (typeof p !== "string" || p.length === 0) {
@@ -271,22 +641,40 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
       if (!check.ok) return { blocked: check.reason };
       const newArgs = { ...args, path: check.path };
 
-      // 2. approval gate (write/edit; read is ungated and unrestricted)
+      // 2. approval gate (write/edit): no prompt in ask/yes (reversible via
+      //    git, path-sandboxed to the root); blocked under --no-approve.
       if (GATED_TOOLS.has(tool.name)) {
-        const blocked = await gate(tool.name, newArgs, []);
+        const blocked = await gate(tool.name, newArgs, [], [], false, false);
         if (blocked !== undefined) return { blocked };
       }
       if (newArgs !== args) return { args: newArgs }; // rewrite for the tool
       return undefined;
     }
 
-    // 3. bash: destructive classification + approval gate. Every bash call
-    //    prompts in "ask" mode (even read-only); "yes" auto-approves
-    //    non-destructive; "no" blocks. Destructive bash confirms in every mode.
+    // 2b. read: sensitive paths confirm in every mode (fail-closed denial
+    //     when there is no human); plain reads are unrestricted in ask/yes
+    //     (no root restriction, no prompt) but blocked in no mode
+    //     (fail-closed: --no-approve allows only read-only bash).
+    if (tool.name === "read") {
+      const p = args.path;
+      if (typeof p !== "string" || p.length === 0) return undefined; // validation catches it
+      const sensitive = sensitivePathPatterns(p);
+      const blocked = await gate("read", args, [], sensitive, false, false);
+      if (blocked !== undefined) return { blocked };
+      return undefined;
+    }
+
+    // 3. bash: classify (destructive → sensitive → read-only → reversible)
+    //    and apply the mode matrix.
     if (tool.name === "bash") {
       const cmd = typeof args.command === "string" ? args.command : "";
       const destructive = cmd.length > 0 ? destructiveBashPatterns(cmd) : [];
-      const blocked = await gate(tool.name, args, destructive);
+      const sensitive = cmd.length > 0 ? sensitiveBashPatterns(cmd) : [];
+      const readOnly = cmd.length > 0 && destructive.length === 0 && isReadOnlyBash(cmd);
+      const reversible =
+        cmd.length > 0 && destructive.length === 0 && sensitive.length === 0 && isReversibleBash(cmd);
+      const gated = !readOnly && !reversible && destructive.length === 0 && sensitive.length === 0;
+      const blocked = await gate(tool.name, args, destructive, sensitive, readOnly, gated);
       if (blocked !== undefined) return { blocked };
     }
     return undefined;
