@@ -1,4 +1,34 @@
-# HANDOFF — TUI shows the model's reasoning text (2026-09-23)
+# HANDOFF — TUI user item is now cyan (2026-09-24)
+
+## The echoed user prompt renders CYAN in the TUI, so it is distinguishable from the assistant's plain reply (366 tests: 358 pass 0 fail 8 skip; PTY verified)
+
+Before: the user's echoed prompt and the assistant's reply both rendered in
+the default foreground (plain), so in a long transcript the two were
+indistinguishable. D15 had deliberately removed the cyan `you ` prefix (the
+input row and the echoed user item are plain, full-width, no prefix) — that
+decision is kept. This change restores distinguishability WITHOUT a prefix:
+the echoed user item is colored.
+
+- **lines.ts** — the `user` case of `itemLines` now emits each wrapped line
+  as a single CYAN span (`{ text, color: "cyan" }`) instead of a plain span.
+  Color only: no text/width/line-count change, so the lockstep contract
+  (`itemLines(item, width).length === itemHeight(item, width)`) holds and the
+  100×24 frame geometry is untouched. Empty user text still renders one blank
+  (colored) row for height uniformity. The `Item` renderer in app.tsx already
+  honors per-span `color`/`dim` generically, so no app.tsx change was needed.
+- **test/tui-pinned-layout.test.ts** — the two `itemLines` user-span shape
+  asserts now expect `color: "cyan"` (empty-text blank row and the "hi" row).
+  The App frame test (`"the prompt"` present, no `you`) is text-only and
+  unaffected — it strips ANSI before asserting, so color does not interfere.
+- **Not touched**: `itemHeight` (line counts are unchanged), the input row
+  (still plain, per D15), the assistant item (still plain default-fg), and the
+  pinned bottom block.
+
+**Verification**: `npm run build` clean; `npm test` 366 tests: 358 pass 0 fail
+8 skip (live). PTY capture (local build, real prompt `hello`): raw frame shows
+`ESC[36mhello ESC[39m` in the transcript; stripped frame is exactly 24 lines
+tall with the input row 4 lines above the bottom and the pinned block
+(hint / menu / `─` / input / `─` / 3×blank) intact.
 
 ## The TUI renders the model's actual thinking, not just a static `thinking…` hint (359 tests: 351 pass 0 fail 8 skip)
 
