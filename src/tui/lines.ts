@@ -48,9 +48,15 @@ const plain = (text: string): RLine => ({ spans: [{ text }] });
 export function itemLines(item: TuiItem, width: number): RLine[] {
   switch (item.kind) {
     case "user":
-      // No prefix (D15): plain at full width; empty text still renders one
-      // blank row (a bare space in the renderer).
-      return item.text ? wrapRows(item.text, width).map(plain) : [plain(" ")];
+      // No prefix (D15): full width, but CYAN — the user's echoed prompt is
+      // colored so it is distinguishable from the assistant's plain
+      // (default-fg) reply. Color only: no text/width change, so the
+      // lockstep contract (itemLines.length === itemHeight) holds. Empty text
+      // still renders one blank row (a bare space in the renderer), colored
+      // for uniformity (invisible either way).
+      return item.text
+        ? wrapRows(item.text, width).map((l) => ({ spans: [{ text: l, color: "cyan" }] }))
+        : [{ spans: [{ text: " ", color: "cyan" }] }];
     case "assistant": {
       const lines: RLine[] = [];
       // The model's reasoning (the wire's `reasoning_content`), accumulated

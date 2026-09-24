@@ -914,9 +914,11 @@ test("C28: the rendered lines of a slice are EXACTLY the counted lines (the lock
 });
 
 test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
-  // user: one plain span per wrapped line; empty text → one blank line.
-  assert.deepEqual(itemLines({ kind: "user", text: "" }, 80), [{ spans: [{ text: " " }] }]);
-  assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "hi" }] }]);
+  // user: one CYAN span per wrapped line (D15 kept it prefix-free/full-width;
+  // the color is what separates it from the assistant's plain reply);
+  // empty text → one blank (colored) line.
+  assert.deepEqual(itemLines({ kind: "user", text: "" }, 80), [{ spans: [{ text: " ", color: "cyan" }] }]);
+  assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "hi", color: "cyan" }] }]);
   // assistant: the cursor is part of the text (and of the height).
   const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false, thinkingText: "" }, 80);
   assert.deepEqual(streamed, [{ spans: [{ text: "ab\u258d" }] }]);
