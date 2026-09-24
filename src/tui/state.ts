@@ -169,6 +169,10 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
     }
     case "turn_start":
       return { ...state, turn: ev.turn };
+    case "steer":
+      // No-op: the user item was already pushed at submit time (steerInput)
+      // — the loop's steer event only confirms delivery. Do NOT double-add.
+      return state;
     case "turn_budget":
       // C26: informational — the run continues on a fresh cycle.
       return {
@@ -386,7 +390,11 @@ export function inputHistory(s: TuiState, dir: -1 | 1): TuiState {
   return { ...s, historyIdx: next, input: line, cursorPos: line.length };
 }
 
-/** Enter: null while busy/approving or on an empty line; else the prompt. */
+/**
+ * Enter: null while busy/approving or on an empty line; else the prompt.
+ * The DRIVER routes busy submits to `steerInput` (steering) — this function
+ * only handles the idle case (a fresh prompt starts a new run).
+ */
 export function submitInput(s: TuiState): { state: TuiState; prompt: string } | null {
   if (s.approval !== null || s.busy) return null;
   const prompt = s.input.trim();
@@ -409,6 +417,36 @@ export function submitInput(s: TuiState): { state: TuiState; prompt: string } | 
 
 export function pushUser(s: TuiState, text: string): TuiState {
   return { ...s, items: [...s.items, { kind: "user", text }] };
+}
+
+/**
+ * Enter while a run is in flight: STEER. The line is not a new prompt —
+ * it is queued by the driver for the running loop and echoed here as a
+ * user item (same shape as pushUser: no new item kind, no render change).
+ * null when idle, while approving, or for empty/slash lines (the driver
+ * owns the /quit-abort path).
+ */
+export function steerInput(
+  s: TuiState,
+  text: string,
+): { state: TuiState; text: string } | null {
+  if (s.approval !== null || !s.busy) return null;
+  const t = text.trim();
+  if (t === "" || t.startsWith("/")) return null;
+  return {
+    state: {
+      ...s,
+      input: "",
+      cursorPos: 0,
+      historyIdx: null,
+      history: [...s.history, t],
+      items: [...s.items, { kind: "user", text: t }],
+      // Follow the bottom: the steer's effect (the model's reaction) is
+      // the interesting thing.
+      viewTop: null,
+    },
+    text: t,
+  };
 }
 
 export function noteError(s: TuiState, text: string): TuiState {

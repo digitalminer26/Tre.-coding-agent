@@ -39,10 +39,12 @@ import {
   scrollToBottom,
   scrollToTop,
   setApproval,
+  steerInput,
   submitInput,
   type TuiState,
 } from "./state.js";
 import { makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import type { SteeringQueue } from "../loop/agent-loop.js";
 import type { AskApproval } from "../tools/safety.js";
 import type {
   AgentMessage,
@@ -110,6 +112,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   let controller = new AbortController();
   let mounted = true;
   let app: ReturnType<typeof render>;
+  // Steering: guidance typed while a run is in flight. The loop drains it
+  // before each LLM call; runPrompt replaces it with a fresh queue per run,
+  // so leftovers from an aborted run are discarded (never delivered later).
+  let steerQueue: SteeringQueue = { push: () => {}, drain: () => [] };
 
   // ── state + render ───────────────────────────────────────────────────────
   const setState = (s: TuiState): void => {
@@ -126,6 +132,17 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
 
   const runPrompt = async (prompt: string): Promise<void> => {
     controller = new AbortController();
+    // One steering queue per run — a closure over a plain array (the
+    // contract is push/drain; the loop drains, onSubmit pushes).
+    const steerState: { q: string[] } = { q: [] };
+    steerQueue = {
+      push: (t) => steerState.q.push(t),
+      drain: () => {
+        const out = steerState.q;
+        steerState.q = [];
+        return out;
+      },
+    };
     try {
       const result = await runTurn({
         model: opts.model,
@@ -143,6 +160,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         entryIds: opts.entryIds,
         noCompact: opts.noCompact,
         compactKeepTokens: opts.compactKeepTokens,
+        steeringQueue: steerQueue,
         tap: (ev) => setState(applyEvent(state, ev)),
       });
       context = result.context;
@@ -184,6 +202,18 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         if ((trimmed === "/quit" || trimmed === "/exit") && state.busy) {
           controller.abort();
           quit(0);
+        }
+        // Steering (TUI): a non-empty, non-slash line typed while busy is
+        // guidance for the running loop — echo it as a user item and queue
+        // it for the loop's next drain. /quit above already won; slash
+        // commands and empty lines fall through (swallowed, as before).
+        if (state.busy && trimmed !== "" && !trimmed.startsWith("/")) {
+          const s = steerInput(state, trimmed);
+          if (s !== null) {
+            steerQueue.push(s.text);
+            setState(s.state);
+            return;
+          }
         }
         return;
       }

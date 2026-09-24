@@ -857,3 +857,168 @@ test("C26: batchSignature — stable across key order, sensitive to tool/args", 
     "different batch shape → different signature",
   );
 });
+
+// ─────────────────────────────── steering ───────────────────────────────────
+
+/** A SteeringQueue backed by a plain array (the driver's shape). */
+function makeQueue(): { q: string[]; queue: { push(t: string): void; drain(): string[] } } {
+  const q: string[] = [];
+  return {
+    q,
+    queue: {
+      push: (t) => q.push(t),
+      drain: () => {
+        const out = [...q]; // copy: the loop iterates the snapshot
+        q.length = 0; // clear the live array the test observes
+        return out;
+      },
+    },
+  };
+}
+
+/** Run the loop, pushing `steers` before the Nth stream call (1-based). */
+async function drainSteered(
+  turns: FakeTurn[],
+  tools: Tool[],
+  steerAtCall: number,
+  steers: string[],
+  extra: Partial<AgentLoopOptions> = {},
+): Promise<{ events: AgentEvent[]; seen: LlmContext[]; queue: string[] }> {
+  const { q, queue } = makeQueue();
+  const seen: LlmContext[] = [];
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, ctx, o) => {
+    call += 1;
+    if (call === steerAtCall) for (const s of steers) q.push(s);
+    seen.push({ ...ctx, messages: JSON.parse(JSON.stringify(ctx.messages)) });
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools,
+      streamFn,
+      signal: new AbortController().signal,
+      steeringQueue: queue,
+      ...extra,
+    }),
+  );
+  return { events, seen, queue: q };
+}
+
+test("steering: a steer typed during turn 1 is delivered as a user message before turn 2", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const { events, seen, queue } = await drainSteered(turns, [tool], 1, ["focus on the tests"]);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(queue.length, 0, "the queue was drained");
+
+  // The steer event was emitted, tagged with the turn it was delivered on.
+  const steers = events.filter((e) => e.type === "steer");
+  assert.equal(steers.length, 1);
+  assert.equal(steers[0]!.type, "steer");
+  if (steers[0]!.type === "steer") {
+    assert.equal(steers[0]!.text, "focus on the tests");
+    assert.equal(steers[0]!.turn, 2);
+  }
+
+  // Turn 2's LLM context carries the steer as a user message (after the
+  // tool result); turn 1's did not.
+  assert.equal(seen.length, 2);
+  assert.deepEqual(normalize(seen[0]!.messages), [userMsg("hi")]);
+  const ctx2 = seen[1]!.messages;
+  assert.equal(ctx2.length, 4, "user, assistant, toolResult, steer");
+  assert.equal(ctx2[3]!.role, "user");
+  if (ctx2[3]!.role === "user") assert.equal(ctx2[3]!.content, "focus on the tests");
+
+  // The steer is part of the final context the session persists.
+  const last = end.messages[end.messages.length - 1]!;
+  assert.equal(last.role, "assistant");
+  assert.equal(end.messages.filter((m) => m.role === "user").length, 2);
+});
+
+test("steering: two steers are drained in order", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const { events, seen, queue } = await drainSteered(turns, [tool], 1, ["first steer", "second steer"]);
+  assert.equal(queue.length, 0);
+  const steers = events.filter((e) => e.type === "steer") as Extract<AgentEvent, { type: "steer" }>[];
+  assert.equal(steers.length, 2);
+  assert.equal(steers[0]!.text, "first steer");
+  assert.equal(steers[1]!.text, "second steer");
+  // Both landed as user messages, in order, before turn 2's LLM call.
+  const ctx2 = seen[1]!.messages;
+  assert.equal(ctx2[3]!.role, "user");
+  assert.equal(ctx2[4]!.role, "user");
+  if (ctx2[3]!.role === "user") assert.equal(ctx2[3]!.content, "first steer");
+  if (ctx2[4]!.role === "user") assert.equal(ctx2[4]!.content, "second steer");
+});
+
+test("steering keep-alive: a pending steer keeps a text-only stop alive for one more turn", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "text", text: "I think I am done" },
+    { type: "text", text: "ok, actually finished" },
+  ];
+  const { events, seen, queue } = await drainSteered(turns, [tool], 1, ["no, fix the bug first"]);
+  const end = agentEnd(events);
+  assert.equal(queue.length, 0);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(seen.length, 2, "the steer forced a second LLM call");
+  const steers = events.filter((e) => e.type === "steer");
+  assert.equal(steers.length, 1);
+  if (steers[0]!.type === "steer") assert.equal(steers[0]!.turn, 1);
+  // The steer was injected right after the text-only reply.
+  const ctx2 = seen[1]!.messages;
+  assert.equal(ctx2.length, 3, "user, assistant(text), steer");
+  assert.equal(ctx2[2]!.role, "user");
+  if (ctx2[2]!.role === "user") assert.equal(ctx2[2]!.content, "no, fix the bug first");
+});
+
+test("steering: no steer → normal stop, no steer events", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  const { events, queue } = await drainSteered(turns, [tool], 1, []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(queue.length, 0);
+  assert.equal(events.filter((e) => e.type === "steer").length, 0);
+});
+
+test("steering: an abort with a steer typed mid-stream discards it (queue is per-run)", async () => {
+  const { q, queue } = makeQueue();
+  const turns: FakeTurn[] = [{ type: "aborted" }];
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, ctx, o) => {
+    call += 1;
+    if (call === 1) q.push("typed too late"); // typed while turn 1's stream is in flight
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools: [],
+      streamFn,
+      signal: new AbortController().signal,
+      steeringQueue: queue,
+    }),
+  );
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted");
+  assert.equal(events.filter((e) => e.type === "steer").length, 0, "no steer was delivered");
+  assert.equal(q.length, 1, "the abort left the queue undrained — the driver discards it");
+  assert.equal(end.messages.length, 2, "user + aborted assistant; no steer message");
+});

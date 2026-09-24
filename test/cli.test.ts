@@ -656,6 +656,82 @@ test("kill mid-run: prompt persisted before the run, partial kept on abort", asy
   if (asst.role === "assistant") assert.equal(asst.stopReason, "aborted");
 });
 
+test("steering: a steer typed during a run is answered (keep-alive) and persisted to the session", async (t) => {
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "s.jsonl");
+  const session = await Session.create(sessionPath, {
+    cwd: dir,
+    model: { id: MODEL.id, provider: "fake" },
+  });
+  t.after(() => session.close());
+  const silent: PrintSinks = { out: { write: () => true }, err: { write: () => true } };
+
+  const q: { list: string[] } = { list: [] };
+  const steeringQueue = {
+    push: (text: string) => q.list.push(text),
+    drain: () => {
+      const out = q.list;
+      q.list = [];
+      return out;
+    },
+  };
+
+  // Turn 1: the stream starts, the user's steer arrives MID-turn (after the
+  // per-turn drain), then the model finishes text-only — the pending steer
+  // must keep the run alive for a turn-2 answer.
+  let turn = 0;
+  const streamFn: StreamFn = (model, _ctx, _opts) =>
+    (async function* () {
+      turn++;
+      const base: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        model: model.id,
+        provider: model.provider,
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      yield { type: "start", partial: base };
+      if (turn === 1) steeringQueue.push("steer me left");
+      const text = turn === 1 ? "turn one" : "steering received";
+      const partial: AssistantMessage = {
+        ...base,
+        content: [{ type: "text", text }],
+      };
+      yield { type: "text_delta", delta: text, partial };
+      yield { type: "done", message: partial };
+    })();
+
+  const { outcome, context } = await runTurn({
+    model: MODEL,
+    systemPrompt: "sys",
+    tools: [],
+    streamFn,
+    controller: new AbortController(),
+    context: [],
+    session,
+    prompt: "start the run",
+    sinks: silent,
+    maxTurns: 8,
+    steeringQueue,
+  });
+  assert.equal(outcome.stopReason, "stop");
+
+  // Context: prompt, assistant 1, steer (delivered mid-run), assistant 2.
+  const users = context.filter((m) => m.role === "user");
+  assert.equal(users.length, 2);
+  if (users[1]!.role === "user") assert.equal(users[1]!.content, "steer me left");
+  const assistants = context.filter((m) => m.role === "assistant");
+  assert.equal(assistants.length, 2, "the pending steer kept the run alive");
+
+  // Session persistence: the steer's user message must be in the file, so a
+  // resumed run keeps the guidance the user gave mid-run.
+  const replayed = await replaySession(sessionPath);
+  const replayUsers = replayed.context.filter((m) => m.role === "user");
+  assert.equal(replayUsers.length, 2, "prompt + steer are both persisted");
+  if (replayUsers[1]!.role === "user") assert.equal(replayUsers[1]!.content, "steer me left");
+});
+
 // ─────────────────────────────── WS7: safety ────────────────────────────────
 
 test("parseArgs: --yes / --no-approve flags (mutually exclusive)", () => {

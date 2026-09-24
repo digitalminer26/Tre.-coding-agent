@@ -25,6 +25,7 @@ import {
   scrollToTop,
   setApproval,
   statsLine,
+  steerInput,
   submitInput,
   type TuiItem,
   type TuiState,
@@ -378,6 +379,43 @@ test("input: submit trims, appends history, marks busy; empty/busy/approving →
   assert.equal(submitInput(makeInitialState("m")), null); // empty line
   assert.equal(submitInput({ ...s, busy: true }), null); // busy
   assert.equal(submitInput(setApproval(s, "q", () => {})), null); // approving
+});
+
+test("steerInput: busy + non-slash line → user item appended, input cleared, still busy", () => {
+  const s = { ...makeInitialState("m"), busy: true, input: "fix the bug" };
+  const r = steerInput(s, "fix the bug");
+  assert.notEqual(r, null);
+  assert.equal(r!.text, "fix the bug");
+  assert.equal(r!.state.input, "");
+  assert.equal(r!.state.cursorPos, 0);
+  assert.equal(r!.state.busy, true, "steering does not end the run");
+  assert.deepEqual(r!.state.history, ["fix the bug"]);
+  assert.equal(r!.state.items.length, 1);
+  assert.deepEqual(r!.state.items[0], { kind: "user", text: "fix the bug" });
+});
+
+test("steerInput: idle → null (a fresh prompt is a run, not a steer)", () => {
+  const s = { ...makeInitialState("m"), busy: false, input: "hello" };
+  assert.equal(steerInput(s, "hello"), null);
+});
+
+test("steerInput: empty or slash line → null (the driver owns /quit-abort)", () => {
+  const busy = { ...makeInitialState("m"), busy: true };
+  assert.equal(steerInput(busy, ""), null);
+  assert.equal(steerInput(busy, "   "), null);
+  assert.equal(steerInput(busy, "/quit"), null);
+  assert.equal(steerInput(busy, "/stats"), null);
+});
+
+test("steerInput: approving → null (input is locked)", () => {
+  const s = setApproval({ ...makeInitialState("m"), busy: true }, "allow?", () => {});
+  assert.equal(steerInput(s, "go"), null);
+});
+
+test("applyEvent: steer is a no-op (the user item was pushed at submit time)", () => {
+  const s = { ...makeInitialState("m"), busy: true, items: [{ kind: "user" as const, text: "fix the bug" }] };
+  const r = applyEvent(s, { type: "steer", turn: 2, text: "fix the bug" });
+  assert.equal(r, s, "no new item — no double-add");
 });
 
 test("input: history navigation walks up to the top and back down to a fresh line", () => {

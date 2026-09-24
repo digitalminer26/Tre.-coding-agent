@@ -1,3 +1,51 @@
+# HANDOFF — steering: type guidance during a run (2026-09-24)
+
+## The TUI now accepts a line WHILE A RUN IS IN FLIGHT — it is injected into the run as a user message and the model reacts on its next turn instead of waiting for a new prompt (387 tests: 380 pass 0 fail 7 skip; PTY verified)
+
+Before: typing while `state.busy` did nothing (submitInput returned null);
+the only busy-time input was /quit. Now:
+
+- **Driver (src/tui/run.tsx)** — owns one per-app SteeringQueue. Enter while
+  busy (non-empty, non-slash line) → pure `steerInput` (state.ts) echoes the
+  line as a user item (same shape as pushUser — cyan, no new item kind) and
+  the driver queues the text. /quit aborts as before.
+- **Loop (src/loop/agent-loop.ts)** — new exported `SteeringQueue` contract
+  ({ push, drain }) on AgentLoopOptions. Two drain points:
+  - **A (per turn)**: after prepareNextTurn, before each LLM call — queued
+    guidance is pushed as a user message into the context and a
+    `{ type: "steer", turn, text }` event is yielded.
+  - **B (keep-alive)**: when the model would stop with a text-only reply and
+    a steer is pending → deliver it and `continue` — the run stays alive and
+    the model answers the steering. This was proven LIVE in the PTY capture
+    (turn counter advanced to 2 after a text-only turn 1).
+- **Persistence (src/cli/main.ts)** — runTurn persists the steer's user
+  message when the steer event fires, so a RESUMED session keeps the
+  guidance (the message lives in the loop's context but travels only as an
+  event — without this it would vanish from the session file).
+- **Event (src/types.ts)** — `steer` added to AgentEvent; applyEvent treats
+  it as a no-op (the item was already pushed at submit time — no double-add).
+- **Help text** — new "Steering (TUI)" paragraph in `tre. --help`.
+
+Edge cases (documented, intentional):
+- Abort/error/budget/loop breaks do NOT drain — the queue is per-run; the
+  driver starts each run with a fresh queue, so a steer typed right before
+  /quit is discarded (the echoed line is NOT in the resumed context).
+- Slash lines while busy are ignored (driver owns the /quit-abort path).
+- The plain REPL (--plain) is a follow-up — steering is TUI-only for now.
+
+**Verification**: `npm run build` clean; `npm test` 387 tests: 380 pass
+0 fail 7 skip. New tests: 5 loop-level (delivery on next turn, multi-steer
+order, keep-alive, no-steer normal stop, abort-discards) in
+agent-loop.test.ts; steerInput unit cases in tui-state.test.ts; an
+end-to-end runTurn test in cli.test.ts (mid-turn steer → turn-2 answer +
+prompt+steer both in the replayed session). PTY frame (slow local model):
+prompt echo, steer echo while busy, and the turn-2 reply all visible.
+
+Note: dogfooded — tre. implemented the core across 2 resumed 27-min runs
+(the session-persistence seam + e2e test + this section were finished by
+the supervising agent after the second watchdog, from tre.'s own in-flight
+PTY-harness work).
+
 # HANDOFF — approval gate loosened: confirm only sensitive + destructive (2026-09-24)
 
 ## The default mode now runs read-only bash, reversible git/npm ops, and in-workspace write/edit WITHOUT a prompt; the user is only confirmed on SENSITIVE reads and DESTRUCTIVE/irreversible actions (376 tests: 369 pass 0 fail 7 skip)

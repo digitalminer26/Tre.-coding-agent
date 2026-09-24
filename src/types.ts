@@ -187,6 +187,17 @@ export type AgentEvent =
     }
   | { type: "turn_start"; turn: number }
   | { type: "turn_end"; turn: number }
+  | {
+      /**
+       * Steering: guidance the user typed while a run was in flight. The
+       * driver queued it; the loop delivered it as a user message into the
+       * context just before this LLM call. Informational (the TUI already
+       * echoed the line at submit time — it is a NO-OP in applyEvent).
+       */
+      type: "steer";
+      turn: number;
+      text: string;
+    }
   | { type: "tool_execution_start"; toolCall: ToolCallBlock }
   | { type: "tool_execution_update"; toolCallId: string; text: string }
   | { type: "tool_execution_end"; toolCallId: string; result: ToolResultMessage }

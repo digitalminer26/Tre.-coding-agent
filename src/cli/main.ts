@@ -65,7 +65,7 @@ import {
   shouldCompact,
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
-import { runLoop } from "../loop/agent-loop.js";
+import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
 import { loadSkillsIndex } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
@@ -314,6 +314,8 @@ export interface RunAgentOptions {
   maxContinuations?: number;
   /** Tool pipeline (WS7 safety hooks); default: raw tool.execute. */
   executeToolCall?: ExecuteToolCall;
+  /** Steering queue (TUI): guidance typed during the run, drained per turn. */
+  steeringQueue?: SteeringQueue;
 }
 
 export interface RunOutcome {
@@ -341,6 +343,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunOutcome> {
     maxTurns: opts.maxTurns,
     maxContinuations: opts.maxContinuations,
     executeToolCall: opts.executeToolCall,
+    steeringQueue: opts.steeringQueue,
   })) {
     await opts.onEvent?.(ev);
     if (ev.type === "agent_end") {
@@ -512,6 +515,8 @@ export async function runTurn(opts: {
   compactKeepTokens?: number;
   /** WS10: extra consumer of the event stream (the TUI renders from it). */
   tap?: (ev: AgentEvent) => void;
+  /** Steering queue (TUI): guidance typed during the run, drained per turn. */
+  steeringQueue?: SteeringQueue;
 }): Promise<{ outcome: RunOutcome; context: AgentMessage[] }> {
   const { controller, context, session } = opts;
   const user: UserMessage = { role: "user", content: opts.prompt, timestamp: Date.now() };
@@ -595,6 +600,11 @@ export async function runTurn(opts: {
       // order).
       if (ev.type === "done") await persist(ev.message);
       else if (ev.type === "tool_execution_end") await persist(ev.result);
+      else if (ev.type === "steer")
+        // The steer's user message is pushed to the context by the loop but
+        // travels only as an event — persist it here so a resumed session
+        // keeps the guidance the user gave mid-run.
+        await persist({ role: "user", content: ev.text, timestamp: Date.now() });
     }
     opts.tap?.(ev);
     printEvent(ev, opts.sinks, session?.path);
@@ -612,6 +622,7 @@ export async function runTurn(opts: {
     maxTurns: opts.maxTurns,
     maxContinuations: opts.maxContinuations,
     executeToolCall: opts.executeToolCall,
+    steeringQueue: opts.steeringQueue,
   });
 
   return { outcome, context: outcome.messages };
@@ -628,6 +639,10 @@ Usage:
   tre. tui                      interactive Ink TUI (streaming,
                                 ↑/↓ history, ctrl+c abort/quit)
   tre. --plain                  interactive plain REPL (even on a TTY)
+
+Steering (TUI): while a run is in flight, typing a line and pressing enter
+injects it as a user message mid-run — the model reacts to it on its next
+turn instead of waiting for a new prompt. /quit (or /exit) still aborts.
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")

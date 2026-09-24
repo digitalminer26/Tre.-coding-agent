@@ -37,6 +37,12 @@
  *    stuck model is caught by LOOP DETECTION instead of a count: the same
  *    tool-call batch signature issued 3 times in a row is NOT executed on
  *    the third repeat, and the run stops with stopReason "loop".
+ *  - Steering: guidance typed during a run is queued by the driver (a
+ *    `SteeringQueue`) and delivered before the next LLM call — after the
+ *    current turn's work completes. A pending steer also KEEPS THE RUN
+ *    ALIVE when the model would otherwise stop with a text-only reply.
+ *    Abort/error/budget/loop breaks do NOT drain — the queue is per-run and
+ *    the driver discards leftovers (a new prompt starts a fresh queue).
  */
 import type {
   AgentEvent,
@@ -56,6 +62,19 @@ import type {
 // implement it without depending on the loop layer. Re-exported for
 // compatibility with the WS2-era location.
 export type { ExecuteToolCall } from "../types.js";
+
+/**
+ * Steering queue — the driver's seam for injecting user guidance into a run
+ * that is already in flight. The driver pushes a line when the user submits
+ * while busy; the loop drains it before each LLM call (and once more as a
+ * keep-alive when the model would stop text-only). The queue is per-run:
+ * abort/error/budget/loop breaks leave it undrained, and the driver
+ * discards the leftovers when the run ends.
+ */
+export interface SteeringQueue {
+  push(text: string): void;
+  drain(): string[];
+}
 
 export interface AgentLoopOptions {
   model: ModelConfig;
@@ -91,6 +110,11 @@ export interface AgentLoopOptions {
     | undefined
     | Promise<AgentMessage[] | undefined>;
   executeToolCall?: ExecuteToolCall;
+  /**
+   * Steering queue (optional): guidance typed during the run is drained
+   * before each LLM call and injected as a user message. See `SteeringQueue`.
+   */
+  steeringQueue?: SteeringQueue;
 }
 
 /**
@@ -274,6 +298,15 @@ export async function* runLoop(
       if (next !== undefined) context.splice(0, context.length, ...next);
     }
 
+    // Steering: guidance typed during the run is queued by the driver and
+    // delivered here — after the previous turn's work, before this LLM call.
+    if (options.steeringQueue) {
+      for (const text of options.steeringQueue.drain()) {
+        context.push({ role: "user", content: text, timestamp: Date.now() });
+        yield { type: "steer", turn, text };
+      }
+    }
+
     // ── stream one assistant response into a single context slot (I2) ──
     let slot = -1;
     let message: AssistantMessage | undefined;
@@ -317,6 +350,18 @@ export async function* runLoop(
           timestamp: Date.now(),
         });
         continue; // consumes a turn like any other (maxTurns still caps)
+      }
+      // Steering keep-alive: the model finished with a text-only reply, but
+      // the user typed guidance while it ran — deliver it and keep going.
+      if (options.steeringQueue) {
+        const pending = options.steeringQueue.drain();
+        if (pending.length > 0) {
+          for (const text of pending) {
+            context.push({ role: "user", content: text, timestamp: Date.now() });
+            yield { type: "steer", turn, text };
+          }
+          continue;
+        }
       }
       break; // normal stop — or length with the nudge already spent
     }
