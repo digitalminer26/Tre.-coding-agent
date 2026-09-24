@@ -1,4 +1,9 @@
 /**
+ * C29 note: since prod-env.ts removes console.timeStamp before the DEV
+ * reconciler loads, the reconciler no longer creates these entries at all
+ * (the root fix). This sweep is kept as a BACKSTOP for anything else that
+ * writes User-Timing entries into the buffer.
+ *
  * C25 — OOM fix: sweep React's User-Timing entries out of Node's
  * performance buffer.
  *

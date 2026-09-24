@@ -55,6 +55,9 @@ import { createInterface, type Interface } from "node:readline";
 // module graph — including ink — before register() runs, making the hook
 // too late).
 import "../tui/terminal-size-fix.js";
+// C29: MUST also run before ink is linked — see the module doc for why
+// (kills the DEV reconciler's per-render performance.measure at the root).
+import "../tui/prod-env.js";
 import { findModelsFile, loadModelsFile, resolveModel } from "../config/models.js";
 import {
   compactContext,
