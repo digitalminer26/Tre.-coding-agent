@@ -33,8 +33,10 @@
  *
  *      The user is only prompted for SENSITIVE reads and DESTRUCTIVE /
  *      irreversible actions. Everything routine (read-only inspection,
- *      reversible git/npm ops, in-workspace writes) runs without a prompt
- *      in "ask" mode.
+ *      reversible git/npm/filesystem ops, in-workspace writes) runs without
+ *      a prompt in "ask" mode. When a prompt IS shown for a plain mutating
+ *      command, the question states its reversibility ("not provably
+ *      reversible") so the human can weigh it.
  *
  *      - mode "ask" (default): prompt only for sensitive and destructive
  *      - mode "yes": auto-approve everything EXCEPT sensitive and
@@ -86,14 +88,20 @@
  *      dups like 2>&1 are fine) is NOT read-only. Anything unrecognized is
  *      never read-only (fail-closed).
  *
- *      REVERSIBLE — safe to undo via git; no prompt in ask/yes:
+ *      REVERSIBLE — undoable in practice; no prompt in ask/yes:
  *        - git add, git commit, git stash (push/list), git switch <branch>,
  *          git checkout <branch> (but NOT `checkout .` / `checkout --
  *          <path>` — those are destructive), git branch <newname>,
  *          git tag <newname>, npm run <script>, npm test
+ *        - filesystem verbs confined to the workspace by the kernel sandbox
+ *          and undoable: mv (mv back), cp (delete the copy), mkdir / rmdir
+ *          (rmdir / mkdir), touch (rm), ln (rm the link), chmod / chown
+ *          (restore prior mode/owner), sed -i (in-place edit, undo via git),
+ *          tee (writes to a file, undo via git)
  *
- *      MUTATING — everything else (mv, chmod, curl, pip, unrecognized
- *      verbs): prompts in ask, auto-allowed in yes, blocked in no.
+ *      MUTATING — everything else (curl, pip, unrecognized verbs): prompts
+ *      in ask (the question notes it is "not provably reversible"),
+ *      auto-allowed in yes, blocked in no.
  *
  *      Deliberately NOT destructive: "dangerous but not destructive"
  *      (curl|sh, exfiltration) — the approval gate covers those whenever
@@ -416,6 +424,18 @@ const GIT_READONLY_RESTRICTED: Record<string, (rest: string[]) => boolean> = {
   stash: (r) => r.length >= 1 && r[0] === "list", // `git stash list`
 };
 
+/**
+ * Filesystem verbs that are undoable in practice (mv → mv back, cp → delete
+ * the copy, mkdir/rmdir → the opposite, touch → rm, ln → rm the link,
+ * chmod/chown → restore prior mode/owner, sed -i / tee → in-place edit
+ * undone via git). They are NOT read-only, so they must be classified
+ * reversible to skip the prompt; the kernel sandbox confines them to the
+ * workspace, which is what keeps them reversible in practice.
+ */
+const REVERSIBLE_FS_VERBS = new Set([
+  "mv", "cp", "mkdir", "rmdir", "touch", "ln", "chmod", "chown", "sed", "tee",
+]);
+
 /** kubectl subcommands that are read-only. */
 const KUBECTL_READONLY = new Set(["get", "describe", "version", "top"]);
 /** docker subcommands that are read-only. */
@@ -532,6 +552,15 @@ function isReversibleSegment(seg: string): boolean {
     if (rest[0] === "run" && rest.length >= 2) return true;
     return false;
   }
+  // Undoable filesystem verbs (see REVERSIBLE_FS_VERBS). `sed` only in its
+  // in-place form (`-i` / `--in-place`): without it, sed prints to stdout
+  // and is read-only, not a mutation at all.
+  if (REVERSIBLE_FS_VERBS.has(base)) {
+    if (base === "sed") {
+      return rest.some((f) => f === "-i" || f.startsWith("--in-place"));
+    }
+    return true;
+  }
   if (base !== "git") return false;
   // Skip global flags (e.g. `git -C dir add .`).
   let i = 0;
@@ -586,7 +615,11 @@ function approvalQuestion(
   if (destructive.length > 0) tags.push(`DESTRUCTIVE: ${destructive.join(", ")}`);
   if (sensitive.length > 0) tags.push(`SENSITIVE: ${sensitive.join(", ")}`);
   if (outside.length > 0) tags.push(`outside the workspace: ${outside.join(", ")}`);
-  const tag = tags.length > 0 ? ` [${tags.join("; ")}]` : "";
+  // A plain gated call (no destructive/sensitive tag) is a mutation the
+  // classifier could not prove reversible — say so, so the human weighs the
+  // reversibility of the action, not just its text.
+  if (tags.length === 0) tags.push("not provably reversible");
+  const tag = ` [${tags.join("; ")}]`;
   if (toolName === "bash") {
     const cmd = typeof args.command === "string" ? args.command : String(args.command ?? "");
     const shown = cmd.length > 120 ? cmd.slice(0, 117) + "..." : cmd;

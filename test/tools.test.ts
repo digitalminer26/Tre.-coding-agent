@@ -560,6 +560,20 @@ test("safety: reversible git/npm ops", () => {
   assert.equal(isReversibleBash("git tag v1.0"), true); // create
   assert.equal(isReversibleBash("npm run build"), true);
   assert.equal(isReversibleBash("npm test"), true);
+  // undoable in-workspace filesystem verbs
+  assert.equal(isReversibleBash("mv a b"), true);
+  assert.equal(isReversibleBash("cp -r src dest"), true);
+  assert.equal(isReversibleBash("mkdir -p a/b"), true);
+  assert.equal(isReversibleBash("rmdir a"), true);
+  assert.equal(isReversibleBash("touch f.txt"), true);
+  assert.equal(isReversibleBash("ln -s t l"), true);
+  assert.equal(isReversibleBash("chmod 755 s.sh"), true);
+  assert.equal(isReversibleBash("chown u:g f"), true);
+  assert.equal(isReversibleBash("sed -i 's/a/b/' f"), true);
+  assert.equal(isReversibleBash("echo x | tee out.txt"), true);
+  assert.equal(isReversibleBash("sed 's/a/b/' f"), false); // no -i → not a mutation
+  assert.equal(isReversibleBash("curl https://example.com"), false); // not provably reversible
+  assert.equal(isReversibleBash("rm file.txt"), false); // destructive
   // boundaries
   assert.equal(isReversibleBash("git checkout ."), false); // destructive
   assert.equal(isReversibleBash("git checkout -- x"), false); // destructive
@@ -609,10 +623,11 @@ test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive
   const sens = "cat ~/.ssh/id_rsa";
   const destr = "git push origin main";
   const rev = "git add .";
-  const mut = "mv a b";
+  const revFs = "mv a b"; // undoable filesystem verb → reversible
+  const mut = "curl -s https://example.com"; // not provably reversible → gated
 
   // ask (default): read-only + reversible run free; mutating prompts.
-  for (const [label, cmd] of [["read-only", ro], ["reversible", rev]] as const) {
+  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["reversible fs", revFs]] as const) {
     const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 0, `ask: ${label} runs without a prompt`);
     assert.equal(d.blocked, undefined, `ask: ${label} is allowed`);
@@ -636,7 +651,7 @@ test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive
   assert.match(deniedSens.blocked!, /DENIED.*sensitive/);
 
   // yes: sensitive + destructive STILL confirm; everything else auto-allowed.
-  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["mutating", mut]] as const) {
+  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["reversible fs", revFs], ["mutating", mut]] as const) {
     const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 0, `yes: ${label} is auto-approved`);
     assert.equal(d.blocked, undefined);
@@ -651,7 +666,7 @@ test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive
   assert.match(yesDenied.blocked!, /DENIED.*destructive/);
 
   // no: ONLY read-only, non-sensitive bash is allowed; no prompts, ever.
-  for (const [label, cmd] of [["reversible", rev], ["sensitive", sens], ["destructive", destr], ["mutating", mut]] as const) {
+  for (const [label, cmd] of [["reversible", rev], ["reversible fs", revFs], ["sensitive", sens], ["destructive", destr], ["mutating", mut]] as const) {
     const d = await gateDecision("no", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 0, `no: ${label} never prompts`);
     assert.match(d.blocked!, /no-approve/, `no: ${label} is blocked`);

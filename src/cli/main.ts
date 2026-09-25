@@ -660,8 +660,8 @@ Options:
                      window; the runaway guard is always on)
   --ask              (DEFAULT) prompt only for SENSITIVE reads and
                      DESTRUCTIVE/irreversible actions; read-only bash,
-                     reversible git/npm ops, and in-workspace write/edit
-                     run without a prompt
+                     reversible git/npm/filesystem ops, and in-workspace
+                     write/edit run without a prompt
   --yes              auto-approve everything except SENSITIVE and
                      DESTRUCTIVE (both confirm in every mode)
   --no-approve       never prompt: only read-only, non-sensitive bash is
@@ -691,8 +691,10 @@ checkout -- <path> / git restore, dd to /dev/*, raw-device redirects,
 mkfs, fork bomb, shutdown/reboot). The default mode (ask) runs everything
 else without a prompt — read-only bash (ls/cat/grep/… and read-only
 git/kubectl/docker subcommands), reversible bash (git add/commit/stash/
-switch/checkout <branch>/branch <new>/tag <new>, npm run/test), and
-in-workspace write/edit. --yes auto-approves everything except sensitive
+switch/checkout <branch>/branch <new>/tag <new>, npm run/test, and the
+undoable in-workspace filesystem verbs mv/cp/mkdir/rmdir/touch/ln/chmod/
+chown/sed -i/tee), and in-workspace write/edit. --yes auto-approves
+everything except sensitive
 and destructive; --no-approve allows ONLY read-only, non-sensitive bash.
 Anything but y is a denial, and a denial comes back to the model as an
 error result.

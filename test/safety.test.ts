@@ -4,6 +4,9 @@
  *   - path sandbox: lexical (../, absolute) and realpath (symlink) escapes
  *   - approval gate: ask / yes / no modes; a denial is a block reason
  *   - destructive bash classification (D8): confirmed even under --yes
+ *   - reversible bash: undoable mutations (git/npm + in-workspace fs verbs)
+ *     run WITHOUT a prompt in ask/yes, and are still blocked in no
+ *   - the approval question states reversibility for plain mutating calls
  *   - pipeline integration: a blocked call becomes an isError ToolResult
  *     whose text is the block reason — the exact contract the loop feeds
  *     back to the model (I3: data, not a throw).
@@ -23,6 +26,7 @@ import { join, resolve } from "node:path";
 import {
   checkPathWithinRoot,
   destructiveBashPatterns,
+  isReversibleBash,
   makeSafetyHooks,
   makeAskQueue,
   type ApprovalMode,
@@ -187,12 +191,85 @@ test("destructiveBashPatterns: over-triggering is documented (echoed rm)", () =>
   assert.deepEqual(destructiveBashPatterns("echo rm -rf /"), ["recursive rm"]);
 });
 
+// ─────────────────────────── reversible bash ───────────────────────────
+
+test("isReversibleBash: git/npm forms (the pre-existing reversible set)", () => {
+  assert.equal(isReversibleBash("git add -A"), true);
+  assert.equal(isReversibleBash('git commit -m "x"'), true);
+  assert.equal(isReversibleBash("git stash push"), true);
+  assert.equal(isReversibleBash("git switch main"), true);
+  assert.equal(isReversibleBash("git checkout feature"), true);
+  assert.equal(isReversibleBash("git branch hotfix"), true);
+  assert.equal(isReversibleBash("git tag v1.0"), true);
+  assert.equal(isReversibleBash("npm test"), true);
+  assert.equal(isReversibleBash("npm run build"), true);
+  // compound of reversible + read-only
+  assert.equal(isReversibleBash('git add -A && git commit -m "x"'), true);
+  assert.equal(isReversibleBash("npm run build 2>&1 | tail -3"), true);
+});
+
+test("isReversibleBash: undoable filesystem verbs are reversible", () => {
+  assert.equal(isReversibleBash("mv a b"), true);
+  assert.equal(isReversibleBash("mv a b c"), true);
+  assert.equal(isReversibleBash("cp a b"), true);
+  assert.equal(isReversibleBash("cp -r src dest"), true);
+  assert.equal(isReversibleBash("mkdir -p a/b"), true);
+  assert.equal(isReversibleBash("rmdir a"), true);
+  assert.equal(isReversibleBash("touch f.txt"), true);
+  assert.equal(isReversibleBash("ln -s target link"), true);
+  assert.equal(isReversibleBash("chmod 755 script.sh"), true);
+  assert.equal(isReversibleBash("chown user:group file"), true);
+  assert.equal(isReversibleBash("sed -i 's/a/b/' file.txt"), true);
+  assert.equal(isReversibleBash("sed --in-place 's/a/b/' file.txt"), true);
+  assert.equal(isReversibleBash("echo hi | tee out.txt"), true);
+});
+
+test("isReversibleBash: sed WITHOUT -i is a stdout print, not a mutation", () => {
+  // no in-place flag → not classified reversible (it is read-only, handled
+  // by the read-only classifier — the point here is it is NOT "reversible")
+  assert.equal(isReversibleBash("sed 's/a/b/' file.txt"), false);
+});
+
+test("isReversibleBash: fail-closed on unknown / unsafe / destructive", () => {
+  assert.equal(isReversibleBash("curl -s https://example.com"), false);
+  assert.equal(isReversibleBash("pip install requests"), false);
+  assert.equal(isReversibleBash("frobnicate x"), false);
+  // command substitution / sudo disqualify
+  assert.equal(isReversibleBash("mv $(cat f) g"), false);
+  assert.equal(isReversibleBash("sudo mv a b"), false);
+  // rm is destructive (not reversible), even non-recursive
+  assert.equal(isReversibleBash("rm file.txt"), false);
+  // git checkout . / -- <path> discard uncommitted work → destructive
+  assert.equal(isReversibleBash("git checkout ."), false);
+  assert.equal(isReversibleBash("git checkout -- file.txt"), false);
+  assert.equal(isReversibleBash("git reset --hard"), false);
+  // an empty command is never reversible
+  assert.equal(isReversibleBash(""), false);
+});
+
 // ─────────────────────────────── approval gate ───────────────────────────────
 
-test("mode ask: mutating bash denied → block reason; nothing executed", async (t) => {
+test("mode ask: reversible bash is NOT prompted (mv, mkdir, chmod, sed -i)", async (t) => {
+  const { root } = await ws(t);
+  let asked = 0;
+  const hooks = makeSafetyHooks({
+    root,
+    mode: "ask",
+    ask: async () => {
+      asked++;
+      return false;
+    },
+  });
+  for (const cmd of ["mv a b", "mkdir -p d", "chmod 755 s.sh", "sed -i 's/a/b/' f.txt", "cp a b"]) {
+    assert.equal(await hooks(bashTool, call("bash", { command: cmd })), undefined, cmd);
+  }
+  assert.equal(asked, 0, "reversible mutations must never reach the prompt");
+});
+
+test("mode ask: plain mutating bash (curl) is denied → block reason; nothing executed", async (t) => {
   const { root } = await ws(t);
   const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
-  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
+  const r = await hooks(bashTool, call("bash", { command: "curl -s https://example.com" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /denied/);
 });
@@ -269,7 +346,7 @@ test("mode yes: destructive bash confirmed → allow", async (t) => {
   assert.equal(asked, 1);
 });
 
-test("mode no: gated tools blocked without prompting", async (t) => {
+test("mode no: reversible bash is blocked (reversible is not the no-mode class)", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -280,8 +357,8 @@ test("mode no: gated tools blocked without prompting", async (t) => {
       return true;
     },
   });
-  // read-only bash (e.g. `ls`) is now ALLOWED in no mode — use a mutating
-  // command for the block case.
+  // mv is now reversible — but "no" mode allows ONLY read-only bash, so a
+  // reversible mutation is still blocked (no prompts, ever).
   const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /no-approve/);
@@ -330,9 +407,41 @@ test("a throwing ask() is treated as denial (fail-closed)", async (t) => {
       throw new Error("stdin gone");
     },
   });
-  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
+  const r = await hooks(bashTool, call("bash", { command: "curl -s https://example.com" }));
   assert.ok(blockedOf(r));
   assert.match(blockedOf(r)!, /denied/);
+});
+
+test("approval question for a plain mutating command states it is not provably reversible", async (t) => {
+  const { root } = await ws(t);
+  let question = "";
+  const hooks = makeSafetyHooks({
+    root,
+    mode: "ask",
+    ask: (q) => {
+      question = q;
+      return false;
+    },
+  });
+  await hooks(bashTool, call("bash", { command: "curl -s https://example.com" }));
+  assert.match(question, /Approve bash/);
+  assert.match(question, /not provably reversible/);
+});
+
+test("approval question for destructive keeps the DESTRUCTIVE tag (not the reversible one)", async (t) => {
+  const { root } = await ws(t);
+  let question = "";
+  const hooks = makeSafetyHooks({
+    root,
+    mode: "ask",
+    ask: (q) => {
+      question = q;
+      return false;
+    },
+  });
+  await hooks(bashTool, call("bash", { command: "rm -rf /" }));
+  assert.match(question, /DESTRUCTIVE: recursive rm/);
+  assert.doesNotMatch(question, /not provably reversible/);
 });
 
 test("makeAskQueue: serializes prompts FIFO", async () => {
@@ -370,7 +479,7 @@ test("blocked bash → isError result whose text IS the block reason", async (t)
   const { root } = await ws(t);
   const hooks = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
   const exec = makeToolExecutor({ beforeToolCall: hooks });
-  const res = await exec(bashTool, call("bash", { command: "mv a b" }), sig());
+  const res = await exec(bashTool, call("bash", { command: "curl -s https://example.com" }), sig());
   assert.equal(res.isError, true);
   const text = res.content.map((c) => c.text).join(" ");
   assert.match(text, /Tool "bash" was blocked/);
@@ -511,7 +620,7 @@ test("read: a missing path is a clean error result (not a throw)", async () => {
 
 // ─────────────────────────── default mode is "ask" ───────────────────────────
 
-test("default mode (no mode option) is ask: mutating bash prompts, denial blocks", async (t) => {
+test("default mode (no mode option) is ask: plain mutating bash prompts, denial blocks", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -521,9 +630,9 @@ test("default mode (no mode option) is ask: mutating bash prompts, denial blocks
       return false;
     },
   });
-  const r = await hooks(bashTool, call("bash", { command: "mv a b" }));
+  const r = await hooks(bashTool, call("bash", { command: "curl -s https://example.com" }));
   assert.ok(blockedOf(r));
-  assert.equal(asked, 1, "the default mode must prompt for mutating bash");
+  assert.equal(asked, 1, "the default mode must prompt for plain mutating bash");
 });
 
 test("default mode (no mode option) is ask: write runs without a prompt, path rewritten", async (t) => {

@@ -748,7 +748,7 @@ test("WS7: mutating bash denied (--ask) → run completes, model gets an isError
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "mv a.txt b.txt" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "curl -s https://example.com" } }] },
     { type: "text", text: "the command was denied" },
   ]);
   const S = mkSinks();

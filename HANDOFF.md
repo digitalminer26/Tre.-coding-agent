@@ -1,3 +1,51 @@
+# HANDOFF — reversible actions stop prompting; approval questions state reversibility (2026-09-25)
+
+**GUARDRAIL ZONE — pending USER commit.** `src/tools/safety.ts` is in the
+agent's own cage, so this increment is staged in the working tree for the
+user to commit with `GUARDRAIL_BYPASS=1` (same flow as 05ce223). Do NOT let
+an agent commit this file.
+
+Spec: a reversible action must not require approval — asking for it is out
+of spec — and when approval IS asked, the question must indicate whether
+the action is reversible. Two gaps:
+
+1. **Reversible was git/npm-only.** `mv a b`, `mkdir -p d`, `sed -i …`,
+   `chmod 755 s.sh` — all undoable in practice (mv back, rmdir, git
+   restore, restore prior mode) — fell into unknown-mutating and prompted
+   in ask mode.
+2. **Prompts didn't say whether the action was reversible.** A plain
+   mutating prompt (`Approve bash: curl …? [y/N]`) gave the human no
+   reversibility signal to weigh.
+
+Fix (safety.ts + help text in main.ts):
+- New `REVERSIBLE_FS_VERBS`: `mv cp mkdir rmdir touch ln chmod chown sed tee`
+  count as reversible (classified in `isReversibleSegment`). They are NOT
+  read-only — the classifiers stay orthogonal; what makes them safe is the
+  kernel sandbox confining them to the workspace plus the undo path.
+  `sed` only in in-place form (`-i` / `--in-place`); bare `sed 's/…'` is
+  read-only, not reversible.
+- `approvalQuestion`: a gated call with no destructive/sensitive/outside
+  tag now shows `Approve bash [not provably reversible]: <cmd>? [y/N]`.
+  Destructive/sensitive tags are unchanged.
+- `--ask` help text: "reversible git/npm/**filesystem** ops"; the Approval
+  block lists the fs verbs.
+
+Mode matrix (unchanged semantics, wider reversible set): ask → read-only +
+reversible free, mutating/sensitive/destructive prompt; yes → sensitive +
+destructive still confirm, rest auto; no → only read-only non-sensitive
+bash allowed (reversible is blocked there, as before).
+
+**Verification**: `npm run build` clean; `npm test` 394 tests: 386 pass
+0 fail 8 skip (new assertions in safety.test.ts, tools.test.ts mode matrix,
+cli.test.ts WS7). Live gate check: `mv a b` / `mkdir -p d` / `sed -i` run
+without a prompt in ask mode; `curl -s …` prompts with the
+`[not provably reversible]` tag; `rm -rf /` still prompts DESTRUCTIVE;
+`--no-approve` still allows `ls` and blocks `mv a b`.
+
+**Still open (needs user decision, not started):** removing the `pi`
+dependency — scope unresolved (all references vs the borrowed code /
+`.pi/` convention).
+
 # HANDOFF — thinking block: the model's reasoning reads as a distinct, scannable block (2026-09-25)
 
 Made the assistant's accumulated reasoning (the wire's `reasoning_content`)
