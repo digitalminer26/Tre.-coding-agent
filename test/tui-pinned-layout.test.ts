@@ -145,10 +145,11 @@ test("itemHeight per kind at width 80", () => {
   assert.equal(itemHeight(asstPlain, 80), 3);
   // NOTE (see farm report): the spec bullet reads "thinking + 200×'x' → 3"
   // but the lockstep formula is additive — encode the FORMULA so drift
-  // fails loudly. The reasoning renders as a dimmed header line + the
-  // wrapped thinking text (lines.ts), so the height counts both.
+  // fails loudly. The reasoning renders as a distinct block (lines.ts): a
+  // dim header, the reasoning under a "│ " gutter wrapped at width−2, and a
+  // blank line before the reply — the height counts all of it.
   const asstThink: TuiItem = { ...asstPlain, thinking: true, thinkingText: "hmm" };
-  assert.equal(itemHeight(asstThink, 80), 1 + 1 + itemHeight(asstPlain, 80)); // header + "hmm" + 3
+  assert.equal(itemHeight(asstThink, 80), 1 + 1 + 1 + itemHeight(asstPlain, 80)); // header + "hmm" + blank + 3
   // A bare `thinking` flag with NO accumulated text renders nothing extra.
   const asstFlagOnly: TuiItem = { ...asstPlain, thinking: true };
   assert.equal(itemHeight(asstFlagOnly, 80), itemHeight(asstPlain, 80));
@@ -922,15 +923,18 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
   // assistant: the cursor is part of the text (and of the height).
   const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false, thinkingText: "" }, 80);
   assert.deepEqual(streamed, [{ spans: [{ text: "ab\u258d" }] }]);
-  // reasoning: dimmed header + dimmed wrapped thinking text, above the reply
-  // — live ("thinking…") while streaming, settled ("thinking:") after done.
+  // reasoning: a distinct block above the reply — a dim header, the
+  // reasoning under a dim "│ " gutter (wrapped at width−2), and a blank line
+  // before the reply. Live ("thinking…") while streaming, settled ("thinking")
+  // after done.
   const think = itemLines(
     { kind: "assistant", text: "ok", streaming: true, thinking: true, thinkingText: "hmm, check" },
     80,
   );
   assert.deepEqual(think, [
     { spans: [{ text: "thinking\u2026", dim: true }] },
-    { spans: [{ text: "hmm, check", dim: true }] },
+    { spans: [{ text: "│ hmm, check", dim: true }] },
+    { spans: [{ text: " " }] },
     { spans: [{ text: "ok\u258d" }] },
   ]);
   const thinkDone = itemLines(
@@ -938,8 +942,9 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
     80,
   );
   assert.deepEqual(thinkDone, [
-    { spans: [{ text: "thinking:", dim: true }] },
-    { spans: [{ text: "hmm, check", dim: true }] },
+    { spans: [{ text: "thinking", dim: true }] },
+    { spans: [{ text: "│ hmm, check", dim: true }] },
+    { spans: [{ text: " " }] },
     { spans: [{ text: "ok" }] },
   ]);
   // tool running: colored mark span + rest; hard wrap splits the line.

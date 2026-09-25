@@ -60,12 +60,20 @@ export function itemLines(item: TuiItem, width: number): RLine[] {
     case "assistant": {
       const lines: RLine[] = [];
       // The model's reasoning (the wire's `reasoning_content`), accumulated
-      // by the state machine. Shown dimmed above the reply: a live "thinking…"
-      // header while it streams, a settled "thinking:" header after done.
-      // Empty when the model did not think (no lines at all).
+      // by the state machine. Rendered as a DISTINCT block above the reply so
+      // it reads as the model's aside, not part of the answer:
+      //   · a dim header ("thinking…" while it streams, "thinking" once done)
+      //   · the reasoning under a dim "│ " gutter, wrapped at width−2 so the
+      //     gutter + text never exceed the terminal width
+      //   · a blank line separating the block from the reply.
+      // Empty when the model did not think (no lines at all). The gutter and
+      // the blank line are part of the height (itemHeight counts them) — the
+      // lockstep contract (itemLines.length === itemHeight) holds.
       if (item.thinkingText !== "") {
-        lines.push({ spans: [{ text: item.thinking ? "thinking…" : "thinking:", dim: true }] });
-        for (const l of wrapRows(item.thinkingText, width)) lines.push({ spans: [{ text: l, dim: true }] });
+        lines.push({ spans: [{ text: item.thinking ? "thinking…" : "thinking", dim: true }] });
+        for (const l of wrapRows(item.thinkingText, Math.max(1, width - 2)))
+          lines.push({ spans: [{ text: "│ " + l, dim: true }] });
+        lines.push({ spans: [{ text: " " }] }); // blank line: thinking | reply
       }
       // The streaming cursor is part of the rendered text — and of the
       // height (itemHeight counts it): before C28 the cursor line rendered

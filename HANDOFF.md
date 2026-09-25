@@ -1,3 +1,26 @@
+# HANDOFF — thinking block: the model's reasoning reads as a distinct, scannable block (2026-09-25)
+
+Made the assistant's accumulated reasoning (the wire's `reasoning_content`)
+read as the model's *aside*, not part of the answer. Before it rendered as a
+dim, full-width text above the reply with a weak `thinking…` header — it
+blended into the reply and long reasoning was hard to scan.
+
+Now (lines.ts + the lockstep itemHeight in state.ts):
+- a dim header — `thinking…` while it streams, `thinking` once done;
+- the reasoning under a dim `│ ` gutter, wrapped at `width−2` so the gutter +
+  text never exceed the terminal width;
+- a blank line separating the block from the reply.
+
+The gutter and blank line are part of the height (itemHeight counts them), so
+the C28 lockstep contract (`itemLines.length === itemHeight`) holds. No change
+to app.tsx (it renders the RLine spans generically).
+
+**Verification**: `npm run build` clean; `npm test` 387 tests: 379 pass
+0 fail 8 skip. Updated the pinned-layout height formula (header + gutter rows
++ blank + reply) and the itemLines shape assertions (gutter + blank line).
+PTY capture (Qwen thinking model, "17 * 24? step by step") confirms the frame:
+`thinking` header → `│ ` gutter with wrapped reasoning → blank line → reply.
+
 # HANDOFF — classification fix: cd-prefixed + compound git/npm commands no longer prompt (2026-09-25)
 
 **GUARDRAIL ZONE — pending USER commit.** `src/tools/safety.ts` is in the

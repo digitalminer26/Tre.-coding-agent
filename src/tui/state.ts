@@ -556,10 +556,14 @@ export function itemHeight(item: TuiItem, width: number): number {
       // before, the cursor line rendered but did not count, overflowing the
       // frame by one row mid-stream).
       const text = item.text + (item.streaming ? "\u258d" : "");
-      // The accumulated reasoning renders dimmed above the reply (lines.ts):
-      // one header line ("thinking…" / "thinking:") + the wrapped text —
+      // The accumulated reasoning renders as a distinct block above the
+      // reply (lines.ts): one dim header line, the reasoning under a "│ "
+      // gutter wrapped at width−2, and a blank line before the reply —
       // count exactly what the renderer draws.
-      const think = item.thinkingText !== "" ? 1 + wrapLineCount(item.thinkingText, width) : 0;
+      const think =
+        item.thinkingText !== ""
+          ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + 1
+          : 0;
       return think + wrapLineCount(text, width);
     }
     case "tool": {
