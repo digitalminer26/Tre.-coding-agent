@@ -1,3 +1,36 @@
+# HANDOFF — classification fix: cd-prefixed + compound git/npm commands no longer prompt (2026-09-25)
+
+**GUARDRAIL ZONE — pending USER commit.** `src/tools/safety.ts` is in the
+agent's own cage, so this increment is staged in the working tree for the
+user to commit with `GUARDRAIL_BYPASS=1` (same flow as the 8e66205 gate
+change). Do NOT let an agent commit this file.
+
+The 8e66205 gate works as designed — but two classification gaps made
+harmless commands fall into the "unknown-mutating" (gated) bucket and
+prompt:
+1. **`cd` was not a read-only verb.** `cd X && git status && ls` →
+   readOnly=false (the user's exact repeated prompt), so it gated.
+2. **`isReversibleBash` rejected ALL compounds.** `git add -A && git commit -m "…"`
+   and `npm run build 2>&1 | tail -3` (the model's standard commit flow and
+   test pipeline) gated, despite every part being reversible/read-only.
+
+Fix (safety.ts only):
+- `cd`, `test`, `[`, `true`, `false`, `sleep`, `env`, `printenv` added to
+  READONLY_VERBS (shell no-ops; `cd` changes only the subshell's cwd).
+- `isReversibleBash` now accepts compounds where EVERY segment is
+  individually reversible or read-only and at least one segment mutates
+  (`ls` alone stays read-only, not "reversible" — classifiers stay
+  orthogonal). Whole-command disqualifiers (backticks, `$( )`, sudo,
+  redirect to a real path) are shared with `isReadOnlyBash` via
+  `hasUnsafeConstructs`; fd dups (`2>&1`) and `/dev/null` remain fine.
+- Still prompts (unchanged, verified): `… && git push`, `… && node script.js`,
+  `… && npm install`, `git commit … > log.txt`, anything touching sensitive
+  patterns (`cd ~/.ssh && ls` → sensitive).
+
+**Verification**: `npm run build` clean; `npm test` 387 tests: 380 pass
+0 fail 7 skip (14 new assertions in tools.test.ts). The user's exact
+command now classifies readOnly=true.
+
 # HANDOFF — steering: type guidance during a run (2026-09-24)
 
 ## The TUI now accepts a line WHILE A RUN IS IN FLIGHT — it is injected into the run as a user message and the model reacts on its next turn instead of waiting for a new prompt (387 tests: 380 pass 0 fail 7 skip; PTY verified)

@@ -498,6 +498,20 @@ test("safety: read-only verbs + git/kubectl/docker subcommands", () => {
   assert.equal(isReadOnlyBash("git tag"), true); // list
   assert.equal(isReadOnlyBash("git stash list"), true);
   assert.equal(isReadOnlyBash("git -C /tmp/repo status"), true);
+  // cd is what most model commands start with — it must not poison the
+  // compound's read-only classification (the user's exact prompt trigger).
+  assert.equal(isReadOnlyBash("cd /Users/me/proj && ls"), true);
+  assert.equal(isReadOnlyBash("cd"), true); // bare cd = $HOME
+  assert.equal(isReadOnlyBash("cd -P /tmp && pwd"), true);
+  assert.equal(
+    isReadOnlyBash('cd /Users/me/proj && git status --short && echo "---" && ls && echo "---" && ls src'),
+    true,
+  );
+  assert.equal(isReadOnlyBash("cd /x && rm -rf /y"), false); // mutating segment
+  assert.equal(isReadOnlyBash("cd ~/.ssh && ls"), true); // sensitivity is a separate check
+  assert.equal(isReadOnlyBash("test -f x && cat x"), true);
+  assert.equal(isReadOnlyBash("[ -f x ] && pwd"), true);
+  assert.equal(isReadOnlyBash("sleep 2 && ls"), true);
   assert.equal(isReadOnlyBash("kubectl get pods"), true);
   assert.equal(isReadOnlyBash("docker ps"), true);
   assert.equal(isReadOnlyBash("ip addr"), true);
@@ -556,8 +570,20 @@ test("safety: reversible git/npm ops", () => {
   assert.equal(isReversibleBash("git switch"), false); // needs a branch
   assert.equal(isReversibleBash("npm install"), false);
   assert.equal(isReversibleBash("npm run"), false); // needs a script
-  assert.equal(isReversibleBash("git add && git push"), false); // compound
+  assert.equal(isReversibleBash("git add && git push"), false); // push is not reversible
   assert.equal(isReversibleBash("ls"), false);
+  // compounds of reversible/read-only segments: the model's standard commit
+  // flow and test pipelines must not prompt in ask mode.
+  assert.equal(isReversibleBash("git add -A && git commit -m 'msg'"), true);
+  assert.equal(isReversibleBash("git commit -m 'x' && git add ."), true);
+  assert.equal(isReversibleBash("npm run build 2>&1 | tail -3"), true);
+  assert.equal(isReversibleBash("git add . && ls"), true);
+  assert.equal(isReversibleBash("cd /tmp/r && git add . && git commit -m 'x'"), true);
+  // a merely unknown-mutating (or non-reversible) segment keeps it gated
+  assert.equal(isReversibleBash("git commit -m x && git push"), false);
+  assert.equal(isReversibleBash("npm run build && npm install"), false);
+  assert.equal(isReversibleBash("git add . && node script.js"), false);
+  assert.equal(isReversibleBash("git commit -m x > log.txt"), false); // redirect to real path
 });
 
 // The mode matrix, exercised through makeSafetyHooks.

@@ -394,6 +394,9 @@ export function sensitiveBashPatterns(command: string): string[] {
 /** Read-only verbs (whole command = one of these, with any arguments). */
 const READONLY_VERBS = new Set([
   "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "pwd",
+  // shell no-ops that start most model commands: cd (changes only the
+  // subshell's cwd), test/[ (evaluate), true/false, sleep, env print
+  "cd", "test", "[", "true", "false", "sleep", "env", "printenv",
   "whoami", "id", "echo", "printf", "which", "type", "date", "uname",
   "grep", "egrep", "fgrep", "rg", "ag", "find", "tree", "sort", "uniq",
   "diff", "cmp", "cut", "column", "basename", "dirname", "realpath",
@@ -428,18 +431,27 @@ const DOCKER_READONLY = new Set(["ps", "images", "inspect", "logs", "version"]);
  *  - each segment: a read-only verb, or a read-only git/kubectl/docker/ip
  *    subcommand form
  */
-export function isReadOnlyBash(command: string): boolean {
-  if (command.length === 0) return false;
-  // Disqualifiers anywhere in the command.
-  if (command.includes("`") || /\$\s*\(/.test(command) || /\$\(/.test(command)) return false;
-  if (/\bsudo\b/.test(command)) return false;
+/**
+ * Whole-command disqualifiers for a "safe" classification (fail-closed):
+ * command substitution, backticks, sudo, and output redirect to a real
+ * path (>/dev/null and fd dups like 2>&1 are fine).
+ */
+function hasUnsafeConstructs(command: string): boolean {
+  if (command.includes("`") || /\$\s*\(/.test(command) || /\$\(/.test(command)) return true;
+  if (/\bsudo\b/.test(command)) return true;
   // Output redirect to a real path (not /dev/null, not a pure fd dup).
   for (const m of command.matchAll(/>{1,2} *([^|\s;&)]*)/g)) {
     const target = (m[1] ?? "").trim();
     if (target === "" || target === "/dev/null") continue;
     if (/^\d+$/.test(target)) continue; // fd dup (2>&1 has no target here)
-    return false;
+    return true;
   }
+  return false;
+}
+
+export function isReadOnlyBash(command: string): boolean {
+  if (command.length === 0) return false;
+  if (hasUnsafeConstructs(command)) return false;
   // Compound: every segment must be read-only.
   const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).filter((s) => s.trim().length > 0);
   if (segments.length === 0) return false;
@@ -485,13 +497,32 @@ function isReadOnlyGit(rest: string[]): boolean {
  *    git checkout <branch> (NOT `checkout .` / `checkout -- <path>` —
  *    those are destructive), git branch <newname>, git tag <newname>,
  *    npm run <script>, npm test
+ * Compounds qualify only if EVERY segment is individually reversible or
+ * read-only — the model's standard `git add -A && git commit -m "msg"` and
+ * `npm run build 2>&1 | tail -3` are; anything with a merely unknown
+ * mutating segment stays gated (fail-closed).
  */
 export function isReversibleBash(command: string): boolean {
   if (command.length === 0) return false;
-  // Only single-segment commands qualify (a compound with a destructive or
-  // mutating part is not reversible).
-  if (/\s*(?:&&|\|\||[;|])\s*/.test(command)) return false;
-  const tokens = command.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (hasUnsafeConstructs(command)) return false;
+  const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).filter((s) => s.trim().length > 0);
+  if (segments.length === 0) return false;
+  // Every segment must be a reversible mutation or read-only, and at least
+  // one segment must mutate (a purely read-only compound is read-only, not
+  // "reversible" — the gate treats both as no-prompt, so this only keeps
+  // the classifiers' meanings orthogonal).
+  let hasMutation = false;
+  for (const seg of segments) {
+    const t = seg.trim();
+    if (isReversibleSegment(t)) hasMutation = true;
+    else if (!isReadOnlySegment(t)) return false;
+  }
+  return hasMutation;
+}
+
+/** One (non-compound) segment: a reversible mutation (the git/npm forms above). */
+function isReversibleSegment(seg: string): boolean {
+  const tokens = seg.split(/\s+/).filter((t) => t.length > 0);
   if (tokens.length < 2) return false;
   const base = path.basename(tokens[0]!);
   const rest = tokens.slice(1);
