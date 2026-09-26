@@ -790,8 +790,13 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 2;
   }
   let model: ModelConfig;
+  // C34: the full catalog (all models, not just the active one) — the TUI's
+  // /models lists + switches across it. Loaded once; the active model is
+  // resolved from it below.
+  let modelsFile: ReturnType<typeof loadModelsFile>;
   try {
-    model = resolveModel(loadModelsFile(modelsPath), args.modelId);
+    modelsFile = loadModelsFile(modelsPath);
+    model = resolveModel(modelsFile, args.modelId);
   } catch (err) {
     sinks.err.write(`error: cannot load ${modelsPath}: ${String(err)}\n`);
     return 2;
@@ -861,7 +866,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         replayed.context.forEach((m, i) => entryIds.set(m, replayed.contextEntryIds[i]!));
         if (replayed.model && !args.modelId) {
           try {
-            model = resolveModel(loadModelsFile(modelsPath), replayed.model.id);
+            model = resolveModel(modelsFile, replayed.model.id);
           } catch {
             sinks.err.write(`note: session model "${replayed.model.id}" not in models.json — using ${model.id}\n`);
           }
@@ -926,6 +931,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       buildExecutor,
       noCompact: args.noCompact,
       compactKeepTokens: args.compactKeepTokens,
+      // C34: the full catalog + a prompt rebuild for /models switches (the
+      // system prompt embeds the model name, so a switch must rebuild it).
+      modelsFile,
+      rebuildSystemPrompt: (modelId: string) =>
+        buildSystemPrompt({ cwd: root, tools: wiredTools, model: modelId, skills }),
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
       sessionPath: sessionFile,

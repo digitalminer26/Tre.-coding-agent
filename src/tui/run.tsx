@@ -52,6 +52,7 @@ import {
   type TuiState,
 } from "./state.js";
 import { makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import { resolveModel, type ModelsFile } from "../config/models.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
 import type { AskApproval } from "../tools/safety.js";
 import type {
@@ -62,6 +63,7 @@ import type {
   Tool,
 } from "../types.js";
 import type { Session } from "../session/session.js";
+import type { ModelOption } from "./state.js";
 
 const NULL_SINKS: PrintSinks = {
   out: { write: () => true },
@@ -79,6 +81,23 @@ function sessionSizeBytes(sessionPath: string | undefined): number | undefined {
     return statSync(sessionPath).size;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * C34 — the driver side of a `/models <id>` switch. The pure
+ * `applyModelSwitch` (state.ts) already re-seeded modelLabel + the context
+ * field in the returned state; this re-resolves the FULL ModelConfig by id
+ * (baseUrl, apiKey, compat — the state machine never sees them). Returns the
+ * new ModelConfig, or null when the id is not in the catalog (the pure
+ * handler already reported it as unknown — the driver just does not switch).
+ */
+function resolveSwitchedModel(modelsFile: ModelsFile | undefined, modelId: string): ModelConfig | null {
+  if (modelsFile === undefined) return null;
+  try {
+    return resolveModel(modelsFile, modelId);
+  } catch {
+    return null;
   }
 }
 
@@ -104,6 +123,21 @@ export interface TuiRunOptions {
   /** D15: static labels for the `/display-bottom` fields. */
   cwd?: string;
   sessionPath?: string;
+  /**
+   * C34: the parsed models.json catalog — feeds `/models` (list + switch).
+   * The driver keeps the full ModelConfigs; on a switch it re-resolves by id
+   * (resolveModel) and rebuilds the stream + system prompt. Absent → the
+   * TUI's catalog is empty and `/models` reports "no catalog supplied".
+   */
+  modelsFile?: ModelsFile;
+  /**
+   * C34: rebuild the system prompt for a given model id (the prompt embeds
+   * the model name). The driver calls it after a `/models <id>` switch so
+   * the next run's prompt matches the active model. Absent → the prompt is
+   * left as-is on a switch (the wire still uses the new model; only the
+   * prompt's "# Model" line would be stale).
+   */
+  rebuildSystemPrompt?: (modelId: string) => string;
   deps?: {
     /** Injected approver (tests): bypasses the TUI's y/n prompt. */
     askApproval?: AskApproval;
@@ -124,13 +158,28 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // its size (chars/4, the loop's estimator) so the `context` field can show
   // where the tokens come from (system prompt vs the message history).
   const systemPromptTokens = Math.ceil((opts.systemPrompt ?? "").length / 4);
+  // C34: the ACTIVE model + system prompt are MUTABLE — `/models <id>`
+  // re-resolves the full ModelConfig by id and rebuilds the prompt, so the
+  // next run uses the new model. `opts.model`/`opts.systemPrompt` are the
+  // startup values; `model`/`systemPrompt` are the live ones runPrompt reads.
+  let model: ModelConfig = opts.model;
+  let systemPrompt: string = opts.systemPrompt;
+  // The light catalog the TUI renders (/models list) — id + the fields the
+  // context field uses. The full ModelConfigs stay in opts.modelsFile.
+  const catalog: ModelOption[] = (opts.modelsFile?.models ?? []).map((m) => ({
+    id: m.id,
+    provider: m.provider,
+    contextWindow: m.contextWindow,
+    maxTokens: m.maxTokens,
+  }));
   let state: TuiState = makeInitialState(
-    opts.model.id,
+    model.id,
     info,
-    opts.model.contextWindow,
-    opts.model.maxTokens,
+    model.contextWindow,
+    model.maxTokens,
     tuiConfig.bottom,
     systemPromptTokens,
+    catalog,
   );
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
@@ -170,8 +219,8 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     };
     try {
       const result = await runTurn({
-        model: opts.model,
-        systemPrompt: opts.systemPrompt,
+        model,
+        systemPrompt,
         tools: opts.tools,
         streamFn: opts.streamFn,
         controller,
@@ -244,6 +293,16 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           if (slash.handled && slash.state.bottom !== prevBottom) {
             saveTuiConfig({ bottom: slash.state.bottom });
           }
+          // C34: a /models <id> switch re-resolves the full ModelConfig (the
+          // state machine only re-seeded the label + context field). The
+          // running turn keeps the old model; the NEXT run uses the new one.
+          if (slash.handled && slash.state.modelLabel !== slashBusy.state.modelLabel) {
+            const nm = resolveSwitchedModel(opts.modelsFile, slash.state.modelLabel);
+            if (nm !== null) {
+              model = nm;
+              if (opts.rebuildSystemPrompt !== undefined) systemPrompt = opts.rebuildSystemPrompt(nm.id);
+            }
+          }
           return;
         }
         // Steering (TUI): a non-empty, non-slash line typed while busy is
@@ -277,6 +336,17 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // reference, so this fires exactly on a real change).
         if (slash.state.bottom !== prevBottom) {
           saveTuiConfig({ bottom: slash.state.bottom });
+        }
+        // C34: a /models <id> switch re-resolves the full ModelConfig (the
+        // state machine only re-seeded the label + context field); rebuild
+        // the system prompt (it embeds the model name) so the next run is
+        // fully consistent.
+        if (slash.state.modelLabel !== r.state.modelLabel) {
+          const nm = resolveSwitchedModel(opts.modelsFile, slash.state.modelLabel);
+          if (nm !== null) {
+            model = nm;
+            if (opts.rebuildSystemPrompt !== undefined) systemPrompt = opts.rebuildSystemPrompt(nm.id);
+          }
         }
         return;
       }

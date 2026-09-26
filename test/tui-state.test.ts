@@ -13,6 +13,7 @@ import type {
 import {
   approvalAnswer,
   applyEvent,
+  applyModelSwitch,
   bottomLineColors,
   compactThreshold,
   contextBreakdown,
@@ -23,6 +24,7 @@ import {
   inputChar,
   inputHistory,
   makeInitialState,
+  modelsListReport,
   noteError,
   pushUser,
   scrollBy,
@@ -33,6 +35,7 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
+  type ModelOption,
   type TuiItem,
   type TuiState,
 } from "../src/tui/state.js";
@@ -357,6 +360,77 @@ test("bottomLineColors: the context line is tinted by urgency, the rest dim", ()
   // unknown keys are skipped (mirrors bottomLines) and the rest pad to 3.
   const s2 = { ...s, bottom: ["bogus", "context"] };
   assert.deepEqual(bottomLineColors(s2), ["yellow", undefined, undefined]);
+});
+
+// ── /models: list the catalog + switch the active model (C34) ─────────────
+
+const CATALOG: ModelOption[] = [
+  { id: "small", provider: "p", contextWindow: 32768, maxTokens: 4096 },
+  { id: "big", provider: "p", contextWindow: 200000, maxTokens: 8192 },
+];
+
+test("modelsListReport: one line per model, active marked with *", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
+  assert.equal(
+    modelsListReport(s),
+    [
+      "models (2) — * = active:",
+      "* small  [p]  window 32.8k",
+      "  big  [p]  window 200k",
+    ].join("\n"),
+  );
+  // no catalog supplied → the bare note (the driver seeds it, so this only
+  // happens if it supplied none)
+  assert.equal(modelsListReport(makeInitialState("m")), "models: (no catalog supplied)");
+});
+
+test("applyModelSwitch: re-seeds label + context field; null on unknown id", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
+  const toBig = applyModelSwitch(s, "big");
+  assert.ok(toBig !== null);
+  assert.equal(toBig.modelLabel, "big");
+  assert.equal(toBig.contextWindow, 200000);
+  assert.equal(toBig.maxTokens, 8192);
+  // the rest of the state is untouched (items, bottom, context estimate)
+  assert.equal(toBig.items, s.items);
+  assert.equal(toBig.bottom, s.bottom);
+  // unknown id → null (a typo can never silently switch)
+  assert.equal(applyModelSwitch(s, "nope"), null);
+  // no catalog → null
+  assert.equal(applyModelSwitch(makeInitialState("m"), "big"), null);
+});
+
+test("handleSlashCommand: /models lists, /models <id> switches, unknown reports", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
+
+  // bare /models → the list as an info item, state otherwise untouched
+  const list = handleSlashCommand(s, "/models");
+  assert.equal(list.handled, true);
+  assert.equal(list.state.items.length, s.items.length + 1);
+  assert.equal((list.state.items[list.state.items.length - 1] as { kind: string }).kind, "info");
+  assert.equal(list.state.modelLabel, "small");
+
+  // /models big → switched: label + window re-seeded, feedback info item
+  const sw = handleSlashCommand(s, "/models big");
+  assert.equal(sw.handled, true);
+  assert.equal(sw.state.modelLabel, "big");
+  assert.equal(sw.state.contextWindow, 200000);
+  const swInfo = sw.state.items[sw.state.items.length - 1] as { kind: string; text: string };
+  assert.equal(swInfo.kind, "info");
+  assert.match(swInfo.text, /switched to big/);
+
+  // /models <unknown> → reported, NOT switched
+  const bad = handleSlashCommand(s, "/models nope");
+  assert.equal(bad.handled, true);
+  assert.equal(bad.state.modelLabel, "small"); // unchanged
+  const badInfo = bad.state.items[bad.state.items.length - 1] as { text: string };
+  assert.match(badInfo.text, /unknown model 'nope'/);
+
+  // /models with a trailing arg that is a real id still switches; a second
+  // word is NOT a valid id (ids are single tokens) → unknown
+  assert.equal(handleSlashCommand(s, "/models big extra").state.modelLabel, "small");
+  // /modelsX (no space) is not the command → unhandled
+  assert.equal(handleSlashCommand(s, "/modelsX").handled, false);
 });
 
 test("agent_end: error/aborted/length become error items; busy + approval clear", () => {

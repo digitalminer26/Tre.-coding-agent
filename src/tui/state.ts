@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig } from "../types.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
@@ -17,6 +17,20 @@ const oneLine = (s: string, n: number): string => {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
 };
+
+/**
+ * C34 — a model as the TUI sees it: the id (wire + switch key) plus the
+ * fields the TUI displays or uses for the context field. The FULL ModelConfig
+ * (baseUrl, apiKey, compat, temperature) stays in the driver — the state
+ * machine is pure and never talks to the wire, so it only carries what it
+ * renders. The driver re-resolves the full config by id on a switch.
+ */
+export interface ModelOption {
+  id: string;
+  provider: string;
+  contextWindow: number;
+  maxTokens: number;
+}
 
 export type TuiItem =
   | { kind: "user"; text: string }
@@ -80,6 +94,13 @@ export interface TuiState {
    */
   approval: { question: string; resolve: (ok: boolean) => void } | null;
   modelLabel: string;
+  /**
+   * C34: the model catalog (light: id + the fields the TUI shows/switches)
+   * from models.json. Feeds `/models` (list + switch). The driver seeds it;
+   * the full ModelConfig (baseUrl, apiKey, compat) stays in the driver, which
+   * re-resolves on a switch. Empty when no catalog was supplied.
+   */
+  models: ModelOption[];
   /** D15: field keys shown in the reserved bottom lines, in order.
    *  C32: seeded from the persisted config (~/.tre/tui.json) and saved
    *  back by the driver after every `/display-bottom` change. */
@@ -141,6 +162,8 @@ export function makeInitialState(
   bottom: string[] = [],
   /** Estimated system-prompt tokens (chars/4) — the fixed floor of the context. */
   systemPromptTokens: number = 0,
+  /** C34: the model catalog (light) for `/models` — seeded by the driver. */
+  models: ModelOption[] = [],
 ): TuiState {
   return {
     items: [],
@@ -163,6 +186,7 @@ export function makeInitialState(
     contextTokens: 0,
     info,
     viewTop: null,
+    models,
   };
 }
 
@@ -1000,6 +1024,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "context", summary: "context breakdown: system/summary/messages + compaction trigger" },
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },
+  { name: "models", summary: "list models / switch the active model" },
   { name: "quit", summary: "end the session" },
   { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
 ];
@@ -1025,12 +1050,23 @@ export function slashCandidates(input: string): string[] {
  * or `  /name — summary` (not). Hidden while an approval is pending (the
  * input is locked then anyway).
  */
+/**
+ * The candidates the menu actually shows: the bare-command prefix filter
+ * (slashCandidates) capped to MENU_MAX_LINES. suggestMenu, menuNav and
+ * menuComplete all operate on THIS list, so the selection marker is always
+ * on a visible line even when the registry grows past the cap (the overflow
+ * commands are still reachable by typing them in full).
+ */
+function visibleCandidates(input: string): string[] {
+  return slashCandidates(input).slice(0, MENU_MAX_LINES);
+}
+
 export function suggestMenu(state: TuiState, width: number): { line: string; selected: boolean }[] {
   if (state.approval !== null) return [];
-  const cands = slashCandidates(state.input);
+  const cands = visibleCandidates(state.input);
   if (cands.length === 0) return [];
   const sel = Math.min(state.suggestIdx ?? 0, cands.length - 1);
-  return cands.slice(0, MENU_MAX_LINES).map((cmd, i) => {
+  return cands.map((cmd, i) => {
     const cmdDef = SLASH_COMMANDS.find((c) => "/" + c.name === cmd);
     const full = `${i === sel ? "> " : "  "}${cmd}${cmdDef ? " — " + cmdDef.summary : ""}`;
     return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i === sel };
@@ -1043,7 +1079,7 @@ export function suggestMenu(state: TuiState, width: number): { line: string; sel
  * navigation.
  */
 export function menuNav(s: TuiState, dir: -1 | 1): TuiState | null {
-  const cands = slashCandidates(s.input);
+  const cands = visibleCandidates(s.input);
   if (cands.length === 0) return null;
   const cur = Math.min(s.suggestIdx ?? 0, cands.length - 1);
   return { ...s, suggestIdx: (cur + dir + cands.length) % cands.length };
@@ -1056,7 +1092,7 @@ export function menuNav(s: TuiState, dir: -1 | 1): TuiState | null {
  * path run (exact match, or no menu).
  */
 export function menuComplete(s: TuiState): TuiState | null {
-  const cands = slashCandidates(s.input);
+  const cands = visibleCandidates(s.input);
   if (cands.length === 0) return null;
   const sel = Math.min(s.suggestIdx ?? 0, cands.length - 1);
   const chosen = cands[sel]!;
@@ -1273,6 +1309,43 @@ export function statsLine(state: TuiState, sessionBytes?: number): string {
 }
 
 /**
+ * C34 — the multi-line report `/models` (no arg) appends as an info item:
+ * one line per model in the catalog, the ACTIVE one marked with `*`. Each
+ * line shows id + provider + window (so a switch's effect on the context
+ * field is visible before it happens). An empty catalog reports the bare
+ * "no models" note (the driver seeds the catalog, so this only happens if
+ * it supplied none).
+ */
+export function modelsListReport(state: TuiState): string {
+  if (state.models.length === 0) return "models: (no catalog supplied)";
+  const lines = state.models.map((m) => {
+    const active = m.id === state.modelLabel ? "* " : "  ";
+    return `${active}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}`;
+  });
+  return `models (${state.models.length}) — * = active:\n` + lines.join("\n");
+}
+
+/**
+ * C34 — the pure model switch: find `modelId` in the catalog and return the
+ * state with the active model's identity + context field re-seeded (the
+ * driver re-resolves the FULL ModelConfig by id and rebuilds the stream —
+ * the state machine only updates what it renders). Returns null when the id
+ * is unknown (the caller reports it) — so a typo can never silently switch.
+ * The context estimate (contextTokens) is left as-is: the next turn's usage
+ * will re-measure it against the new window.
+ */
+export function applyModelSwitch(state: TuiState, modelId: string): TuiState | null {
+  const m = state.models.find((x) => x.id === modelId);
+  if (m === undefined) return null;
+  return {
+    ...state,
+    modelLabel: m.id,
+    contextWindow: m.contextWindow,
+    maxTokens: m.maxTokens,
+  };
+}
+
+/**
  * Handle a submitted `/…` line. Commands:
  *   /context                   multi-line info item: the context breakdown
  *                              (system prompt / summary / messages) and the
@@ -1280,6 +1353,11 @@ export function statsLine(state: TuiState, sessionBytes?: number): string {
  *   /display-bottom            report current selection + the field menu
  *   /display-bottom off|none   clear the bottom lines
  *   /display-bottom f1 f2 …    set the fields (deduped, order preserved)
+ *   /models                    multi-line info item: the catalog, active
+ *                              model marked with `*`
+ *   /models <id>               switch the active model (re-seeds modelLabel +
+ *                              the context field; the driver re-resolves the
+ *                              full ModelConfig by id — see applyModelSwitch)
  *   /stats                     one info line: turns, tokens, tool calls,
  *                              session file (path + size in bytes)
  * Feedback lands as an `info` item in the output area. `/quit` and `/exit`
@@ -1302,6 +1380,20 @@ export function handleSlashCommand(
   }
   if (line.trim() === "/context") {
     return { state: withInfo(s, contextReport(s)), handled: true };
+  }
+  const mm = /^\/models(?:\s+(.*))?$/.exec(line.trim());
+  if (mm !== null) {
+    const arg = (mm[1] ?? "").trim();
+    if (arg === "") {
+      // list the catalog (active marked)
+      return { state: withInfo(s, modelsListReport(s)), handled: true };
+    }
+    const next = applyModelSwitch(s, arg);
+    if (next === null) {
+      const known = s.models.map((m) => m.id).join(", ") || "(none)";
+      return { state: withInfo(s, `models: unknown model '${arg}' — known: ${known}`), handled: true };
+    }
+    return { state: withInfo(next, `models: switched to ${arg} (window ${fmtTokens(next.contextWindow)})`), handled: true };
   }
   const m = /^\/display-bottom(?:\s+(.*))?$/.exec(line.trim());
   if (m === null) return { state: s, handled: false };
