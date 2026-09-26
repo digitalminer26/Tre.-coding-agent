@@ -831,6 +831,52 @@ test("C28: a SINGLE item taller than the budget scrolls (the C27 defect)", () =>
   assert.notDeepEqual(mid.visible, atTop.visible, "different positions render different rows");
 });
 
+test("C30: FOLLOW mode clips an over-budget tail item (no frame overflow, no scrollback clear)", () => {
+  // The user's "output clears on a new turn, can't scroll back" bug: a
+  // single reply (or big tool diff) taller than the item budget, while the
+  // view follows the bottom (viewTop null). The legacy fitItems window kept
+  // that item WHOLE, so the frame was taller than the viewport — Ink's
+  // shouldClearTerminalForFrame then ran clearTerminal, and \u001b[3J erased
+  // the TERMINAL SCROLLBACK. C30 clips the tail to the budget (the last
+  // `budget` lines — follow the bottom), so the frame is exactly `rows`
+  // tall and no clear is ever emitted.
+  const budget = itemAreaBudget(24, 0); // 16 at 24 rows
+  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 40 lines at 80
+  const s = fitItemsScrollable([huge], 80, 24, 0, null); // viewTop null = follow
+  assert.equal(s.maxScroll, 24, "content still scrolls (maxScroll unchanged)");
+  assert.deepEqual(s.visible, [{ item: huge, from: 40 - budget, to: 40 }], "clipped to the LAST budget lines");
+  assert.equal(s.pad, 0, "window full");
+  assert.equal(s.eff, 0, "following the bottom");
+  // The frame (visible lines + pad) is exactly the budget — never taller,
+  // so it never overflows the viewport and Ink never full-clears.
+  const shown = s.visible.reduce((a, v) => a + (v.to - v.from), 0);
+  assert.equal(shown + s.pad, budget, "frame content rows == budget (no overflow)");
+  // The clip is a slice of the SAME item (the renderer does
+  // itemLines(item).slice(from, to)) — height math stays in lockstep.
+  assert.equal(itemHeight(s.visible[0]!.item, 80), 40, "the item itself is unchanged");
+
+  // A short item before an over-budget tail: the legacy fitItems window
+  // keeps only the over-budget tail (it alone fills the window), and C30
+  // clips it to the FULL budget (the short item is excluded by the legacy
+  // tail logic — unchanged behavior). The frame is still exactly the budget.
+  const short: TuiItem = { kind: "user", text: "q" }; // 1 line
+  const mixed = fitItemsScrollable([short, huge], 80, 24, 0, null);
+  assert.deepEqual(
+    mixed.visible.map((v) => [v.item, v.from, v.to]),
+    [[huge, 40 - budget, 40]],
+    "over-budget tail alone fills the window, clipped to the full budget",
+  );
+  const mixedShown = mixed.visible.reduce((a, v) => a + (v.to - v.from), 0);
+  assert.equal(mixedShown + mixed.pad, budget, "still exactly the budget rows");
+
+  // No-overflow regression for the common case: content that FITS is
+  // byte-identical to the legacy window (full items, from 0).
+  const fits = Array.from({ length: 5 }, (_, i) => twoLineUser(i)); // 10 ≤ 16
+  const f = fitItemsScrollable(fits, 80, 24, 0, null);
+  assert.ok(f.visible.every((v) => v.from === 0), "no clip when it fits");
+  assert.equal(f.pad, budget - 10);
+});
+
 test("C28: pinned view stays put as content appends (no drift), follows when it reaches the bottom", () => {
   // A pinned viewTop is an ABSOLUTE content row. Simulate output appending:
   // the window [2,18) at 20 lines is still [2,18) at 30 lines (eff grows).

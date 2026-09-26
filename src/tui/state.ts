@@ -615,8 +615,11 @@ export function itemsHeight(items: TuiItem[], width: number): number {
  * clamped to >= 1. Keeps the longest TAIL of items whose `itemsHeight` is
  * <= budget (never reorders; if only the last item fits, keep just it; if
  * even the last item alone exceeds the budget, keep just it and let
- * pad = 0 — the frame may then exceed rows, which Ink handles by scrolling;
- * bottom stays pinned). `pad = max(0, budget - itemsHeight(visible))`.
+ * pad = 0 — the frame may then exceed rows. The CALLER (fitItemsScrollable)
+ * CLIPS that overflowing tail item back to the budget before rendering: an
+ * unclipped overflow would make the frame taller than the viewport, which
+ * trips Ink's full-clear fallback (\u001b[3J erases the terminal scrollback).
+ * `pad = max(0, budget - itemsHeight(visible))`.
  */
 export function fitItems(
   items: TuiItem[],
@@ -692,17 +695,37 @@ export function fitItemsScrollable(
   if (viewTop === null || total <= budget) {
     const legacy = fitItems(items, width, rows, extraLines);
     const start = items.length - legacy.visible.length;
-    return {
-      visible: legacy.visible.map((item, i) => ({
-        item,
-        from: 0,
-        to: lineLists[start + i]!.length,
-      })),
-      pad: legacy.pad,
-      total,
-      maxScroll,
-      eff: 0,
-    };
+    // C30: the legacy window keeps a tail item WHOLE even when it alone
+    // exceeds the budget (fitItems' documented "let pad = 0 — the frame may
+    // then exceed rows, which Ink handles by scrolling"). Ink does NOT
+    // handle that: an overflowing frame trips shouldClearTerminalForFrame →
+    // clearTerminal, and \u001b[3J erases the TERMINAL SCROLLBACK — the
+    // "output clears on a new turn, can't scroll back" bug. Clip the tail
+    // to the budget instead (the SAME clip the pinned path applies), so the
+    // frame is never taller than the viewport and no clear is ever emitted.
+    // When the tail fits (the common case) the clip is a no-op and the frame
+    // is byte-identical to the legacy window.
+    let shown = 0;
+    const visible: VisibleSlice[] = [];
+    for (let i = 0; i < legacy.visible.length; i++) {
+      const item = legacy.visible[i]!;
+      const h = lineLists[start + i]!.length;
+      const room = budget - shown;
+      if (room <= 0) break;
+      if (h <= room) {
+        visible.push({ item, from: 0, to: h });
+        shown += h;
+      } else {
+        // The tail item overflows: show its LAST `room` lines (follow the
+        // bottom) and clip the rest. Keep the ORIGINAL item and record the
+        // line range [h-room, h) — the renderer slices itemLines to it (the
+        // same mechanism the pinned path uses), so no per-kind rebuild.
+        visible.push({ item, from: h - room, to: h });
+        shown += room;
+        break;
+      }
+    }
+    return { visible, pad: Math.max(0, budget - shown), total, maxScroll, eff: 0 };
   }
 
   // Pinned: the viewport covers content rows [W, W + budget). Straddlers

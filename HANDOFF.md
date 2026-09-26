@@ -1,3 +1,47 @@
+# HANDOFF — TUI no longer clears the terminal scrollback on a new turn (2026-09-26)
+
+**Status: COMPLETED.** One increment (C30): the TUI wiped the terminal's
+scrollback whenever a turn's output was tall enough to overflow the frame,
+so the user could not scroll back. Root cause: in FOLLOW mode
+(`viewTop === null`, the default), `fitItemsScrollable` fell back to
+`fitItems`, whose documented behavior for a single item taller than the item
+budget is to keep it WHOLE and let `pad = 0` — "the frame may then exceed
+rows, which Ink handles by scrolling." Ink does NOT handle that gracefully:
+an overflowing frame trips `shouldClearTerminalForFrame` → `clearTerminal`,
+and `ansi-escapes.clearTerminal` is `\u001b[2J\u001b[3J\u001b[H` — **`\u001b[3J`
+erases the terminal's scrollback buffer**. A long reply or a big tool diff
+(the common "new turn" shape) overflows the ~16-row item budget at 24 rows,
+so every such turn cleared the scrollback.
+
+**Fix (state.ts only, `fitItemsScrollable` follow path).** When the legacy
+tail window's last item alone exceeds the budget, CLIP it to the budget
+instead of rendering it whole — show its LAST `budget` lines (follow the
+bottom) by keeping the ORIGINAL item and recording the line range
+`[h-budget, h)` (the renderer already slices `itemLines(item).slice(from, to)`,
+the same mechanism the pinned path uses — no per-kind rebuild). The frame is
+now exactly `rows` tall in every case, so `shouldClearTerminalForFrame` never
+fires and no clear is ever emitted. When the tail fits (the common case) the
+clip is a no-op and the frame is byte-identical to the legacy window.
+`fitItems`'s own contract is unchanged (it still returns the whole item);
+the doc comment now notes the caller clips it.
+
+**Verification.** Unit probe (fake TTY, 24 rows): a 30-line single reply in
+follow mode — before the fix the SECOND frame emitted
+`\u001b[2J\u001b[3J\u001b[H`; after the fix, zero clears and the frame is
+exactly 24 rows showing the last 16 lines (follow the bottom). End-to-end
+(real `runTui` + `script` PTY + a fake model streaming a 40-line reply): the
+turn emits NO `\u001b[3J`; the only clear in the whole run is the one-time
+unmount teardown. New regression test `C30: FOLLOW mode clips an over-budget
+tail item` pins the clip (single item, over-budget tail after a short item,
+and the no-overflow no-op case). Full suite green (396 pass, 0 fail).
+
+**Note for the user:** this is the TUI (the Ink app). The plain CLI/REPL
+printer is untouched. The terminal's OWN scrollback now accumulates across
+turns as expected — you can scroll back through prior turns. (The in-app
+PgUp/wheel scroll still works as before for content beyond the viewport.)
+
+---
+
 # HANDOFF — TUI color pass: tool lines and busy state get distinct colors (2026-09-26)
 
 **Status: COMPLETED.** One increment: the TUI's output area was mostly
