@@ -93,14 +93,39 @@ export function itemLines(item: TuiItem, width: number): RLine[] {
           : item.running
             ? "→"
             : "·";
-      const color = item.isError ? "red" : item.resultText !== undefined ? "green" : "gray";
-      // Header: mark (colored) + " name args", wrapped as one string —
-      // exactly how itemHeight counts it.
+      // The mark carries the OUTCOME (red ✗ / green ✓ / yellow → in flight);
+      // the name+args are one blue run — the tool line reads as a unit, and
+      // blue separates it from the cyan user prompt and the plain reply.
+      const color = item.isError ? "red" : item.resultText !== undefined ? "green" : "yellow";
+      // Header: mark + name + args, wrapped as ONE string (exactly how
+      // itemHeight counts it), then the wrapped rows are re-split at the
+      // mark / name boundaries into colored spans. wrap-ansi's hard wrap
+      // only inserts newlines (it never reorders or drops characters —
+      // joined, the rows are the original string), so the split is exact.
       const head = wrapRows(`${mark} ${item.name} ${item.argsText}`, width);
-      head.forEach((l, i) => {
-        if (i === 0 && l !== "") lines.push({ spans: [{ text: l.charAt(0), color }, { text: l.slice(1) }] });
-        else lines.push(plain(l));
-      });
+      // Segment boundaries in the ORIGINAL string: the mark is [0, 1), the
+      // name [1, nameEnd), the args [nameEnd, ∞). Each wrapped row covers
+      // [off, off+len) of it (off = the row's start offset — the rows are
+      // contiguous slices of the original), so a row is colored by clipping
+      // those segments to its range.
+      const nameEnd = mark.length + 1 + item.name.length;
+      const segs: [number, number, string | undefined][] = [
+        [0, mark.length, color],
+        [mark.length, nameEnd, "blue"],
+        [nameEnd, Number.POSITIVE_INFINITY, undefined],
+      ];
+      let off = 0;
+      for (const l of head) {
+        const end = off + l.length;
+        const spans: RSpan[] = [];
+        for (const [s, e, c] of segs) {
+          const a = Math.max(off, s);
+          const b = Math.min(end, e);
+          if (b > a) spans.push({ text: l.slice(a - off, b - off), ...(c !== undefined ? { color: c } : {}) });
+        }
+        lines.push({ spans });
+        off = end;
+      }
       if (item.diff !== undefined) {
         for (const line of item.diff) {
           if (line === "") continue;

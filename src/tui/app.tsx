@@ -192,10 +192,16 @@ export function App(props: AppProps): React.ReactElement {
   return (
     <Box flexDirection="column">
       <Text dimColor>
+        {/* busy = YELLOW, not dim: the one moment the header should jump
+            out is while the agent is working (the dim chrome is the
+            resting state). The base is truncated to leave room for the
+            indicator — the header is ALWAYS exactly one row (frame
+            contract), so the busy suffix must never push it past width. */}
         {oneLine(
-          `tre. · ${state.modelLabel} — turn ${state.turn}${state.busy ? " · working…" : ""}`,
-          width
+          `tre. · ${state.modelLabel} — turn ${state.turn}`,
+          state.busy ? Math.max(1, width - " · working…".length) : width
         )}
+        {state.busy && <Text color="yellow"> · working…</Text>}
       </Text>
       {layout.visible.map((slice, i) => (
         <Item key={i} slice={slice} width={width} />

@@ -947,18 +947,37 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
     { spans: [{ text: " " }] },
     { spans: [{ text: "ok" }] },
   ]);
-  // tool running: colored mark span + rest; hard wrap splits the line.
+  // tool running: colored mark span (YELLOW = in flight) + blue name span
+  // + plain args; hard wrap splits the line.
   const run = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "a".repeat(100), running: true }, 80);
   assert.equal(run.length, 2);
   // line 1 = mark(1) + " bash "(6) + 73 args chars = 80 display columns.
-  assert.deepEqual(run[0]!.spans, [{ text: "\u2192", color: "gray" }, { text: " bash " + "a".repeat(73) }]);
-  assert.equal(run[1]!.spans[0]!.text.length, 27, "remaining args on line 2");
+  assert.deepEqual(run[0]!.spans, [
+    { text: "\u2192", color: "yellow" },
+    { text: " bash", color: "blue" },
+    { text: " " + "a".repeat(73) },
+  ]);
+  assert.deepEqual(run[1]!.spans, [{ text: "a".repeat(27) }], "remaining args on line 2, plain");
   // tool done with diff + result: colored diff runs, dim result (2-col indent).
   const done = itemLines(
     { kind: "tool", id: "t", name: "edit", argsText: "{}", running: false, diff: ["+a", "-b"], resultText: "ok" },
     80,
   );
-  assert.deepEqual(done[0]!.spans, [{ text: "\u2713", color: "green" }, { text: " edit {}" }]);
+  assert.deepEqual(done[0]!.spans, [
+    { text: "\u2713", color: "green" },
+    { text: " edit", color: "blue" },
+    { text: " {}" },
+  ]);
+  // error tool: RED mark (the outcome color), blue name.
+  const failed = itemLines(
+    { kind: "tool", id: "t", name: "bash", argsText: "ls", running: false, resultText: "boom", isError: true },
+    80,
+  );
+  assert.deepEqual(failed[0]!.spans, [
+    { text: "\u2717", color: "red" },
+    { text: " bash", color: "blue" },
+    { text: " ls" },
+  ]);
   assert.deepEqual(done[1]!.spans, [{ text: "+a", color: "green" }]);
   assert.deepEqual(done[2]!.spans, [{ text: "-b", color: "red" }]);
   assert.deepEqual(done[3]!.spans, [{ text: "  ok", dim: true }]);

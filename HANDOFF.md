@@ -1,3 +1,43 @@
+# HANDOFF — TUI color pass: tool lines and busy state get distinct colors (2026-09-26)
+
+**Status: COMPLETED.** One increment: the TUI's output area was mostly
+monochrome — the user prompt (cyan), the outcome marks (✓/✗), the diff
+lines, and compaction were colored, but the tool NAME/ARGS were plain
+default-fg, the in-flight `→` mark was the same dim gray as idle chrome,
+and the header's `· working…` was dim. Now the output reads by type:
+
+- **Tool header** — the mark keeps its outcome color (red `✗` / green `✓`),
+  the **in-flight `→` mark is yellow** (was gray — it now jumps out while a
+  tool runs), and the **tool name is blue** (separates the tool line from
+  the cyan user prompt and the plain assistant reply). The args stay
+  default-fg. `src/tui/lines.ts`: the header is still wrapped as ONE string
+  (the lockstep contract `itemLines.length === itemHeight` is untouched —
+  wrap-ansi's hard wrap only inserts newlines, so the wrapped rows are
+  contiguous slices of the original), then each row is re-split into
+  colored spans by clipping the mark/name/args segment boundaries to the
+  row's range (handles a name that itself wraps).
+- **Busy header** — `· working…` is now yellow (the one moment the header
+  should stand out; the dim chrome is the resting state). The dim base is
+  truncated to leave room for the indicator, so the header is ALWAYS
+  exactly one row (frame contract) — a long model label truncates instead
+  of wrapping the frame to rows+1.
+
+Tests: the span-shape pins in `test/tui-pinned-layout.test.ts` updated for
+the new mark/name colors (incl. a new red-`✗` error-tool case), plus a new
+frame-height regression in `test/tui-app.test.tsx` (busy frame == idle
+frame height with a 90-char model label). Full suite green (395 pass, 0
+fail). PTY capture: pinned block intact, 24 rows. Color codes verified in
+a FORCE_COLOR render: 33m `→`, 34m name, 32m `✓`/diff+, 31m `✗`/diff-,
+36m user, 33m `· working…`.
+
+**Note for the user:** this is the TUI (the Ink app). The plain CLI/REPL
+printer (`printEvent` in `src/cli/main.ts`) is deliberately untouched — it
+prints to piped stdout where color is not assumed. If you also want the
+one-shot/REPL output colored, that is a separate increment (it would need a
+TTY/color-support check before emitting ANSI).
+
+---
+
 # HANDOFF — safe command substitution / heredoc no longer prompt (2026-09-25)
 
 **Status: COMPLETED.** Implemented by tre. (one-shot runs, 27B Qwen3.8 on

@@ -86,6 +86,29 @@ test("renders a busy indicator and the streaming caret", () => {
   app.unmount();
 });
 
+test("the busy header stays ONE row: a long model label truncates, never wraps", () => {
+  // The frame is exactly `rows` tall by construction; the busy suffix
+  // (" · working…") is appended to the dim base, so the base must be
+  // truncated to leave room — a wrap would add a row and break the frame.
+  const longModel = "a".repeat(90);
+  const mk = (busy: boolean) => {
+    const s = { ...makeInitialState(longModel), busy, items: [] as TuiItem[] };
+    const a = makeApp(s);
+    return a;
+  };
+  const idle = mk(false);
+  const idleFrame = idle.lastFrame() ?? "";
+  idle.unmount();
+  const busy = mk(true);
+  const busyFrame = busy.lastFrame() ?? "";
+  busy.unmount();
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const lineCount = (f: string) => strip(f).replace(/\n$/, "").split("\n").length;
+  assert.match(busyFrame, /working…/);
+  // The busy indicator shows (the label truncates, the indicator does not).
+  assert.equal(lineCount(busyFrame), lineCount(idleFrame), "busy frame is the same height as idle");
+});
+
 test("typing routes chars and backspace to callbacks; enter submits", async () => {
   const calls: string[] = [];
   const app = makeApp(makeInitialState("m"), {
