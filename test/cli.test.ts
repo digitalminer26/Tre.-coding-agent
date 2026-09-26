@@ -588,6 +588,62 @@ test("main: bad model id / missing models file → exit 2", async (t) => {
   assert.equal(code2, 2);
 });
 
+// ─────────────────────── startup config guide (deployability) ───────────────────────
+
+test("main: no models.json → step-by-step config guide (REQUIRED/NEEDED), exit 2", async (t) => {
+  const { dir } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(["run", "x", "--models", join(dir, "missing.json")], {
+    streamFn: fakeStream([{ type: "text", text: "x" }]),
+    sinks: S.sinks,
+  });
+  assert.equal(code, 2);
+  const err = S.err();
+  assert.match(err, /none is configured yet/);
+  assert.match(err, /REQUIRED/);
+  assert.match(err, /baseUrl — NEEDED/);
+  assert.match(err, /OPTIONAL/);
+  assert.match(err, /apiKey — \(unset\)/);
+});
+
+test("main: models.json with blank baseUrl → adaptive guide (populated shown, baseUrl NEEDED), exit 2", async (t) => {
+  const { dir } = await workspace(t);
+  const models = join(dir, "models.json");
+  await writeFile(
+    models,
+    JSON.stringify({
+      default: "m1",
+      models: [{ id: "m1", provider: "vks", contextWindow: 131072, maxTokens: 32768, temperature: 0.6 }],
+    }),
+  );
+  const S = mkSinks();
+  const code = await main(["run", "x", "--models", models], {
+    streamFn: fakeStream([{ type: "text", text: "x" }]),
+    sinks: S.sinks,
+  });
+  assert.equal(code, 2);
+  const err = S.err();
+  // Populated fields are shown with their values…
+  assert.match(err, /id — populated: "m1"/);
+  assert.match(err, /provider — populated: "vks"/);
+  assert.match(err, /contextWindow — populated: 131072/);
+  assert.match(err, /temperature — populated: 0.6/);
+  // …and the missing endpoint field is NEEDED.
+  assert.match(err, /baseUrl — NEEDED/);
+});
+
+test("main: models.json WITH a baseUrl → no guide (proceeds to run)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(["run", "say hi", "--tools", "none", "--models", models], {
+    streamFn: fakeStream([{ type: "text", text: "hi" }]),
+    sinks: S.sinks,
+  });
+  assert.equal(code, 0);
+  // A configured endpoint never triggers the setup guide.
+  assert.doesNotMatch(S.err(), /none is configured yet/);
+});
+
 // ─────────────────────── mid-run kill keeps the prompt ───────────────────────
 
 /** A stream that emits a partial, then hangs until the signal aborts (kill). */

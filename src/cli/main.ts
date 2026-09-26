@@ -58,7 +58,14 @@ import "../tui/terminal-size-fix.js";
 // C29: MUST also run before ink is linked — see the module doc for why
 // (kills the DEV reconciler's per-render performance.measure at the root).
 import "../tui/prod-env.js";
-import { findModelsFile, loadModelsFile, resolveModel } from "../config/models.js";
+import {
+  buildModelsSetupGuide,
+  findModelsFile,
+  hasEndpoint,
+  loadModelsFile,
+  readActiveModelLenient,
+  resolveModel,
+} from "../config/models.js";
 import {
   compactContext,
   estimateTokens,
@@ -781,19 +788,33 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   }
 
   // models (D19: --models wins; otherwise locate — nearest models.json above
-  // the launch directory, then the permanent ~/.tre/models.json)
+  // the launch directory, then the permanent ~/.tre/models.json).
+  //
+  // Deployability: a fresh checkout / first run on a new machine has no
+  // endpoint wired up yet. Rather than a bare "not found" error, the startup
+  // prints a step-by-step configuration guide — REQUIRED vs OPTIONAL fields,
+  // each REQUIRED field marked populated (show the value) or needed (show a
+  // placeholder) — whenever there is NO endpoint configuration populated
+  // (no models.json, or the active model's baseUrl is blank).
   const modelsPath = args.modelsPath ?? findModelsFile(undefined, path.resolve(process.cwd()));
-  if (modelsPath === null) {
-    sinks.err.write(
-      `error: models.json not found — searched ${path.resolve(process.cwd())} and its parents, then ~/.tre/models.json; pass --models <file>\n`,
-    );
-    return 2;
-  }
   let model: ModelConfig;
   // C34: the full catalog (all models, not just the active one) — the TUI's
   // /models lists + switches across it. Loaded once; the active model is
   // resolved from it below.
   let modelsFile: ReturnType<typeof loadModelsFile>;
+  if (modelsPath === null) {
+    sinks.err.write(
+      buildModelsSetupGuide({}, "~/.tre/models.json (or pass --models <file>)") + "\n",
+    );
+    return 2;
+  }
+  // A file that does not even parse (or has no models) cannot be strict-
+  // loaded; the lenient reader still tells the guide what is populated.
+  const lenient = readActiveModelLenient(modelsPath);
+  if (lenient === null || !hasEndpoint(lenient)) {
+    sinks.err.write(buildModelsSetupGuide(lenient ?? {}, modelsPath) + "\n");
+    return 2;
+  }
   try {
     modelsFile = loadModelsFile(modelsPath);
     model = resolveModel(modelsFile, args.modelId);

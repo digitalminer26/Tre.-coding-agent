@@ -1,3 +1,53 @@
+# HANDOFF — Startup config guide: step-by-step models.json setup when no endpoint is configured (2026-09-26)
+
+**Status: COMPLETED.** One increment, one commit (see git log). Part of making
+tre. deployable on another endpoint/machine.
+
+**The problem.** A fresh checkout / first run on a new machine has no endpoint
+wired up yet, so `tre.` could only print a bare "models.json not found" error
+and exit 2 — dead end for someone deploying to a new endpoint.
+
+**The fix.** At startup, when there is **no endpoint configuration populated**
+(no models.json, or the active model's `baseUrl` is blank), `main()` prints a
+step-by-step configuration guide to stderr and exits 2. The guide is
+**adaptive**: it lists every field, marks each **REQUIRED** field as either
+`populated: <value>` (already filled in — shows the value) or `NEEDED:
+<placeholder>` (still blank), and lists the **OPTIONAL** fields (`apiKey`,
+`temperature`, `compat`) as populated or `(unset)` — optionals never block
+start. It ends with a ready-to-edit JSON template (populated values kept,
+blank ones as placeholders).
+
+- `src/config/models.ts`:
+  - `buildModelsSetupGuide(model, fileLabel)` — pure guide generator (REQUIRED
+    vs OPTIONAL, populated vs NEEDED, + template). `REQUIRED_FIELDS` /
+    `OPTIONAL_FIELDS` drive it; `isPopulated` = non-empty string / finite
+    positive number / non-empty object.
+  - `hasEndpoint(model)` — true iff `baseUrl` is populated (the trigger).
+  - `readActiveModelLenient(path)` — reads the active (default, else first)
+    model's populated fields WITHOUT throwing on missing required fields, so
+    the guide can show what's already filled in. `null` = unreadable/bad JSON
+    (strict loader reports those); `{}` = no models at all.
+- `src/cli/main.ts`: startup now (a) no models.json → empty guide to
+  `~/.tre/models.json (or pass --models <file>)`; (b) models.json present but
+  `!hasEndpoint(lenient)` → adaptive guide for that file; (c) otherwise
+  proceeds to the strict load as before. Exit 2 in (a)/(b).
+- Tests: `test/models.test.ts` (+7: hasEndpoint, guide empty/partial/optional,
+  lenient partial/default-resolution/bad-json/empty), `test/cli.test.ts`
+  (+3: no-file guide, blank-baseUrl adaptive guide, configured-endpoint
+  proceeds without a guide).
+
+Tests: full suite green (430 pass, 0 fail; 438 total, 8 live-skipped).
+Verified against the compiled binary in a clean-HOME sandbox: missing file →
+empty guide; blank-baseUrl file → adaptive guide (populated shown, baseUrl
+NEEDED); configured endpoint → no guide.
+
+Note: this is the CONFIG-TIME trigger (deterministic, no network probe), per
+the spec — "no endpoint configuration populated" = `baseUrl` blank. A
+reachable-vs-not check would be flaky (network/sandbox) and is intentionally
+out of scope.
+
+---
+
 # HANDOFF — TUI /models: list the catalog + switch the active model (2026-09-26)
 
 **Status: COMPLETED.** One increment (C34), one commit: `ac76b10`.
