@@ -1,3 +1,57 @@
+# HANDOFF — TUI context display: breakdown + compaction trigger + colors (2026-09-26)
+
+**Status: COMPLETED.** One increment (C33), one commit: `f30e682`.
+
+The `context` bottom field now answers TWO questions the old
+`used/window (pct)` did not: **where** the context tokens come from and
+**when** compaction fires.
+
+- `src/tui/state.ts`:
+  - `TuiState.systemPromptTokens` (new, `makeInitialState` 6th arg) —
+    the fixed prompt floor, estimated chars/4 (the loop's estimator) and
+    seeded by the driver from `opts.systemPrompt`.
+  - `TuiState.summaryTokens` — estimated size of the current compaction
+    summary (chars/4 from the event's `summaryChars`), set on each
+    `context_compacted`; 0 until the first compaction.
+  - `compactThreshold(window, maxTokens, slack=1024)` — the REAL
+    `shouldCompact` trigger (`window − maxTokens − slack`, clamped ≥ 0),
+    exported so the display and the loop can never drift.
+  - `contextBreakdown(state)` — `{ system, summary, messages, total,
+    threshold, headroom }`; messages = total − system − summary (the
+    summary is a user message IN context, so it is part of total).
+  - `contextReport(state)` — the multi-line `/context` body:
+    total/window + `system prompt / summary / messages` split + the
+    trigger with headroom (`DUE` when over).
+  - `contextUrgencyColor(state)` — green < 70% ≤ yellow < 90% ≤ red of
+    the THRESHOLD (not the window — compaction fires at the threshold);
+    undefined (dim) when unknown.
+  - `bottomLineColors(state)` — per-line colors aligned 1:1 with
+    `bottomLines` (mirrors its unknown-key skip + padding), so the
+    renderer pairs color with text.
+  - The `context` bottom value is now
+    `used/window (pct) · sys N · [sum N] · msgs N · @threshold|DUE`
+    (compact: the headroom number lives in `/context`, not the one-liner,
+    so it fits a bottom line). `fmtTokens(0)` → `"0"`.
+  - `/context` added to `SLASH_COMMANDS` + `handleSlashCommand` (info
+    item; works mid-run via the C32 busy route, like `/stats`).
+- `src/tui/app.tsx`: the reserved bottom lines render through
+  `bottomLineColors` — the context line is tinted by urgency, the rest
+  stay dim.
+- `src/tui/run.tsx`: seeds `systemPromptTokens` from `opts.systemPrompt`.
+- Tests: `test/tui-state.test.ts` (+6: threshold, breakdown, urgency
+  color, report, `/context` handler, bottomLineColors),
+  `test/tui-pinned-layout.test.ts` (context field expectations enriched;
+  menu tests updated for the 5th command — `/context` sorts first).
+
+Tests: full suite green (417 pass, 0 fail; 425 total, 8 live-skipped).
+PTY verification (live 27B, trivial prompt): the bottom field renders
+`context: 1.6k/131.1k (1%) · sys 0.6k · msgs 1k · @97.3k` with the GREEN
+urgency escape (`\u001b[32m`) in the raw frame; `/context` appends the
+4-line report (system prompt 0.6k / messages 1k / compaction at 97.3k,
+95.7k headroom).
+
+---
+
 # HANDOFF — TUI config: persisted `/display-bottom` + slash commands mid-run (2026-09-26)
 
 **Status: COMPLETED.** Two increments (C32), three commits:
