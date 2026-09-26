@@ -11,7 +11,17 @@
   "engines": {
     "node": ">=20"
   },
+  "files": [
+    "dist",
+    "src",
+    "test",
+    "tsconfig.json",
+    "models.json",
+    "README.md",
+    "THIRD_PARTY.md"
+  ],
   "scripts": {
+    "prepare": "tsc",
     "build": "tsc",
     "check": "sh scripts/quality-check.sh",
     "test": "sh scripts/quality-check.sh && tsc && node --test dist/test/*.test.js",
