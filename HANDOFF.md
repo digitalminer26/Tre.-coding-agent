@@ -1,3 +1,60 @@
+# HANDOFF — TUI config: persisted `/display-bottom` + slash commands mid-run (2026-09-26)
+
+**Status: COMPLETED.** Two increments (C32), three commits:
+
+1. `975cd44` — the `/display-bottom` selection now survives between tre.
+   sessions. New `src/tui/tui-config.ts`: the selection lives in
+   `~/.tre/tui.json` (the TUI's permanent home, next to models.json and
+   sessions/). `loadTuiConfig` never throws (missing/corrupt/non-object
+   file → default; `bottom` normalized like the command itself — unknown
+   fields dropped, deduped, order kept — so a hand-edited file can never
+   select a nonexistent field); `saveTuiConfig` is best-effort (creates
+   the parent dir, swallows write failures, returns bool). The driver
+   (run.tsx) loads at startup into `makeInitialState` (new 5th arg) and
+   saves after a handled slash command whose `bottom` array reference
+   changed (exactly the `/display-bottom` set/off/unknown-field paths —
+   `/stats` keeps the same array, so no spurious writes).
+2. `1cc1839` — slash commands are handled WHILE A TASK IS RUNNING. A busy
+   submit with a `/` prefix goes through the new pure `submitSlashBusy`
+   (state.ts: clears the line like submitInput — input/cursor/history —
+   and returns the trimmed line; null when idle/approving/empty/non-slash)
+   + `handleSlashCommand` — so `/display-bottom` reconfigures the bottom
+   lines mid-task (feedback lands as an info item, `busy` untouched, the
+   run and the loop's next drain are unaffected), and `/stats` works
+   mid-run too. A slash line is NEVER a steer (it must not be queued for
+   the loop); unknown slash lines stay swallowed, non-slash lines still
+   steer, and `/quit`-while-busy still aborts+exits (checked first).
+3. `cd0b9c9` — e2e scenario 17 (`tui-slash-mid-run(C32)`): a 40-line
+   reply (the wide mid-run window, scenario-15 task), `/display-bottom
+   model turn` typed while the turn runs, then asserts on the
+   ANSI-stripped frame (line-anchored greps need the clean text — raw
+   capture lines carry `\r` + dim escapes): the feedback info line, the
+   new bottom fields rendered, the reply completed after the mid-run
+   command, and `~/.tre/tui.json` == `["model","turn"]`. HOME is pointed
+   at the scenario dir so the real user's config is never touched.
+
+Files: `src/tui/tui-config.ts` (new), `src/tui/state.ts` (`makeInitialState`
+bottom seed + `submitSlashBusy`), `src/tui/run.tsx` (load at startup,
+save-on-change, busy-slash route), `test/tui-config.test.ts` (new, 11
+tests), `test/tui-state.test.ts` (seed + busy-route pins), `test/e2e.sh`
+(scenario 17 + runner registration).
+
+Tests: full suite green (411 pass, 0 fail; 419 total, 8 live-skipped).
+PTY verification: (a) persistence — session 1 set `model context`,
+`~/.tre/tui.json` written, fresh session 2 restored both fields with the
+pinned frame intact; (b) mid-run — a `sleep 8` bash tool running,
+`/display-bottom model turn` typed mid-tool: feedback info line rendered,
+bottom lines switched live, tool finished, config persisted. E2E 17
+passed live against the 27B.
+
+Note for future work: the `edit` tool corrupted `test/e2e.sh` twice during
+this task (truncated lines around the replacement point, duplicated tail) —
+the file was restored from git and the scenario was patched via a
+deterministic python script instead. If `edit` misbehaves on that file
+again, `git checkout -- test/e2e.sh` and re-apply.
+
+---
+
 # HANDOFF — TUI readability: block icons, hanging indents, turn spacing (2026-09-26)
 
 **Status: COMPLETED.** One increment (C31): the TUI rendered every block as
