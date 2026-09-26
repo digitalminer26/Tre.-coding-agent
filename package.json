@@ -14,9 +14,7 @@
   "files": [
     "dist",
     "src",
-    "test",
     "tsconfig.json",
-    "models.json",
     "README.md",
     "THIRD_PARTY.md"
   ],
