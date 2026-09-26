@@ -542,9 +542,15 @@ test("safety: compound commands, redirects, $( ), backticks, sudo disqualify rea
   assert.equal(isReadOnlyBash("echo hi > out.txt"), false);
   assert.equal(isReadOnlyBash("ls > /dev/null"), true); // /dev/null is fine
   assert.equal(isReadOnlyBash("cat x 2>&1"), true); // fd dup is fine
-  // command substitution / backticks / sudo
-  assert.equal(isReadOnlyBash("echo $(rm -rf x)"), false);
-  assert.equal(isReadOnlyBash("echo `id`"), false);
+  // command substitution / backticks / sudo — a substitution is SAFE only
+  // when its inner command is read-only or reversible; an unsafe inner
+  // (mutating / destructive) or sudo still disqualifies read-only.
+  assert.equal(isReadOnlyBash("echo $(date)"), true); // safe inner (read-only)
+  assert.equal(isReadOnlyBash("echo $(pwd)"), true); // safe inner (read-only)
+  assert.equal(isReadOnlyBash("echo `id`"), true); // safe backtick inner
+  assert.equal(isReadOnlyBash("echo $(rm -rf x)"), false); // unsafe inner
+  assert.equal(isReadOnlyBash("echo `rm -rf x`"), false); // unsafe backtick inner
+  assert.equal(isReadOnlyBash("echo $(curl -s x)"), false); // unsafe inner
   assert.equal(isReadOnlyBash("sudo ls"), false);
 });
 
@@ -676,6 +682,22 @@ test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive
   assert.equal(noRo.blocked, undefined, "no: read-only bash is allowed");
   const noSensRo = await gateDecision("no", FAKE_TOOL, { command: "cat ~/.ssh/id_rsa" }, true);
   assert.match(noSensRo.blocked!, /no-approve/, "no: sensitive bash is blocked even if read-only-looking");
+});
+
+test("safety: ask mode — standard commit forms with safe substitution/heredoc do NOT prompt", async () => {
+  // the model's everyday commit shapes must run without a prompt in ask mode
+  const commitDate = 'git commit -m "$(date)"';
+  const commitStatus = 'git commit -m "$(git status --short)"';
+  const commitHeredoc = 'git add -A && git commit -m "$(cat <<\'EOF\'\nfix: a change\nEOF\n)"';
+  for (const cmd of [commitDate, commitStatus, commitHeredoc]) {
+    const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `ask: ${JSON.stringify(cmd.slice(0, 40))}... runs without a prompt`);
+    assert.equal(d.blocked, undefined, `ask: ${JSON.stringify(cmd.slice(0, 40))}... is allowed`);
+  }
+  // a commit with an UNSAFE inner substitution still prompts (mutating)
+  const commitUnsafe = 'git commit -m "$(rm -rf x)"';
+  const d = await gateDecision("ask", FAKE_TOOL, { command: commitUnsafe }, true);
+  assert.equal(d.asked.length, 1, "ask: a commit with an unsafe inner substitution prompts");
 });
 
 test("safety: mode matrix — write/edit (sandboxed, no prompt in ask/yes, blocked in no)", async () => {

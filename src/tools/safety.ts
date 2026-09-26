@@ -83,10 +83,12 @@
  *        - docker ps/images/inspect/logs/version
  *        - `ip addr` (the read-only form of `ip`)
  *      A compound command (; && || |) counts as read-only ONLY if EVERY
- *      segment is read-only. Anything containing $( ), backticks, sudo, or
- *      an output redirect to a real path (redirects to /dev/null and fd
- *      dups like 2>&1 are fine) is NOT read-only. Anything unrecognized is
- *      never read-only (fail-closed).
+ *      segment is read-only. A command substitution / backtick whose INNER
+ *      command is itself read-only counts as a safe opaque argument (e.g.
+ *      `echo $(date)`); a substitution whose inner command is not read-only
+ *      is NOT read-only (fail-closed). sudo and an output redirect to a real
+ *      path (redirects to /dev/null and fd dups like 2>&1 are fine) are NOT
+ *      read-only. Anything unrecognized is never read-only (fail-closed).
  *
  *      REVERSIBLE — undoable in practice; no prompt in ask/yes:
  *        - git add, git commit, git stash (push/list), git switch <branch>,
@@ -216,6 +218,45 @@ async function realpathExisting(p: string): Promise<string> {
  * extra prompt, a false negative is a destroyed machine.
  */
 export function destructiveBashPatterns(command: string): string[] {
+  // The raw scan sees tokens of the WHOLE command, but a destructive verb
+  // hidden inside a substitution (`git commit -m "$(rm -rf /)"`) is glued to
+  // the `$(` token and invisible to it. Inherit the labels from every
+  // substitution's inner command (recursively — each inner is strictly
+  // shorter, so this terminates; unbalanced substitutions are ignored here,
+  // because the RO/REV classifiers already gate them as unsafe).
+  const hits = rawDestructiveHits(command);
+  const inners = findSubstitutions(command);
+  if (inners !== null) {
+    for (const inner of inners) {
+      for (const h of destructiveBashPatterns(inner)) {
+        if (!hits.includes(h)) hits.push(h);
+      }
+    }
+  }
+  return hits;
+}
+
+/**
+ * `git` subcommand = the FIRST positional argument after the git token,
+ * skipping global flags (`-C <path>` and `-c <val>` each consume a value;
+ * other leading flags are skipped). Destructive git checks must match the
+ * SUBCOMMAND, not a word anywhere in the argument list — `git stash push
+ * -m wip` is not `git push`. Returns null when no positional remains.
+ */
+function gitSubcommand(rest: string[]): { sub: string; args: string[] } | null {
+  let i = 0;
+  while (i < rest.length) {
+    const t = rest[i]!;
+    if (t === "-C" || t === "-c") i += 2; // global flags that take a value
+    else if (t.startsWith("-")) i += 1; // other leading flags (--git-dir=…)
+    else break;
+  }
+  if (i >= rest.length) return null;
+  return { sub: rest[i]!, args: rest.slice(i + 1) };
+}
+
+/** The raw token/regex destructive scan (no substitution recursion). */
+function rawDestructiveHits(command: string): string[] {
   const hits: string[] = [];
   const tokens = command.split(/\s+/).filter((t) => t.length > 0);
 
@@ -238,14 +279,14 @@ export function destructiveBashPatterns(command: string): string[] {
   }
 
   // git push — ANY push (publishing to a remote is irreversible; force
-  // pushes are the obvious subset)
+  // pushes are the obvious subset). Only when `push` IS the subcommand —
+  // `git stash push -m wip` is a local, undoable operation.
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const pi = rest.indexOf("push");
-    if (pi === -1) continue;
-    const force = rest.slice(pi + 1).some((f) => {
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "push") continue;
+    const force = sc.args.some((f) => {
       if (f === "--force" || f === "--force-with-lease") return true;
       return f.startsWith("-") && !f.startsWith("--") && f.slice(1).includes("f");
     });
@@ -256,20 +297,18 @@ export function destructiveBashPatterns(command: string): string[] {
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const ri = rest.indexOf("reset");
-    if (ri === -1) continue;
-    if (rest.slice(ri + 1).includes("--hard")) hits.push("git reset --hard");
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "reset") continue;
+    if (sc.args.includes("--hard")) hits.push("git reset --hard");
   }
 
   // git clean with a force flag (-f / -fd / -x): removes untracked files
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const ci = rest.indexOf("clean");
-    if (ci === -1) continue;
-    const forced = rest.slice(ci + 1).some((f) => {
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "clean") continue;
+    const forced = sc.args.some((f) => {
       if (f === "--force") return true;
       if (f.startsWith("--")) return false; // other long flags
       // short flags: an "f" or "x" means force (-f, -fd, -fx, -x, ...);
@@ -283,10 +322,9 @@ export function destructiveBashPatterns(command: string): string[] {
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const bi = rest.indexOf("branch");
-    if (bi === -1) continue;
-    if (rest.slice(bi + 1).some((f) => f === "-D" || f === "--delete")) {
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "branch") continue;
+    if (sc.args.some((f) => f === "-D" || f === "--delete")) {
       hits.push("git branch -D (force-delete a branch)");
     }
   }
@@ -295,10 +333,9 @@ export function destructiveBashPatterns(command: string): string[] {
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const ci = rest.indexOf("checkout");
-    if (ci === -1) continue;
-    const args = rest.slice(ci + 1);
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "checkout") continue;
+    const args = sc.args;
     if (args.includes(".") || args.includes("--")) {
       hits.push("git checkout . / -- <path> (discards uncommitted work)");
     }
@@ -309,10 +346,9 @@ export function destructiveBashPatterns(command: string): string[] {
   for (let i = 0; i + 1 < tokens.length; i++) {
     const t = tokens[i]!;
     if (t !== "git" && !/\/git$/.test(t)) continue;
-    const rest = tokens.slice(i + 1);
-    const ri = rest.indexOf("restore");
-    if (ri === -1) continue;
-    if (!rest.slice(ri + 1).includes("--source")) {
+    const sc = gitSubcommand(tokens.slice(i + 1));
+    if (!sc || sc.sub !== "restore") continue;
+    if (!sc.args.includes("--source")) {
       hits.push("git restore (discards uncommitted work)");
     }
   }
@@ -452,26 +488,303 @@ const DOCKER_READONLY = new Set(["ps", "images", "inspect", "logs", "version"]);
  *    subcommand form
  */
 /**
- * Whole-command disqualifiers for a "safe" classification (fail-closed):
- * command substitution, backticks, sudo, and output redirect to a real
- * path (>/dev/null and fd dups like 2>&1 are fine).
+ * Verdict on a command's shell constructs (command substitutions, backticks,
+ * sudo, output redirects), evaluated for a given classifier PURPOSE:
+ *  - "safe": no constructs, or every substitution's inner command is
+ *    acceptable for the purpose — read-only inners are always acceptable;
+ *    a reversible (mutating) inner is acceptable only for the "reversible"
+ *    purpose (it has side effects, so it is NOT read-only). The safe
+ *    substitutions count as opaque arguments.
+ *  - "unsafe": a construct is not provably safe for the purpose (a
+ *    substitution whose inner is not acceptable, or sudo, or a redirect to
+ *    a real path) — the command is not read-only/reversible
+ *  - "destructive": a substitution's inner command is destructive — the
+ *    whole command is destructive (prompts in every mode)
+ * Fail-closed: anything unrecognized (an unbalanced substitution, deep
+ * nesting) is "unsafe".
  */
-function hasUnsafeConstructs(command: string): boolean {
-  if (command.includes("`") || /\$\s*\(/.test(command) || /\$\(/.test(command)) return true;
-  if (/\bsudo\b/.test(command)) return true;
+type ConstructVerdict =
+  | { kind: "safe" }
+  | { kind: "unsafe" }
+  | { kind: "destructive"; labels: string[] };
+
+/** Which classifier asked for the construct verdict. */
+type ConstructPurpose = "readonly" | "reversible";
+
+/** Maximum substitution nesting depth before we give up (fail-closed). */
+const MAX_SUB_DEPTH = 4;
+
+/**
+ * Classify a command's shell constructs for a given classifier purpose. See
+ * ConstructVerdict. A command with no constructs (or only substitutions
+ * whose inners are acceptable for the purpose) is "safe"; sudo and a
+ * redirect to a real path are "unsafe"; a substitution whose inner command
+ * is destructive makes the whole command "destructive".
+ */
+function constructVerdict(command: string, purpose: ConstructPurpose, depth = 0): ConstructVerdict {
+  // sudo is never safe
+  if (/\bsudo\b/.test(command)) return { kind: "unsafe" };
   // Output redirect to a real path (not /dev/null, not a pure fd dup).
   for (const m of command.matchAll(/>{1,2} *([^|\s;&)]*)/g)) {
     const target = (m[1] ?? "").trim();
     if (target === "" || target === "/dev/null") continue;
     if (/^\d+$/.test(target)) continue; // fd dup (2>&1 has no target here)
-    return true;
+    return { kind: "unsafe" };
   }
-  return false;
+  // Command substitutions: $(...) and backticks.
+  const inners = findSubstitutions(command);
+  if (inners === null) return { kind: "unsafe" }; // unbalanced — fail closed
+  if (inners.length === 0) return { kind: "safe" };
+  if (depth > MAX_SUB_DEPTH) return { kind: "unsafe" };
+  const labels: string[] = [];
+  let unsafe = false;
+  for (const inner of inners) {
+    const v = substitutionInnerVerdict(inner, purpose, depth + 1);
+    if (v.kind === "destructive") {
+      for (const l of v.labels) if (!labels.includes(l)) labels.push(l);
+    } else if (v.kind === "unsafe") {
+      unsafe = true;
+    }
+  }
+  if (labels.length > 0) return { kind: "destructive", labels };
+  if (unsafe) return { kind: "unsafe" };
+  return { kind: "safe" };
+}
+
+/**
+ * Verdict on a command substitution's INNER command for a given purpose:
+ * "safe" if it is acceptable for the purpose (read-only inners always; a
+ * reversible inner only for the "reversible" purpose), "destructive" if it
+ * is destructive, "unsafe" otherwise (fail-closed).
+ */
+function substitutionInnerVerdict(inner: string, purpose: ConstructPurpose, depth: number): ConstructVerdict {
+  const trimmed = inner.trim();
+  if (trimmed.length === 0) return { kind: "unsafe" };
+  if (depth > MAX_SUB_DEPTH) return { kind: "unsafe" };
+  // Nested constructs inside the inner command (substitutions, sudo, ...).
+  const nested = constructVerdict(trimmed, purpose, depth);
+  if (nested.kind === "destructive") return nested;
+  if (nested.kind === "unsafe") return { kind: "unsafe" };
+  // Read-only inners are acceptable for BOTH purposes.
+  if (isReadOnlyBashDepth(trimmed, depth)) return { kind: "safe" };
+  // A reversible (mutating) inner is acceptable only for the reversible
+  // classifier — it has side effects, so it is NOT a read-only argument.
+  if (purpose === "reversible" && isReversibleBashDepth(trimmed, depth)) return { kind: "safe" };
+  // Destructive at the top level (rm -rf, git push, ...).
+  const destr = destructiveBashPatterns(trimmed);
+  if (destr.length > 0) return { kind: "destructive", labels: destr };
+  return { kind: "unsafe" };
+}
+
+/**
+ * Find all command substitutions in `command`: `$(...)` and backtick
+ * `` `...` ``. Returns the inner command text of each (respecting quotes,
+ * nesting, and heredocs). Returns `null` if any substitution is UNBALANCED
+ * (unterminated) — the caller treats the whole command as unsafe
+ * (fail-closed).
+ */
+function findSubstitutions(command: string): string[] | null {
+  const inners: string[] = [];
+  let i = 0;
+  const n = command.length;
+  while (i < n) {
+    const c = command[i];
+    if (c === "'") {
+      // single-quoted: no expansion; skip to the closing quote
+      i++;
+      while (i < n && command[i] !== "'") i++;
+      i++; // skip the closing quote (or run past the end)
+      continue;
+    }
+    if (c === '"') {
+      // double-quoted: $( ) inside IS expanded, so keep scanning (just
+      // skip the quote char itself)
+      i++;
+      continue;
+    }
+    if (c === "$" && command[i + 1] === "(") {
+      const r = extractBalanced(command, i + 2, "(", ")");
+      if (r === null) return null; // unbalanced — fail closed
+      inners.push(r.text);
+      i = r.end;
+      continue;
+    }
+    if (c === "`") {
+      const r = extractBacktick(command, i + 1);
+      if (r === null) return null; // unbalanced — fail closed
+      inners.push(r.text);
+      i = r.end;
+      continue;
+    }
+    i++;
+  }
+  return inners;
+}
+
+/**
+ * Extract a balanced `open...close` region starting at `start` (just after
+ * the first `open`). Returns the inner text and the index just past the
+ * matching `close`, or null if unbalanced. Respects quotes, nested
+ * substitutions, and heredocs.
+ */
+function extractBalanced(
+  command: string,
+  start: number,
+  open: string,
+  close: string,
+): { text: string; end: number } | null {
+  let depth = 1;
+  let i = start;
+  const n = command.length;
+  while (i < n) {
+    const c = command[i];
+    if (c === "'") {
+      i++;
+      while (i < n && command[i] !== "'") i++;
+      if (i >= n) return null;
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < n) {
+        if (command[i] === "\\") { i += 2; continue; }
+        if (command[i] === '"') break;
+        i++;
+      }
+      if (i >= n) return null;
+      i++;
+      continue;
+    }
+    if (c === "<" && command[i + 1] === "<") {
+      const skipped = skipHeredoc(command, i);
+      if (skipped === -1) return null; // unterminated heredoc
+      i = skipped;
+      continue;
+    }
+    if (c === "$" && command[i + 1] === "(") {
+      depth++;
+      i += 2;
+      continue;
+    }
+    if (c === "`") {
+      const r = extractBacktick(command, i + 1);
+      if (r === null) return null;
+      i = r.end;
+      continue;
+    }
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return { text: command.slice(start, i), end: i + 1 };
+    }
+    i++;
+  }
+  return null;
+}
+
+/** Extract a backtick `` `...` `` region starting at `start` (just after
+ *  the opening backtick). Returns the inner text and the index just past
+ *  the closing backtick, or null if unbalanced. */
+function extractBacktick(command: string, start: number): { text: string; end: number } | null {
+  let i = start;
+  const n = command.length;
+  while (i < n) {
+    const c = command[i];
+    if (c === "\\") { i += 2; continue; }
+    if (c === "'") {
+      i++;
+      while (i < n && command[i] !== "'") i++;
+      if (i >= n) return null;
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < n) {
+        if (command[i] === "\\") { i += 2; continue; }
+        if (command[i] === '"') break;
+        i++;
+      }
+      if (i >= n) return null;
+      i++;
+      continue;
+    }
+    if (c === "$" && command[i + 1] === "(") {
+      const r = extractBalanced(command, i + 2, "(", ")");
+      if (r === null) return null;
+      i = r.end;
+      continue;
+    }
+    if (c === "`") {
+      return { text: command.slice(start, i), end: i + 1 };
+    }
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Given the index of the first `<` of a `<<`/`<<-`/`<<<` operator, return
+ * the index just past the heredoc/here-string (or -1 if unterminated). A
+ * heredoc body may contain anything (including `)`), so it must be skipped
+ * whole when balancing the enclosing substitution.
+ */
+function skipHeredoc(command: string, i: number): number {
+  const n = command.length;
+  let d = i + 2;
+  if (d < n && command[d] === "<") {
+    // here-string <<<: the content is on the same line; skip to end of line
+    const nl = command.indexOf("\n", d + 1);
+    return nl === -1 ? n : nl + 1;
+  }
+  if (d < n && command[d] === "-") d++;
+  // read the delimiter (possibly quoted)
+  let delim = "";
+  if (d < n && (command[d] === "'" || command[d] === '"')) {
+    const q = command[d];
+    d++;
+    while (d < n && command[d] !== q) { delim += command[d]!; d++; }
+    if (d >= n) return -1;
+    d++; // skip the closing quote
+  } else {
+    while (d < n && !/\s/.test(command[d]!)) { delim += command[d]!; d++; }
+  }
+  if (delim.length === 0) return -1; // not a heredoc (e.g. `<< 2`)
+  // the body starts after the newline following the <<delim
+  const nl = command.indexOf("\n", d);
+  if (nl === -1) return -1;
+  let searchFrom = nl + 1;
+  while (searchFrom <= n) {
+    const lineEnd = command.indexOf("\n", searchFrom);
+    const line = command.slice(searchFrom, lineEnd === -1 ? n : lineEnd);
+    if (line.replace(/^\t+/, "") === delim) {
+      return (lineEnd === -1 ? n : lineEnd) + 1;
+    }
+    if (lineEnd === -1) return -1;
+    searchFrom = lineEnd + 1;
+  }
+  return -1;
 }
 
 export function isReadOnlyBash(command: string): boolean {
+  return isReadOnlyBashDepth(command, 0);
+}
+
+/**
+ * Read-only check at a given substitution depth. At depth 0 the command's
+ * constructs are evaluated (a substitution with a read-only/reversible
+ * inner counts as a safe opaque argument); at depth > 0 (we are inside a
+ * substitution) constructs are NOT evaluated — the inner command is treated
+ * as a plain command (its own substitutions are checked by the outer
+ * substitution's verdict, not here).
+ */
+function isReadOnlyBashDepth(command: string, depth: number): boolean {
   if (command.length === 0) return false;
-  if (hasUnsafeConstructs(command)) return false;
+  if (depth === 0) {
+    const v = constructVerdict(command, "readonly", 0);
+    if (v.kind !== "safe") return false;
+  }
   // Compound: every segment must be read-only.
   const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).filter((s) => s.trim().length > 0);
   if (segments.length === 0) return false;
@@ -523,8 +836,22 @@ function isReadOnlyGit(rest: string[]): boolean {
  * mutating segment stays gated (fail-closed).
  */
 export function isReversibleBash(command: string): boolean {
+  return isReversibleBashDepth(command, 0);
+}
+
+/**
+ * Reversible check at a given substitution depth. At depth 0 the command's
+ * constructs are evaluated (a substitution with a read-only/reversible
+ * inner counts as a safe opaque argument); at depth > 0 (we are inside a
+ * substitution) constructs are NOT evaluated — the inner command is treated
+ * as a plain command.
+ */
+function isReversibleBashDepth(command: string, depth: number): boolean {
   if (command.length === 0) return false;
-  if (hasUnsafeConstructs(command)) return false;
+  if (depth === 0) {
+    const v = constructVerdict(command, "reversible", 0);
+    if (v.kind !== "safe") return false;
+  }
   const segments = command.split(/\s*(?:&&|\|\||[;|])\s*/).filter((s) => s.trim().length > 0);
   if (segments.length === 0) return false;
   // Every segment must be a reversible mutation or read-only, and at least

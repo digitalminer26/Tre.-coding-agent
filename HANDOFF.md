@@ -1,9 +1,106 @@
+# HANDOFF — safe command substitution / heredoc no longer prompt (2026-09-25)
+
+**Status: COMPLETED.** Implemented by tre. (one-shot runs, 27B Qwen3.8 on
+the TKG NVIDIA cluster) across three 30-min chunks; the final two fixes
+(label inheritance + git subcommand position) were finished by the
+orchestrator after the last watchdog kill, per the session's standing
+approval for guardrail-zone commits. `src/tools/safety.ts` is in the agent's
+own cage — committed by the user's explicit instruction with
+`GUARDRAIL_BYPASS=1`.
+
+**Also in this increment (second fix).** The destructive git checks matched
+their keyword ANYWHERE after `git` (`rest.indexOf("push")`), so
+`git stash push -m wip` was falsely flagged "git push (publishes to a
+remote)". Now each check requires the keyword to be the actual
+SUBCOMMAND — the first positional after the git token, skipping global
+flags (`-C <path>`, `-c <val>`, other leading flags) via the new
+`gitSubcommand()` helper. `git -C /r push origin main` and
+`git -c user.name=x push --force origin main` are still caught;
+`git stash push`, `git commit -m push`, `git stash list` are not.
+
+**What changed.** The bash approval gate used to treat ANY command
+substitution (`$( … )`), backtick (`` `…` ``), `sudo`, or output redirect to a
+real path as a blanket disqualifier: `git commit -m "$(date)"` and
+`git add -A && git commit -m "$(cat <<'EOF' … EOF …)"` — the model's everyday
+commit shapes — fell into unknown-mutating and prompted in the default `ask`
+mode, even though the inner command is trivially read-only. Now a
+substitution is a **safe opaque argument** when its INNER command is itself
+read-only (or, for the reversible classifier, reversible); only an inner
+command that is not provably safe still disqualifies. `sudo` and an output
+redirect to a real path remain unsafe, and an unbalanced substitution fails
+closed.
+
+**Why.** The old rule was all-or-nothing: a `$( )` anywhere meant "not
+read-only / not reversible", regardless of what the substitution actually
+did. The model builds commit messages with `$(date)` / `$(git status)` /
+heredocs constantly, so the default mode prompted on routine, side-effect-free
+commands — asking for approval on a reversible action is out of spec. The fix
+classifies the *inner* command and lets the outer command inherit its safety,
+while keeping the fail-closed guarantees (unknown / mutating / destructive
+inners, `sudo`, real-path redirects, and unbalanced substitutions still gate).
+
+**How (safety.ts only).**
+- New `constructVerdict(command, purpose, depth)` → `{ kind: "safe" | "unsafe"
+  | "destructive" }`, evaluated for a classifier PURPOSE. `purpose` is
+  `"readonly"` or `"reversible"`: a substitution whose inner is read-only is
+  safe for BOTH; a substitution whose inner is merely reversible (mutating)
+  is safe only for the reversible classifier (it has side effects, so it is
+  NOT a read-only argument). `sudo` → unsafe; a redirect to a real path (not
+  `/dev/null`, not an fd dup) → unsafe; a substitution whose inner is
+  destructive → destructive (the whole command prompts in every mode).
+- `substitutionInnerVerdict(inner, purpose, depth)` classifies one inner
+  command: read-only inners are always acceptable; a reversible inner is
+  acceptable only when `purpose === "reversible"`; anything else (unknown,
+  mutating, deep nesting) is unsafe; a destructive inner is destructive.
+- `findSubstitutions` now returns `null` on an UNBALANCED substitution
+  (unterminated `$( ` or backtick) so the verdict fails closed (previously
+  unbalanced substitutions were silently skipped and the command was treated
+  as having no constructs).
+- `isReadOnlyBash` / `isReversibleBash` delegate to
+  `isReadOnlyBashDepth` / `isReversibleBashDepth`; at depth 0 they gate on
+  `constructVerdict(…, purpose, 0)` and require `kind === "safe"`, then check
+  every segment via the existing `isReadOnlySegment` / `isReversibleSegment`
+  (a reversible compound still needs ≥1 mutating segment). Nested
+  substitutions are checked by the outer substitution's verdict, not re-run
+  here.
+
+**Still prompts (unchanged, verified):** redirect to a real path
+(`echo hi > out.txt`), `sudo <anything>`, and a substitution whose inner is
+not provably safe (`echo $(rm -rf x)`, `git commit -m "$(rm -rf x)"`,
+`$(curl …)`, backtick `$(mv a b)` for read-only). Sensitive and destructive
+commands are untouched.
+
+**Final details (orchestrator finish).** (1) Label inheritance:
+`destructiveBashPatterns()` now recurses into every substitution's inner
+command (raw scan extracted to `rawDestructiveHits()`; each inner is
+strictly shorter, so the recursion terminates) — a destructive inner such as
+`git commit -m "$(rm -rf /)"` is LABELED destructive on the outer command
+(the prompt says destructive, not merely "not provably reversible"), nested
+substitutions included. (2) Git subcommand position: see above.
+
+**Verification.** `npm run build` clean; `npm test` (quality-check + tsc +
+node --test) 402 tests: 395 pass / 0 fail / 7 skip (pre-existing
+network/TTY skips). New assertions in test/safety.test.ts (read-only /
+reversible substitution + heredoc suites, the fail-closed `$(rm -rf x)`
+inner, unbalanced substitution, destructive-label inheritance incl. nested,
+git subcommand-position matrix) and test/tools.test.ts (the read-only
+disqualifier test now distinguishes safe vs unsafe inners; a new gate-level
+test asserts the standard commit shapes do NOT prompt in ask mode while a
+commit with an unsafe inner still prompts). Live 27-case classifier probe on
+the built dist: ALL PASS — `git commit -m "$(date)"` and the multiline
+heredoc commit form → reversible (no prompt in ask); `git stash push -m wip`
+→ reversible, no destructive hit; `echo hi > out.txt` / `sudo ls` /
+`echo $(rm -rf x)` / `$(curl …)` → neither read-only nor reversible (still
+gate); `git commit -m "$(rm -rf /)"` → destructive label inherited.
+
+**Still open (needs user decision, not started):** removing the `pi`
+dependency — scope unresolved (all references vs the borrowed code /
+`.pi/` convention).
+
 # HANDOFF — reversible actions stop prompting; approval questions state reversibility (2026-09-25)
 
-**GUARDRAIL ZONE — pending USER commit.** `src/tools/safety.ts` is in the
-agent's own cage, so this increment is staged in the working tree for the
-user to commit with `GUARDRAIL_BYPASS=1` (same flow as 05ce223). Do NOT let
-an agent commit this file.
+**Status: COMMITTED (efc7b28)** — guardrail zone, committed by the user's
+explicit instruction with `GUARDRAIL_BYPASS=1` (2026-09-25).
 
 Spec: a reversible action must not require approval — asking for it is out
 of spec — and when approval IS asked, the question must indicate whether

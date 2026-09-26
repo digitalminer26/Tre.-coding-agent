@@ -26,6 +26,7 @@ import { join, resolve } from "node:path";
 import {
   checkPathWithinRoot,
   destructiveBashPatterns,
+  isReadOnlyBash,
   isReversibleBash,
   makeSafetyHooks,
   makeAskQueue,
@@ -234,8 +235,11 @@ test("isReversibleBash: fail-closed on unknown / unsafe / destructive", () => {
   assert.equal(isReversibleBash("curl -s https://example.com"), false);
   assert.equal(isReversibleBash("pip install requests"), false);
   assert.equal(isReversibleBash("frobnicate x"), false);
-  // command substitution / sudo disqualify
-  assert.equal(isReversibleBash("mv $(cat f) g"), false);
+  // a substitution with a SAFE inner (read-only/reversible) counts as an
+  // opaque argument — the command stays reversible; an UNSAFE inner still
+  // disqualifies; sudo always disqualifies.
+  assert.equal(isReversibleBash("mv $(cat f) g"), true); // safe inner
+  assert.equal(isReversibleBash("mv $(rm -rf x) g"), false); // unsafe inner
   assert.equal(isReversibleBash("sudo mv a b"), false);
   // rm is destructive (not reversible), even non-recursive
   assert.equal(isReversibleBash("rm file.txt"), false);
@@ -245,6 +249,93 @@ test("isReversibleBash: fail-closed on unknown / unsafe / destructive", () => {
   assert.equal(isReversibleBash("git reset --hard"), false);
   // an empty command is never reversible
   assert.equal(isReversibleBash(""), false);
+});
+
+// ──────────────────── safe command substitution / heredoc ────────────────────
+
+test("isReadOnlyBash: a substitution with a read-only inner is read-only", () => {
+  assert.equal(isReadOnlyBash("echo $(date)"), true);
+  assert.equal(isReadOnlyBash("echo $(pwd)"), true);
+  assert.equal(isReadOnlyBash("echo $(git status)"), true);
+  assert.equal(isReadOnlyBash("echo $(ls -la)"), true);
+  assert.equal(isReadOnlyBash("echo `date`"), true); // backtick form, safe inner
+  // nested safe substitution
+  assert.equal(isReadOnlyBash("echo $(echo $(pwd))"), true);
+  // a compound whose segments each carry a safe substitution
+  assert.equal(isReadOnlyBash("ls && echo $(date)"), true);
+});
+
+test("isReadOnlyBash: a substitution with an unsafe inner is NOT read-only", () => {
+  assert.equal(isReadOnlyBash("echo $(rm -rf x)"), false);
+  assert.equal(isReadOnlyBash("echo $(curl -s https://example.com)"), false);
+  assert.equal(isReadOnlyBash("echo $(mv a b)"), false); // mutating inner
+  assert.equal(isReadOnlyBash("echo `rm -rf x`"), false); // backtick, unsafe inner
+  assert.equal(isReadOnlyBash("echo $(sudo ls)"), false); // sudo inside
+  // an unbalanced substitution is fail-closed
+  assert.equal(isReadOnlyBash("echo $(date"), false);
+});
+
+test("isReversibleBash: the standard commit forms with safe substitution/heredoc", () => {
+  // the model's everyday commit shapes must NOT be gated in ask mode
+  assert.equal(isReversibleBash('git commit -m "$(date)"'), true);
+  assert.equal(isReversibleBash('git commit -m "$(git status --short)"'), true);
+  // heredoc inside a substitution
+  assert.equal(
+    isReversibleBash('git commit -m "$(cat <<\'EOF\'\nfix: a change\nEOF\n)"'),
+    true,
+  );
+  // a safe substitution in a compound of reversible + read-only
+  assert.equal(isReversibleBash('git add -A && git commit -m "$(date)"'), true);
+});
+
+test("isReversibleBash: a substitution with an unsafe inner is NOT reversible", () => {
+  assert.equal(isReversibleBash('git commit -m "$(rm -rf x)"'), false);
+  assert.equal(isReversibleBash('git commit -m "$(curl -s https://example.com)"'), false);
+  assert.equal(isReversibleBash("git commit -m `rm -rf x`"), false);
+});
+
+test("destructiveBashPatterns: a destructive inner is inherited by the outer command", () => {
+  // The raw token scan cannot see `rm` glued to the `$(` token — the label
+  // must be inherited from the substitution's inner command.
+  const hits = destructiveBashPatterns('git commit -m "$(rm -rf /)"');
+  assert.ok(hits.length > 0, `expected a destructive hit, got ${JSON.stringify(hits)}`);
+  assert.equal(isReadOnlyBash('git commit -m "$(rm -rf /)"'), false);
+  assert.equal(isReversibleBash('git commit -m "$(rm -rf /)"'), false);
+  // nested substitution: the label must propagate two levels out
+  const nested = destructiveBashPatterns('echo "$(echo $(rm -rf /))"');
+  assert.ok(nested.length > 0, `expected a nested destructive hit, got ${JSON.stringify(nested)}`);
+  // plain destructive commands are still caught (regression guard)
+  assert.ok(destructiveBashPatterns("rm -rf build/").length > 0);
+  assert.ok(destructiveBashPatterns("git push origin main").length > 0);
+  // a read-only inner adds no destructive label
+  assert.equal(destructiveBashPatterns('git commit -m "$(date)"').length, 0);
+});
+
+test("destructiveBashPatterns: git destructive checks match the SUBCOMMAND, not any argument word", () => {
+  // the false positive that motivated this: `stash push` is local + undoable
+  assert.equal(destructiveBashPatterns("git stash push -m wip").length, 0);
+  assert.equal(isReversibleBash("git stash push -m wip"), true);
+  // real pushes are still caught — including with global flags
+  assert.ok(destructiveBashPatterns("git push origin main").length > 0);
+  assert.deepEqual(destructiveBashPatterns("git push --force origin main"), ["git push --force"]);
+  assert.ok(destructiveBashPatterns("git -C /some/repo push origin main").length > 0);
+  assert.ok(destructiveBashPatterns("git -c user.name=x push --force origin main").length > 0);
+  // other subcommands that merely CONTAIN a destructive word as an argument
+  assert.equal(destructiveBashPatterns("git commit -m push").length, 0);
+  // the remaining destructive git forms are unchanged
+  assert.ok(destructiveBashPatterns("git reset --hard HEAD~1").length > 0);
+  assert.ok(destructiveBashPatterns("git clean -fd").length > 0);
+  assert.ok(destructiveBashPatterns("git branch -D old").length > 0);
+  assert.ok(destructiveBashPatterns("git checkout .").length > 0);
+  assert.ok(destructiveBashPatterns("git -C /r checkout .").length > 0);
+  assert.equal(destructiveBashPatterns("git stash").length, 0);
+  assert.equal(destructiveBashPatterns("git stash list").length, 0);
+  assert.equal(destructiveBashPatterns("git status").length, 0);
+});
+
+test("isReversibleBash: sudo / redirect still disqualify even with a safe inner", () => {
+  assert.equal(isReversibleBash('sudo git commit -m "x"'), false);
+  assert.equal(isReversibleBash('git commit -m "x" > log.txt'), false);
 });
 
 // ─────────────────────────────── approval gate ───────────────────────────────
