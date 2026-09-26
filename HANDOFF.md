@@ -1,3 +1,48 @@
+# HANDOFF — Deployable on another endpoint / another Mac (2026-09-26)
+
+**Status: COMPLETED.** Three commits: `6de4856` (startup config guide),
+`e83f96a` (build-on-install + files), `2f14df4` (files trim). Goal: `tre.`
+deploys cleanly on a new machine (e.g. another macOS laptop) pointed at a new
+LLM endpoint.
+
+**What made it deployable (and verified end-to-end):**
+
+1. **Build-on-install** (`e83f96a`): `package.json` gained `"prepare": "tsc"`
+   + a `files` allowlist. `dist/` is gitignored, so a fresh clone had none and
+   `npm i -g .` produced a broken bin. Now `npm install` runs `prepare` →
+   `tsc` → builds `dist/` before the bin is linked; the `files` list makes
+   `npm pack`/tarball include `dist` (`.gitignore` would otherwise exclude it).
+   Verified: fresh clone → `npm install` → `npm i -g .` → working `tre.` bin;
+   and `npm pack` → tarball (contains `dist`) → `npm i -g <tarball>` → works.
+2. **Startup config guide** (`6de4856`): with no endpoint configured (no
+   `models.json`, or the active model's `baseUrl` blank), `tre.` prints a
+   step-by-step `models.json` setup (REQUIRED vs OPTIONAL; each required field
+   `populated: <value>` or `NEEDED: <placeholder>`; + a fill-in template) and
+   exits 2 — instead of a bare "not found". This is the config-time trigger
+   (deterministic, no network probe).
+3. **Endpoint-agnostic artifact** (`2f14df4`): the `files` list ships
+   `dist/src/tsconfig/README/THIRD_PARTY` only — no dev `models.json` (the
+   endpoint is supplied at deploy time via the guide) and no test source.
+
+**The "another Mac" flow (proven against a mock OpenAI endpoint):**
+fresh clone → `npm install` (builds `dist`) → `npm i -g .` → first run with no
+endpoint prints the guide → user writes `models.json` with the new `baseUrl` →
+re-run streams a real reply.
+
+**Notes:**
+- `tre.` is an interactive TUI *client* — it makes OUTBOUND calls to the LLM
+  endpoint and listens on no inbound port. Deploy = install the package +
+  provide `models.json` (or `--models <file>`); no ports/ufw/compose.
+- `models.json` lookup (D19): `--models` → nearest `models.json` above cwd →
+  `~/.tre/models.json`. Put the endpoint config in `~/.tre/models.json` for a
+  machine-wide default.
+- Docker was considered (Dockerfile + .dockerignore drafted) but removed to
+  keep the tree clean — the npm-install path is the supported deploy. Re-add
+  only if the registry/VM pipeline is actually wanted.
+- `engines.node >= 20` (global fetch + ESM). A target Mac needs Node ≥ 20.
+
+---
+
 # HANDOFF — Startup config guide: step-by-step models.json setup when no endpoint is configured (2026-09-26)
 
 **Status: COMPLETED.** One increment, one commit (see git log). Part of making
