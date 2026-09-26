@@ -16,12 +16,16 @@
  * (pure handler in state.ts: handleSlashCommand); the driver dispatches it
  * before the unknown-command error, and passes static labels (cwd, session)
  * into the state via makeInitialState.
+ * C32: the bottom selection is PERSISTED — loaded from ~/.tre/tui.json at
+ * startup (tui-config.ts) and saved back after every /display-bottom
+ * change, so the layout survives between tre. sessions.
  */
 import React from "react";
 import { statSync } from "node:fs";
 import { render } from "ink";
 import { App } from "./app.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
+import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
   applyEvent,
@@ -108,7 +112,17 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   if (opts.sessionPath !== undefined) info.session = opts.sessionPath;
   // The model's window + output cap seed the `context` bottom field
   // (used/window/% — the compaction trigger's own numbers).
-  let state: TuiState = makeInitialState(opts.model.id, info, opts.model.contextWindow, opts.model.maxTokens);
+  // C32: the bottom selection is restored from the persisted TUI config
+  // (~/.tre/tui.json) — a missing/corrupt file silently yields the default
+  // (empty selection), so a first launch behaves exactly as before.
+  const tuiConfig = loadTuiConfig();
+  let state: TuiState = makeInitialState(
+    opts.model.id,
+    info,
+    opts.model.contextWindow,
+    opts.model.maxTokens,
+    tuiConfig.bottom,
+  );
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
   let controller = new AbortController();
@@ -227,9 +241,16 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       // D15: slash commands are UI commands, not runs — dispatch through the
       // pure handler, then clear the busy flag submitInput raised. The
       // driver measures the session file (I/O) for /stats.
+      const prevBottom = state.bottom;
       const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath));
       if (slash.handled) {
         setState({ ...slash.state, busy: false });
+        // C32: persist the bottom selection — /display-bottom is the only
+        // handled command that changes it (the others keep the same array
+        // reference, so this fires exactly on a real change).
+        if (slash.state.bottom !== prevBottom) {
+          saveTuiConfig({ bottom: slash.state.bottom });
+        }
         return;
       }
       if (prompt.startsWith("/")) {

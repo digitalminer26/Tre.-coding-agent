@@ -581,6 +581,15 @@ test("C28: makeInitialState starts following the bottom (viewTop null)", () => {
   assert.equal(makeInitialState("m").viewTop, null);
 });
 
+test("C32: makeInitialState seeds bottom from the persisted config", () => {
+  assert.deepEqual(makeInitialState("m").bottom, [], "default: empty selection");
+  assert.deepEqual(
+    makeInitialState("m", {}, 0, 0, ["model", "context"]).bottom,
+    ["model", "context"],
+    "the driver passes the loaded config's bottom through",
+  );
+});
+
 // ── /stats: tool-call tally + the pure stats line ─────────────────────────
 
 test("applyEvent: tool_execution_start increments toolCalls (quiet tools too)", () => {

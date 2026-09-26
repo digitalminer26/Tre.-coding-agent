@@ -80,7 +80,9 @@ export interface TuiState {
    */
   approval: { question: string; resolve: (ok: boolean) => void } | null;
   modelLabel: string;
-  /** D15: field keys shown in the reserved bottom lines, in order. */
+  /** D15: field keys shown in the reserved bottom lines, in order.
+   *  C32: seeded from the persisted config (~/.tre/tui.json) and saved
+   *  back by the driver after every `/display-bottom` change. */
   bottom: string[];
   /** D16: selected candidate in the slash-command menu (null = first). */
   suggestIdx: number | null;
@@ -120,6 +122,8 @@ export function makeInitialState(
   info: Record<string, string> = {},
   window: number = 0,
   maxTokens: number = 0,
+  /** C32: bottom fields restored from the persisted config (~/.tre/tui.json). */
+  bottom: string[] = [],
 ): TuiState {
   return {
     items: [],
@@ -131,7 +135,7 @@ export function makeInitialState(
     turn: 0,
     approval: null,
     modelLabel,
-    bottom: [],
+    bottom,
     suggestIdx: null,
     totalTokens: 0,
     toolCalls: 0,
