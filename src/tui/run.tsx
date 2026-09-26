@@ -120,12 +120,17 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // (~/.tre/tui.json) — a missing/corrupt file silently yields the default
   // (empty selection), so a first launch behaves exactly as before.
   const tuiConfig = loadTuiConfig();
+  // The system prompt is the fixed floor of every turn's context — estimate
+  // its size (chars/4, the loop's estimator) so the `context` field can show
+  // where the tokens come from (system prompt vs the message history).
+  const systemPromptTokens = Math.ceil((opts.systemPrompt ?? "").length / 4);
   let state: TuiState = makeInitialState(
     opts.model.id,
     info,
     opts.model.contextWindow,
     opts.model.maxTokens,
     tuiConfig.bottom,
+    systemPromptTokens,
   );
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;

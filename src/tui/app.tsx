@@ -12,6 +12,7 @@ import { itemLines } from "./lines.js";
 import {
   FIXED_NON_ITEM_LINES,
   approvalLine,
+  bottomLineColors,
   bottomLines,
   fitItemsScrollable,
   inputWrap,
@@ -255,10 +256,18 @@ export function App(props: AppProps): React.ReactElement {
       ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: the reserved lines are the user-configurable bottom display
-          (/display-bottom) — blank when nothing is selected. */}
-      {bottomLines(state, width).map((line, i) => (
-        <Text key={`reserved-${i}`} dimColor>{line || " "}</Text>
-      ))}
+          (/display-bottom) — blank when nothing is selected. The `context`
+          line is tinted by compaction urgency (green → yellow → red); the
+          rest stay dim (the resting chrome). */}
+      {(() => {
+        const lines = bottomLines(state, width);
+        const colors = bottomLineColors(state);
+        return lines.map((line, i) => (
+          <Text key={`reserved-${i}`} dimColor={colors[i] === undefined} color={colors[i]}>
+            {line || " "}
+          </Text>
+        ));
+      })()}
     </Box>
   );
 }

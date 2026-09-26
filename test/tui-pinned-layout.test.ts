@@ -430,24 +430,27 @@ test("bottomLines: values, order, truncation, unknown keys, padding", () => {
     bottomLines({ ...base, bottom: ["context"], contextWindow: 131072 }, 80)[0],
     "context: 131.1k window (no usage yet)",
   );
+  // enriched: used/window + the system/summary/messages split + the
+  // compaction trigger `@T` (threshold = window − maxTokens − slack; the
+  // base state has maxTokens 0). systemPromptTokens set so "sys" is non-zero.
   assert.equal(
-    bottomLines({ ...base, bottom: ["context"], contextWindow: 81920, contextTokens: 25341 }, 80)[0],
-    "context: 25.3k/81.9k (31%)",
+    bottomLines({ ...base, bottom: ["context"], contextWindow: 81920, contextTokens: 25341, systemPromptTokens: 500 }, 80)[0],
+    "context: 25.3k/81.9k (31%) · sys 0.5k · msgs 24.8k · @80.9k",
   );
-  // unknown window but known usage → no %
+  // unknown window but known usage → no %, no trigger (threshold 0)
   assert.equal(
     bottomLines({ ...base, bottom: ["context"], contextTokens: 45234 }, 80)[0],
-    "context: 45.2k/—",
+    "context: 45.2k/— · sys 0 · msgs 45.2k",
   );
   // compaction drop: 120k → 9.6k reads as a visible reset
   assert.equal(
     bottomLines({ ...base, bottom: ["context"], contextWindow: 131072, contextTokens: 9600 }, 80)[0],
-    "context: 9.6k/131.1k (7%)",
+    "context: 9.6k/131.1k (7%) · sys 0 · msgs 9.6k · @130k",
   );
-  // big windows format as M
+  // big windows format as M; over the trigger → DUE
   assert.equal(
     bottomLines({ ...base, bottom: ["context"], contextWindow: 2_000_000, contextTokens: 2_100_000 }, 80)[0],
-    "context: 2.1M/2M (105%)",
+    "context: 2.1M/2M (105%) · sys 0 · msgs 2.1M · DUE",
   );
 
   // static labels: cwd / session
@@ -571,10 +574,11 @@ test("slashCandidates: bare command words only, alphabetical prefix filter", () 
   assert.deepEqual(slashCandidates(""), []); // no slash
   assert.deepEqual(slashCandidates("quit"), []); // no leading slash
   assert.deepEqual(slashCandidates("/quit"), ["/quit"]);
-  assert.deepEqual(slashCandidates("/"), ["/display-bottom", "/exit", "/quit", "/stats"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/"), ["/context", "/display-bottom", "/exit", "/quit", "/stats"]); // all, alphabetical
   assert.deepEqual(slashCandidates("/d"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/di"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/display-bottom"), ["/display-bottom"]); // exact
+  assert.deepEqual(slashCandidates("/c"), ["/context"]);
   assert.deepEqual(slashCandidates("/st"), ["/stats"]);
   assert.deepEqual(slashCandidates("/zz"), []); // no match
   assert.deepEqual(slashCandidates("/display-bottom m"), []); // space → arguments, menu hides
@@ -588,21 +592,22 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
 
   // "/" → all commands, first selected ("> "), the rest ("  ")
   const all = suggestMenu({ ...s, input: "/" }, 80);
-  assert.equal(all.length, 4);
-  assert.deepEqual(all.map((m) => m.selected), [true, false, false, false]);
-  assert.ok(all[0]!.line.startsWith("> /display-bottom — "));
-  assert.ok(all[1]!.line.startsWith("  /exit — "));
-  assert.ok(all[2]!.line.startsWith("  /quit — "));
-  assert.ok(all[3]!.line.startsWith("  /stats — "));
+  assert.equal(all.length, 5);
+  assert.deepEqual(all.map((m) => m.selected), [true, false, false, false, false]);
+  assert.ok(all[0]!.line.startsWith("> /context — "));
+  assert.ok(all[1]!.line.startsWith("  /display-bottom — "));
+  assert.ok(all[2]!.line.startsWith("  /exit — "));
+  assert.ok(all[3]!.line.startsWith("  /quit — "));
+  assert.ok(all[4]!.line.startsWith("  /stats — "));
 
   // each line is exactly one row at width
   for (const m of all) assert.ok(wrapLineCount(m.line, 80) <= 1);
 
   // selection moves with suggestIdx (and clamps when it overruns)
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 2 }, 80).map((m) => m.selected),
-    [false, false, true, false]);
+    [false, false, true, false, false]);
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 9 }, 80).map((m) => m.selected),
-    [false, false, false, true]); // clamp to last
+    [false, false, false, false, true]); // clamp to last
 
   // truncated to one row at a narrow width (marker survives)
   const narrow = suggestMenu({ ...s, input: "/" }, 20)[0]!;
@@ -641,10 +646,10 @@ test("menuNav: arrows move the selection with wrap-around, null off-menu", () =>
   // on-menu: down from null → 1, up from null → last (wrap)
   const base: TuiState = { ...s, input: "/" };
   assert.equal(menuNav(base, 1)!.suggestIdx, 1);
-  assert.equal(menuNav(base, -1)!.suggestIdx, 3);
+  assert.equal(menuNav(base, -1)!.suggestIdx, 4);
   // wrap at both ends
-  assert.equal(menuNav({ ...base, suggestIdx: 3 }, 1)!.suggestIdx, 0);
-  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 3);
+  assert.equal(menuNav({ ...base, suggestIdx: 4 }, 1)!.suggestIdx, 0);
+  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 4);
   // a stale (overrun) index is clamped before moving
   assert.equal(menuNav({ ...base, suggestIdx: 9 }, 1)!.suggestIdx, 0);
   // state otherwise untouched
@@ -661,7 +666,7 @@ test("menuComplete: enter completes the selected word, exact match submits", () 
 
   // "/" + first selection → completes to the full command + space
   const c1 = menuComplete({ ...s, input: "/" });
-  assert.equal(c1!.input, "/display-bottom ");
+  assert.equal(c1!.input, "/context ");
   assert.equal(c1!.suggestIdx, null);
 
   // a partial word completes the selected candidate
@@ -670,8 +675,8 @@ test("menuComplete: enter completes the selected word, exact match submits", () 
 
   // the selected (navigated) candidate is the one completed
   const c3 = menuComplete({ ...s, input: "/", suggestIdx: 2 });
-  assert.equal(c3!.input, "/quit ");
-  const c4 = menuComplete({ ...s, input: "/", suggestIdx: 3 });
+  assert.equal(c3!.input, "/exit ");
+  const c4 = menuComplete({ ...s, input: "/", suggestIdx: 4 });
   assert.equal(c4!.input, "/stats ");
 
   // exact match → null (Enter submits; the completed trailing-space form
@@ -778,12 +783,13 @@ test("App frame: '/' shows the grey menu above the top separator, frame stays ro
   const app = renderApp(mkState([], { input: "/", cursorPos: 1, suggestIdx: 1 }));
   try {
     const lines = frameLines(app.lastFrame());
-    assert.equal(lines.length, H); // exactly rows (budget shrank by 4)
-    // the menu sits between the hint and the top separator: with 4 menu
-    // lines the hint moves up to row 13, the block stays pinned at the end
-    assert.ok(lineAt(lines, 13).includes("enter send")); // hint line
-    assert.ok(lineAt(lines, 14).startsWith("  /display-bottom")); // unselected: dim, two spaces
-    assert.ok(lineAt(lines, 15).startsWith("> /exit")); // selected (idx 1): marked
+    assert.equal(lines.length, H); // exactly rows (budget shrank by 5)
+    // the menu sits between the hint and the top separator: with 5 menu
+    // lines the hint moves up to row 12, the block stays pinned at the end
+    assert.ok(lineAt(lines, 12).includes("enter send")); // hint line
+    assert.ok(lineAt(lines, 13).startsWith("  /context")); // unselected: dim, two spaces
+    assert.ok(lineAt(lines, 14).startsWith("> /display-bottom")); // selected (idx 1): marked
+    assert.ok(lineAt(lines, 15).startsWith("  /exit"));
     assert.ok(lineAt(lines, 16).startsWith("  /quit"));
     assert.ok(lineAt(lines, 17).startsWith("  /stats"));
     assert.equal(lineAt(lines, 18), SEP_LINE); // top separator still full width

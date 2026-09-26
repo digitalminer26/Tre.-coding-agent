@@ -13,6 +13,11 @@ import type {
 import {
   approvalAnswer,
   applyEvent,
+  bottomLineColors,
+  compactThreshold,
+  contextBreakdown,
+  contextReport,
+  contextUrgencyColor,
   handleSlashCommand,
   inputBackspace,
   inputChar,
@@ -252,6 +257,106 @@ test("contextTokens: tracks the last done usage; compaction resets to the new es
     s2,
   );
   assert.equal(s4.contextTokens, 25341);
+});
+
+// ── context breakdown: where the tokens come from + when compaction fires ──
+
+test("compactThreshold = window − maxTokens − slack (the real shouldCompact trigger)", () => {
+  assert.equal(compactThreshold(131072, 32768), 131072 - 32768 - 1024); // 97280
+  assert.equal(compactThreshold(131072, 0), 131072 - 1024);
+  assert.equal(compactThreshold(0, 32768), 0); // unknown window → 0
+  assert.equal(compactThreshold(100, 32768), 0); // window < max → 0 (never compact)
+});
+
+test("contextBreakdown: system / summary / messages split; headroom vs the trigger", () => {
+  // window 131072, maxTokens 32768 → threshold 97280. system 5000, summary 0,
+  // total 25000 → messages = 25000 − 5000 = 20000, headroom = 97280 − 25000.
+  const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
+  const bd = contextBreakdown(s);
+  assert.deepEqual(
+    { system: bd.system, summary: bd.summary, messages: bd.messages, total: bd.total },
+    { system: 5000, summary: 0, messages: 20000, total: 25000 },
+  );
+  assert.equal(bd.threshold, 97280);
+  assert.equal(bd.headroom, 97280 - 25000);
+
+  // after a compaction the summary is a distinct bucket (summaryTokens set by
+  // the context_compacted event).
+  const s2 = { ...s, summaryTokens: 2000, contextTokens: 30000 };
+  const bd2 = contextBreakdown(s2);
+  assert.deepEqual(
+    { system: bd2.system, summary: bd2.summary, messages: bd2.messages, total: bd2.total },
+    { system: 5000, summary: 2000, messages: 23000, total: 30000 },
+  );
+
+  // over the trigger → negative headroom (compaction is due).
+  const s3 = { ...s, contextTokens: 100000 };
+  assert.ok(contextBreakdown(s3).headroom < 0);
+
+  // unknown window (0) → threshold 0, headroom = −total (but the report
+  // suppresses the compaction line when threshold is 0).
+  const s4 = { ...makeInitialState("m"), contextTokens: 5000, systemPromptTokens: 1000 };
+  assert.equal(contextBreakdown(s4).threshold, 0);
+});
+
+test("contextUrgencyColor: green < 70% ≤ yellow < 90% ≤ red; undefined when unknown", () => {
+  const mk = (total: number): TuiState =>
+    ({ ...makeInitialState("m", {}, 131072, 32768), contextTokens: total, systemPromptTokens: 0 });
+  // threshold 97280. 50% → green, 75% → yellow, 95% → red.
+  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.5))), "green");
+  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.75))), "yellow");
+  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.95))), "red");
+  // no usage yet → undefined (dim); unknown window → undefined.
+  assert.equal(contextUrgencyColor({ ...makeInitialState("m", {}, 131072, 32768) }), undefined);
+  assert.equal(contextUrgencyColor({ ...makeInitialState("m"), contextTokens: 5000 }), undefined);
+});
+
+test("contextReport: multi-line breakdown + compaction trigger (the /context body)", () => {
+  // no usage yet → the window alone.
+  assert.equal(
+    contextReport({ ...makeInitialState("m", {}, 131072, 32768) }),
+    "context: 131.1k window (no usage yet)",
+  );
+  // a live context: total/window + system/summary/messages + the trigger.
+  const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
+  assert.equal(
+    contextReport(s),
+    [
+      "context: 25k/131.1k (19%)",
+      "  system prompt: 5k (fixed floor)",
+      "  messages: 20k",
+      "  compaction: at 97.3k — 72.3k headroom left",
+    ].join("\n"),
+  );
+  // over the trigger → DUE.
+  const over = { ...s, contextTokens: 100000 };
+  assert.match(contextReport(over), /compaction: DUE — over the trigger by/);
+});
+
+test("handleSlashCommand: /context appends the breakdown as an info item", () => {
+  const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
+  const r = handleSlashCommand(s, "/context");
+  assert.equal(r.handled, true);
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.equal((info as { text: string }).text, contextReport(s));
+  // state otherwise untouched (no bottom change, no input change)
+  assert.deepEqual(r.state.bottom, []);
+  assert.equal(r.state.input, "");
+  // unknown line still passes through
+  assert.equal(handleSlashCommand(s, "/context now").handled, false);
+});
+
+test("bottomLineColors: the context line is tinted by urgency, the rest dim", () => {
+  const s = {
+    ...makeInitialState("m", {}, 131072, 32768, ["model", "context", "turn"]),
+    contextTokens: Math.round(97280 * 0.75), // yellow zone
+    systemPromptTokens: 0,
+  };
+  assert.deepEqual(bottomLineColors(s), [undefined, "yellow", undefined]);
+  // unknown keys are skipped (mirrors bottomLines) and the rest pad to 3.
+  const s2 = { ...s, bottom: ["bogus", "context"] };
+  assert.deepEqual(bottomLineColors(s2), ["yellow", undefined, undefined]);
 });
 
 test("agent_end: error/aborted/length become error items; busy + approval clear", () => {

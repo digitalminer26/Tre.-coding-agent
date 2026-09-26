@@ -98,6 +98,21 @@ export interface TuiState {
   /** The model's output cap (maxTokens) — static, from ModelConfig. */
   maxTokens: number;
   /**
+   * Estimated tokens of the system prompt (chars/4) — static for the session
+   * (the prompt is built once at startup). Feeds the `context` field's
+   * breakdown and the `/context` report: the prompt is the fixed floor every
+   * turn pays, so it is shown separately from the growing message history.
+   * 0 = unknown (no prompt supplied — the TUI always supplies one).
+   */
+  systemPromptTokens: number;
+  /**
+   * Estimated tokens of the CURRENT compaction summary (chars/4) — set on
+   * each `context_compacted` (the summary is a user message in context, so
+   * it is part of contextTokens; this tracks it separately so the breakdown
+   * can show system / summary / messages). 0 = no compaction yet.
+   */
+  summaryTokens: number;
+  /**
    * Estimated tokens of the CURRENT context (what the next prompt would
    * start from): the last `done` usage's totalTokens (prompt+completion of
    * the last call), or — after a compaction — the estimate of the new
@@ -124,6 +139,8 @@ export function makeInitialState(
   maxTokens: number = 0,
   /** C32: bottom fields restored from the persisted config (~/.tre/tui.json). */
   bottom: string[] = [],
+  /** Estimated system-prompt tokens (chars/4) — the fixed floor of the context. */
+  systemPromptTokens: number = 0,
 ): TuiState {
   return {
     items: [],
@@ -141,6 +158,8 @@ export function makeInitialState(
     toolCalls: 0,
     contextWindow: window,
     maxTokens,
+    systemPromptTokens,
+    summaryTokens: 0,
     contextTokens: 0,
     info,
     viewTop: null,
@@ -328,6 +347,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // would overstate it). Event without the field → keep the last
         // usage-based estimate.
         contextTokens: ev.contextTokens ?? state.contextTokens,
+        // The summary is a user message in the new context — track its size
+        // separately so the context breakdown can show system / summary /
+        // messages. Estimate from the summary's char count (chars/4, the
+        // same estimator the loop uses).
+        summaryTokens: Math.ceil(ev.summaryChars / 4),
         items: [
           ...state.items,
           {
@@ -973,6 +997,7 @@ export interface SlashCommand {
 /** The D16 registry — single source of truth for the menu; run.tsx
     dispatches by name. Adding a command = one entry here. */
 export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: "context", summary: "context breakdown: system/summary/messages + compaction trigger" },
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "quit", summary: "end the session" },
@@ -1051,10 +1076,103 @@ export function menuComplete(s: TuiState): TuiState | null {
 export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cwd", "session"] as const;
 export type BottomField = (typeof BOTTOM_FIELDS)[number];
 
-/** Compact token count: 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
+/** Compact token count: 0 → "0", 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
 function fmtTokens(t: number): string {
+  if (t <= 0) return "0";
   if (t >= 1_000_000) return `${Math.round(t / 100_000) / 10}M`;
   return `${Math.round(t / 100) / 10}k`;
+}
+
+/**
+ * The compaction trigger threshold — the value of `contextTokens` at which
+ * compact.ts's `shouldCompact` fires: `totalTokens + maxTokens + slack >
+ * window`, i.e. `totalTokens > window − maxTokens − slack` (slack 1024).
+ * 0 = unknown (no window). This is the SAME number the loop compares
+ * against, so the bottom field reports the real trigger, not a guess.
+ */
+export function compactThreshold(window: number, maxTokens: number, slack = 1024): number {
+  if (window <= 0) return 0;
+  // Clamp to 0 when the window is smaller than the output budget + slack
+  // (compaction could never make the context fit): the trigger is then
+  // "always due", which the display treats the same as an unknown window.
+  return Math.max(0, window - maxTokens - slack);
+}
+
+/**
+ * Where the current context's tokens come from, plus when compaction fires.
+ * The state machine holds one context number (contextTokens — the last
+ * usage's total, or the post-compaction estimate) and the static system
+ * prompt size, so the breakdown is a three-way split:
+ *   system   — the fixed prompt floor (every turn pays it).
+ *   summary  — the current compaction summary (a user message in context;
+ *              0 until the first compaction).
+ *   messages — the rest of the message history (prompts, replies, tool
+ *              results).
+ *   total    — contextTokens (system + summary + messages).
+ *   threshold— the compaction trigger (compactThreshold).
+ *   headroom — threshold − total (negative = compaction is due).
+ */
+export interface ContextBreakdown {
+  system: number;
+  summary: number;
+  messages: number;
+  total: number;
+  threshold: number;
+  headroom: number;
+}
+
+export function contextBreakdown(state: TuiState): ContextBreakdown {
+  const total = state.contextTokens;
+  const system = state.systemPromptTokens;
+  const summary = state.summaryTokens;
+  const messages = Math.max(0, total - system - summary);
+  const threshold = compactThreshold(state.contextWindow, state.maxTokens);
+  return { system, summary, messages, total, threshold, headroom: threshold - total };
+}
+
+/**
+ * The multi-line report `/context` appends as an info item: the used/window
+ * total, the system / summary / messages split (where the tokens come
+ * from), and the compaction trigger with its headroom. "—" marks an unknown
+ * window; the no-usage case reports the window alone (nothing to break down
+ * yet).
+ */
+export function contextReport(state: TuiState): string {
+  const bd = contextBreakdown(state);
+  const win = state.contextWindow > 0 ? fmtTokens(state.contextWindow) : "—";
+  if (bd.total <= 0) {
+    return win === "—" ? "context: — (no usage yet)" : `context: ${win} window (no usage yet)`;
+  }
+  const pct = state.contextWindow > 0 ? ` (${Math.round((bd.total / state.contextWindow) * 100)}%)` : "";
+  const lines = [
+    `context: ${fmtTokens(bd.total)}/${win}${pct}`,
+    `  system prompt: ${fmtTokens(bd.system)} (fixed floor)`,
+  ];
+  if (bd.summary > 0) lines.push(`  summary: ${fmtTokens(bd.summary)}`);
+  lines.push(`  messages: ${fmtTokens(bd.messages)}`);
+  if (bd.threshold > 0) {
+    lines.push(
+      bd.headroom > 0
+        ? `  compaction: at ${fmtTokens(bd.threshold)} — ${fmtTokens(bd.headroom)} headroom left`
+        : `  compaction: DUE — over the trigger by ${fmtTokens(-bd.headroom)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The urgency color for the `context` bottom field, by how close the context
+ * is to the compaction trigger (not the raw window — compaction fires at the
+ * threshold, which is window − output − slack, so "close to the window" is
+ * the wrong scale). Unknown (no window or no usage yet) → undefined (dim).
+ */
+export function contextUrgencyColor(state: TuiState): string | undefined {
+  const bd = contextBreakdown(state);
+  if (bd.threshold <= 0 || bd.total <= 0) return undefined;
+  const ratio = bd.total / bd.threshold;
+  if (ratio >= 0.9) return "red";
+  if (ratio >= 0.7) return "yellow";
+  return "green";
 }
 
 /** The value shown for one field ("—" when a static label is absent). */
@@ -1072,11 +1190,26 @@ function bottomValue(state: TuiState, field: BottomField): string {
       // Window from the model config; used = the last call's usage
       // (prompt+completion ≈ next prompt size — the compaction trigger's
       // own number) or, right after a compaction, the estimate of the new
-      // [summary, …kept] context. "—" marks an unknown side.
+      // [summary, …kept] context. Beyond used/window it shows WHERE the
+      // tokens come from (system prompt / summary / messages) and WHEN
+      // compaction fires (the trigger `@T`; "DUE" when already over it).
+      // The headroom number lives in the multi-line `/context` report — the
+      // one-liner stays short enough to fit a bottom line. "—" marks an
+      // unknown side.
       const win = state.contextWindow > 0 ? fmtTokens(state.contextWindow) : "—";
       if (state.contextTokens <= 0) return `${win === "—" ? "—" : `${win} window (no usage yet)`}`;
-      const pct = state.contextWindow > 0 ? ` (${Math.round((state.contextTokens / state.contextWindow) * 100)}%)` : "";
-      return `${fmtTokens(state.contextTokens)}/${win}${pct}`;
+      const bd = contextBreakdown(state);
+      const pct = state.contextWindow > 0 ? ` (${Math.round((bd.total / state.contextWindow) * 100)}%)` : "";
+      const parts = [
+        `${fmtTokens(bd.total)}/${win}${pct}`,
+        `sys ${fmtTokens(bd.system)}`,
+        ...(bd.summary > 0 ? [`sum ${fmtTokens(bd.summary)}`] : []),
+        `msgs ${fmtTokens(bd.messages)}`,
+      ];
+      if (bd.threshold > 0) {
+        parts.push(bd.headroom > 0 ? `@${fmtTokens(bd.threshold)}` : "DUE");
+      }
+      return parts.join(" · ");
     }
     case "cwd":
       return state.info.cwd ?? "—";
@@ -1107,6 +1240,26 @@ export function bottomLines(state: TuiState, width: number): string[] {
 }
 
 /**
+ * The colors for the RESERVED_BOTTOM_LINES, aligned one-for-one with
+ * `bottomLines(state, width)`: the `context` field is tinted by compaction
+ * urgency (green → yellow → red as the context nears the trigger; undefined
+ * = dim when unknown), every other field is undefined (the renderer dims it).
+ * It mirrors bottomLines' iteration EXACTLY (same skip of unknown keys, same
+ * RESERVED_BOTTOM_LINES cap, same padding) so line i's color pairs with
+ * line i's text — including when an unknown key would shift indices.
+ */
+export function bottomLineColors(state: TuiState): (string | undefined)[] {
+  const colors: (string | undefined)[] = [];
+  for (const key of state.bottom) {
+    if (colors.length >= RESERVED_BOTTOM_LINES) break;
+    if (!(BOTTOM_FIELDS as readonly string[]).includes(key)) continue;
+    colors.push(key === "context" ? contextUrgencyColor(state) : undefined);
+  }
+  while (colors.length < RESERVED_BOTTOM_LINES) colors.push(undefined);
+  return colors;
+}
+
+/**
  * The one-line report `/stats` appends as an info item: session turn
  * count, cumulative tokens, tool-call count, and the session file size
  * (bytes, when the caller could measure it — the driver does the I/O;
@@ -1120,7 +1273,10 @@ export function statsLine(state: TuiState, sessionBytes?: number): string {
 }
 
 /**
- * Handle a submitted `/…` line. Two commands:
+ * Handle a submitted `/…` line. Commands:
+ *   /context                   multi-line info item: the context breakdown
+ *                              (system prompt / summary / messages) and the
+ *                              compaction trigger + headroom
  *   /display-bottom            report current selection + the field menu
  *   /display-bottom off|none   clear the bottom lines
  *   /display-bottom f1 f2 …    set the fields (deduped, order preserved)
@@ -1143,6 +1299,9 @@ export function handleSlashCommand(
   });
   if (line.trim() === "/stats") {
     return { state: withInfo(s, statsLine(s, sessionBytes)), handled: true };
+  }
+  if (line.trim() === "/context") {
+    return { state: withInfo(s, contextReport(s)), handled: true };
   }
   const m = /^\/display-bottom(?:\s+(.*))?$/.exec(line.trim());
   if (m === null) return { state: s, handled: false };
