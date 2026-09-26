@@ -1,3 +1,59 @@
+# HANDOFF — TUI /models: list the catalog + switch the active model (2026-09-26)
+
+**Status: COMPLETED.** One increment (C34), one commit: `ac76b10`.
+
+`/models` lists the models.json catalog and switches the active model
+mid-session.
+
+- `src/tui/state.ts`:
+  - `ModelOption` (new, light: id + provider + contextWindow + maxTokens)
+    and `TuiState.models` (the catalog) — the state machine is pure and
+    never talks to the wire, so it carries only what it renders; the FULL
+    ModelConfig (baseUrl, apiKey, compat) stays in the driver.
+  - `modelsListReport(state)` — the multi-line `/models` body: one line per
+    model, the active one marked `*`, each showing id + provider + window
+    (so a switch's effect on the context field is visible before it
+    happens). Empty catalog → "(no catalog supplied)".
+  - `applyModelSwitch(state, id)` — the pure switch: re-seeds modelLabel +
+    the context field (window + maxTokens); null on unknown id (a typo can
+    never silently switch).
+  - `/models` + `/models <id>` in `SLASH_COMMANDS` + `handleSlashCommand`
+    (info item; works mid-run via the C32 busy route, like `/stats`).
+  - **Menu-cap fix**: `visibleCandidates` (slashCandidates capped to
+    MENU_MAX_LINES) is now the single source for `suggestMenu`, `menuNav`
+    AND `menuComplete`. Before, the 6th command (`/models`) pushed the
+    registry past the cap while menuNav/menuComplete still wrapped within
+    the FULL list — navigating to index 5 (the hidden 6th) made the
+    selection marker vanish. Now the marker is always on a visible line.
+- `src/tui/run.tsx`: `modelsFile` + `rebuildSystemPrompt` options; the
+  ACTIVE model + system prompt are now mutable (`let`), seeded from the
+  catalog at startup; `runPrompt` reads the live ones; both slash call
+  sites detect a switch (modelLabel changed) → `resolveSwitchedModel`
+  re-resolves the full ModelConfig by id + rebuilds the prompt. A running
+  turn keeps the old model; the NEXT run uses the new one.
+- `src/cli/main.ts`: loads the full `ModelsFile` once (reused for the
+  resume path too) and passes it + a `rebuildSystemPrompt` closure
+  (buildSystemPrompt over the driver's cwd/tools/skills) to `runTui`.
+- Tests: `test/tui-state.test.ts` (+3: list report, applyModelSwitch,
+  `/models` handler), `test/tui-pinned-layout.test.ts` (menu tests updated
+  for the 6-command registry capped to 5 visible — `/stats` drops off the
+  menu; wrap/complete now within the visible 5).
+
+Tests: full suite green (420 pass, 0 fail; 428 total, 8 live-skipped).
+PTY verification (live 27B, 2-model catalog both pointing at the endpoint,
+windows 32768 vs 200000): `/models` lists `* small [vks-llama] window
+32.8k` + `big … 200k`; `/models big` → `models: switched to big (window
+200k)`; the bottom field re-seeds from `context: 32.8k window (no usage
+yet)` / `model: small` to `context: 1.6k/200k (1%) · sys 0.6k · msgs 1k ·
+@190.8k` / `model: big` — the switch re-resolved the full config and the
+context field reflects the new window + threshold.
+
+Note: the slash menu now shows 5 of 6 commands (`/stats` is capped off the
+`/` menu but still reachable by typing it). If a 7th command is ever
+added, raise `MENU_MAX_LINES` or the cap silently hides more.
+
+---
+
 # HANDOFF — TUI context display: breakdown + compaction trigger + colors (2026-09-26)
 
 **Status: COMPLETED.** One increment (C33), one commit: `f30e682`.
