@@ -27,6 +27,7 @@ import {
   statsLine,
   steerInput,
   submitInput,
+  submitSlashBusy,
   type TuiItem,
   type TuiState,
 } from "../src/tui/state.js";
@@ -631,6 +632,42 @@ test("statsLine: one line with turns, tokens, tool calls, session size", () => {
     statsLine(zero, 0),
     "stats: 3 turn(s), 12345 tokens, 7 tool call(s), session: /tmp/empty.jsonl (0 bytes)",
   );
+});
+
+test("C32: submitSlashBusy — busy + slash line clears the line, never steers", () => {
+  const s = { ...makeInitialState("m"), busy: true, input: "/display-bottom model" };
+  const r = submitSlashBusy(s);
+  assert.notEqual(r, null);
+  assert.equal(r!.line, "/display-bottom model");
+  assert.equal(r!.state.input, "", "the line is cleared");
+  assert.equal(r!.state.cursorPos, 0);
+  assert.equal(r!.state.busy, true, "busy is untouched — the run continues");
+  assert.deepEqual(r!.state.history, ["/display-bottom model"], "kept for ↑ navigation");
+  assert.equal(r!.state.items.length, 0, "no user item — a slash line is NOT a steer");
+  // idle → null (fresh prompts take submitInput's path)
+  assert.equal(submitSlashBusy({ ...makeInitialState("m"), input: "/stats" }), null);
+  // empty / non-slash → null (steering's path)
+  assert.equal(submitSlashBusy({ ...makeInitialState("m"), busy: true, input: "   " }), null);
+  assert.equal(submitSlashBusy({ ...makeInitialState("m"), busy: true, input: "fix it" }), null);
+  // approving → null (input is locked)
+  assert.equal(submitSlashBusy(setApproval({ ...makeInitialState("m"), busy: true }, "q?", () => {})), null);
+});
+
+test("C32: busy slash submit = submitSlashBusy + handleSlashCommand (the driver's route)", () => {
+  const cleared = submitSlashBusy({ ...makeInitialState("m"), busy: true, input: "/display-bottom model" })!;
+  const r = handleSlashCommand(cleared.state, cleared.line);
+  assert.equal(r.handled, true);
+  assert.deepEqual(r.state.bottom, ["model"]);
+  assert.equal(r.state.busy, true, "the handler never touches busy — the run continues");
+  assert.equal(r.state.input, "");
+  assert.equal(r.state.items.length, 1);
+  assert.equal((r.state.items[0] as { kind: string }).kind, "info", "the feedback lands as an info item");
+  // An unhandled line (a typo) is left alone — the driver keeps the cleared
+  // state and swallows the line (as before C32).
+  const cleared2 = submitSlashBusy({ ...makeInitialState("m"), busy: true, input: "/nope" })!;
+  const r2 = handleSlashCommand(cleared2.state, cleared2.line);
+  assert.equal(r2.handled, false);
+  assert.equal(r2.state, cleared2.state, "unhandled: the state is returned untouched");
 });
 
 test("handleSlashCommand: /stats appends one info line and touches nothing else", () => {

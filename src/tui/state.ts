@@ -483,6 +483,31 @@ export function steerInput(
   };
 }
 
+/**
+ * C32: Enter on a slash line while a run is in flight. The line is a UI
+ * command, NOT a steer — it must never be queued for the loop. Clear it
+ * exactly like submitInput does (input, cursor, history) and return the
+ * cleared state plus the trimmed line; the driver hands the line to
+ * handleSlashCommand (and persists a /display-bottom change). null when
+ * idle, while approving, or for empty/non-slash lines (those take their
+ * own paths: submitInput / steerInput).
+ */
+export function submitSlashBusy(s: TuiState): { state: TuiState; line: string } | null {
+  if (s.approval !== null || !s.busy) return null;
+  const line = s.input.trim();
+  if (line === "" || !line.startsWith("/")) return null;
+  return {
+    state: {
+      ...s,
+      input: "",
+      cursorPos: 0,
+      historyIdx: null,
+      history: [...s.history, line],
+    },
+    line,
+  };
+}
+
 export function noteError(s: TuiState, text: string): TuiState {
   return { ...s, items: [...s.items, { kind: "error", text }] };
 }

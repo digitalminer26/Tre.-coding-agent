@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 16, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 17, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -547,6 +547,43 @@ EOF
   echo "rc=0, bare launch opened the TUI (hint line), no REPL banner, PONG-16 rendered"
 }
 
+scenario_17() { # C32: /display-bottom WHILE a task is running — the command
+  # is handled mid-run (feedback info line, bottom lines reconfigured, the
+  # run continues to completion) and the selection is persisted to
+  # ~/.tre/tui.json. HOME is pointed at the scenario dir so the real
+  # user's ~/.tre/tui.json is never touched.
+  local D="$WORK/17"; mkdir -p "$D/home"
+  cat > "$D/feed.sh" <<'EOF'
+# A long reply (40 lines, like scenario 15) leaves a wide mid-run window.
+printf 'Reply with exactly the numbers 1 through 40, each on its own line, in order. Do not add any other text.\r'
+# The turn is running once the first reply line renders.
+wait_pattern "$OUT" " 1." 240 || exit 6
+sleep 2
+# C32: reconfigure the bottom display WHILE the task is running.
+printf '/display-bottom model turn\r'
+new_since "$OFF" "$OUT" "display-bottom: model turn" 120 || exit 7
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  ( export HOME="$D/home"
+    pty_feed 17 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+      --session "$D/s.jsonl" --cwd "$D" )
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  grep -qF "display-bottom: model turn" "$D/out.log" || { echo "no mid-run /display-bottom feedback in frames"; return 1; }
+  # The run CONTINUED after the mid-run command (the long reply finished).
+  grep -qE ' 40\.' "$D/out.log" || { echo "the run did not finish after the mid-run command"; return 1; }
+  # The bottom lines reconfigured mid-run: a frame shows the new fields.
+  grep -qF "model: Qwen" "$D/out.log" || { echo "no 'model:' bottom line in frames — the mid-run change did not render"; return 1; }
+  grep -qE 'turn: [0-9]+' "$D/out.log" || { echo "no 'turn: N' bottom line in frames"; return 1; }
+  # The selection was persisted to (the scenario's) ~/.tre/tui.json.
+  [ -f "$D/home/.tre/tui.json" ] || { echo "no ~/.tre/tui.json written"; return 1; }
+  python3 -c "import json,sys; c=json.load(open('$D/home/.tre/tui.json')); sys.exit(0 if c.get('bottom')==['model','turn'] else 1)" \
+    || { echo "persisted bottom wrong: $(cat "$D/home/.tre/tui.json" 2>/dev/null)"; return 1; }
+  echo "rc=0, /display-bottom handled mid-run (feedback + rendered fields), run completed, selection persisted (C32)"
+}
+
 # ───────────────────────────── runner ─────────────────────────────
 
 run_one() {
@@ -568,6 +605,7 @@ run_one() {
     14) name="tui-pinned-layout" ;;
     15) name="tui-scrollback(C27)" ;;
     16) name="bare-tty-launches-tui" ;;
+    17) name="tui-slash-mid-run(C32)" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

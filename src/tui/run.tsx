@@ -18,7 +18,10 @@
  * into the state via makeInitialState.
  * C32: the bottom selection is PERSISTED — loaded from ~/.tre/tui.json at
  * startup (tui-config.ts) and saved back after every /display-bottom
- * change, so the layout survives between tre. sessions.
+ * change, so the layout survives between tre. sessions — and slash
+ * commands are handled WHILE A RUN IS IN FLIGHT too (busy submits with a
+ * "/" prefix go through the same handler: the line is cleared, the
+ * feedback lands as an info item, and the run continues untouched).
  */
 import React from "react";
 import { statSync } from "node:fs";
@@ -45,6 +48,7 @@ import {
   setApproval,
   steerInput,
   submitInput,
+  submitSlashBusy,
   type TuiState,
 } from "./state.js";
 import { makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
@@ -218,6 +222,24 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         if ((trimmed === "/quit" || trimmed === "/exit") && state.busy) {
           controller.abort();
           quit(0);
+        }
+        // C32: slash commands are UI commands — they are handled while a run
+        // is in flight too (e.g. /display-bottom reconfigures the bottom
+        // lines mid-task). submitSlashBusy clears the line (never a steer —
+        // it must not be queued for the loop); the pure handler appends the
+        // feedback info item and state.busy is left untouched, so the run
+        // continues and the loop's next drain is unaffected. /quit above
+        // already won; unhandled slash lines are swallowed (as before) and
+        // non-slash lines steer.
+        const slashBusy = submitSlashBusy(state);
+        if (slashBusy !== null) {
+          const prevBottom = state.bottom;
+          const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
+          setState(slash.handled ? slash.state : slashBusy.state);
+          if (slash.handled && slash.state.bottom !== prevBottom) {
+            saveTuiConfig({ bottom: slash.state.bottom });
+          }
+          return;
         }
         // Steering (TUI): a non-empty, non-slash line typed while busy is
         // guidance for the running loop — echo it as a user item and queue
