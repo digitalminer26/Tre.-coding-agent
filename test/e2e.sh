@@ -436,6 +436,7 @@ EOF
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   # The long reply rendered at all (else there was nothing to scroll).
+  # C31: reply lines hang under the ◆ icon (2-space indent).
   grep -q $'\x1b[?1006h' "$D/out.log" || { echo "mouse mode 1006 never enabled in the pty capture"; return 1; }
   grep -q $'\x1b[?1006l' "$D/out.log" || { echo "mouse mode 1006 not restored on exit"; return 1; }
   python3 - "$D/out.log" "$D/plain.txt" <<'PY'
@@ -445,7 +446,7 @@ clean = re.sub(r"\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\-_])", "",
 clean = clean.replace("\r", "")
 open(sys.argv[2], "w").write(clean)
 PY
-  grep -qE '^40[.]?$' "$D/plain.txt" || { echo "line 40 of the reply never rendered — content too short to scroll?"; return 1; }
+  grep -qE '^ *40[.]?$' "$D/plain.txt" || { echo "line 40 of the reply never rendered — content too short to scroll?"; return 1; }
   grep -q "scrolled — PgDn/wheel" "$D/plain.txt" || { echo "no scroll status in frames — PgUp/wheel did not scroll"; return 1; }
   # The pinned frame (last "scrolled" hint) must show MIDDLE lines of the
   # reply, not line 40: the view actually moved. (C27's fallback kept the

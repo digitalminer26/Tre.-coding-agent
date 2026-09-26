@@ -7,7 +7,7 @@
 import React from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import cliTruncate from "cli-truncate";
-import type { TuiState, VisibleSlice } from "./state.js";
+import type { TuiItem, TuiState, VisibleSlice } from "./state.js";
 import { itemLines } from "./lines.js";
 import {
   FIXED_NON_ITEM_LINES,
@@ -20,6 +20,18 @@ import {
 
 /** Truncate a line to at most `w` display columns (ellipsis at the end). */
 const oneLine = (s: string, w: number): string => cliTruncate(s, w, { position: "end" });
+
+/**
+ * C31: the item rendered immediately above `it` in the CONTENT (its
+ * absolute predecessor in `items`), or undefined when it is first — the
+ * SAME predecessor the fit math uses for the item's leading blank line, so
+ * the render counts what it draws. `items` is the very array the fit
+ * received (state.items), so identity lookup is exact.
+ */
+const prevOf = (items: TuiItem[], it: TuiItem): TuiItem | undefined => {
+  const i = items.indexOf(it);
+  return i > 0 ? items[i - 1] : undefined;
+};
 
 // C27 — mouse-wheel scrolling. SGR (mode 1006) and X11 (4-byte) wheel
 // events arrive at Ink as RAW input text (no parsed `name`): button 64/65
@@ -204,7 +216,7 @@ export function App(props: AppProps): React.ReactElement {
         {state.busy && <Text color="yellow"> · working…</Text>}
       </Text>
       {layout.visible.map((slice, i) => (
-        <Item key={i} slice={slice} width={width} />
+        <Item key={i} slice={slice} prev={prevOf(state.items, slice.item)} width={width} />
       ))}
       {Array.from({ length: layout.pad }, (_, i) => (
         <Text key={`pad-${i}`}> </Text>
@@ -225,9 +237,12 @@ export function App(props: AppProps): React.ReactElement {
         )}
       </Text>
       {/* D16: slash-command completion menu — grey lines above the input,
-          selected candidate marked with "> ". */}
+          selected candidate marked with "> " and YELLOW (C31: the resting
+          chrome is dim; the pick is the one line that should stand out). */}
       {menu.map((m, i) => (
-        <Text key={`menu-${i}`} dimColor={!m.selected}>{m.line}</Text>
+        <Text key={`menu-${i}`} dimColor={!m.selected} color={m.selected ? "yellow" : undefined}>
+          {m.line}
+        </Text>
       ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: no 'you' prefix — the input is plain text. The cursor
@@ -250,12 +265,15 @@ export function App(props: AppProps): React.ReactElement {
 
 /**
  * One visible slice of an item (C28): draws EXACTLY lines [from, to) of
- * `itemLines(item, width)` — the same lines the fit math counted, so a
- * straddling item is clipped, never dropped, and the frame stays exactly
- * `rows` tall. (D15/D19 notes moved to lines.ts with the line shapes.)
+ * `itemLines(item, width, prev)` — the same lines the fit math counted (the
+ * fit computes them with the item's ABSOLUTE predecessor in the content;
+ * `prev` is that predecessor, reconstructed from the contiguous visible
+ * slice), so a straddling item is clipped, never dropped, and the frame
+ * stays exactly `rows` tall. (D15/D19 notes moved to lines.ts with the line
+ * shapes.)
  */
-function Item({ slice, width }: { slice: VisibleSlice; width: number }): React.ReactElement {
-  const lines = itemLines(slice.item, width).slice(slice.from, slice.to);
+function Item({ slice, prev, width }: { slice: VisibleSlice; prev: TuiItem | undefined; width: number }): React.ReactElement {
+  const lines = itemLines(slice.item, width, prev).slice(slice.from, slice.to);
   return (
     <Box flexDirection="column">
       {lines.map((line, i) => (

@@ -10,8 +10,17 @@
  * per-item line lists once, the viewport slices [from, to) of them, and the
  * renderer draws exactly those lines.
  *
+ * C31 — readability: every block type gets an icon (❯ user, ◆ assistant,
+ * ◦ thinking, ⚠ error, ℹ info, ✂ compaction, ✓/✗/→ tools), wrapped text
+ * hangs under a 2-column icon gutter, and a blank line separates a user
+ * prompt from the block that follows it and any block from the next user
+ * prompt (a new turn). The blank line is a LEADING line of the later item
+ * (see blankBefore), so the per-item lockstep contract below holds with
+ * the same `prev` on both sides, and a C30 clip of an over-budget item
+ * drops the separator first (it is the item's first line).
+ *
  * CONTRACT (pinned in test/tui-pinned-layout.test.ts):
- *   itemLines(item, width).length === itemHeight(item, width)
+ *   itemLines(item, width, prev).length === itemHeight(item, width, prev)
  * The fit math counts lines and the viewport slices them; drift between the
  * two is a broken frame. When editing either, edit both and the test.
  */
@@ -39,30 +48,53 @@ function wrapRows(text: string, width: number): string[] {
   return wrapAnsi(text, Math.max(1, width), WRAP).split("\n");
 }
 
-const plain = (text: string): RLine => ({ spans: [{ text }] });
+/**
+ * C31: the blank line that separates blocks — one before EVERY item that is
+ * not the first (a fresh prompt after a turn), and one before a NON-user
+ * item that follows a user item (the prompt's reply block). `prev` is the
+ * item rendered immediately above (undefined = the item is first). The
+ * HEIGHT side (itemHeight) must count the same line with the same `prev`.
+ */
+function blankBefore(item: TuiItem, prev: TuiItem | undefined): boolean {
+  if (prev === undefined) return false;
+  if (item.kind === "user") return true;
+  return prev.kind === "user";
+}
 
 /**
  * The exact lines the TUI renders for `item` at `width` (see the module
- * contract). Height-0 items (hidden tools) yield [].
+ * contract). Height-0 items (hidden tools) yield []. `prev` = the item
+ * rendered immediately above (undefined = first) — it decides the C31
+ * leading blank line.
  */
-export function itemLines(item: TuiItem, width: number): RLine[] {
+export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[] {
+  const lines: RLine[] = [];
+  if (item.kind !== "tool" || !item.hidden) {
+    // The separator is part of THIS item's rendered lines (the lockstep
+    // contract counts it — itemHeight gets the same `prev`).
+    if (blankBefore(item, prev)) lines.push({ spans: [{ text: " " }] });
+  }
   switch (item.kind) {
     case "user":
-      // No prefix (D15): full width, but CYAN — the user's echoed prompt is
-      // colored so it is distinguishable from the assistant's plain
-      // (default-fg) reply. Color only: no text/width change, so the
-      // lockstep contract (itemLines.length === itemHeight) holds. Empty text
-      // still renders one blank row (a bare space in the renderer), colored
-      // for uniformity (invisible either way).
-      return item.text
-        ? wrapRows(item.text, width).map((l) => ({ spans: [{ text: l, color: "cyan" }] }))
-        : [{ spans: [{ text: " ", color: "cyan" }] }];
+      // C31: the prompt gets a CYAN ❯ icon (2 columns) and its text HANGS
+      // under it — wrapped at width−2, icon on line 1, 2-space indent on
+      // the rest — so a multi-line prompt reads as one block. Empty text
+      // still renders one blank row (a bare space), colored for uniformity.
+      if (item.text) {
+        const rows = wrapRows(item.text, Math.max(1, width - 2));
+        rows.forEach((l, i) =>
+          lines.push({ spans: [{ text: (i === 0 ? "❯ " : "  ") + l, color: "cyan" }] }),
+        );
+      } else {
+        lines.push({ spans: [{ text: " ", color: "cyan" }] });
+      }
+      return lines;
     case "assistant": {
-      const lines: RLine[] = [];
+      const body: RLine[] = [];
       // The model's reasoning (the wire's `reasoning_content`), accumulated
       // by the state machine. Rendered as a DISTINCT block above the reply so
       // it reads as the model's aside, not part of the answer:
-      //   · a dim header ("thinking…" while it streams, "thinking" once done)
+      //   · a dim header ("◦ thinking…" while it streams, "◦ thinking" done)
       //   · the reasoning under a dim "│ " gutter, wrapped at width−2 so the
       //     gutter + text never exceed the terminal width
       //   · a blank line separating the block from the reply.
@@ -70,21 +102,28 @@ export function itemLines(item: TuiItem, width: number): RLine[] {
       // the blank line are part of the height (itemHeight counts them) — the
       // lockstep contract (itemLines.length === itemHeight) holds.
       if (item.thinkingText !== "") {
-        lines.push({ spans: [{ text: item.thinking ? "thinking…" : "thinking", dim: true }] });
+        body.push({ spans: [{ text: "◦ " + (item.thinking ? "thinking…" : "thinking"), dim: true }] });
         for (const l of wrapRows(item.thinkingText, Math.max(1, width - 2)))
-          lines.push({ spans: [{ text: "│ " + l, dim: true }] });
-        lines.push({ spans: [{ text: " " }] }); // blank line: thinking | reply
+          body.push({ spans: [{ text: "│ " + l, dim: true }] });
+        body.push({ spans: [{ text: " " }] }); // blank line: thinking | reply
       }
       // The streaming cursor is part of the rendered text — and of the
       // height (itemHeight counts it): before C28 the cursor line rendered
       // but did not count, overflowing the frame by one row mid-stream.
+      // C31: a ◆ icon leads the reply (2 columns) and the text hangs under
+      // it — wrapped at width−2, icon on line 1, 2-space indent on the rest
+      // — so the reply reads as one block, distinct from the cyan prompt
+      // and the dim reasoning.
       const text = item.text + (item.streaming ? "▍" : "");
-      if (text !== "") for (const l of wrapRows(text, width)) lines.push(plain(l));
-      return lines;
+      if (text !== "") {
+        const rows = wrapRows(text, Math.max(1, width - 2));
+        rows.forEach((l, i) => body.push({ spans: [{ text: (i === 0 ? "◆ " : "  ") + l }] }));
+      }
+      return [...lines, ...body];
     }
     case "tool": {
       if (item.hidden) return []; // D19: quiet tool — renders nothing
-      const lines: RLine[] = [];
+      const body: RLine[] = [];
       const mark =
         item.resultText !== undefined
           ? item.isError
@@ -123,31 +162,48 @@ export function itemLines(item: TuiItem, width: number): RLine[] {
           const b = Math.min(end, e);
           if (b > a) spans.push({ text: l.slice(a - off, b - off), ...(c !== undefined ? { color: c } : {}) });
         }
-        lines.push({ spans });
+        body.push({ spans });
         off = end;
       }
       if (item.diff !== undefined) {
+        // C31: diff lines hang under the header — wrapped at width−2, then
+        // every row gets the 2-space indent (indenting BEFORE the wrap would
+        // only indent line 1).
         for (const line of item.diff) {
           if (line === "") continue;
           const dcolor = line.startsWith("+") ? "green" : line.startsWith("-") ? "red" : undefined;
-          for (const l of wrapRows(line, width)) lines.push({ spans: [{ text: l, color: dcolor }] });
+          for (const l of wrapRows(line, Math.max(1, width - 2)))
+            body.push({ spans: [{ text: "  " + l, color: dcolor }] });
         }
       }
       if (item.resultText !== undefined) {
-        // itemHeight counts wrap(`${mark} ${result}`) — mark + space is two
-        // columns, the renderer draws two spaces: same wrap, dim color.
-        for (const l of wrapRows(`  ${item.resultText}`, width))
-          lines.push({ spans: [{ text: l, dim: true }] });
+        // C31: the result hangs under the header too — wrapped at width−2,
+        // 2-space indent on every row (itemHeight counts the same wrap).
+        for (const l of wrapRows(item.resultText, Math.max(1, width - 2)))
+          body.push({ spans: [{ text: "  " + l, dim: true }] });
       }
-      return lines;
+      return [...lines, ...body];
     }
     case "compaction": {
-      const text = `✂ compacted: ~${Math.round(item.tokensBefore / 100) / 10}k tokens → summary (${item.summaryChars} chars) + last ${item.messagesKept} message(s) kept`;
-      return wrapRows(text, width).map((l) => ({ spans: [{ text: l, color: "magenta" }] }));
+      // C31: the ✂ icon leads (2 columns); the text hangs under it.
+      const text = `compacted: ~${Math.round(item.tokensBefore / 100) / 10}k tokens → summary (${item.summaryChars} chars) + last ${item.messagesKept} message(s) kept`;
+      const rows = wrapRows(text, Math.max(1, width - 2));
+      const body = rows.map((l, i) => ({ spans: [{ text: (i === 0 ? "✂ " : "  ") + l, color: "magenta" as const }] }));
+      return [...lines, ...body];
     }
-    case "error":
-      return item.text ? wrapRows(item.text, width).map((l) => ({ spans: [{ text: l, color: "red" }] })) : [];
-    case "info":
-      return item.text ? wrapRows(item.text, width).map((l) => ({ spans: [{ text: l, dim: true }] })) : [];
+    case "error": {
+      // C31: a ⚠ icon leads the error (2 columns); the text hangs under it.
+      if (item.text === "") return lines;
+      const rows = wrapRows(item.text, Math.max(1, width - 2));
+      const body = rows.map((l, i) => ({ spans: [{ text: (i === 0 ? "⚠ " : "  ") + l, color: "red" as const }] }));
+      return [...lines, ...body];
+    }
+    case "info": {
+      // C31: an ℹ icon leads the info line (2 columns); the text hangs under it.
+      if (item.text === "") return lines;
+      const rows = wrapRows(item.text, Math.max(1, width - 2));
+      const body = rows.map((l, i) => ({ spans: [{ text: (i === 0 ? "ℹ " : "  ") + l, dim: true }] }));
+      return [...lines, ...body];
+    }
   }
 }

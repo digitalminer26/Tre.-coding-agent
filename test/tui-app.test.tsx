@@ -347,8 +347,10 @@ test("C27: scroll keys are ignored while an approval is pending", async () => {
 });
 
 test("C28: pinned frame shows older items, clipped straddlers, and the scroll status", () => {
-  // Test terminal: width 100, rows 24 → item budget 16. 10 items of 2
-  // lines (200 chars each) = 20 lines total, maxScroll 4.
+  // Test terminal: width 100, rows 24 → item budget 16. 10 items of 200
+  // chars each: C31 hanging indent at width−2=98 → 3 lines; the first
+  // renders 3 (no separator), the rest 4 (leading blank) = 39 lines total,
+  // maxScroll 23.
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
     kind: "user",
     text: `item-${i} ` + "x".repeat(192),
@@ -357,15 +359,15 @@ test("C28: pinned frame shows older items, clipped straddlers, and the scroll st
   const app = makeApp(state);
   const frame = app.lastFrame() ?? "";
   // item-0 straddles the top edge: its FIRST line is above the window —
-  // only its 2nd line (the clipped x-run) may appear, never the "item-0"
-  // label. item-8 straddles the bottom edge: its "item-8" label shows
-  // (line 0 is inside), but item-9 is fully below the window.
+  // only its 2nd/3rd lines (clipped x-runs) may appear, never the "item-0"
+  // label. item-4 straddles the bottom edge: its "item-4" label shows
+  // (line 0 is inside); item-5 starts at the bottom edge → excluded.
   assert.doesNotMatch(frame, /item-0/);
   assert.match(frame, /item-1/);
-  assert.match(frame, /item-8/);
-  assert.doesNotMatch(frame, /item-9/);
-  // The hint line carries the scroll status (3 rows above the bottom).
-  assert.match(frame, /↑3\/4 scrolled/);
+  assert.match(frame, /item-4/);
+  assert.doesNotMatch(frame, /item-5/);
+  // The hint line carries the scroll status (22 rows above the bottom).
+  assert.match(frame, /↑22\/23 scrolled/);
   assert.doesNotMatch(frame, /enter send ·/);
   app.unmount();
 });

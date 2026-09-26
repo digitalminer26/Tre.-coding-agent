@@ -1,3 +1,50 @@
+# HANDOFF — TUI readability: block icons, hanging indents, turn spacing (2026-09-26)
+
+**Status: COMPLETED.** One increment (C31): the TUI rendered every block as
+plain full-width text — a user prompt, an assistant reply, a tool line, an
+error, and an info note all looked the same, and a long block's wrapped
+lines ran back to column 0, so the eye had no anchors. New rendering in
+`src/tui/lines.ts` (the single source of truth for line shapes; the height
+math in `state.ts` mirrors it — the lockstep contract
+`itemLines(item, width, prev).length === itemHeight(item, width, prev)`
+still pins both sides):
+
+- **Icons per block type** — `❯` user prompt (cyan), `◆` assistant reply
+  (default fg), `◦` thinking header (dim), `⚠` error (red), `ℹ` info (dim),
+  `✂` compaction (magenta); tool marks unchanged (`✓`/`✗`/`→`, colored).
+- **Hanging indent** — every block's text wraps at `width−2` under its
+  2-column icon: icon on line 1, 2-space indent on the rest, so a wrapped
+  block reads as one unit (tool diff lines get the same 2-space hang under
+  the header).
+- **Turn spacing** — a blank line separates a user prompt from the block
+  that follows it, and every block from the next user prompt (a new turn).
+  Implemented as a LEADING line of the later item (`blankBefore(item, prev)`
+  in lines.ts, mirrored in `itemHeight`): the per-item lockstep contract
+  holds with the same `prev` on both sides, and a C30 clip of an over-budget
+  item drops the separator first (it is the item's first line).
+- **Menu highlight** — the selected slash-command candidate is YELLOW
+  (was plain fg); the resting menu stays dim.
+
+Files: `src/tui/lines.ts` (icons + hanging wraps + `blankBefore`; all
+`itemLines` shapes), `src/tui/state.ts` (`itemHeight`/`itemsHeight`/
+`fitItems`/`fitItemsScrollable` take and pass the `prev` predecessor),
+`src/tui/app.tsx` (`Item` receives `prev` — its ABSOLUTE predecessor in
+`state.items` via `prevOf`, so the render counts what the fit counted —
+and the menu's selected line is yellow), `test/tui-pinned-layout.test.ts`
+(rewritten geometry pins: C31 separator rules, hanging-wrap heights, the
+C28/C30 window math at the new line counts, span shapes),
+`test/tui-app.test.tsx` (pinned-frame test at the new geometry),
+`test/e2e.sh` (scenario 15: reply lines hang 2 under `◆`, so the
+"line 40 rendered" grep allows a leading indent).
+
+Tests: full suite green (397 pass, 0 fail). PTY capture: fresh session,
+`/display-bottom model` → `/quit` — frame exactly 24 rows, input row 4
+above the bottom, pinned block (hint / `─` / input / `─` / display lines)
+intact; icon shapes are pinned by the unit tests (the capture's empty
+session has no content blocks to show).
+
+---
+
 # HANDOFF — TUI bottom display: `context` field — window, used, %, compaction reset (2026-09-26)
 
 **Status: COMPLETED.** One increment: the bottom display (`/display-bottom`)

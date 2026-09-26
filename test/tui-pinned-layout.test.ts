@@ -184,20 +184,39 @@ test("itemHeight per kind at width 80", () => {
   };
   assert.equal(itemHeight(toolDone, 80), 1 + 10 + 1);
 
-  // compaction / error: single line at width 80
+  // compaction / error: single line at width 80 (C31: the text hangs under
+  // a 2-col icon, wrapped at width−2 — 70 chars = 1 line at 78)
   const compact: TuiItem = { kind: "compaction", tokensBefore: 4096, messagesKept: 2, summaryChars: 123 };
   assert.equal(itemHeight(compact, 80), 1);
 
   const err: TuiItem = { kind: "error", text: "boom" };
   assert.equal(itemHeight(err, 80), 1);
+
+  // C31: the leading blank line — before a non-user item that follows a
+  // user item, before every user item that is not first, and NOT between
+  // other pairs (e.g. an error after a reply). Hidden tools render nothing,
+  // separator included.
+  const u: TuiItem = { kind: "user", text: "q" };
+  const a: TuiItem = { kind: "assistant", text: "r", streaming: false, thinking: false, thinkingText: "" };
+  const e: TuiItem = { kind: "error", text: "boom" };
+  assert.equal(itemHeight(u, 80), 1, "first item: no separator");
+  assert.equal(itemHeight(a, 80, u), 2, "reply after a prompt: blank + 1");
+  assert.equal(itemHeight(u, 80, a), 2, "a new prompt: blank + 1");
+  assert.equal(itemHeight(e, 80, u), 2, "error after a prompt: blank + 1");
+  assert.equal(itemHeight(e, 80, a), 1, "error after a reply: no separator");
+  assert.equal(itemHeight(a, 80, u), 2, "assistant after a prompt: blank + 1");
+  const hidden: TuiItem = { kind: "tool", id: "h", name: "read", argsText: "{}", running: true, hidden: true };
+  assert.equal(itemHeight(hidden, 80, u), 0, "hidden tool: no lines, no separator");
 });
 
-test("itemsHeight is the sum of itemHeights", () => {
+test("itemsHeight is the sum of itemHeights (C31: separators count)", () => {
   const a: TuiItem = { kind: "user", text: "hello" }; // 1 at w80
-  const b: TuiItem = { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false, thinkingText: "" }; // 3 at w80
+  const b: TuiItem = { kind: "assistant", text: "x".repeat(200), streaming: false, thinking: false, thinkingText: "" }; // 3 at w80 (78-wide hang)
   const c: TuiItem = { kind: "error", text: "boom" }; // 1 at w80
-  assert.equal(itemsHeight([a, b, c], 80), itemHeight(a, 80) + itemHeight(b, 80) + itemHeight(c, 80));
-  assert.equal(itemsHeight([a, b, c], 80), 5);
+  // C31: b follows a user → +1 blank; c (error) follows an assistant → no
+  // blank.
+  assert.equal(itemsHeight([a, b, c], 80), itemHeight(a, 80) + itemHeight(b, 80, a) + itemHeight(c, 80, b));
+  assert.equal(itemsHeight([a, b, c], 80), 6);
 });
 
 // ── fitItems ───────────────────────────────────────────────────────────
@@ -208,24 +227,28 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
     { kind: "assistant", text: "a1", streaming: false, thinking: false, thinkingText: "" },
     { kind: "user", text: "q2" },
   ];
+  // C31: a1 follows a user (+1 blank), q2 follows an assistant (+1 blank)
+  // → heights 1 + 2 + 2 = 5 (the fit counts each item WITH its separator).
 
   // D16: the 4th arg is extraLines (approval + menu); 0 → budget 16
   const r1 = fitItems(oneLiners, 80, 24, 0);
   assert.equal(r1.visible.length, 3);
-  assert.equal(itemsHeight(r1.visible, 80), 3);
-  assert.equal(r1.pad, 24 - FIXED_NON_ITEM_LINES - 3); // 13
+  assert.equal(itemsHeight(r1.visible, 80), 5); // 1 + 2 + 2 (C31 separators)
+  assert.equal(r1.pad, 24 - FIXED_NON_ITEM_LINES - 5); // 11
 
   // a pending approval steals exactly one line of budget → pad shrinks by 1
   const r2 = fitItems(oneLiners, 80, 24, 1);
   assert.equal(r2.visible.length, 3);
-  assert.equal(r2.pad, 24 - FIXED_NON_ITEM_LINES - 1 - 3); // 12
+  assert.equal(r2.pad, 24 - FIXED_NON_ITEM_LINES - 1 - 5); // 10
 
   // a 3-line completion menu steals exactly 3 lines of budget
   const r5 = fitItems(oneLiners, 80, 24, 3);
   assert.equal(r5.visible.length, 3);
-  assert.equal(r5.pad, 24 - FIXED_NON_ITEM_LINES - 3 - 3); // 10
+  assert.equal(r5.pad, 24 - FIXED_NON_ITEM_LINES - 3 - 5); // 8
 
-  // 30 items × exactly 5 lines (360 = 4×80+40) → longest tail is the last 3
+  // 30 items × exactly 5 lines (360 = 4×78+48 — the C31 2-col icon hang
+  // wraps at width−2) → longest tail is the last 3 (assistants after
+  // assistants add no separator, so the per-item height is unchanged)
   const big: TuiItem[] = Array.from({ length: 30 }, () => ({
     kind: "assistant" as const,
     text: "y".repeat(360),
@@ -233,7 +256,7 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
     thinking: false,
     thinkingText: "",
   }));
-  assert.equal(itemHeight(big[29] as TuiItem, 80), 5); // sanity: exactly 5 lines each
+  assert.equal(itemHeight(big[29] as TuiItem, 80, big[28]), 5); // sanity: exactly 5 lines each
   const r3 = fitItems(big, 80, 24, 0);
   assert.equal(r3.visible.length, 3); // floor(16/5) = 3 (15 ≤ 16 < 20)
   assert.ok(itemsHeight(r3.visible, 80) <= 16);
@@ -246,8 +269,9 @@ test("fitItems keeps the longest tail that fits and pads the rest (rows=24)", ()
   assert.equal(r3.visible[r3.visible.length - 1], big[29] as TuiItem); // newest last
 
   // a single item that alone exceeds the budget → keep just it, pad = 0
+  // (4000 chars at the 78-wide hang = 52 lines)
   const monster: TuiItem = { kind: "assistant", text: "z".repeat(4000), streaming: false, thinking: false, thinkingText: "" };
-  assert.equal(itemHeight(monster, 80), 50); // sanity: exactly 50 lines (50×80)
+  assert.equal(itemHeight(monster, 80, undefined), 52); // sanity: exactly 52 lines (51×78+22)
   const r4 = fitItems([monster], 80, 24, 0);
   assert.equal(r4.visible.length, 1);
   assert.equal(r4.visible[0], monster);
@@ -801,7 +825,18 @@ const twoLineUser = (i: number): TuiItem => ({
 });
 
 test("C28: fitItemsScrollable following the bottom is byte-identical to fitItems", () => {
-  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
+  // Uniform-height content: 10 assistant items × 300 chars → 4 lines each
+  // at width 80 (C31: 78-wide hang); assistants after assistants add no
+  // separator, so every item is exactly 4 lines. 40 lines total, budget
+  // 16 → W = 40 − 16 = 24 = an item boundary, so the legacy tail window
+  // and the absolute window select the SAME items, full, with the same pad.
+  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
+    kind: "assistant",
+    text: `a${i} ` + "x".repeat(298), // 300 chars → 4 lines at 80 (C31)
+    streaming: false,
+    thinking: false,
+    thinkingText: "",
+  }));
   for (const extra of [0, 1, 3]) {
     const legacy = fitItems(items, 80, 24, extra);
     const s = fitItemsScrollable(items, 80, 24, extra, null);
@@ -813,47 +848,49 @@ test("C28: fitItemsScrollable following the bottom is byte-identical to fitItems
     assert.ok(s.visible.every((v) => v.from === 0), "full items (no clip)");
     assert.equal(s.pad, legacy.pad, `pad identical (extra=${extra})`);
     assert.equal(s.eff, 0);
-    assert.equal(s.total, 20);
+    assert.equal(s.total, 40);
   }
 });
 
 test("C28: maxScroll is total−budget; 0 when the content fits (even a stale pin follows)", () => {
-  const ten = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  assert.equal(fitItemsScrollable(ten, 80, 24, 0, 0).maxScroll, 4); // 20 − 16
-  const four = Array.from({ length: 4 }, (_, i) => twoLineUser(i)); // 8 ≤ 16
+  const ten = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 29 lines (C31)
+  assert.equal(fitItemsScrollable(ten, 80, 24, 0, 0).maxScroll, 13); // 29 − 16
+  const four = Array.from({ length: 4 }, (_, i) => twoLineUser(i)); // 11 ≤ 16 (C31)
   assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).maxScroll, 0);
   assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).eff, 0, "clamped to the range");
-  assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).pad, 8, "legacy tail window + pad");
+  assert.equal(fitItemsScrollable(four, 80, 24, 0, 999).pad, 5, "legacy tail window + pad (16 − 11)");
 });
 
 test("C28: a pinned window holds exactly the budget rows (straddlers clipped, no gaps)", () => {
-  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  // maxScroll 4, viewTop 1 → window [1,17): item0 [0,2) straddles top
-  // (clip line 1); item1 [2,4)…item7 [14,16) full; item8 [16,18) straddles
-  // bottom (clip line 0). 9 pieces, 16 lines, pad 0.
+  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 29 lines (C31: 2 + 9×3)
+  // maxScroll 13, viewTop 1 → window [1,17): item0 [0,2) straddles top
+  // (clip line 1); item1 [2,5)…item5 [14,17) full (3 lines each: C31 blank
+  // + 2); item6 [17,20) starts at the bottom edge → excluded. 6 pieces,
+  // 16 lines, pad 0.
   const s = fitItemsScrollable(items, 80, 24, 0, 1);
-  assert.deepEqual(s.visible.map((v) => v.item), items.slice(0, 9));
+  assert.deepEqual(s.visible.map((v) => v.item), items.slice(0, 6));
   assert.equal(s.visible[0]!.from, 1, "top straddler clipped from its 2nd line");
   assert.equal(s.visible[0]!.to, 2);
-  assert.equal(s.visible[8]!.from, 0);
-  assert.equal(s.visible[8]!.to, 1, "bottom straddler clipped to its 1st line");
+  assert.equal(s.visible[5]!.from, 0);
+  assert.equal(s.visible[5]!.to, 3, "item5 ends exactly at the bottom edge");
   assert.equal(s.pad, 0, "no gap lines — the window is full");
   const shown = s.visible.reduce((a, v) => a + (v.to - v.from), 0);
   assert.equal(shown, 16, "exactly the budget rows");
-  assert.equal(s.eff, 3, "3 rows between the window bottom and the content bottom");
+  assert.equal(s.eff, 12, "12 rows between the window bottom and the content bottom");
 });
 
 test("C28: a SINGLE item taller than the budget scrolls (the C27 defect)", () => {
-  // 40 lines > the 16-row budget: C27's straddle-skip left every scroll
-  // position rendering the identical overflow frame. C28 clips.
-  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 40 lines at 80
+  // 42 lines > the 16-row budget (C31: 3200 chars hang at width−2=78):
+  // C27's straddle-skip left every scroll position rendering the identical
+  // overflow frame. C28 clips.
+  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 42 lines at 80 (C31)
   const atTop = fitItemsScrollable([huge], 80, 24, 0, 0);
-  assert.equal(atTop.maxScroll, 24);
+  assert.equal(atTop.maxScroll, 26);
   assert.deepEqual(atTop.visible, [{ item: huge, from: 0, to: 16 }]);
   const mid = fitItemsScrollable([huge], 80, 24, 0, 12);
   assert.deepEqual(mid.visible, [{ item: huge, from: 12, to: 28 }], "window [12,28)");
-  const atBottom = fitItemsScrollable([huge], 80, 24, 0, 24);
-  assert.deepEqual(atBottom.visible, [{ item: huge, from: 24, to: 40 }]);
+  const atBottom = fitItemsScrollable([huge], 80, 24, 0, 26);
+  assert.deepEqual(atBottom.visible, [{ item: huge, from: 26, to: 42 }]);
   assert.equal(atBottom.eff, 0, "at the bottom");
   assert.notDeepEqual(mid.visible, atTop.visible, "different positions render different rows");
 });
@@ -868,10 +905,10 @@ test("C30: FOLLOW mode clips an over-budget tail item (no frame overflow, no scr
   // `budget` lines — follow the bottom), so the frame is exactly `rows`
   // tall and no clear is ever emitted.
   const budget = itemAreaBudget(24, 0); // 16 at 24 rows
-  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 40 lines at 80
+  const huge: TuiItem = { kind: "user", text: "y".repeat(3200) }; // 42 lines at 80 (C31: width−2 hang)
   const s = fitItemsScrollable([huge], 80, 24, 0, null); // viewTop null = follow
-  assert.equal(s.maxScroll, 24, "content still scrolls (maxScroll unchanged)");
-  assert.deepEqual(s.visible, [{ item: huge, from: 40 - budget, to: 40 }], "clipped to the LAST budget lines");
+  assert.equal(s.maxScroll, 26, "content still scrolls (maxScroll unchanged)");
+  assert.deepEqual(s.visible, [{ item: huge, from: 42 - budget, to: 42 }], "clipped to the LAST budget lines");
   assert.equal(s.pad, 0, "window full");
   assert.equal(s.eff, 0, "following the bottom");
   // The frame (visible lines + pad) is exactly the budget — never taller,
@@ -880,35 +917,38 @@ test("C30: FOLLOW mode clips an over-budget tail item (no frame overflow, no scr
   assert.equal(shown + s.pad, budget, "frame content rows == budget (no overflow)");
   // The clip is a slice of the SAME item (the renderer does
   // itemLines(item).slice(from, to)) — height math stays in lockstep.
-  assert.equal(itemHeight(s.visible[0]!.item, 80), 40, "the item itself is unchanged");
+  assert.equal(itemHeight(s.visible[0]!.item, 80), 42, "the item itself is unchanged");
 
   // A short item before an over-budget tail: the legacy fitItems window
   // keeps only the over-budget tail (it alone fills the window), and C30
   // clips it to the FULL budget (the short item is excluded by the legacy
-  // tail logic — unchanged behavior). The frame is still exactly the budget.
+  // tail logic — unchanged behavior). C31: the tail's own height includes
+  // its leading blank (it follows the short item) → 43 lines.
   const short: TuiItem = { kind: "user", text: "q" }; // 1 line
   const mixed = fitItemsScrollable([short, huge], 80, 24, 0, null);
   assert.deepEqual(
     mixed.visible.map((v) => [v.item, v.from, v.to]),
-    [[huge, 40 - budget, 40]],
+    [[huge, 43 - budget, 43]],
     "over-budget tail alone fills the window, clipped to the full budget",
   );
   const mixedShown = mixed.visible.reduce((a, v) => a + (v.to - v.from), 0);
   assert.equal(mixedShown + mixed.pad, budget, "still exactly the budget rows");
 
   // No-overflow regression for the common case: content that FITS is
-  // byte-identical to the legacy window (full items, from 0).
-  const fits = Array.from({ length: 5 }, (_, i) => twoLineUser(i)); // 10 ≤ 16
+  // byte-identical to the legacy window (full items, from 0). C31: 5 items
+  // = 2 + 4×3 = 14 lines (first has no separator).
+  const fits = Array.from({ length: 5 }, (_, i) => twoLineUser(i)); // 14 ≤ 16
   const f = fitItemsScrollable(fits, 80, 24, 0, null);
   assert.ok(f.visible.every((v) => v.from === 0), "no clip when it fits");
-  assert.equal(f.pad, budget - 10);
+  assert.equal(f.pad, budget - 14);
 });
 
 test("C28: pinned view stays put as content appends (no drift), follows when it reaches the bottom", () => {
   // A pinned viewTop is an ABSOLUTE content row. Simulate output appending:
-  // the window [2,18) at 20 lines is still [2,18) at 30 lines (eff grows).
-  const items10 = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 20 lines
-  const items15 = [...items10, ...Array.from({ length: 5 }, (_, i) => twoLineUser(10 + i))]; // 30
+  // the window [2,18) at 29 lines (C31) is still [2,18) at 44 lines
+  // (eff grows).
+  const items10 = Array.from({ length: 10 }, (_, i) => twoLineUser(i)); // 29 lines (C31)
+  const items15 = [...items10, ...Array.from({ length: 5 }, (_, i) => twoLineUser(10 + i))]; // 44
   const a = fitItemsScrollable(items10, 80, 24, 0, 2);
   const b = fitItemsScrollable(items15, 80, 24, 0, 2);
   assert.deepEqual(
@@ -916,36 +956,31 @@ test("C28: pinned view stays put as content appends (no drift), follows when it 
     a.visible.map((v) => [v.item, v.from, v.to]),
     "same window, same clips — the view did not slide",
   );
-  assert.equal(b.eff, 12, "new output landed BELOW the window (14 − 2)");
+  assert.equal(b.eff, 26, "new output landed BELOW the window (28 − 2)");
   // scrollBy(0, larger maxScroll) on the C28 value keeps the same content row.
   const s = scrollBy(scrollToBottom({ ...makeInitialState("m") }), 2, 4);
   assert.equal(s.viewTop, 2, "2 rows up from the bottom");
-  assert.equal(scrollBy(s, 0, 14).viewTop, 2, "still row 2 at 30 lines");
+  assert.equal(scrollBy(s, 0, 14).viewTop, 2, "still row 2 at 44 lines");
   assert.equal(scrollBy(s, -2, 14).viewTop, 4, "scrolling DOWN moves the pinned top toward the bottom");
   assert.equal(scrollBy(s, -12, 14).viewTop, null, "reached the bottom → follow");
 });
 
 test("C28: a pinned window renders exactly the budget rows (no gaps)", () => {
-  // 100×24 → item budget 16. 10 items × 2 lines = 20, maxScroll 4,
-  // viewTop 3 → window [3,19): item0 above; item1 [2,4) clips to its 2nd
-  // line; items 2..8 full; item9 [18,20) clips to its 1st line. (The
-  // App-level rendering of a pinned window is pinned in tui-app.test.tsx —
-  // no JSX in this .ts file.)
+  // 100×24 → item budget 16. C31: 200-char items hang at width−2=98 → 3
+  // lines; the first renders 3 (no separator), the rest 4 (leading blank)
+  // = 39 lines. maxScroll 23, viewTop 3 → window [3,19): item0 above;
+  // items 1..4 full (4 each, starting exactly at the window top); item5
+  // [19,23) at the bottom edge → excluded.
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
     kind: "user",
-    text: `item-${i} ` + "x".repeat(192), // 200 chars → 2 lines at 100
+    text: `item-${i} ` + "x".repeat(192), // 200 chars → 3 lines at 100 (C31: 98-wide hang)
   }));
   const s = fitItemsScrollable(items, 100, 24, 0, 3);
   assert.deepEqual(s.visible.map((v) => [v.item, v.from, v.to]), [
-    [items[1]!, 1, 2],
-    [items[2]!, 0, 2],
-    [items[3]!, 0, 2],
-    [items[4]!, 0, 2],
-    [items[5]!, 0, 2],
-    [items[6]!, 0, 2],
-    [items[7]!, 0, 2],
-    [items[8]!, 0, 2],
-    [items[9]!, 0, 1],
+    [items[1]!, 0, 4],
+    [items[2]!, 0, 4],
+    [items[3]!, 0, 4],
+    [items[4]!, 0, 4],
   ]);
   const shown = s.visible.reduce((a, v) => a + (v.to - v.from), 0);
   assert.equal(shown + s.pad, 16, "window exactly budget tall (no gaps)");
@@ -987,41 +1022,67 @@ test("C28: the rendered lines of a slice are EXACTLY the counted lines (the lock
   }
 });
 
-test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
-  // user: one CYAN span per wrapped line (D15 kept it prefix-free/full-width;
-  // the color is what separates it from the assistant's plain reply);
-  // empty text → one blank (colored) line.
+test("C31: itemLines shapes — icons, hanging indents, separators", () => {
+  // user: a CYAN ❯ icon leads; the text HANGS under it — wrapped at
+  // width−2, icon on line 1, 2-space indent on the rest. Empty text → one
+  // blank (colored) line.
   assert.deepEqual(itemLines({ kind: "user", text: "" }, 80), [{ spans: [{ text: " ", color: "cyan" }] }]);
-  assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "hi", color: "cyan" }] }]);
-  // assistant: the cursor is part of the text (and of the height).
+  assert.deepEqual(itemLines({ kind: "user", text: "hi" }, 80), [{ spans: [{ text: "❯ hi", color: "cyan" }] }]);
+  assert.deepEqual(
+    itemLines({ kind: "user", text: "aa bb" }, 6),
+    [
+      { spans: [{ text: "❯ aa ", color: "cyan" }] },
+      { spans: [{ text: "  bb", color: "cyan" }] },
+    ],
+    "multi-line prompt: icon on line 1, hanging indent on the rest",
+  );
+  const asst = (t: string): TuiItem => ({ kind: "assistant", text: t, streaming: false, thinking: false, thinkingText: "" });
+  // C31 spacing: a non-first user item leads with a blank line (a new
+  // turn), and a non-user item after a user item leads with one too
+  // (prompt | reply). FIRST items (no prev) have no separator.
+  assert.deepEqual(
+    itemLines({ kind: "user", text: "hi" }, 80, asst("r")),
+    [
+      { spans: [{ text: " " }] },
+      { spans: [{ text: "❯ hi", color: "cyan" }] },
+    ],
+  );
+  assert.deepEqual(
+    itemLines(asst("r"), 80, { kind: "user", text: "q" }),
+    [
+      { spans: [{ text: " " }] },
+      { spans: [{ text: "◆ r" }] },
+    ],
+  );
+  // assistant: the cursor is part of the text (and of the height); ◆ leads.
   const streamed = itemLines({ kind: "assistant", text: "ab", streaming: true, thinking: false, thinkingText: "" }, 80);
-  assert.deepEqual(streamed, [{ spans: [{ text: "ab\u258d" }] }]);
-  // reasoning: a distinct block above the reply — a dim header, the
-  // reasoning under a dim "│ " gutter (wrapped at width−2), and a blank line
-  // before the reply. Live ("thinking…") while streaming, settled ("thinking")
-  // after done.
+  assert.deepEqual(streamed, [{ spans: [{ text: "◆ ab▍" }] }]);
+  // reasoning: a distinct block above the reply — a dim "◦ thinking…"
+  // header, the reasoning under a dim "│ " gutter (wrapped at width−2), a
+  // blank line before the reply, and the reply under its ◆. Live
+  // ("thinking…") while streaming, settled ("thinking") after done.
   const think = itemLines(
     { kind: "assistant", text: "ok", streaming: true, thinking: true, thinkingText: "hmm, check" },
     80,
   );
   assert.deepEqual(think, [
-    { spans: [{ text: "thinking\u2026", dim: true }] },
+    { spans: [{ text: "◦ thinking…", dim: true }] },
     { spans: [{ text: "│ hmm, check", dim: true }] },
     { spans: [{ text: " " }] },
-    { spans: [{ text: "ok\u258d" }] },
+    { spans: [{ text: "◆ ok▍" }] },
   ]);
   const thinkDone = itemLines(
     { kind: "assistant", text: "ok", streaming: false, thinking: false, thinkingText: "hmm, check" },
     80,
   );
   assert.deepEqual(thinkDone, [
-    { spans: [{ text: "thinking", dim: true }] },
+    { spans: [{ text: "◦ thinking", dim: true }] },
     { spans: [{ text: "│ hmm, check", dim: true }] },
     { spans: [{ text: " " }] },
-    { spans: [{ text: "ok" }] },
+    { spans: [{ text: "◆ ok" }] },
   ]);
   // tool running: colored mark span (YELLOW = in flight) + blue name span
-  // + plain args; hard wrap splits the line.
+  // + plain args; hard wrap splits the line (the header is unchanged by C31).
   const run = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "a".repeat(100), running: true }, 80);
   assert.equal(run.length, 2);
   // line 1 = mark(1) + " bash "(6) + 73 args chars = 80 display columns.
@@ -1031,7 +1092,8 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
     { text: " " + "a".repeat(73) },
   ]);
   assert.deepEqual(run[1]!.spans, [{ text: "a".repeat(27) }], "remaining args on line 2, plain");
-  // tool done with diff + result: colored diff runs, dim result (2-col indent).
+  // tool done with diff + result: C31 — diff lines hang under the header
+  // (2-space indent), colored runs; dim result (2-col indent).
   const done = itemLines(
     { kind: "tool", id: "t", name: "edit", argsText: "{}", running: false, diff: ["+a", "-b"], resultText: "ok" },
     80,
@@ -1051,15 +1113,28 @@ test("C28: itemLines shapes (spans) mirror the pre-C28 renderer", () => {
     { text: " bash", color: "blue" },
     { text: " ls" },
   ]);
-  assert.deepEqual(done[1]!.spans, [{ text: "+a", color: "green" }]);
-  assert.deepEqual(done[2]!.spans, [{ text: "-b", color: "red" }]);
+  assert.deepEqual(done[1]!.spans, [{ text: "  +a", color: "green" }], "diff hangs under the header (C31)");
+  assert.deepEqual(done[2]!.spans, [{ text: "  -b", color: "red" }]);
   assert.deepEqual(done[3]!.spans, [{ text: "  ok", dim: true }]);
-  // hidden tool: no lines at all.
-  assert.deepEqual(itemLines({ kind: "tool", id: "h", name: "read", argsText: "{}", running: true, hidden: true }, 80), []);
-  // compaction / error / info colors.
-  assert.equal(itemLines({ kind: "compaction", tokensBefore: 2000, summaryChars: 5, messagesKept: 1 }, 80)[0]!.spans[0]!.color, "magenta");
-  assert.equal(itemLines({ kind: "error", text: "x" }, 80)[0]!.spans[0]!.color, "red");
-  assert.equal(itemLines({ kind: "info", text: "x" }, 80)[0]!.spans[0]!.dim, true);
+  // hidden tool: no lines at all — not even the C31 separator.
+  assert.deepEqual(
+    itemLines({ kind: "tool", id: "h", name: "read", argsText: "{}", running: true, hidden: true }, 80, { kind: "user", text: "q" }),
+    [],
+  );
+  // VISIBLE tool after a prompt: the C31 separator leads (the tool case
+  // used to shadow the separator — lockstep with itemHeight's +1).
+  const toolAfterUser = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "ls", running: true }, 80, { kind: "user", text: "q" });
+  assert.deepEqual(toolAfterUser[0], { spans: [{ text: " " }] }, "separator first");
+  assert.equal(toolAfterUser.length, 2);
+  assert.equal(itemHeight({ kind: "tool", id: "t", name: "bash", argsText: "ls", running: true }, 80, { kind: "user", text: "q" }), toolAfterUser.length, "lockstep");
+  // compaction: the ✂ icon leads (2 cols), the text hangs under it.
+  const comp = itemLines({ kind: "compaction", tokensBefore: 2000, summaryChars: 5, messagesKept: 1 }, 80);
+  assert.equal(comp.length, 1);
+  assert.ok(comp[0]!.spans[0]!.text.startsWith("\u2702 "));
+  assert.equal(comp[0]!.spans[0]!.color, "magenta");
+  // error / info: ⚠ / ℹ lead (2 cols), the text hangs under it.
+  assert.deepEqual(itemLines({ kind: "error", text: "x" }, 80), [{ spans: [{ text: "\u26a0 x", color: "red" }] }]);
+  assert.deepEqual(itemLines({ kind: "info", text: "x" }, 80), [{ spans: [{ text: "\u2139 x", dim: true }] }]);
 });
 
 test("C28: itemAreaBudget mirrors the fit reservation", () => {

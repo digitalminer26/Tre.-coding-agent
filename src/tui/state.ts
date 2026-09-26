@@ -573,28 +573,47 @@ export function wrapLineCount(text: string, width: number): number {
 
 /**
  * Exact line count the renderer renders for one `TuiItem` at the given
- * terminal width. MUST stay in lockstep with the `Item` rendering in app.tsx.
+ * terminal width. MUST stay in lockstep with the `Item` rendering in
+ * app.tsx (the lines it counts are itemLines in lines.ts). `prev` = the
+ * item rendered immediately above (undefined = first): it decides the C31
+ * leading blank line (a blank before every non-first item, and before a
+ * non-user item that follows a user item) — the SAME rule lines.ts applies
+ * (blankBefore), so the count and the render agree.
  */
-export function itemHeight(item: TuiItem, width: number): number {
+export function itemHeight(item: TuiItem, width: number, prev?: TuiItem): number {
+  // C31: the leading blank line (see blankBefore in lines.ts — mirrored
+  // here so the count and the render share one rule). Hidden tools render
+  // nothing, not even the separator.
+  const blank =
+    item.kind !== "tool" || !item.hidden
+      ? prev === undefined
+        ? 0
+        : item.kind === "user" || prev.kind === "user"
+          ? 1
+          : 0
+      : 0;
   switch (item.kind) {
     case "user":
-      // No prefix (D15): the user's text renders plain at full width.
-      // Empty text still renders one line (a bare space in app.tsx).
-      return item.text ? wrapLineCount(item.text, width) : 1;
+      // C31: the prompt gets a ❯ icon (2 columns) and its text hangs under
+      // it — wrapped at width−2 (the icon column is constant, so the wrap
+      // width is constant too). Empty text still renders one line.
+      return blank + (item.text ? wrapLineCount(item.text, Math.max(1, width - 2)) : 1);
     case "assistant": {
       // The streaming cursor renders as part of the text — count it (C28:
       // before, the cursor line rendered but did not count, overflowing the
       // frame by one row mid-stream).
       const text = item.text + (item.streaming ? "\u258d" : "");
       // The accumulated reasoning renders as a distinct block above the
-      // reply (lines.ts): one dim header line, the reasoning under a "│ "
-      // gutter wrapped at width−2, and a blank line before the reply —
-      // count exactly what the renderer draws.
+      // reply (lines.ts): one dim header line ("◦ thinking…"), the
+      // reasoning under a "│ " gutter wrapped at width−2, and a blank line
+      // before the reply — count exactly what the renderer draws.
       const think =
         item.thinkingText !== ""
           ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + 1
           : 0;
-      return think + wrapLineCount(text, width);
+      // C31: the reply text hangs under a ◆ icon (2 columns) — wrapped at
+      // width−2.
+      return blank + think + wrapLineCount(text, Math.max(1, width - 2));
     }
     case "tool": {
       if (item.hidden) return 0; // D19: quiet tool mid-flight — renders nothing
@@ -608,33 +627,44 @@ export function itemHeight(item: TuiItem, width: number): number {
             : "\u00b7";
       let count = wrapLineCount(`${mark} ${item.name} ${item.argsText}`, width);
       if (item.diff !== undefined) {
+        // C31: diff lines hang under the header — wrapped at width−2 (the
+        // 2-space indent applies to EVERY row, so the wrap sees width−2).
         for (const line of item.diff) {
-          if (line !== "") count += wrapLineCount(line, width);
+          if (line !== "") count += wrapLineCount(line, Math.max(1, width - 2));
         }
       }
       if (item.resultText !== undefined) {
-        count += wrapLineCount(`${mark} ${item.resultText}`, width);
+        // C31: the result hangs under the header too — the 2-space indent
+        // applies to every row, so the wrap sees width−2 (the mark+space
+        // prefix is the same 2 columns).
+        count += wrapLineCount(item.resultText, Math.max(1, width - 2));
       }
-      return count;
+      return blank + count;
     }
     case "compaction":
       // The item carries no `text` field; mirror the exact line app.tsx
-      // renders so the height stays in lockstep with the renderer.
-      return wrapLineCount(
-        `\u2702 compacted: ~${Math.round(item.tokensBefore / 100) / 10}k tokens \u2192 summary (${item.summaryChars} chars) + last ${item.messagesKept} message(s) kept`,
-        width,
+      // renders so the height stays in lockstep with the renderer. C31: the
+      // ✂ icon (2 columns) leads; the text hangs under it (width−2).
+      return (
+        blank +
+        wrapLineCount(
+          `compacted: ~${Math.round(item.tokensBefore / 100) / 10}k tokens \u2192 summary (${item.summaryChars} chars) + last ${item.messagesKept} message(s) kept`,
+          Math.max(1, width - 2),
+        )
       );
     case "error":
     case "info":
-      return wrapLineCount(item.text, width);
+      // C31: a ⚠ / ℹ icon (2 columns) leads; the text hangs under it
+      // (width−2). Empty text renders nothing (no icon alone).
+      return blank + wrapLineCount(item.text, Math.max(1, width - 2));
   }
 }
 
-/** Sum of `itemHeight` over `items`. */
+/** Sum of `itemHeight` over `items` (each item sees its predecessor). */
 export function itemsHeight(items: TuiItem[], width: number): number {
   let total = 0;
-  for (const item of items) {
-    total += itemHeight(item, width);
+  for (let i = 0; i < items.length; i++) {
+    total += itemHeight(items[i]!, width, items[i - 1]);
   }
   return total;
 }
@@ -663,7 +693,9 @@ export function fitItems(
   let total = 0;
   let start = items.length;
   for (let i = items.length - 1; i >= 0; i--) {
-    const h = itemHeight(items[i]!, width);
+    // C31: each item's height counts its C31 leading blank line — the SAME
+    // `prev` the render side uses (its actual predecessor in `items`).
+    const h = itemHeight(items[i]!, width, items[i - 1]);
     if (total > 0 && total + h > budget) break;
     total += h;
     start = i;
@@ -714,8 +746,11 @@ export function fitItemsScrollable(
   const budget = itemAreaBudget(rows, extraLines);
   // One wrap pass: the per-item rendered line lists — both the height
   // counts AND the sliceable rows (re-wrapping via itemHeight would do the
-  // work twice per frame).
-  const lineLists = items.map((it) => itemLines(it, width));
+  // work twice per frame). C31: each item's lines include its leading blank
+  // line, decided by its ABSOLUTE predecessor in the content (items[i-1]) —
+  // the same rule the count uses, so the content rows are stable as the
+  // viewport moves.
+  const lineLists = items.map((it, i) => itemLines(it, width, items[i - 1]));
   const total = lineLists.reduce((a, l) => a + l.length, 0);
   const maxScroll = Math.max(0, total - budget);
 
