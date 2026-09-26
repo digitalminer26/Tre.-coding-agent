@@ -1,19 +1,20 @@
 {
-  "default": "Qwen3.8-27B-UD-Q4_K_S",
+  "default": "Qwen3.8-27B-UD-Q4_K_M",
   "models": [
     {
-      "id": "Qwen3.8-27B-UD-Q4_K_S",
+      "id": "Qwen3.8-27B-UD-Q4_K_M",
       "provider": "vks-llama",
-      "baseUrl": "http://172.30.70.13:8080/v1",
+      "baseUrl": "http://172.30.70.11:8080/v1",
       "api": "openai-completions",
       "apiKey": "not-needed",
-      "contextWindow": 81920,
+      "contextWindow": 131072,
       "maxTokens": 32768,
       "temperature": 0.6,
       "compat": {
         "extraParams": {
           "options": {
-            "reasoning_effort": "medium"
+            "reasoning_effort": "medium",
+            "repeat_penalty": 1.3
           }
         }
       }
