@@ -28,3 +28,18 @@ Every design decision is traceable to the walkthrough.
 npm install
 npm test        # tsc + node --test (contract tests, no network)
 ```
+
+### Point it at an endpoint
+
+The endpoint config is **not in git** (it's per-machine). Create it from the
+template:
+
+```bash
+cp models.json.example models.json   # then edit models.json
+```
+
+Fill in `baseUrl` (your OpenAI-compatible endpoint, e.g.
+`http://<host>:<port>/v1`) and the model's `id`. `tre.` finds `models.json`
+by walking up from the launch dir, then `~/.tre/models.json`. With **no**
+`models.json` (or a blank `baseUrl`), `tre.` prints a step-by-step setup
+guide — REQUIRED vs OPTIONAL fields — and exits.

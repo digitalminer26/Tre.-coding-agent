@@ -1,0 +1,15 @@
+{
+  "default": "<model-id>",
+  "models": [
+    {
+      "id": "<model-id>",
+      "provider": "<provider-label>",
+      "baseUrl": "http://<host>:<port>/v1",
+      "api": "openai-completions",
+      "apiKey": "not-needed",
+      "contextWindow": 131072,
+      "maxTokens": 32768,
+      "temperature": 0.6
+    }
+  ]
+}
