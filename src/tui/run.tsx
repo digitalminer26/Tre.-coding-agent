@@ -106,7 +106,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // D15: static labels for the /display-bottom fields (cwd, session).
   const info: Record<string, string> = { cwd: opts.cwd ?? process.cwd() };
   if (opts.sessionPath !== undefined) info.session = opts.sessionPath;
-  let state: TuiState = makeInitialState(opts.model.id, info);
+  // The model's window + output cap seed the `context` bottom field
+  // (used/window/% — the compaction trigger's own numbers).
+  let state: TuiState = makeInitialState(opts.model.id, info, opts.model.contextWindow, opts.model.maxTokens);
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
   let controller = new AbortController();

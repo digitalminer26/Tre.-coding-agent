@@ -212,6 +212,47 @@ test("context_compacted appends a compaction item", () => {
   assert.equal(s.items[0]!.kind, "compaction");
 });
 
+test("contextTokens: tracks the last done usage; compaction resets to the new estimate", () => {
+  // No usage yet → 0 (the `context` field shows the window, "no usage yet").
+  const s0 = makeInitialState("m", {}, 131072, 32768);
+  assert.equal(s0.contextTokens, 0);
+  assert.equal(s0.contextWindow, 131072);
+  assert.equal(s0.maxTokens, 32768);
+
+  // done with usage → the last call's totalTokens (prompt+completion).
+  const s1 = fold(
+    [
+      { type: "agent_start" },
+      startEv(),
+      deltaEv("hi"),
+      doneEv([{ type: "text", text: "hi" }], { usage: { input: 20000, output: 5341, totalTokens: 25341 } }),
+    ],
+    s0,
+  );
+  assert.equal(s1.contextTokens, 25341);
+  assert.equal(s1.totalTokens, 25341);
+
+  // done WITHOUT usage (some endpoints) → keeps the previous estimate.
+  const s2 = fold([doneEv([{ type: "text", text: "again" }])], s1);
+  assert.equal(s2.contextTokens, 25341);
+
+  // compaction → the event's estimate of the new [summary, …kept] context.
+  const s3 = fold(
+    [{ type: "context_compacted", tokensBefore: 25341, messagesKept: 4, summaryChars: 809, contextTokens: 9600 }],
+    s2,
+  );
+  assert.equal(s3.contextTokens, 9600);
+  assert.equal(s3.items[s3.items.length - 1]!.kind, "compaction");
+
+  // a compaction event WITHOUT contextTokens (older emitter) → keeps the
+  // last usage-based estimate rather than going blank.
+  const s4 = fold(
+    [{ type: "context_compacted", tokensBefore: 25341, messagesKept: 4, summaryChars: 809 }],
+    s2,
+  );
+  assert.equal(s4.contextTokens, 25341);
+});
+
 test("agent_end: error/aborted/length become error items; busy + approval clear", () => {
   const withApproval = setApproval(makeInitialState("m"), "allow?", () => {});
   const cases: Array<[AgentEvent, string]> = [

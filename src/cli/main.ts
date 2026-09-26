@@ -61,6 +61,7 @@ import "../tui/prod-env.js";
 import { findModelsFile, loadModelsFile, resolveModel } from "../config/models.js";
 import {
   compactContext,
+  estimateTokens,
   makeSummaryMessage,
   shouldCompact,
 } from "../context/compact.js";
@@ -581,13 +582,15 @@ export async function runTurn(opts: {
         const entryId = await session.appendCompaction(r.summary, firstId, r.tokensBefore);
         ids.set(summaryMsg, entryId);
       }
+      const newContext = [summaryMsg, ...r.kept];
       await report({
         type: "context_compacted",
         tokensBefore: r.tokensBefore,
         messagesKept: r.kept.length,
         summaryChars: r.summary.length,
+        contextTokens: estimateTokens(newContext),
       });
-      return [summaryMsg, ...r.kept];
+      return newContext;
     };
   }
 

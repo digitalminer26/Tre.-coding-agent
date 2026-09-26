@@ -399,6 +399,33 @@ test("bottomLines: values, order, truncation, unknown keys, padding", () => {
   assert.equal(bottomLines({ ...base, bottom: ["tokens"], totalTokens: 0 }, 80)[0], "tokens: —");
   assert.equal(bottomLines({ ...base, bottom: ["tokens"], totalTokens: 1234 }, 80)[0], "tokens: 1234 total");
 
+  // context: used/window with % of the window (makeInitialState defaults:
+  // no window, no usage yet)
+  assert.equal(bottomLines({ ...base, bottom: ["context"] }, 80)[0], "context: —");
+  assert.equal(
+    bottomLines({ ...base, bottom: ["context"], contextWindow: 131072 }, 80)[0],
+    "context: 131.1k window (no usage yet)",
+  );
+  assert.equal(
+    bottomLines({ ...base, bottom: ["context"], contextWindow: 81920, contextTokens: 25341 }, 80)[0],
+    "context: 25.3k/81.9k (31%)",
+  );
+  // unknown window but known usage → no %
+  assert.equal(
+    bottomLines({ ...base, bottom: ["context"], contextTokens: 45234 }, 80)[0],
+    "context: 45.2k/—",
+  );
+  // compaction drop: 120k → 9.6k reads as a visible reset
+  assert.equal(
+    bottomLines({ ...base, bottom: ["context"], contextWindow: 131072, contextTokens: 9600 }, 80)[0],
+    "context: 9.6k/131.1k (7%)",
+  );
+  // big windows format as M
+  assert.equal(
+    bottomLines({ ...base, bottom: ["context"], contextWindow: 2_000_000, contextTokens: 2_100_000 }, 80)[0],
+    "context: 2.1M/2M (105%)",
+  );
+
   // static labels: cwd / session
   assert.equal(bottomLines({ ...base, bottom: ["cwd"] }, 80)[0], "cwd: /w");
   assert.equal(bottomLines({ ...base, bottom: ["session"], info: {} }, 80)[0], "session: —");
@@ -426,7 +453,7 @@ test("handleSlashCommand: /display-bottom set, clear, report, unknown, passthrou
   assert.deepEqual(r0.state.bottom, []);
   const info0 = r0.state.items[r0.state.items.length - 1];
   assert.equal(info0?.kind, "info");
-  assert.match((info0 as { text: string }).text, /display-bottom: \(none\) — fields: model status turn tokens cwd session/);
+  assert.match((info0 as { text: string }).text, /display-bottom: \(none\) — fields: model status turn tokens context cwd session/);
 
   // set (deduped, order preserved)
   const r1 = handleSlashCommand(s, "/display-bottom status model status");

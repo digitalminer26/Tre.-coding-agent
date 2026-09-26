@@ -208,6 +208,9 @@ export type AgentEvent =
       tokensBefore: number;
       messagesKept: number;
       summaryChars: number;
+      /** Estimated tokens of the NEW context ([summary, …kept]) — what the
+       *  next prompt starts from (estimateTokens; chars/4). */
+      contextTokens?: number;
     }
   | AssistantStreamEvent;
 

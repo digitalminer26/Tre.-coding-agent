@@ -88,6 +88,21 @@ export interface TuiState {
   totalTokens: number;
   /** Count of tool executions started (tool_execution_start events). */
   toolCalls: number;
+  /**
+   * The model's context window (tokens) — static, from ModelConfig. Drives
+   * the `context` bottom field; 0/absent = unknown (renders "—").
+   */
+  contextWindow: number;
+  /** The model's output cap (maxTokens) — static, from ModelConfig. */
+  maxTokens: number;
+  /**
+   * Estimated tokens of the CURRENT context (what the next prompt would
+   * start from): the last `done` usage's totalTokens (prompt+completion of
+   * the last call), or — after a compaction — the estimate of the new
+   * [summary, …kept] context (the event's contextTokens). 0 = unknown
+   * (no assistant turn yet).
+   */
+  contextTokens: number;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -103,6 +118,8 @@ export interface TuiState {
 export function makeInitialState(
   modelLabel: string,
   info: Record<string, string> = {},
+  window: number = 0,
+  maxTokens: number = 0,
 ): TuiState {
   return {
     items: [],
@@ -118,6 +135,9 @@ export function makeInitialState(
     suggestIdx: null,
     totalTokens: 0,
     toolCalls: 0,
+    contextWindow: window,
+    maxTokens,
+    contextTokens: 0,
     info,
     viewTop: null,
   };
@@ -231,6 +251,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       return {
         ...state,
         totalTokens: state.totalTokens + used,
+        // The last call's usage (prompt + completion) is a close proxy for
+        // the context size the NEXT prompt starts from — the same number
+        // the compaction trigger (shouldCompact) compares against the
+        // window. No usage (some endpoints) → keep the previous estimate.
+        contextTokens: used > 0 ? used : state.contextTokens,
         items: state.items.map((it) =>
           it.kind === "assistant" && it.streaming ? { ...it, streaming: false, thinking: false } : it,
         ),
@@ -294,6 +319,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
     case "context_compacted":
       return {
         ...state,
+        // The context is now [summary, …kept] — the estimate the event
+        // carries is what the next prompt starts from (pre-event usage
+        // would overstate it). Event without the field → keep the last
+        // usage-based estimate.
+        contextTokens: ev.contextTokens ?? state.contextTokens,
         items: [
           ...state.items,
           {
@@ -954,8 +984,14 @@ export function menuComplete(s: TuiState): TuiState | null {
 // ---------------------------------------------------------------------------
 
 /** Fields the user may pin into the bottom lines, in menu order. */
-export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "cwd", "session"] as const;
+export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cwd", "session"] as const;
 export type BottomField = (typeof BOTTOM_FIELDS)[number];
+
+/** Compact token count: 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
+function fmtTokens(t: number): string {
+  if (t >= 1_000_000) return `${Math.round(t / 100_000) / 10}M`;
+  return `${Math.round(t / 100) / 10}k`;
+}
 
 /** The value shown for one field ("—" when a static label is absent). */
 function bottomValue(state: TuiState, field: BottomField): string {
@@ -968,6 +1004,16 @@ function bottomValue(state: TuiState, field: BottomField): string {
       return String(state.turn);
     case "tokens":
       return state.totalTokens > 0 ? `${state.totalTokens} total` : "—";
+    case "context": {
+      // Window from the model config; used = the last call's usage
+      // (prompt+completion ≈ next prompt size — the compaction trigger's
+      // own number) or, right after a compaction, the estimate of the new
+      // [summary, …kept] context. "—" marks an unknown side.
+      const win = state.contextWindow > 0 ? fmtTokens(state.contextWindow) : "—";
+      if (state.contextTokens <= 0) return `${win === "—" ? "—" : `${win} window (no usage yet)`}`;
+      const pct = state.contextWindow > 0 ? ` (${Math.round((state.contextTokens / state.contextWindow) * 100)}%)` : "";
+      return `${fmtTokens(state.contextTokens)}/${win}${pct}`;
+    }
     case "cwd":
       return state.info.cwd ?? "—";
     case "session":

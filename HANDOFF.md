@@ -1,3 +1,48 @@
+# HANDOFF — TUI bottom display: `context` field — window, used, %, compaction reset (2026-09-26)
+
+**Status: COMPLETED.** One increment: the bottom display (`/display-bottom`)
+had no visibility into the model's context window — the `tokens` field is the
+CUMULATIVE session total (grows forever, says nothing about pressure), so
+when a compaction fired the user had no idea how full the window was, or how
+much the compaction freed. New selectable field `context` (menu order:
+`model status turn tokens context cwd session`):
+
+- **Value** — `used/window (pct)`, e.g. `context: 25.3k/81.9k (31%)`.
+  `used` = the LAST assistant `done` usage's `totalTokens` (prompt+completion
+  of the last call — the SAME number `shouldCompact` compares against the
+  window, so the field shows exactly what the trigger sees). Right after a
+  compaction it is the estimate of the new `[summary, …kept]` context (the
+  `context_compacted` event now carries an optional `contextTokens`,
+  computed by the CLI via `estimateTokens`), so a 120k→9.6k compaction reads
+  as a visible reset (`context: 9.6k/131.1k (7%)`). Numbers format compact:
+  `131.1k`, `2.1M`.
+- **Unknown sides** — no usage yet (fresh session): `131.1k window (no
+  usage yet)`; no window in the model config: `—`; usage without a window:
+  `45.2k/—` (no %). A `done` without usage keeps the previous estimate; a
+  `context_compacted` without `contextTokens` (older emitter) keeps the last
+  usage-based estimate — the field never blanks.
+
+Files: `src/types.ts` (optional `contextTokens` on `context_compacted`),
+`src/cli/main.ts` (emits it — `estimateTokens([summaryMsg, …kept])`),
+`src/tui/state.ts` (`contextWindow`/`maxTokens`/`contextTokens` state +
+`makeInitialState` params, folds in `done`/`context_compacted`, the
+`context` field + `fmtTokens`), `src/tui/run.tsx` (seeds the window from
+`ModelConfig`). The plain CLI's compaction line is untouched.
+
+Tests: new `contextTokens` state-machine test (usage tracking, no-usage
+keep, compaction reset, legacy-event fallback) in `test/tui-state.test.ts`;
+`bottomLines` context cases (idle window, used/window/%, unknown window,
+compaction drop, M formatting) + updated menu-order assertion in
+`test/tui-pinned-layout.test.ts`. Full suite green (397 pass, 0 fail).
+PTY capture: `/display-bottom context status model` renders
+`context: 131.1k window (no usage yet)` in the pinned block, frame intact.
+
+**Note for the user:** the field is opt-in like the others —
+`/display-bottom context status model` (or add `context` to your current
+selection). `/stats` is unchanged.
+
+---
+
 # HANDOFF — TUI no longer clears the terminal scrollback on a new turn (2026-09-26)
 
 **Status: COMPLETED.** One increment (C30): the TUI wiped the terminal's
