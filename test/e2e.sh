@@ -556,8 +556,9 @@ scenario_17() { # C32: /display-bottom WHILE a task is running — the command
   cat > "$D/feed.sh" <<'EOF'
 # A long reply (40 lines, like scenario 15) leaves a wide mid-run window.
 printf 'Reply with exactly the numbers 1 through 40, each on its own line, in order. Do not add any other text.\r'
-# The turn is running once the first reply line renders.
-wait_pattern "$OUT" " 1." 240 || exit 6
+# The turn is running once the reply block renders (C31: the first line is
+# the ◆ icon + "1"; the wrapped lines hang 2 spaces under it).
+wait_pattern "$OUT" "◆ 1" 240 || exit 6
 sleep 2
 # C32: reconfigure the bottom display WHILE the task is running.
 printf '/display-bottom model turn\r'
@@ -571,12 +572,22 @@ EOF
       --session "$D/s.jsonl" --cwd "$D" )
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
-  grep -qF "display-bottom: model turn" "$D/out.log" || { echo "no mid-run /display-bottom feedback in frames"; return 1; }
+  # ANSI-strip (CSI + charset + other escapes) — the line-anchored asserts
+  # need clean text (raw capture lines carry \r and dim-mode escapes).
+  python3 - "$D/out.log" "$D/plain.txt" <<'PY'
+import re, sys
+raw = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+clean = re.sub(r"\u001b(?:\[[0-9;?]*[a-zA-Z]|\][^\u0007]*\u0007|[@-Z\\-_])", "", raw)
+clean = clean.replace("\r", "")
+open(sys.argv[2], "w").write(clean)
+PY
+  grep -qF "display-bottom: model turn" "$D/plain.txt" || { echo "no mid-run /display-bottom feedback in frames"; return 1; }
   # The run CONTINUED after the mid-run command (the long reply finished).
-  grep -qE ' 40\.' "$D/out.log" || { echo "the run did not finish after the mid-run command"; return 1; }
+  # C31: the reply's last line hangs 2 spaces under the ◆ icon.
+  grep -qE '^ *40[.]?$' "$D/plain.txt" || { echo "the run did not finish after the mid-run command"; return 1; }
   # The bottom lines reconfigured mid-run: a frame shows the new fields.
-  grep -qF "model: Qwen" "$D/out.log" || { echo "no 'model:' bottom line in frames — the mid-run change did not render"; return 1; }
-  grep -qE 'turn: [0-9]+' "$D/out.log" || { echo "no 'turn: N' bottom line in frames"; return 1; }
+  grep -qF "model: Qwen" "$D/plain.txt" || { echo "no 'model:' bottom line in frames — the mid-run change did not render"; return 1; }
+  grep -qE '^turn: [0-9]+' "$D/plain.txt" || { echo "no 'turn: N' bottom line in frames"; return 1; }
   # The selection was persisted to (the scenario's) ~/.tre/tui.json.
   [ -f "$D/home/.tre/tui.json" ] || { echo "no ~/.tre/tui.json written"; return 1; }
   python3 -c "import json,sys; c=json.load(open('$D/home/.tre/tui.json')); sys.exit(0 if c.get('bottom')==['model','turn'] else 1)" \
