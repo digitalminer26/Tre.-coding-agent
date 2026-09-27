@@ -14,9 +14,19 @@ rules).
 
 ## Status
 
+All planned workstreams are complete; the project is in ongoing hardening.
+
 - [x] Phase A — WS0: repo scaffold + the three contracts (`src/types.ts`)
-- [ ] Phase B — WS1 wire · WS2 loop · WS3 tools · WS4 prompt · WS5 session · WS8 tests (parallel)
-- [ ] Phase C — WS6 CLI integration · WS7 safety
+- [x] Phase B — WS1 wire · WS2 loop · WS3 tools · WS4 prompt · WS5 session · WS8 tests
+- [x] Phase C — WS6 CLI integration · WS7 safety
+- [x] Phase 3 — WS9 compaction · WS10 TUI (Ink) · WS11 bash kernel sandbox (macOS Seatbelt)
+
+Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
+opt-in mouse tracking, `/models` switching, a context/compaction readout, an
+approval-mode matrix (`--yes` default · `--ask` · `--no-approve`, with
+systemic sensitive/destructive ops blocked in every mode), deployability
+(`npm i -g .` builds `dist/` on install), and loop/stall guards that stop
+runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 
 ## Docs
 

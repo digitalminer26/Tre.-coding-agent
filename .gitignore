@@ -8,3 +8,7 @@ context-fold/
 # Copy models.json.example to models.json and fill it in (or run tre. with no
 # models.json: it prints a step-by-step setup guide).
 models.json
+
+# editor swap files
+.*.swp
+*.swp
