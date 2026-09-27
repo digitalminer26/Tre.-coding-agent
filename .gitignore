@@ -8,6 +8,14 @@ context-fold/
 # Copy models.json.example to models.json and fill it in (or run tre. with no
 # models.json: it prints a step-by-step setup guide).
 models.json
+# Per-machine Telegram bot credentials (token) + poll state — never in git.
+.tre/telegram.json
+.tre/telegram/
+# Skills are deployment-specific — never in git by default. The two
+# exceptions are the repo's own development protocol (force-added):
+.tre/skills/
+!.tre/skills/git-commit/
+!.tre/skills/self-improve/
 
 # editor swap files
 .*.swp

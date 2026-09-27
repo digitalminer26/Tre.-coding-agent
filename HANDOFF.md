@@ -1,3 +1,59 @@
+# HANDOFF — telegram skill: send/receive via a Telegram bot (2026-09-27)
+
+**Status: COMPLETED, committed (skill is LOCAL — deployment-specific, gitignored).**
+Activated on this machine (token + chat id in; both directions verified).
+
+**What it is.** A skill (`.tre/skills/telegram/`) so the agent can message
+the user over Telegram — send (task results / notifications) and receive
+(instructions the user sends to the bot). One helper script
+(`telegram.py`, stdlib `python3`, no installs) + a `SKILL.md`.
+
+**Deployment policy (decided by the user):** skills are UNIQUE TO
+INDIVIDUAL DEPLOYMENTS — the repo's `.gitignore` now ignores `.tre/skills/`
+wholesale, with force-include exceptions only for the repo's own protocol
+skills (`git-commit`, `self-improve`). The telegram skill is therefore
+UNTRACKED: it stays on this machine, it does not go to GitHub. The
+constraints it taught are documented in the repo instead:
+`docs/04-skill-authoring.md` (load paths, workspace-only write boundary,
+read asymmetry, `python3`-only network under the sandbox, secret handling,
+state, fake-credential verification, a checklist recipe).
+
+**The one manual step.** The user creates a bot with @BotFather and gives
+the agent the token (invasive, so the user does it). Everything else —
+writing `.tre/telegram.json`, discovering the chat id (`chatids` peeks
+without consuming), sending, polling — the agent does itself.
+
+**Key design constraints (verified empirically; full set in
+`docs/04-skill-authoring.md`):**
+- Skills load ONLY from `<cwd>/.tre/skills/` (project) and
+  `~/.tre/agent/skills/` (user). The agent can only WRITE inside the
+  workspace (write tool root-confined; bash kernel-sandboxed), so an
+  agent-created skill MUST live in `<cwd>/.tre/skills/`.
+- `read` file tool is NOT kernel-sandboxed (root-confined + sensitive-path
+  gated) → the model CAN read `~/.tre/...`; `bash` CANNOT.
+- Under the sandbox, `curl`/`git` FAIL TLS (LibreSSL can't read
+  `/private/etc/ssl/openssl.cnf`) but `python3` (`/usr/bin/python3`,
+  stdlib urllib) and node `https` WORK. `node` is also NOT on the sandboxed
+  bash PATH (nvm dir denied) → the helper is `/usr/bin/python3`.
+- Secrets go in a gitignored workspace file (`.tre/telegram.json`); name it
+  plainly (`.json`) — sensitive-path patterns (`*.key`, `.env`, …) would
+  block the agent's own read.
+
+**Files:** `.tre/skills/telegram/SKILL.md` + `telegram.py` (LOCAL,
+gitignored — NOT committed), `docs/04-skill-authoring.md` (committed),
+`.gitignore` (skill-ignore policy + credential/state ignores, committed).
+No source files touched (no guardrail-zone file).
+
+**Gate:** `tsc` clean; full suite 451 tests → 441 pass / 2 fail (the two
+pre-existing sandbox-induced bash-truncation failures) / 8 skip. Verified:
+script send/poll/chatids reach the Telegram API (clean `401` with a fake
+token = network+TLS+script+config all work), no-chatId / no-config error
+paths, chunking ≤4000, and the skill loader indexes `telegram` correctly.
+**Live-verified with the real token:** bot @Tredot_bot, chat id
+7846729185, test send delivered, user's "Hi" received via poll.
+
+---
+
 # HANDOFF — stall detection: a second, complementary loop guard for the sandbox wall (2026-09-27)
 
 **Status: COMPLETED, committed.**
