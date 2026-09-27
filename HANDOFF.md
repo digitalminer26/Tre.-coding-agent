@@ -1,7 +1,7 @@
 # HANDOFF — .pi → .tre rename + docs de-pi-ification (2026-09-27)
 
-**Status: PARTIAL — one commit in, the guardrail-zone commit staged for the
-user, docs increment in flight.**
+**Status: PARTIAL — two commits in (`21da855` code, `e5bccdf` docs), the
+guardrail-zone commit staged for the user's `GUARDRAIL_BYPASS=1`.**
 
 **Decision (user, 2026-09-27):** move the skills dir `.pi/` → `.tre/` and make
 the documentation not rely on explicit pi references. The `pi` name is KEPT
@@ -41,12 +41,12 @@ the pre-commit guardrail was NOT running at all on this clone; it is now
 wired and verified (reject + bypass paths). A fresh clone must still run
 that command once (noted in the hook header).
 
-**Docs increment (in flight this session):** `docs/01-walkthrough-harness-llm.md`
+**Docs increment (committed `e5bccdf`):** `docs/01-walkthrough-harness-llm.md`
 gains a "Reference status" note (frozen record of the v0.85.1 source,
 traceable to the published packages, not a local install); README's
-"traceable to the walkthrough" line + docs list note the frozen status.
-Remaining: build+test gate, commit the docs increment, then close out this
-section.
+"traceable to the walkthrough" line + docs list note the frozen status;
+the two stale "Still open" lines in older sections are marked RESOLVED.
+Gate re-run clean (433 pass / 0 fail / 8 skip).
 
 **Still open (needs user decision, not started):** removing the `pi`
 dependency — scope unresolved (all references vs the borrowed code /
