@@ -463,7 +463,9 @@ test("bash: pre-aborted signal → aborted immediately", async () => {
 });
 
 test("bash: >2000 lines → tail-truncated, full output saved to temp file", async () => {
-  const cmd = 'node -e "for(let i=1;i<=5000;i++) console.log(\'line-\'+i)"';
+  // process.execPath (absolute) — a bare `node` on PATH fails when the test
+  // runs under a kernel sandbox that cannot stat the nvm bin dir (exit 127).
+  const cmd = `${process.execPath} -e "for(let i=1;i<=5000;i++) console.log('line-'+i)"`;
   const r = await runBash(cmd);
   assert.equal(r.isError, undefined);
   const text = resultText(r);
@@ -511,7 +513,7 @@ test("loop + pipeline: a blocked tool becomes an isError toolResult in context (
 });
 
 test("bash: byte limit (1000 × 60B lines ≈ 60KB) truncates even under 2000 lines", async () => {
-  const cmd = 'node -e "for(let i=0;i<1000;i++) process.stdout.write(\'x\'.repeat(59)+\'\\n\')"';
+  const cmd = `${process.execPath} -e "for(let i=0;i<1000;i++) process.stdout.write('x'.repeat(59)+'\\n')"`;
   const r = await runBash(cmd);
   assert.equal(r.isError, undefined);
   const fop = r.details?.fullOutputPath as string;

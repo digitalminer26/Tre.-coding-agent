@@ -1,3 +1,30 @@
+# HANDOFF — fix: the two sandbox-induced bash-truncation test failures (2026-09-27)
+
+**Status: COMPLETED, committed.**
+
+**Problem.** Two tests in `test/tools.test.ts` failed on this machine
+(since the 2026-09-27 telegram increment, which noted them as
+"pre-existing"): `bash: >2000 lines → tail-truncated…` and
+`bash: byte limit (1000 × 60B lines) truncates…`. Both spawn a child
+command `node -e "…"` through the bash tool and assert `isError ===
+undefined` — but the child exits 127 with `node: command not found`.
+
+**Root cause.** The child shell resolves `node` via PATH. On this machine
+node lives in an nvm dir that the kernel sandbox denies stat access to
+(verified: `ls <nvm bin dir>` → "Operation not permitted" from a
+sandboxed shell, while the binary itself runs fine by absolute path).
+So PATH lookup fails for the child's `node`. The product was correct —
+it faithfully reported a failing command; the TEST was environment-fragile
+(it passed on machines where the sandbox can stat the nvm dir).
+
+**Fix.** The two commands now use `process.execPath` (the running node
+binary, absolute — no PATH lookup) instead of bare `node`:
+`test/tools.test.ts` (2 lines + comment). No product code changed.
+
+**Gate:** `tsc` clean; full suite 451 tests → 443 pass / 0 fail / 8 skip.
+
+---
+
 # HANDOFF — telegram skill: send/receive via a Telegram bot (2026-09-27)
 
 **Status: COMPLETED, committed (skill is LOCAL — deployment-specific, gitignored).**
