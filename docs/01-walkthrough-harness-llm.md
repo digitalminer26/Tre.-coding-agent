@@ -3,6 +3,14 @@
 Grounded in the actual source of the pi coding agent (v0.85.1), which is split into four
 layers. Every claim below is traceable to a file:
 
+> **Reference status (2026-09-27):** the local reference install
+> (`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/`) is no
+> longer present, so this walkthrough is a **frozen record of the v0.85.1
+> source** — traceable to the published `@earendil-works/pi-*` packages, not
+> to a local install. It remains the design reference for this repo (see
+> `docs/03-citation-policy.md` for the borrowing rules, now frozen: no new
+> L1/L2 borrowing until the reference is re-installed and re-audited).
+
 | Layer   | Package                                          | Job                                                                                        |
 |---------|--------------------------------------------------|--------------------------------------------------------------------------------------------|
 | Wire    | `@earendil-works/pi-ai`                          | HTTP/SSE to LLM endpoints, per-provider request building & response parsing, model catalog |

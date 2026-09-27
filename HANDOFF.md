@@ -1,3 +1,60 @@
+# HANDOFF — .pi → .tre rename + docs de-pi-ification (2026-09-27)
+
+**Status: PARTIAL — one commit in, the guardrail-zone commit staged for the
+user, docs increment in flight.**
+
+**Decision (user, 2026-09-27):** move the skills dir `.pi/` → `.tre/` and make
+the documentation not rely on explicit pi references. The `pi` name is KEPT
+where it is a factual citation of the upstream design reference
+(`@earendil-works/pi-*` v0.85.1 — `docs/03`, `docs/01`, README,
+`THIRD_PARTY.md`); what goes is the *convention* (`.pi/` paths in code,
+hook, skills) and the docs' dependence on a local reference install that no
+longer exists.
+
+**Why a previous session looped on this (root cause, confirmed):** the
+guardrail hook protects `.pi/skills/self-improve/SKILL.md` BY PATH. Renaming
+the dir makes the old path vanish — a rename-only commit slips past the hook
+while the zone's protection silently disappears; updating the hook's regex is
+itself a zone edit, which the hook rejects. The two fixes are mutually
+exclusive in separate commits → the agent bounced between "commit the rename
+(hook says OK but protection is gone)" and "update the regex (hook says
+NO)". Resolution: ONE atomic commit containing the rename + the hook-regex
+update + the skill-text updates, committed by a human with
+`GUARDRAIL_BYPASS=1`.
+
+**Done (committed `21da855`):** default skills dirs in `src/cli/main.ts`
+moved to `<cwd>/.tre/skills` + `~/.tre/agent/skills` (usage comment +
+`defaultSkillDirs`), new test in `test/cli.test.ts`, and the
+`docs/03-citation-policy.md` freeze note (the local reference install at
+`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/` is gone —
+borrowing is frozen; L1/L2 already cited stands as-is).
+
+**Staged for the user's bypass commit (do NOT commit without it):**
+`git mv .pi .tre` (both skills) + `scripts/guardrail-check.sh`
+(PROTECTED regex → `^\.tre/skills/self-improve/SKILL\.md) + the two
+SKILL.md zone-list text updates. Verified: the wired hook REJECTS this exact
+staged set without the bypass and names both zone files.
+Command: `GUARDRAIL_BYPASS=1 git commit -m "<message>"`.
+ALSO (repo-local, not in git): this clone was missing
+`git config core.hooksPath scripts/git-hooks` (the documented setup step) —
+the pre-commit guardrail was NOT running at all on this clone; it is now
+wired and verified (reject + bypass paths). A fresh clone must still run
+that command once (noted in the hook header).
+
+**Docs increment (in flight this session):** `docs/01-walkthrough-harness-llm.md`
+gains a "Reference status" note (frozen record of the v0.85.1 source,
+traceable to the published packages, not a local install); README's
+"traceable to the walkthrough" line + docs list note the frozen status.
+Remaining: build+test gate, commit the docs increment, then close out this
+section.
+
+**Still open (needs user decision, not started):** removing the `pi`
+dependency — scope unresolved (all references vs the borrowed code /
+`.pi/` convention). NOTE (2026-09-27): the convention half (`.pi/` paths)
+is resolved by this section; the scope question is now only about the
+factual citations + L1/L2 borrowed code, which the freeze note in
+`docs/03` says stand as-is until the reference is re-audited.
+
 # HANDOFF — TUI scroll: stop resetting the viewport when steering (IN PROGRESS, 2026-09-26)
 
 **User report:** two-finger trackpad drag doesn't scroll the TUI, and the
@@ -605,7 +662,9 @@ gate); `git commit -m "$(rm -rf /)"` → destructive label inherited.
 
 **Still open (needs user decision, not started):** removing the `pi`
 dependency — scope unresolved (all references vs the borrowed code /
-`.pi/` convention).
+`.pi/` convention). RESOLVED 2026-09-27 (see top section): the convention
+half (`.pi/` paths) is done; the rest is the factual citations, frozen by
+the `docs/03` freeze note.
 
 # HANDOFF — reversible actions stop prompting; approval questions state reversibility (2026-09-25)
 
@@ -651,7 +710,9 @@ without a prompt in ask mode; `curl -s …` prompts with the
 
 **Still open (needs user decision, not started):** removing the `pi`
 dependency — scope unresolved (all references vs the borrowed code /
-`.pi/` convention).
+`.pi/` convention). RESOLVED 2026-09-27 (see top section): the convention
+half (`.pi/` paths) is done; the rest is the factual citations, frozen by
+the `docs/03` freeze note.
 
 # HANDOFF — thinking block: the model's reasoning reads as a distinct, scannable block (2026-09-25)
 

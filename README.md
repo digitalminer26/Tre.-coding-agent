@@ -8,7 +8,9 @@ an agent loop with tools (`read`/`write`/`edit`/`bash`), and persists sessions
 as JSONL.
 
 Built from scratch using pi (MIT) as a *design reference* — no code vendored.
-Every design decision is traceable to the walkthrough.
+Every design decision is traceable to the walkthrough (a frozen record of the
+v0.85.1 reference source; see `docs/03-citation-policy.md` for the borrowing
+rules).
 
 ## Status
 
@@ -18,7 +20,7 @@ Every design decision is traceable to the walkthrough.
 
 ## Docs
 
-- `docs/01-walkthrough-harness-llm.md` — how a coding-agent harness talks to an LLM endpoint (reference behavior, source-traceable)
+- `docs/01-walkthrough-harness-llm.md` — how a coding-agent harness talks to an LLM endpoint (reference behavior, source-traceable; frozen record of the v0.85.1 reference)
 - `docs/02-contracts.md` — the three WS0 contracts (the gate for parallel work)
 - `PLAN.md` — workstreams, locked decisions (D1–D6), build order
 
