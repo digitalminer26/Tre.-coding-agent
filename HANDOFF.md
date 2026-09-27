@@ -1,3 +1,49 @@
+# HANDOFF — always-active skills: `always: true` frontmatter includes the SKILL.md body in the system prompt (2026-09-27)
+
+**Status: WORK COMPLETE, gate green — COMMITTED.**
+
+**Why.** On-demand skill loading (index in the prompt, body read via the
+`read` tool only when a task matches the description) assumes the user is
+present to trigger the read. A messaging channel like telegram must be active
+even when the user is AWAY — if the skill body isn't loaded, the agent has
+no way to know it should poll for incoming messages or send results, and the
+user has no way to communicate with it.
+
+**What changed.**
+- `src/prompt/skills.ts` — `SkillIndexEntry` gains `always?: boolean` and
+  `body?: string`. `parseSkillMd` now splits frontmatter from body
+  (`splitSkillMd`); when the frontmatter has `always: true`, the trimmed
+  body is captured on the entry. On-demand skills are unchanged (no body
+  field → byte-identical index entries).
+- `src/prompt/system-prompt.ts` — the `# Skills` section now splits skills:
+  on-demand ones keep the existing index lines (name + description + path);
+  always-active ones render under a `## Always-active skills` subsection with
+  their body verbatim. When there are no on-demand skills the "read its
+  SKILL.md" intro line is omitted; when there are no skills at all the
+  section is absent (test-pinned).
+- `src/cli/main.ts` — `loadSkills` now returns `SkillIndexEntry[]` (was an
+  inline object type that would have dropped `always`/`body`).
+- `.tre/skills/telegram/SKILL.md` — marked `always: true` (deployment-
+  specific, gitignored, not committed).
+- `docs/04-skill-authoring.md` — documents the `always: true` flag and the
+  token-cost tradeoff (every always skill's body is in every prompt).
+- `test/prompt.test.ts` — new tests: frontmatter parse (true captures body,
+  false/absent does not), index load (always skill keeps body, plain skill
+  doesn't), prompt rendering (always body verbatim, on-demand body never
+  leaks, no path line for always skills, all-always omits the on-demand
+  intro, no skills → no section).
+
+**Gate.** `tsc` clean; `scripts/quality-check.sh` OK; `node --test
+dist/test/*.test.js` → 458 pass / 0 fail. Verified against the REAL
+`.tre/skills`: telegram loads with `always: true` + 4222-char body in the
+prompt; git-commit/self-improve stay index-only (their bodies do NOT appear
+in the prompt).
+
+**Note for the user.** The previous top section below (--extra-root) is
+stale — that work was already committed by the human (942af6a).
+
+---
+
 # HANDOFF — `--extra-root`: explicitly assigned non-sensitive dirs as extra read/write roots (C35/D21) (2026-09-27)
 
 **Status: WORK COMPLETE, gate green — AWAITING HUMAN COMMIT (guardrail zone).**

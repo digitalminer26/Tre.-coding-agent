@@ -24,6 +24,14 @@ the body is read ON DEMAND by the model via the `read` tool. Consequences:
 - The body can be long (it's read on demand), but keep it actionable:
   commands, not essays.
 
+**Always-active skills** (`always: true` in the frontmatter) are the
+exception: their body is included VERBATIM in the system prompt, so they are
+in effect from the first message with no trigger needed. Use this ONLY for
+skills that must be active even when the user is absent — e.g. a messaging
+channel the agent is expected to monitor and answer (the telegram skill).
+Every `always` skill pays its body's token cost in every prompt, so keep
+bodies tight and keep the set of always-active skills minimal.
+
 ## Where skills load from
 
 ONLY two default dirs (`src/cli/main.ts`):
@@ -116,7 +124,8 @@ they're what the model will actually hit in a fresh deployment.
 ## Recipe (checklist)
 
 1. `mkdir -p .tre/skills/<name>`; write `SKILL.md` (frontmatter: `name` +
-   `description` with a WHEN clause) and any helper (system binary, stdlib).
+   `description` with a WHEN clause; `always: true` only for user-absent
+   channels like telegram) and any helper (system binary, stdlib).
 2. Secrets/state → gitignored workspace files; add them to `.gitignore`.
 3. Test with a fake credential (expect a clean auth error, not a crash).
 4. Verify the loader indexes it: `loadSkillsIndex('.tre/skills')` shows the

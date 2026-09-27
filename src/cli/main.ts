@@ -75,7 +75,7 @@ import {
 import { openAiStream } from "../wire/openai-completions.js";
 import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
-import { loadSkillsIndex } from "../prompt/skills.js";
+import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
 import {
   makeSafetyHooks,
@@ -296,9 +296,9 @@ export function defaultSkillDirs(cwd: string): string[] {
 }
 
 /** Load + dedupe skills across dirs by name (earlier dirs win). */
-export async function loadSkills(dirs: string[]) {
+export async function loadSkills(dirs: string[]): Promise<SkillIndexEntry[]> {
   const seen = new Set<string>();
-  const out: { name: string; description: string; filePath: string }[] = [];
+  const out: SkillIndexEntry[] = [];
   for (const dir of dirs) {
     for (const entry of await loadSkillsIndex(dir)) {
       if (seen.has(entry.name)) continue;

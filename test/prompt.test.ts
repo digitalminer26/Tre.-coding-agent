@@ -76,6 +76,52 @@ test("loadSkillsIndex: missing dir → []", async () => {
   assert.deepEqual(await loadSkillsIndex(path.join(dir, "nope")), []);
 });
 
+test("parseSkillMd: always: true captures the body; absent/false does not", () => {
+  const raw =
+    `---\nname: tg\ndescription: Talk to the user over Telegram.\nalways: true\n---\n\n` +
+    `# Telegram\n\n${SKILL_A_BODY}\n`;
+  const e = parseSkillMd("/x/tg/SKILL.md", raw, "tg");
+  assert.equal(e.always, true);
+  assert.ok(e.body!.includes(SKILL_A_BODY), "body is captured for always skills");
+
+  const off = parseSkillMd(
+    "/x/tg/SKILL.md",
+    `---\nname: tg\ndescription: d\nalways: false\n---\n\n${SKILL_B_BODY}\n`,
+    "tg",
+  );
+  assert.equal(off.always, undefined);
+  assert.equal(off.body, undefined, "no body captured without always: true");
+});
+
+test("loadSkillsIndex: always skill keeps its body; on-demand skill does not", async () => {
+  const skillsDir = path.join(dir, "skills");
+  mkdirSync(path.join(skillsDir, "always-skill"), { recursive: true });
+  mkdirSync(path.join(skillsDir, "plain-skill"), { recursive: true });
+  writeFileSync(
+    path.join(skillsDir, "always-skill", "SKILL.md"),
+    `---\nname: always-skill\ndescription: Always on.\nalways: true\n---\n\nALWAYS-BODY-MARKER\n`,
+  );
+  writeFileSync(
+    path.join(skillsDir, "plain-skill", "SKILL.md"),
+    `---\nname: plain-skill\ndescription: On demand.\n---\n\nPLAIN-BODY-MARKER\n`,
+  );
+  const index = await loadSkillsIndex(skillsDir);
+  assert.deepEqual(index, [
+    {
+      name: "always-skill",
+      description: "Always on.",
+      filePath: path.join(skillsDir, "always-skill", "SKILL.md"),
+      always: true,
+      body: "ALWAYS-BODY-MARKER",
+    },
+    {
+      name: "plain-skill",
+      description: "On demand.",
+      filePath: path.join(skillsDir, "plain-skill", "SKILL.md"),
+    },
+  ]);
+});
+
 test("parseSkillMd: no frontmatter → dir-name fallback; body never captured in the index", () => {
   const e = parseSkillMd("/x/y/SKILL.md", "just a body\n", "y");
   assert.deepEqual(e, { name: "y", description: "", filePath: "/x/y/SKILL.md" });
@@ -107,6 +153,45 @@ test("prompt: skills appear as name+description+path — NEVER their bodies", as
   }
   assert.ok(!p.includes(SKILL_A_BODY), "skill A body must not leak");
   assert.ok(!p.includes(SKILL_B_BODY), "skill B body must not leak");
+});
+
+test("prompt: always skill body is included verbatim; on-demand bodies never leak", async () => {
+  const skillsDir = path.join(dir, "skills");
+  mkdirSync(path.join(skillsDir, "always-skill"), { recursive: true });
+  mkdirSync(path.join(skillsDir, "plain-skill"), { recursive: true });
+  writeFileSync(
+    path.join(skillsDir, "always-skill", "SKILL.md"),
+    `---\nname: always-skill\ndescription: Always on.\nalways: true\n---\n\nALWAYS-BODY-MARKER\n`,
+  );
+  writeFileSync(
+    path.join(skillsDir, "plain-skill", "SKILL.md"),
+    `---\nname: plain-skill\ndescription: On demand.\n---\n\nPLAIN-BODY-MARKER\n`,
+  );
+  const skills = await loadSkillsIndex(skillsDir);
+  const p = buildSystemPrompt({ cwd: dir, tools: [READ], skills });
+  assert.ok(p.includes("## Always-active skills"), "always section present");
+  assert.ok(p.includes("ALWAYS-BODY-MARKER"), "always body included verbatim");
+  assert.ok(!p.includes("PLAIN-BODY-MARKER"), "on-demand body must not leak");
+  assert.ok(p.includes("**plain-skill**"), "on-demand skill still indexed");
+  assert.ok(
+    !p.includes(path.join(skillsDir, "always-skill", "SKILL.md")),
+    "always skill is not indexed with a path line",
+  );
+});
+
+test("prompt: all-always → no on-demand intro line; no skills → no section", async () => {
+  const skillsDir = path.join(dir, "skills");
+  mkdirSync(path.join(skillsDir, "always-skill"), { recursive: true });
+  writeFileSync(
+    path.join(skillsDir, "always-skill", "SKILL.md"),
+    `---\nname: always-skill\ndescription: Always on.\nalways: true\n---\n\nALWAYS-BODY-MARKER\n`,
+  );
+  const onlyAlways = await loadSkillsIndex(skillsDir);
+  const p = buildSystemPrompt({ cwd: dir, tools: [READ], skills: onlyAlways });
+  assert.ok(!p.includes("read its SKILL.md (via the read tool)"), "no on-demand intro when no on-demand skills");
+  assert.ok(p.includes("## Always-active skills"));
+  const none = buildSystemPrompt({ cwd: dir, tools: [READ] });
+  assert.ok(!none.includes("# Skills"));
 });
 
 test("prompt: one tool line per enabled tool, derived from the tool set", async () => {

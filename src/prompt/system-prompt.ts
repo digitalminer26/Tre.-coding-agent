@@ -5,7 +5,8 @@
  *  - guidelines DERIVED FROM THE TOOL SET (each enabled tool contributes
  *    its usage guideline; absent tools contribute nothing)
  *  - project-context files, verbatim
- *  - skills INDEX (name + description + path; bodies are read on demand)
+ *  - skills INDEX (name + description + path; bodies are read on demand;
+ *    `always` skills have their body included verbatim)
  *  - working directory
  *
  * No timestamps, no randomness: same inputs → same string (test-pinned).
@@ -118,22 +119,37 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     sections.push(["# Project context", "", ...ctxFiles, ""].join("\n"));
   }
 
-  // 5. skills — INDEX only; bodies are read on demand via the read tool
+  // 5. skills — INDEX only; bodies are read on demand via the read tool.
+  //    Exception: `always` skills have their body included verbatim below.
   if (skills.length > 0) {
-    const lines = skills.map(
+    const onDemand = skills.filter((s) => !s.always);
+    const always = skills.filter((s) => s.always);
+    const lines = onDemand.map(
       (s) => `- **${s.name}** — ${s.description}\n  path: ${s.filePath}`,
     );
-    sections.push(
-      [
-        "# Skills",
-        "",
+    const parts: string[] = ["# Skills", ""];
+    if (onDemand.length > 0) {
+      parts.push(
         "Skills provide specialized instructions. When a task matches a skill's",
         "description, read its SKILL.md (via the read tool) BEFORE doing the task.",
         "",
         ...lines,
         "",
-      ].join("\n"),
-    );
+      );
+    }
+    if (always.length > 0) {
+      parts.push(
+        "## Always-active skills",
+        "",
+        "Always-active skills are in effect at all times — their full",
+        "instructions are included below. Follow them without reading the file.",
+        "",
+      );
+      for (const s of always) {
+        parts.push(`### ${s.name} — ${s.description}`, "", s.body ?? "", "");
+      }
+    }
+    sections.push(parts.join("\n"));
   }
 
   // 6. working directory (+ C35 extra roots, when assigned)
