@@ -370,19 +370,28 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     onScrollToBottom: (): void => setState(scrollToBottom(state)),
   };
 
-  // C27: terminal mouse-wheel forwarding (SGR mode 1006) so wheel events
-  // reach the input parser. The DRIVER owns the terminal: enable once here
-  // (never inside a component — a raw write would corrupt the frame
-  // stream). Opt out with TRE_NO_MOUSE=1 (keeps terminal text selection).
+  // C27: terminal mouse-wheel forwarding so wheel/trackpad events reach the
+  // input parser. The DRIVER owns the terminal: enable once here (never
+  // inside a component — a raw write would corrupt the frame stream). Opt
+  // out with TRE_NO_MOUSE=1 (keeps terminal text selection).
+  //
+  // TWO modes, not one: 1006 is only the SGR *report format* — in
+  // xterm-compatible terminals it enables NO mouse reporting on its own, so
+  // a trackpad wheel is never forwarded and scrolling appears dead. 1002
+  // (button-event tracking) is the base mode that actually makes the
+  // terminal send events (wheel = button 64/65 press+release); 1006 then
+  // shapes them as SGR `CSI < b ; x ; y M/m`, which the app parses. 1002 is
+  // chosen over 1003 (any-event) so plain pointer motion is NOT reported —
+  // less noise, and clicks/drags are still swallowed by the app.
   let mouseMode = false;
   if (!process.env.TRE_NO_MOUSE) {
-    process.stdout.write("\u001b[?1006h");
+    process.stdout.write("\u001b[?1002h\u001b[?1006h");
     mouseMode = true;
   }
   const restoreMouseMode = (): void => {
     if (mouseMode) {
       mouseMode = false;
-      process.stdout.write("\u001b[?1006l");
+      process.stdout.write("\u001b[?1006l\u001b[?1002l");
     }
   };
   // C28: restore the terminal on EVERY death path, not just the finally

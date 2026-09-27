@@ -29,15 +29,29 @@ increments, PTY-verified.
 - Then: build+test gate, commit (message: `fix(tui): keep scroll position when steering`),
   update this section to COMPLETED.
 
-**Increment 2 (after 1): wheel/trackpad robustness.**
-- Investigate: which terminals send SGR (`ESC[<64;...M`) vs legacy (`ESC[64;...M`
-  / `ESC[M`) wheel events for two-finger trackpad. `src/tui/run.tsx` `onMouse`
-  currently handles SGR wheel (button 64/65) — check whether legacy `ESC[M`
-  (button 64/65, 0-based y) is also parsed; if not, add it.
-- Also consider: some terminals (e.g. certain kitty/ghostty/iTerm2 modes) only
-  send wheel when mouse reporting is on — verify `run.tsx` enables the right
-  mouse mode (`ESC[?1006h` SGR + possibly `ESC[?1003h` any-event).
-- PTY-verify legacy `ESC[M`-style wheel if added.
+**Increment 2 (COMPLETED): enable base mouse-tracking mode 1002.**
+- ROOT CAUSE of "two-finger drag doesn't scroll": `run.tsx` emitted ONLY
+  `ESC[?1006h`. 1006 is the SGR *report format*, not a mouse-tracking mode —
+  in xterm-compatible terminals it enables NO reporting, so the terminal
+  never forwards the trackpad wheel. (The earlier PTY "proof" fed raw SGR
+  bytes directly, bypassing the terminal's gesture-to-event translation.)
+- FIX: `src/tui/run.tsx` now emits `ESC[?1002h` + `ESC[?1006h` at startup and
+  `ESC[?1006l` + `ESC[?1002l` on every teardown path. 1002 (button-event) is
+  the base mode that makes the terminal send events; 1006 shapes them as SGR.
+  1002 chosen over 1003 (any-event) to avoid pointer-motion noise.
+- e2e scenario 15 extended to assert 1002h+1002l too. ALSO fixed a
+  PRE-EXISTING bug found while doing this: the 1006h/1006l greps used
+  `grep -q $'ESC[?1006h'` (ESC = real escape byte) — BSD grep 2.6.0-FreeBSD
+  parses `[?1006h` as an UNBALANCED bracket expression and exits 2 (error),
+  so the scenario false-failed with "mouse mode 1006 never enabled" even
+  though the bytes were present (grep -F proves it). All four mouse-mode
+  greps are now `grep -qF` (fixed-string). Verified: scenario 15 PASSES
+  against the mock ("40-line reply rendered AND scrolled ... mouse mode
+  enabled+restored").
+- Mock now complies with the prompt's line count (`.repro/mock-slow.mjs`
+  parses "1 through N") so scenario 15's exact-40-lines check is meaningful.
+- NOTE: a root `models.json` (gitignored) was created pointing at the mock for
+  e2e, then DELETED so it can't shadow `~/.tre/models.json`.
 
 **Repro assets (in `.repro/`, gitignored):**
 - `mock-slow.mjs` — SSE mock streaming 60 lines @ 200ms on 127.0.0.1 (port in
@@ -49,9 +63,10 @@ increments, PTY-verified.
   'scrolled' or 'enter send') = the hint-sequence check.
 - `out.log` / `out-clean.txt` — earlier plain wheel repro.
 
-**State at compaction:** tree clean (last commit `21a2333` merge), NO source
-changes made yet, mock server running (port in `.repro/mock-port.txt`,
-`pkill -f mock-slow.mjs` to stop). Next action: edit `steerInput`.
+**State:** BOTH increments done. Increment 1 committed (`dd25cc6`).
+Increment 2 (run.tsx 1002 + e2e.sh grep -qF fix + handoff) is staged for
+commit. Mock server may still be running (`pkill -f mock-slow.mjs` to stop;
+port in `.repro/mock-port.txt`). Root `models.json` deleted.
 
 ---
 

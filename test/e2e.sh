@@ -437,8 +437,13 @@ EOF
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   # The long reply rendered at all (else there was nothing to scroll).
   # C31: reply lines hang under the ◆ icon (2-space indent).
-  grep -q $'\x1b[?1006h' "$D/out.log" || { echo "mouse mode 1006 never enabled in the pty capture"; return 1; }
-  grep -q $'\x1b[?1006l' "$D/out.log" || { echo "mouse mode 1006 not restored on exit"; return 1; }
+  grep -qF $'\x1b[?1006h' "$D/out.log" || { echo "mouse mode 1006 never enabled in the pty capture"; return 1; }
+  grep -qF $'\x1b[?1006l' "$D/out.log" || { echo "mouse mode 1006 not restored on exit"; return 1; }
+  # 1006 alone is only the SGR format — xterm-compatible terminals send NO
+  # wheel events without a base tracking mode. 1002 (button-event) is the
+  # mode that actually makes the trackpad wheel reach the app.
+  grep -qF $'\x1b[?1002h' "$D/out.log" || { echo "mouse base mode 1002 never enabled (wheel would be dead in xterm-compatible terminals)"; return 1; }
+  grep -qF $'\x1b[?1002l' "$D/out.log" || { echo "mouse base mode 1002 not restored on exit"; return 1; }
   python3 - "$D/out.log" "$D/plain.txt" <<'PY'
 import re, sys
 raw = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
