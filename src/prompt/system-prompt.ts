@@ -27,6 +27,9 @@ export interface SystemPromptOptions {
   skills?: SkillIndexEntry[];
   /** Caller-supplied extra guidelines, appended after the derived ones. */
   extraGuidelines?: string[];
+  /** C35: explicitly assigned additional read/write roots (in addition to
+   *  the working directory) — rendered in the Working-directory section. */
+  extraRoots?: string[];
 }
 
 /** Guidelines derived from the enabled tool set. Each entry is keyed by the
@@ -61,7 +64,7 @@ function deriveGuidelines(tools: Tool[], extra: string[] = []): string[] {
 }
 
 export function buildSystemPrompt(opts: SystemPromptOptions): string {
-  const { cwd, tools, model, projectContextFiles = [], skills = [], extraGuidelines = [] } = opts;
+  const { cwd, tools, model, projectContextFiles = [], skills = [], extraGuidelines = [], extraRoots = [] } = opts;
   const sections: string[] = [];
 
   // 1. base identity
@@ -133,8 +136,17 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     );
   }
 
-  // 6. working directory
-  sections.push(["# Working directory", "", `All relative paths resolve against:\n\`${cwd}\``].join("\n"));
+  // 6. working directory (+ C35 extra roots, when assigned)
+  const wdLines = ["# Working directory", "", `All relative paths resolve against:`, `\`${cwd}\``];
+  if (extraRoots.length > 0) {
+    wdLines.push(
+      "",
+      "Additional read/write roots (in addition to the working directory —",
+      "the file tools and the bash sandbox are allowed inside them too):",
+      ...extraRoots.map((r) => `\`${r}\``),
+    );
+  }
+  sections.push(wdLines.join("\n"));
 
   return sections.join("\n\n");
 }

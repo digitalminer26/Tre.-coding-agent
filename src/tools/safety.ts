@@ -139,6 +139,7 @@
  */
 import os from "node:os";
 import path from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import type { BeforeToolCall } from "./pipeline.js";
 
@@ -153,6 +154,10 @@ export type ApprovalMode = "ask" | "yes" | "no";
 export interface SafetyOptions {
   /** Project root. Must exist — checked per call, fail-closed if not. */
   root: string;
+  /** C35: explicitly assigned additional read/write regions (CLI
+   *  --extra-root). write/edit are allowed under ANY root; the primary
+   *  `root` stays the workspace for the sensitive-path (ws)/(sys) split. */
+  extraRoots?: string[];
   mode?: ApprovalMode;
   /** Human prompt. Required for confirmations (sensitive/destructive in
    *  "ask"; mutating bash in "ask"); if absent, those calls are denied
@@ -214,6 +219,82 @@ export async function checkPathWithinRoot(
     };
   }
   return { ok: true, path: resolved };
+}
+
+/**
+ * C35: the multi-root form of `checkPathWithinRoot`. A path is allowed when
+ * it lands under ANY of `roots` (the workspace first, then the explicitly
+ * assigned extra roots); the first match's canonical path is returned. All
+ * roots refused → the refusal names the full boundary. Any failure is a
+ * refusal — never a throw.
+ */
+export async function checkPathWithinRoots(
+  roots: string[],
+  p: string,
+): Promise<PathCheck> {
+  for (const r of roots) {
+    const c = await checkPathWithinRoot(r, p);
+    if (c.ok) return c;
+  }
+  const boundary =
+    roots.length > 1
+      ? `the working directory ${roots[0]} and its extra roots (${roots.slice(1).join(", ")})`
+      : `the project root ${roots[0]}`;
+  const resolved = path.resolve(roots[0] ?? process.cwd(), p);
+  return {
+    ok: false,
+    reason:
+      `path "${p}" resolves to ${resolved}, which is outside ${boundary} ` +
+      `— use a path inside one of them`,
+  };
+}
+
+/**
+ * C35: validate an `--extra-root` at startup. The kernel policy and the
+ * write/edit hook re-allow whatever is passed here, so the CLI refuses to
+ * START when a root would widen the boundary onto a secret surface:
+ *   - the dir must exist (and be a directory),
+ *   - its REAL path must not match a sensitive pattern (~/.ssh, ~/.aws,
+ *     *.pem, .env-family, ...) — the same patterns the approval gate uses,
+ *   - its REAL path must stay under the current user's home dir (refuses
+ *     /etc, /usr, /Library, other users' homes, /Volumes, / — the v1 rule:
+ *     extra roots are non-sensitive dirs under ~; outside-home regions are
+ *     --no-sandbox territory, not a contract).
+ * Returns undefined when the root is acceptable, else the refusal reason.
+ * Never throws.
+ */
+export function validateExtraRoot(
+  dir: string,
+  home: string = os.homedir(),
+): string | undefined {
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    return `${dir} does not exist`;
+  }
+  if (!statSync(real).isDirectory()) {
+    return `${dir} is not a directory`;
+  }
+  let homeReal = home;
+  try {
+    homeReal = realpathSync(home);
+  } catch {
+    /* home missing/unresolvable — compare against the input (fail toward refusal below) */
+  }
+  if (real !== homeReal && !real.startsWith(homeReal + path.sep)) {
+    return (
+      `${dir} (real: ${real}) is outside your home directory (${homeReal}) — ` +
+      `only non-sensitive dirs under it are allowed as extra roots`
+    );
+  }
+  const segs = real.split("/").filter((s) => s.length > 0);
+  for (const pat of [...SENSITIVE_FILENAME, ...SENSITIVE_PATH]) {
+    if (pat.test(segs)) {
+      return `${dir} (real: ${real}) is a sensitive path (${pat.label}) — secret surfaces cannot be extra roots`;
+    }
+  }
+  return undefined;
 }
 
 /** realpath of the deepest existing ancestor of `p` (p may not exist yet). */
@@ -1057,6 +1138,11 @@ function approvalQuestion(
  */
 export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
   const root = opts.root;
+  // C35: the write/edit boundary is the full root set — the workspace first,
+  // then the explicitly assigned extra roots. The sensitive-path (ws)/(sys)
+  // split below keeps using the PRIMARY root only: an extra root never
+  // downgrades a sensitive path from (sys) to (ws).
+  const roots = [root, ...(opts.extraRoots ?? [])];
   // Default mode is "yes" (auto-approve): the kernel sandbox confines bash
   // to the workspace and the codebase is backed up to git, so workspace-
   // scoped work runs without a prompt. Only SYSTEMIC (sys) sensitive reads
@@ -1154,7 +1240,7 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
             'missing required string argument "path" (the validation layer should have caught this)',
         };
       }
-      const check = await checkPathWithinRoot(root, p);
+      const check = await checkPathWithinRoots(roots, p);
       if (!check.ok) return { blocked: check.reason };
       const newArgs = { ...args, path: check.path };
 

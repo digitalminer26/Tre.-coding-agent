@@ -1,3 +1,127 @@
+# HANDOFF — `--extra-root`: explicitly assigned non-sensitive dirs as extra read/write roots (C35/D21) (2026-09-27)
+
+**Status: WORK COMPLETE, gate green — AWAITING HUMAN COMMIT (guardrail zone).**
+This increment touches `src/tools/sandbox.ts`, `src/tools/safety.ts`, and
+`src/tools/bash.ts` — all guardrail zone. Per the self-improve protocol the
+pre-commit hook REJECTS an agent commit here. The agent did all the work (code
++ tests + docs, gate green); the **human commits** it:
+
+```sh
+GUARDRAIL_BYPASS=1 git add -A
+GUARDRAIL_BYPASS=1 git commit -m "Add --extra-root: explicitly assigned non-sensitive dirs under home as additional read/write roots (C35/D21)"
+```
+
+**What it is.** `--extra-root <dir>` (repeatable) assigns an ADDITIONAL
+read/write region in addition to the workspace (`--cwd`). The workspace stays
+the primary root (working dir, skills, sessions, the prompt's "Working
+directory"); extra roots are boundary regions only. This is the contract for
+"I explicitly allow this one directory" short of `--no-sandbox` (which removes
+the boundary entirely) — it covers the sibling-project case and gives a
+deliberate alternative to the `git push`/`~/.ssh` sandbox wall.
+
+**Design — one boundary concept, two layers that MUST move together.** The
+boundary is a *set* of roots (workspace + extra roots), enforced in two layers:
+(1) the bash kernel policy (`generateBashSandboxPolicy(root, extraRoots)`)
+re-allows each extra root's subpath (real path, read **and** write, plus its
+ancestor-metadata chain), emitted BEFORE the workspace rule so the workspace
+stays the last matching rule (last-match-wins); (2) the write/edit path sandbox
+(`checkPathWithinRoots(roots, p)`) allows a path under ANY root. `read` stays
+unrestricted. An extra root re-allows **its own subpath only** — never its
+parent or siblings — so a path outside every root is still denied by the kernel
+and refused by the hook.
+
+**The sensitive-root guard (what makes it a contract).** At startup each
+`--extra-root` is validated and the run REFUSES to start (exit 2, like `--cwd`
+on a missing dir) if its real path is sensitive (`~/.ssh`, `~/.aws`, `*.pem`,
+`.env`-family, …) or outside the user's home dir (v1 rule: a non-sensitive dir
+under `~`). The (ws)/(sys) sensitive split keeps using the PRIMARY root only —
+an extra root widens the *boundary* but never downgrades a path from
+(sys)-sensitive to (ws), so a `.env` under an extra root is still blocked in
+every mode.
+
+**Inherited-sandbox limitation (documented, not fixed).** When
+`TRE_SANDBOX === "1"` (tre running inside another sandboxed tre), the bash
+child spawns unwrapped (it inherits the caller's confinement and the per-call
+policy is not re-applied), so extra roots are inert there — same as the
+workspace re-allow today.
+
+**Numbering correction.** The spec was filed as "C27/D14" (commit `40fabfb`)
+and its header said "next decision = D17". Both were stale: the decision log
+had already spent D14–D20 and the source contracts run to C34. The correct
+identifiers are **C35** (next contract after C34) and **D21** (next decision
+after D20). Recorded in the spec header, `docs/02-contracts.md`, and below.
+
+**Files changed.**
+- `src/tools/sandbox.ts` *(guardrail)* — `generateBashSandboxPolicy` gains an
+  optional `extraRoots` arg (default `[]` → byte-identical policy for all
+  existing callers); each extra root gets read+write subpath allows (real
+  path) + ancestor-metadata rules, before the workspace rules.
+  `spawnSandboxedBash` opts gain `extraRoots`.
+- `src/tools/bash.ts` *(guardrail)* — `BashToolOptions.extraRoots?` forwarded
+  into the spawn call.
+- `src/tools/safety.ts` *(guardrail)* — `SafetyOptions.extraRoots?`; new
+  `checkPathWithinRoots(roots, p)` (allowed under ANY root; refusal names the
+  full boundary); the write/edit hook uses the root set for the boundary but
+  the PRIMARY root for the (ws)/(sys) sensitive split; new
+  `validateExtraRoot(dir, home?)` (exists + is a dir + non-sensitive + under
+  home; never throws).
+- `src/cli/main.ts` — `--extra-root <dir>` (repeatable) parse + help; startup
+  validation (exit 2 on refusal); wired into the bash tool, the safety hooks,
+  and the system prompt; `behaviorSettingsLines` reports the extra roots.
+- `src/prompt/system-prompt.ts` — `SystemPromptOptions.extraRoots?`; the
+  "Working directory" section lists the workspace + each extra root (omitted
+  when empty → byte-identical prompt for existing runs).
+- `docs/05-extra-roots-spec.md` — status → IMPLEMENTED (C35/D21); fixed the
+  §4.1 snippet's missing-paren bug (the same bug the new unit test caught in
+  the code); corrected the refusal-message format (exit 2) and the §8 commit
+  ref.
+- `docs/02-contracts.md` — C35 paragraph (after the stall paragraph).
+- `test/sandbox.test.ts` — policy shape (extra-root read+write allows +
+  ancestor metadata, ordered before the workspace; `[]` → byte-identical
+  regression pin) + a kernel canary (extra root readable+writable, its sibling
+  denied, workspace still works, /etc still denied, node realpathSync into the
+  extra root) that skips under an inherited sandbox.
+- `test/safety.test.ts` — `checkPathWithinRoots` (any root / outside all /
+  single-root parity); write/edit allowed under an extra root, refused outside
+  all; **a sensitive path under an extra root stays (sys)-sensitive and
+  blocked** (the guardrail property); `validateExtraRoot` (accepts a plain dir
+  under home; refuses missing / sensitive / not-a-dir / outside-home).
+- `test/cli.test.ts` — `--extra-root` parse (repeatable, in order);
+  `behaviorSettingsLines` (renders / omits); `main` exit 2 on a nonexistent
+  root; `main` exit 0 + summary lists a valid root (skipped when the repo is
+  not under `$HOME`).
+- `test/prompt.test.ts` — extra roots render in the Working-directory section;
+  absent → byte-identical.
+- `test/e2e.sh` — scenario 19 `extra-root(C35)` (a live model writes into the
+  assigned extra root via the write tool AND bash; a non-assigned sibling is
+  refused/denied) — skips under an inherited sandbox, like s10.
+
+**Gate (green).** `tsc` clean; full suite **463 tests → 454 pass / 0 fail / 9
+skip** (was 451/443/8: +12 tests, +1 skip = the new kernel canary, which
+skips under the inherited sandbox). Quality-check source scan clean (31
+files); dependency freeze OK (4 runtime / 4 dev).
+
+**Kernel canary — NOT run here (inherited sandbox).** This session's bash tool
+runs under an inherited kernel sandbox (`TRE_SANDBOX=1`), where nested
+`sandbox_apply` is EPERM (rc 71) and the per-call policy is not re-applied —
+so the kernel canary (unit) and e2e s19 both correctly SKIP here. To
+live-verify the kernel boundary, run from a FRESH (non-sandboxed) shell:
+
+```sh
+npm test                      # unit, incl. the C35 kernel canary
+TRE_SANDBOX= bash test/e2e.sh 19 19   # e2e scenario 19 (live 27B)
+```
+
+The unit canary and the policy-shape tests are the guardrail evidence that ran
+green in the gate; the kernel canary + s19 are the live confirmation the human
+should run before/with the bypass commit.
+
+**Out of scope (v1).** Extra roots outside the home dir (external mounts,
+`/opt`); per-root read-only vs read-write; config-file persistence of extra
+roots (flag-only). See `docs/05-extra-roots-spec.md` §6.
+
+---
+
 # HANDOFF — fix: the two sandbox-induced bash-truncation test failures (2026-09-27)
 
 **Status: COMPLETED, committed.**
@@ -2003,6 +2127,45 @@ run B: created merged.md via bash instead of c.md); s12 needs the same
 anywhere (no ~/.gitconfig, no ~/.config/git, no /etc/gitconfig) — commits
 auto-fall-back to `Hong Yu <tertain@Hongs-MacBook-Air.local>` (git's
 no-identity fallback), which is why existing commits carry that identity.
+
+## D21 — `--extra-root`: explicitly assigned non-sensitive dirs as extra read/write roots (C35) — WORK COMPLETE, gate green; awaiting human commit (guardrail zone)
+
+`--extra-root <dir>` (repeatable) assigns an ADDITIONAL read/write region in
+addition to the workspace. The boundary becomes a SET of roots (workspace +
+extra roots) enforced in two layers that move together: the bash kernel policy
+(`generateBashSandboxPolicy(root, extraRoots)` re-allows each extra root's
+real-path subpath, read+write, + ancestor metadata, before the workspace rule
+so the workspace stays last) and the write/edit path sandbox
+(`checkPathWithinRoots(roots, p)` — allowed under ANY root). `read` stays
+unrestricted. An extra root re-allows its own subpath only (never parent/
+siblings).
+
+**The guard (what makes it a contract):** each root is validated at startup and
+the run REFUSES to start (exit 2) if its real path is sensitive (`~/.ssh`,
+`~/.aws`, `*.pem`, `.env`-family, …) or outside the user's home (v1 rule: a
+non-sensitive dir under `~`). The (ws)/(sys) sensitive split keeps using the
+PRIMARY root only — an extra root never downgrades a path from (sys) to (ws),
+so a `.env` under an extra root is still blocked in every mode.
+
+**Inherited-sandbox limitation:** under `TRE_SANDBOX=1` the bash child spawns
+unwrapped, so the per-call extra-root policy is inert (same as the workspace
+re-allow). The kernel canary (unit) + e2e s19 skip under inheritance.
+
+**Numbering note:** the spec was filed as "C27/D14" (commit `40fabfb`) and its
+header said "next decision = D17" — both stale (the log had spent D14–D20; the
+source contracts run to C34). Correct identifiers: **C35** (next after C34) +
+**D21** (next after D20).
+
+**Gate:** `tsc` clean; full suite **463 tests → 454 pass / 0 fail / 9 skip**
+(451/443/8 before: +12 tests, +1 skip = the kernel canary, skipped under the
+inherited sandbox). Quality-check source scan clean; dependency freeze OK.
+
+**Commit (human, guardrail zone):**
+```sh
+GUARDRAIL_BYPASS=1 git add -A
+GUARDRAIL_BYPASS=1 git commit -m "Add --extra-root: explicitly assigned non-sensitive dirs under home as additional read/write roots (C35/D21)"
+```
+Full spec: `docs/05-extra-roots-spec.md`; contract: `docs/02-contracts.md` C35.
 
 ## D20 — sessions outside the repo + explicit budget + dependency freeze — DONE (296 tests: 289 pass 0 fail; built by GPU farm, orchestrator-verified, 1 integration bug caught)
 

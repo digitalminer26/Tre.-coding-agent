@@ -70,6 +70,30 @@ Rules:
   count. The two guards are complementary: byte-identical retries are
   caught by the loop guard (stopReason `loop`); rephrased retries are
   caught here (stopReason `stall`).
+- **C35 — extra roots: an explicitly assigned, non-sensitive directory under
+  home becomes an additional read/write region (one boundary, two layers).**
+  The boundary is a *set* of roots, not a single value: the workspace
+  (`--cwd`) plus each `--extra-root <dir>` (repeatable). The two layers that
+  enforce it MUST move together — the bash kernel policy
+  (`generateBashSandboxPolicy(root, extraRoots)`) re-allows each extra root's
+  subpath (real path, read **and** write, with its ancestor-metadata chain),
+  emitted BEFORE the workspace rule so the workspace stays the last matching
+  rule; and the write/edit path sandbox (`checkPathWithinRoots(roots, p)`)
+  allows a path under ANY root. `read` stays unrestricted. An extra root
+  re-allows **its own subpath only** — never its parent or siblings — so a
+  path outside every root is still denied by the kernel and refused by the
+  hook. **The sensitive-root guard (what makes it a contract):** at startup
+  each extra root is validated and the run REFUSES to start (exit 2, like
+  `--cwd` on a missing dir) if its real path is sensitive (`~/.ssh`, `~/.aws`,
+  `*.pem`, `.env`-family, …) or outside the user's home dir (v1 rule: a
+  non-sensitive dir under `~`). The (ws)/(sys) sensitive split keeps using
+  the PRIMARY root only — an extra root widens the *boundary* but never
+  downgrades a path from (sys)-sensitive to (ws), so a `.env` under an extra
+  root is still blocked in every mode. **Inherited-sandbox limitation:** when
+  `TRE_SANDBOX === "1"`, the bash child spawns unwrapped (it inherits the
+  caller's confinement and the per-call policy is not re-applied), so extra
+  roots are inert there — same as the workspace re-allow today. Full spec:
+  `docs/05-extra-roots-spec.md`.
 
 ## Contract 2 — Events
 

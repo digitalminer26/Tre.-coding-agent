@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 17, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 19, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -631,6 +631,40 @@ EOF
   echo "rc=0, TUI renders with NO mouse-tracking mode (highlight/copy works; wheel is opt-in TRE_MOUSE=1)"
 }
 
+scenario_19() { # C35: --extra-root — an assigned sibling is writable (write tool + bash); a non-assigned sibling is refused
+  # The boundary is a SET of roots (workspace + extra roots) enforced in TWO
+  # layers that move together: the bash kernel policy (Seatbelt) and the
+  # write/edit path sandbox. This drives BOTH layers against a LIVE model:
+  # a write into the ASSIGNED extra root must SUCCEED (write tool AND bash),
+  # and a write into a NON-assigned sibling must be REFUSED (write/edit path
+  # sandbox) / DENIED (bash kernel sandbox).
+  # Like s10, this needs a FRESH kernel sandbox (the per-call policy is what
+  # re-allows the extra root). Under an INHERITED kernel sandbox (an agent's
+  # bash tool running this suite: TRE_SANDBOX=1) the child spawns unwrapped,
+  # so the extra-root re-allow is inert and the scenario is skipped, not failed.
+  if [ -n "${TRE_SANDBOX:-}" ]; then
+    echo "SKIPPED (inherited kernel sandbox: the per-call extra-root policy is inert)"
+    return 0
+  fi
+  local D="$WORK/19"; mkdir -p "$D/ws" "$D/extra" "$D/other"
+  local EXTRA="$D/extra" OTHER="$D/other"
+  guarded_run 300 "$D" run \
+    "Do these three things, in order, and report the result of each: (1) use the write tool to create a file at $EXTRA/extra-ok.txt containing exactly the text extra-ok; (2) run the bash command: echo bash-ok > $EXTRA/extra-bash.txt; (3) run the bash command: echo x > $OTHER/evil.txt" \
+    --yes --session "$D/s.jsonl" --cwd "$D/ws" --extra-root "$EXTRA"
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  # (1) the write tool landed in the assigned extra root.
+  [ -f "$EXTRA/extra-ok.txt" ] || { echo "write tool did not create $EXTRA/extra-ok.txt"; return 1; }
+  # (2) bash landed in the assigned extra root.
+  [ -f "$EXTRA/extra-bash.txt" ] || { echo "bash did not create $EXTRA/extra-bash.txt"; return 1; }
+  # (3) the NON-assigned sibling was refused/denied — no file, and the log
+  # shows the refusal (write/edit path sandbox) or the kernel denial (bash).
+  [ -f "$OTHER/evil.txt" ] && { echo "FAIL: non-assigned sibling was written — boundary leaked"; return 1; }
+  grep -qE "outside|Operation not permitted|✗|denied|blocked" "$D/out.log" || { echo "no refusal/denial marker for the non-assigned sibling"; return 1; }
+  echo "rc=0, extra root writable (write+bash), non-assigned sibling refused"
+}
+
+
 # ───────────────────────────── runner ─────────────────────────────
 
 run_one() {
@@ -654,6 +688,7 @@ run_one() {
     16) name="bare-tty-launches-tui" ;;
     17) name="tui-slash-mid-run(C32)" ;;
     18) name="tui-no-mouse-by-default" ;;
+    19) name="extra-root(C35)" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

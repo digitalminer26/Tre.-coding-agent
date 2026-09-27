@@ -25,16 +25,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   checkPathWithinRoot,
+  checkPathWithinRoots,
   destructiveBashPatterns,
   isReadOnlyBash,
   isReversibleBash,
   makeSafetyHooks,
   makeAskQueue,
+  validateExtraRoot,
   type ApprovalMode,
 } from "../src/tools/safety.js";
 import { makeToolExecutor } from "../src/tools/pipeline.js";
 import { bashTool } from "../src/tools/bash.js";
-import { readTool, writeTool } from "../src/tools/index.js";
+import { readTool, writeTool, editTool } from "../src/tools/index.js";
 import type { Tool, ToolCallBlock } from "../src/types.js";
 
 type Decision = { args?: Record<string, unknown> } | { blocked: string } | undefined;
@@ -775,4 +777,124 @@ test("write/edit are still sandboxed to the root in every mode", async (t) => {
     assert.ok(blockedOf(r), `mode ${mode}: write outside must be blocked`);
     assert.match(blockedOf(r)!, /outside the project root/);
   }
+});
+
+// ─────────────────────────────── C35: extra roots ───────────────────────────────
+
+test("C35 checkPathWithinRoots: allowed under ANY root, refused outside all", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "om-c35-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = join(base, "root");
+  const extra = join(base, "extra");
+  const other = join(base, "other");
+  await mkdir(root, { recursive: true });
+  await mkdir(extra, { recursive: true });
+  await mkdir(other, { recursive: true });
+
+  // Under the primary root.
+  const inRoot = await checkPathWithinRoots([root, extra], "a.txt");
+  assert.equal(inRoot.ok, true);
+  assert.equal(inRoot.ok && inRoot.path, join(root, "a.txt"));
+  // Under the EXTRA root (absolute path).
+  const inExtra = await checkPathWithinRoots([root, extra], join(extra, "b.txt"));
+  assert.equal(inExtra.ok, true);
+  assert.equal(inExtra.ok && inExtra.path, join(extra, "b.txt"));
+  // Outside ALL roots → refused, naming the full boundary.
+  const out = await checkPathWithinRoots([root, extra], join(other, "evil.txt"));
+  assert.equal(out.ok, false);
+  assert.match(out.ok ? "" : out.reason, /extra roots/);
+  assert.match(out.ok ? "" : out.reason, /outside/);
+  // Single-root list behaves like checkPathWithinRoot.
+  const single = await checkPathWithinRoots([root], join(extra, "b.txt"));
+  assert.equal(single.ok, false);
+});
+
+test("C35 write/edit: allowed under an extra root, refused outside all roots", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "om-c35-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = join(base, "root");
+  const extra = join(base, "extra");
+  const other = join(base, "other");
+  await mkdir(root, { recursive: true });
+  await mkdir(extra, { recursive: true });
+  await mkdir(other, { recursive: true });
+
+  const hooks = makeSafetyHooks({ root, mode: "yes", extraRoots: [extra] });
+  // write INTO the extra root → allowed + path rewritten to the canonical path.
+  const rExtra = await hooks(
+    writeTool,
+    call("write", { path: join(extra, "ok.txt"), content: "x" }),
+  );
+  assert.ok(argsOf(rExtra), "a write into the extra root must be allowed");
+  assert.equal(argsOf(rExtra)!.path, join(extra, "ok.txt"));
+  // write OUTSIDE all roots → blocked, naming the extra roots.
+  const rOut = await hooks(
+    writeTool,
+    call("write", { path: join(other, "evil.txt"), content: "x" }),
+  );
+  assert.ok(blockedOf(rOut));
+  assert.match(blockedOf(rOut)!, /extra roots/);
+  // edit into the extra root → allowed too.
+  const rEdit = await hooks(
+    editTool,
+    call("edit", { path: join(extra, "ok.txt"), oldText: "x", newText: "y" }),
+  );
+  assert.ok(argsOf(rEdit), "an edit into the extra root must be allowed");
+  assert.equal(argsOf(rEdit)!.path, join(extra, "ok.txt"));
+});
+
+test("C35 sensitive paths under an extra root stay (sys)-sensitive — never downgraded", async (t) => {
+  // The guardrail property: the (ws)/(sys) split keeps using the PRIMARY root
+  // only. A `.env` / `id_rsa` under an extra root is still system-level
+  // sensitive and BLOCKED in every mode (an extra root widens the BOUNDARY,
+  // it never downgrades a secret from (sys) to (ws)).
+  const base = await mkdtemp(join(tmpdir(), "om-c35sens-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = join(base, "root");
+  const extra = join(base, "extra");
+  await mkdir(root, { recursive: true });
+  await mkdir(extra, { recursive: true });
+
+  const hooks = makeSafetyHooks({ root, mode: "yes", extraRoots: [extra] });
+
+  // A project .env INSIDE the workspace is (ws) — allowed in "yes".
+  const wsEnv = await hooks(readTool, call("read", { path: join(root, ".env") }));
+  assert.equal(wsEnv, undefined, "a workspace .env is (ws) and allowed in yes");
+
+  // The SAME .env under the EXTRA root is (sys) — blocked in every mode.
+  const erEnv = await hooks(readTool, call("read", { path: join(extra, ".env") }));
+  assert.ok(blockedOf(erEnv), "a .env under an extra root must be blocked");
+  assert.match(blockedOf(erEnv)!, /system-level sensitive/);
+
+  // And via bash: cat of an extra-root secret is (sys) too.
+  const erBash = await hooks(
+    bashTool,
+    call("bash", { command: `cat ${join(extra, ".env")}` }),
+  );
+  assert.ok(blockedOf(erBash), "bash cat of an extra-root .env must be blocked");
+  assert.match(blockedOf(erBash)!, /system-level sensitive/);
+});
+
+test("C35 validateExtraRoot: accepts a plain dir under home; refuses missing, sensitive, outside-home", async (t) => {
+  const base = await mkdtemp(join(tmpdir(), "om-c35v-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // The temp base stands in for "home" (validateExtraRoot takes home as a
+  // parameter, so the test is hermetic — no real ~/.ssh needed).
+  const plain = join(base, "projects", "repo");
+  await mkdir(plain, { recursive: true });
+  const sens = join(base, ".ssh");
+  await mkdir(sens, { recursive: true });
+  const sensFile = join(base, "projects", "server.key");
+  await writeFile(sensFile, "k");
+  const outside = join(base, "..", "om-c35v-outside-" + Date.now());
+  await mkdir(outside, { recursive: true });
+  t.after(() => rm(outside, { recursive: true, force: true }));
+
+  assert.equal(validateExtraRoot(plain, base), undefined, "a plain dir under home is fine");
+  assert.match(validateExtraRoot(join(base, "nope"), base)!, /does not exist/);
+  assert.match(validateExtraRoot(sens, base)!, /sensitive path \(~\/\.ssh\/\)/);
+  assert.match(validateExtraRoot(sensFile, base)!, /is not a directory/);
+  assert.match(validateExtraRoot(outside, base)!, /outside your home directory/);
+  // home itself is allowed (it is "under home" by the realPath identity).
+  assert.equal(validateExtraRoot(base, base), undefined);
 });

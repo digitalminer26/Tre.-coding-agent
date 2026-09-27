@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { fakeStream } from "./fake-stream.js";
 import {
+  behaviorSettingsLines,
   defaultSkillDirs,
   exitCodeFor,
   main,
@@ -1049,6 +1050,76 @@ test("WS7: bad --cwd (nonexistent) → exit 2", async (t) => {
   assert.equal(code, 2);
   assert.match(S.err(), /not an existing directory/);
 });
+
+// ──────────────────────────────── C35: extra roots ────────────────────────────────
+
+test("C35 parseArgs: --extra-root is repeatable and collected in order", () => {
+  const a = parseArgs(["run", "x", "--extra-root", "/a/b", "--extra-root", "/c/d"]);
+  assert.deepEqual(a.extraRoots, ["/a/b", "/c/d"]);
+  assert.deepEqual(parseArgs(["run", "x"]).extraRoots, []);
+  // a bare --extra-root with no value is an error (like other value flags).
+  assert.notDeepEqual(parseArgs(["run", "x", "--extra-root"]).errors, []);
+});
+
+test("C35 behaviorSettingsLines: extra roots render; empty → no extra line", () => {
+  const none = behaviorSettingsLines("yes", true);
+  assert.ok(none.some((l) => l.includes("sandbox:  on (bash confined to the workspace)")));
+  assert.ok(!none.some((l) => l.includes("extra roots:")));
+  const withRoots = behaviorSettingsLines("yes", true, ["/home/u/a", "/home/u/b"]);
+  assert.ok(
+    withRoots.some((l) => l.includes("sandbox:  on (bash confined to the workspace + extra roots)")),
+  );
+  assert.ok(
+    withRoots.some((l) =>
+      l.includes("extra roots: /home/u/a, /home/u/b  (read+write, in addition to the workspace)"),
+    ),
+  );
+  // sandbox off still reports off (extra roots don't change that line's state).
+  const off = behaviorSettingsLines("yes", false, ["/home/u/a"]);
+  assert.ok(off.some((l) => l.includes("sandbox:  off (--no-sandbox)")));
+});
+
+test("C35 main: --extra-root pointing at a nonexistent dir → exit 2 + refusal", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const code = await main(
+    [
+      "run", "x", "--models", models, "--cwd", dir,
+      "--extra-root", join(dir, "does-not-exist"),
+    ],
+    { streamFn: fakeStream([{ type: "text", text: "x" }]), sinks: S.sinks },
+  );
+  assert.equal(code, 2);
+  assert.match(S.err(), /--extra-root .*does not exist/);
+});
+
+test(
+  "C35 main: --extra-root (valid dir under home) → exit 0, summary lists it",
+  {
+    // The valid e2e needs an EXISTING dir under home to point at. The repo
+    // root qualifies (it is under ~ and non-sensitive); home is readable even
+    // under an inherited kernel sandbox, so no write is required. Skip when
+    // the repo is not under home (e.g. a CI checkout elsewhere).
+    skip:
+      !process.env.HOME ||
+      !process.cwd().startsWith(process.env.HOME + "/")
+        ? "repo is not under $HOME — no valid in-home extra root to point at"
+        : false,
+  },
+  async (t) => {
+    const { dir, models } = await workspace(t);
+    const S = mkSinks();
+    const code = await main(
+      [
+        "run", "x", "--models", models, "--cwd", dir,
+        "--extra-root", process.cwd(),
+      ],
+      { streamFn: fakeStream([{ type: "text", text: "x" }]), sinks: S.sinks },
+    );
+    assert.equal(code, 0);
+    assert.match(S.err(), /extra roots: .*\(read\+write, in addition to the workspace\)/);
+  },
+);
 
 // ──────────────────────────────── WS9: compaction ────────────────────────────────
 

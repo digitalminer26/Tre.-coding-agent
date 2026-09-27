@@ -234,6 +234,71 @@ test("policy: the workspace re-allow uses the REAL path (resolved, not literal)"
   }
 });
 
+test("policy: C35 extra roots — same mechanism as the workspace, emitted before it", () => {
+  const base = mkdtempSync(path.join(tmpdir(), "sb-extra-"));
+  try {
+    const ws = path.join(base, "ws");
+    const er = path.join(base, "extra");
+    const sibling = path.join(base, "sibling");
+    mkdirSync(ws);
+    mkdirSync(er);
+    mkdirSync(sibling);
+    const wsReal = realpathSync(ws);
+    const erReal = realpathSync(er);
+    const p = generateBashSandboxPolicy(ws, [er]);
+
+    // Each extra root gets a read AND a write subpath allow (REAL path).
+    assert.ok(
+      p.includes(`(allow file-read* (subpath "${erReal}"))`),
+      "extra root must get a read subpath allow (real path)",
+    );
+    assert.ok(
+      p.includes(`(allow file-write* (subpath "${erReal}"))`),
+      "extra root must get a write subpath allow (real path)",
+    );
+    // The workspace keeps its own allows.
+    assert.ok(p.includes(`(allow file-read* (subpath "${wsReal}"))`));
+    assert.ok(p.includes(`(allow file-write* (subpath "${wsReal}"))`));
+    // Ordering: the extra-root rules come BEFORE the workspace rules, so the
+    // workspace stays the LAST matching read/write subpath rule (last-match-
+    // wins). The sibling is never re-allowed.
+    assert.ok(
+      p.indexOf(`(allow file-read* (subpath "${erReal}"))`) <
+        p.indexOf(`(allow file-read* (subpath "${wsReal}"))`),
+      "extra-root read allow must precede the workspace read allow",
+    );
+    assert.ok(
+      p.indexOf(`(allow file-write* (subpath "${erReal}"))`) <
+        p.indexOf(`(allow file-write* (subpath "${wsReal}"))`),
+      "extra-root write allow must precede the workspace write allow",
+    );
+    assert.ok(
+      !p.includes(`(subpath "${realpathSync(sibling)}")`),
+      "a sibling of the extra root must NOT be re-allowed",
+    );
+    // The extra root's ancestor chain gets metadata-only re-allows (node's
+    // realpathSync walk-down must survive the enumeration denies).
+    for (const r of ancestorMetadataRules(erReal)) {
+      assert.ok(p.includes(r), `missing ancestor metadata rule ${r}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("policy: C35 no extra roots → byte-identical to the single-root policy (regression pin)", () => {
+  const ws = mkdtempSync(path.join(tmpdir(), "sb-extra-pin-"));
+  try {
+    assert.equal(
+      generateBashSandboxPolicy(ws),
+      generateBashSandboxPolicy(ws, []),
+      "an empty extraRoots list must not change the policy",
+    );
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 /** Run `cmd` under the generated policy with cwd = the workspace (the
  * product spawns the child with cwd = workspace; running from a cwd that is
  * DENIED by the policy makes the shell's getcwd fail and pollutes stderr).
@@ -420,6 +485,67 @@ test(
       }
     } finally {
       rmSync(ws, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "OS probe (darwin): C35 extra root is readable+writable, its sibling is NOT",
+  {
+    skip:
+      process.platform !== "darwin"
+        ? true
+        : process.env.TRE_SANDBOX === "1"
+          ? "under an inherited kernel sandbox — nested sandbox_apply is EPERM (rc 71); the kernel probe needs a fresh process (run npm test outside a sandboxed shell)"
+          : false,
+    timeout: 60_000,
+  },
+  () => {
+    const base = mkdtempSync(path.join(tmpdir(), "sb-c35-"));
+    try {
+      const ws = path.join(base, "ws");
+      const er = path.join(base, "extra");
+      const sibling = path.join(base, "sibling");
+      mkdirSync(ws);
+      mkdirSync(er);
+      mkdirSync(sibling);
+      writeFileSync(path.join(er, "in.txt"), "extra-data\n");
+      writeFileSync(path.join(sibling, "secret.txt"), "sibling-secret\n");
+      const policy = generateBashSandboxPolicy(ws, [er]);
+
+      // The extra root is readable AND writable by the sandboxed child.
+      const erRead = runSandboxed(policy, `cat "${path.join(er, "in.txt")}"`, ws);
+      assert.ok(erRead.ok, `reading the extra root must succeed: ${erRead.out}`);
+      assert.match(erRead.out, /extra-data/);
+      const erWrite = runSandboxed(policy, `echo x > "${path.join(er, "out.txt")}"`, ws);
+      assert.ok(erWrite.ok, `writing in the extra root must succeed: ${erWrite.out}`);
+      assert.ok(existsSync(path.join(er, "out.txt")), "the extra-root file must exist");
+
+      // A SIBLING of the extra root (not assigned) is still denied — the
+      // re-allow covers the extra root's subpath only, never its parent.
+      const sibRead = runSandboxed(policy, `cat "${path.join(sibling, "secret.txt")}"`, ws);
+      assert.ok(!sibRead.ok, "reading the extra root's sibling must FAIL");
+      assert.ok(!sibRead.out.includes("sibling-secret"), "the sibling content must not leak");
+      const sibWrite = runSandboxed(policy, `echo x > "${path.join(sibling, "evil.txt")}"`, ws);
+      assert.ok(!sibWrite.ok, "writing the extra root's sibling must FAIL");
+      assert.ok(!existsSync(path.join(sibling, "evil.txt")), "the sibling file must not exist");
+
+      // The workspace still works (regression) and /etc is still denied.
+      const wsRead = runSandboxed(policy, "echo ws-ok > w.txt && cat w.txt", ws);
+      assert.ok(wsRead.ok, "the workspace must still work");
+      assert.match(wsRead.out, /ws-ok/);
+      const etc = runSandboxed(policy, "cat /etc/passwd", ws);
+      assert.ok(!etc.ok, "/etc must still be denied with an extra root assigned");
+
+      // node's realpathSync walk-down survives into the extra root (the
+      // ancestor-metadata re-allows cover its chain too).
+      const probe = path.join(er, "probe.js");
+      writeFileSync(probe, 'console.log("c35-node-ran")\n');
+      const nodeRun = runSandboxed(policy, `node "${probe}"`, ws);
+      assert.ok(nodeRun.ok, `running a node FILE under the extra root must succeed: ${nodeRun.out}`);
+      assert.match(nodeRun.out, /c35-node-ran/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   },
 );

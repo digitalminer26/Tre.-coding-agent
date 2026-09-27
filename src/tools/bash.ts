@@ -64,6 +64,9 @@ export interface BashToolOptions {
   /** WS11: kernel-sandbox the child's file access to the workspace.
    *  On by default when a cwd is set AND the platform is darwin. */
   sandbox?: boolean;
+  /** C35: explicitly assigned additional read/write regions (CLI
+   *  --extra-root) re-allowed in the per-call kernel policy. */
+  extraRoots?: string[];
 }
 
 export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
@@ -103,6 +106,8 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
           // detached: the sandbox-exec→shell→cmd tree forms its own process
           // group so timeout/abort can kill it whole (see killChild).
           detached: true,
+          // C35: explicitly assigned extra roots (validated by the CLI).
+          extraRoots: opts.extraRoots,
         });
         child = s.child;
         disposePolicy = s.dispose;

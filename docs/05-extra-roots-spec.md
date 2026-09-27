@@ -1,9 +1,16 @@
 # Spec — `--extra-root`: explicitly assigned directories outside the workspace
 
-**Status: SPEC (not yet implemented).** Next contract = **C27**, next decision =
-**D14**. This is a **guardrail-zone** change (touches `sandbox.ts`, `safety.ts`,
-`bash.ts`) — the agent does all the work, the **human commits** it with
-`GUARDRAIL_BYPASS=1`. See §9.
+**Status: IMPLEMENTED (C35 / D21).** This is a **guardrail-zone** change (touches
+`sandbox.ts`, `safety.ts`, `bash.ts`) — the agent does all the work, the
+**human commits** it with `GUARDRAIL_BYPASS=1`. See §9.
+
+> **Numbering correction (2026-09-27):** this spec was filed as "C27/D14" (commit
+> `40fabfb`) and its header said "next decision = D17". Both were stale: the
+> decision log (HANDOFF.md) had already spent D14–D20 (pinned input layout,
+> `/display-bottom`, `/` menu, self-improve readiness, rename+gate, quiet
+> file-access, sessions-outside-repo), and the source contracts run to C34.
+> The correct identifiers for this increment are therefore **C35** (next contract
+> after C34) and **D21** (next decision after D20). Recorded accordingly.
 
 ---
 
@@ -31,7 +38,7 @@ The kernel policy is already **allowlist-by-enumeration with last-match-wins**
 more pair of rules. The architecture supports N regions; only the plumbing is
 hardwired to 1.
 
-## 2. The contract (C27)
+## 2. The contract (C35)
 
 **Flag:** `--extra-root <dir>` (repeatable). Each `<dir>` is an *additional*
 directory the agent may read and write, **in addition to** the workspace
@@ -83,12 +90,13 @@ second repo, a scratch dir) while keeping every secret surface denied.
 > would re-open exactly the surfaces the sandbox exists to protect; the escape
 > for that is `--no-sandbox`. Revisit only if a real need appears.
 
-**Refusal message** (stderr, non-zero exit, before the loop starts):
+**Refusal message** (stderr, **exit 2** — same as `--cwd` on a missing dir,
+before the loop starts):
 ```
-error: --extra-root <dir> is not allowed: <reason>
-  reason ∈ { "does not exist",
-             "is a sensitive path (<label>) — secret surfaces cannot be extra roots",
-             "is outside your home directory (<home>) — only non-sensitive dirs under it are allowed" }
+error: --extra-root <dir> does not exist
+error: --extra-root <dir> is not a directory
+error: --extra-root <dir> (real: <real>) is a sensitive path (<label>) — secret surfaces cannot be extra roots
+error: --extra-root <dir> (real: <real>) is outside your home directory (<home>) — only non-sensitive dirs under it are allowed
 ```
 
 ## 4. Code touch points (exact)
@@ -110,16 +118,16 @@ const er = extraRoots.map((e) => seString(workspaceRealPath(e)));
 Insert in the **reads** section, immediately BEFORE the workspace read-allow
 (so the workspace stays the last matching read rule):
 ```ts
-    // C27 extra roots: same mechanism as the workspace — ancestor metadata
+    // C35 extra roots: same mechanism as the workspace — ancestor metadata
     // re-allows + a read subpath allow. Emitted BEFORE the workspace rule so
     // the workspace remains the last matching read rule.
     ...extraRoots.flatMap((e) => ancestorMetadataRules(workspaceRealPath(e))),
-    ...er.map((e) => `(allow file-read* (subpath "${e}")`),
+    ...er.map((e) => `(allow file-read* (subpath "${e}"))`),
     `(allow file-read* (subpath "${w}"))`, // workspace — LAST so it wins
 ```
 Insert in the **writes** section, immediately BEFORE the workspace write-allow:
 ```ts
-    ...er.map((e) => `(allow file-write* (subpath "${e}")`),
+    ...er.map((e) => `(allow file-write* (subpath "${e}"))`),
     `(allow file-write* (subpath "${w}"))`,
 ```
 `spawnSandboxedBash` opts gain `extraRoots?: string[]`, forwarded:
@@ -157,7 +165,7 @@ passes it in the `spawnSandboxedBash` call (`{ cwd, env, detached, extraRoots }`
 - Args: `--extra-root <dir>` repeatable → `opts.extraRoots: string[]`.
 - After `root` is resolved (`main.ts:871`), validate each extra root per §3
   (exists + non-sensitive + under home); on failure write the §3 message and
-  `exit 1`.
+  `exit 2` (matching `--cwd` on a missing dir).
 - Wire into all three surfaces:
   ```ts
   const tools = allTools.map((t) =>
@@ -185,9 +193,9 @@ Additional read/write roots (in addition to the workspace):
 (omitted entirely when empty — prompt stays byte-identical for existing runs).
 
 ### 4.6 `docs/02-contracts.md`
-Add **C27** (a paragraph after the stall paragraph) describing the extra-root
+Add **C35** (a paragraph after the stall paragraph) describing the extra-root
 boundary + the sensitive-root guard + the inherited-sandbox limitation. Record
-**D14** in `PLAN.md` §9 when implemented.
+**D21** in `PLAN.md` §9 when implemented.
 
 ## 5. Test plan
 
@@ -214,8 +222,8 @@ boundary + the sensitive-root guard + the inherited-sandbox limitation. Record
    root assigned.
 5. `node` can `realpathSync` into the extra root (ancestor-metadata chain works).
 
-**e2e (`test/e2e.sh`):** a scenario that launches with
-`--cwd <repo> --extra-root <sibling>` and has the model write a file into the
+**e2e (`test/e2e.sh`):** scenario 19 — a one-shot run launched with
+`--cwd <workdir> --extra-root <sibling>` has the model write a file into the
 sibling via the `write` tool **and** via `bash` — both succeed; a write to a
 non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
 
@@ -230,12 +238,12 @@ non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
 1. `tsc` clean; **full suite green** (no new failures).
 2. Kernel canary (§5) passes on this machine.
 3. e2e extra-root scenario passes (or is correctly skipped under inheritance).
-4. `docs/02-contracts.md` C27 + `PLAN.md` D14 recorded.
+4. `docs/02-contracts.md` C35 + the decision log (HANDOFF.md) D21 recorded.
 5. `HANDOFF.md` top section updated.
 6. Committed **by the human** (§9).
 
 ## 8. Sequencing
-The stall guard (C26) is done and green (commit `ad4d0d2`). This is the **next**
+The stall guard (C26) is done and green (commit `f393fb2`). This is the **next**
 increment. It must land as **one** increment — the bash kernel boundary and the
 file-tool root set move together (§2). Estimated ~200 lines across 6 files.
 
@@ -246,6 +254,6 @@ agent does all the work (code + tests + docs, gate green, canary passed), then
 **stops** and hands off. The human commits:
 ```sh
 GUARDRAIL_BYPASS=1 git add -A
-GUARDRAIL_BYPASS=1 git commit -m "Add --extra-root: explicitly assigned non-sensitive dirs under home as additional read/write roots (C27/D14)"
+GUARDRAIL_BYPASS=1 git commit -m "Add --extra-root: explicitly assigned non-sensitive dirs under home as additional read/write roots (C35/D21)"
 ```
 The agent must never set `GUARDRAIL_BYPASS`.

@@ -202,9 +202,19 @@ export function tmpdirRealPath(): string {
  * Allowlist by enumeration — see the module header for the kernel semantics
  * (resolved-path matching, fatal symlink-top subpath denies, node denies
  * for /etc + /home, /System/Volumes/Data real-target denies).
+ *
+ * C35: `extraRoots` are explicitly assigned additional read/write regions
+ * (CLI --extra-root). Each gets the SAME mechanism as the workspace —
+ * ancestor-metadata re-allows + read/write subpath allows — emitted BEFORE
+ * the workspace rules, which stay LAST (last matching rule wins). An extra
+ * root re-allows its own subpath only — never its parent or siblings.
  */
-export function generateBashSandboxPolicy(workspace: string): string {
+export function generateBashSandboxPolicy(
+  workspace: string,
+  extraRoots: string[] = [],
+): string {
   const w = seString(workspaceRealPath(workspace));
+  const er = extraRoots.map((e) => seString(workspaceRealPath(e)));
   return [
     "(version 1)",
     "(allow default)",
@@ -238,6 +248,11 @@ export function generateBashSandboxPolicy(workspace: string): string {
     // when the workspace is elsewhere). No file content is opened.
     ...ancestorMetadataRules(workspaceRealPath(workspace)),
     ...ancestorMetadataRules(tmpdirRealPath()),
+    // C35 extra roots: same mechanism as the workspace (ancestor metadata +
+    // a read subpath allow), emitted BEFORE the workspace rule so the
+    // workspace remains the last matching read rule.
+    ...extraRoots.flatMap((e) => ancestorMetadataRules(workspaceRealPath(e))),
+    ...er.map((e) => `(allow file-read* (subpath "${e}"))`),
     `(allow file-read* (subpath "${w}"))`, // the workspace (REAL path), wherever it lives — LAST so it wins
     "; ── writes: workspace + /dev fakes only ──",
     '(deny file-write* (subpath "/private"))',
@@ -253,6 +268,9 @@ export function generateBashSandboxPolicy(workspace: string): string {
     '(deny file-write* (subpath "/Network"))',
     '(deny file-write* (subpath "/dev"))',
     '(allow file-write* (subpath "/private/var/folders"))', // per-user temp (v1 boundary)
+    // C35 extra roots: a write subpath allow each, BEFORE the workspace rule
+    // so the workspace stays the last matching write rule.
+    ...er.map((e) => `(allow file-write* (subpath "${e}"))`),
     `(allow file-write* (subpath "${w}"))`,
     '(allow file-write* (subpath "/dev/null"))',
     '(allow file-write* (subpath "/dev/stdout"))',
@@ -287,16 +305,22 @@ export interface SandboxSpawn {
  * SIGKILL the whole sandbox-exec→shell→cmd tree on timeout/abort —
  * killing only sandbox-exec orphans the shell, which keeps the stdout
  * pipe open and the caller's promise never settles.
+ * `extraRoots` (C35): explicitly assigned additional read/write regions
+ * re-allowed in the per-call policy (validated by the CLI before spawn).
  */
 export async function spawnSandboxedBash(
   command: string,
-  opts: { cwd?: string; env: NodeJS.ProcessEnv; detached?: boolean },
+  opts: { cwd?: string; env: NodeJS.ProcessEnv; detached?: boolean; extraRoots?: string[] },
 ): Promise<SandboxSpawn> {
   const dir = await mkdtemp(path.join(tmpdir(), "coding-agent-sb-"));
   const policyPath = path.join(dir, `policy-${randomBytes(8).toString("hex")}.sb`);
-  await writeFile(policyPath, generateBashSandboxPolicy(opts.cwd ?? process.cwd()), {
-    mode: 0o600,
-  });
+  await writeFile(
+    policyPath,
+    generateBashSandboxPolicy(opts.cwd ?? process.cwd(), opts.extraRoots ?? []),
+    {
+      mode: 0o600,
+    },
+  );
   const sandboxExec = sandboxExecPath();
   if (!sandboxExec) throw new Error("sandbox-exec binary not found");
   // git treats an UNREADABLE system config (/etc/gitconfig — denied by the

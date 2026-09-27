@@ -80,6 +80,7 @@ import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.
 import {
   makeSafetyHooks,
   makeAskQueue,
+  validateExtraRoot,
   type ApprovalMode,
   type AskApproval,
 } from "../tools/safety.js";
@@ -146,6 +147,10 @@ export interface CliOptions {
   /** --no-sandbox (WS11): run bash without the kernel file-access sandbox
    *  (default: sandboxed on darwin; the flag is a no-op elsewhere). */
   noSandbox: boolean;
+  /** C35: --extra-root <dir> (repeatable): explicitly assigned additional
+   *  read/write regions (non-sensitive dirs under the user's home), in
+   *  addition to the workspace. Validated at startup; a refusal exits 2. */
+  extraRoots: string[];
 }
 
 export interface ParsedArgs extends CliOptions {
@@ -174,6 +179,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     noCompact: false,
     compactKeepTokens: 8192,
     noSandbox: false,
+    extraRoots: [],
     errors: [],
   };
   let i = 0;
@@ -189,7 +195,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
-               a === "--max-continuations" || a === "--compact-keep") {
+               a === "--max-continuations" || a === "--compact-keep" || a === "--extra-root") {
       const v = argv[i + 1];
       if (v === undefined) {
         opts.errors.push(`${a} needs a value`);
@@ -203,6 +209,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (a === "--session") opts.sessionPath = v;
       else if (a === "--resume") opts.resumePath = v;
       else if (a === "--skills") opts.skillDirs.push(v);
+      else if (a === "--extra-root") opts.extraRoots.push(v);
       else if (a === "--max-turns") {
         const n = Number(v);
         if (!Number.isInteger(n) || n <= 0) opts.errors.push("--max-turns must be a positive integer");
@@ -672,6 +679,11 @@ Options:
   --tools <list>     read,write,edit,bash — or "all" (default) / "none"
   --cwd <dir>        project root: the agent's working directory and the
                      sandbox boundary for file tools (default: process cwd)
+  --extra-root <dir> C35: an ADDITIONAL read/write root in addition to the
+                     workspace (repeatable). Must be an existing, non-sensitive
+                     dir under your home dir — the startup refuses otherwise
+                     (the kernel sandbox + the write/edit path sandbox both
+                     re-allow it; siblings and everything else stay denied)
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -706,9 +718,11 @@ id_rsa*/id_ed25519*, *.pem/*.key/*.p12/*.pfx, .env-family), which is
 BLOCKED in every mode (across the board). A sensitive path INSIDE the
 workspace (e.g. a project .env) is allowed in the default mode. write/edit
 are sandboxed to the project root (--cwd or the process cwd) — paths that
-escape it (../, absolute paths, symlinks) are refused. On macOS the bash
-tool runs in the project root under a kernel (Seatbelt) sandbox with the
-same boundary; elsewhere it runs in the project root unsandboxed.
+escape it (../, absolute paths, symlinks) are refused. C35: --extra-root
+adds explicitly assigned read/write roots (non-sensitive dirs under your
+home) to that boundary, for the file tools AND the bash sandbox. On macOS
+the bash tool runs in the project root under a kernel (Seatbelt) sandbox
+with the same boundary; elsewhere it runs in the project root unsandboxed.
 Approval (D8): the DEFAULT mode (yes) auto-approves everything except
 SYSTEMIC sensitive reads and SYSTEMIC destructive commands (dd to /dev/*,
 raw-device redirects, mkfs, fork bomb, shutdown/reboot — inherently
@@ -786,24 +800,40 @@ export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): 
  * The behavior-settings lines shown at startup: the CURRENT approval mode +
  * sandbox state, what is always blocked (systemic sensitive/destructive),
  * and the OPTIONAL flags that change the behavior. `mode` is the resolved
- * ApprovalMode; `sandboxOn` is whether the kernel sandbox is active. The TUI
- * seeds this as a single multi-line info item; the plain CLI prints it to
- * stderr.
+ * ApprovalMode; `sandboxOn` is whether the kernel sandbox is active;
+ * `extraRoots` (C35) are the explicitly assigned additional read/write
+ * regions (omitted from the summary when empty). The TUI seeds this as a
+ * single multi-line info item; the plain CLI prints it to stderr.
  */
-export function behaviorSettingsLines(mode: ApprovalMode, sandboxOn: boolean): string[] {
+export function behaviorSettingsLines(
+  mode: ApprovalMode,
+  sandboxOn: boolean,
+  extraRoots: string[] = [],
+): string[] {
   const approval =
     mode === "yes"
       ? "auto-approve (default) — workspace-scoped work runs without a prompt"
       : mode === "ask"
         ? "ask — prompt for SENSITIVE + DESTRUCTIVE + mutating bash"
         : "no-approve (fail-closed) — only read-only, non-sensitive bash runs";
-  return [
+  const sandbox = sandboxOn
+    ? extraRoots.length > 0
+      ? `on (bash confined to the workspace + extra roots)`
+      : "on (bash confined to the workspace)"
+    : "off (--no-sandbox)";
+  const lines = [
     "Behavior:",
     `  approval: ${approval}`,
-    `  sandbox:  ${sandboxOn ? "on (bash confined to the workspace)" : "off (--no-sandbox)"}`,
-    "  blocked:  system-level sensitive reads + destructive commands (across the board)",
-    "  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox",
+    `  sandbox:  ${sandbox}`,
   ];
+  if (extraRoots.length > 0) {
+    lines.push(`  extra roots: ${extraRoots.join(", ")}  (read+write, in addition to the workspace)`);
+  }
+  lines.push(
+    "  blocked:  system-level sensitive reads + destructive commands (across the board)",
+    "  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir>",
+  );
+  return lines;
 }
 
 /**
@@ -873,11 +903,27 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     sinks.err.write(`error: cwd ${root} is not an existing directory\n`);
     return 2;
   }
+  // C35: validate the explicitly assigned extra roots BEFORE wiring anything
+  // (fail-closed: a root that would widen the boundary onto a secret surface
+  // or outside the home dir refuses the startup).
+  const extraRoots: string[] = [];
+  for (const dir of args.extraRoots) {
+    const reason = validateExtraRoot(path.resolve(dir));
+    if (reason !== undefined) {
+      sinks.err.write(`error: --extra-root ${reason}\n`);
+      return 2;
+    }
+    extraRoots.push(path.resolve(dir));
+  }
   // bash runs in the project root, so its relative paths mean the same
   // thing as the file tools' (the safety hook resolves those against it);
   // on darwin the child is kernel-sandboxed to the same boundary (WS11).
+  // C35: extra roots are re-allowed in the per-call kernel policy AND in
+  // the write/edit path sandbox — one boundary, both layers.
   const wiredTools = tools.map((t) =>
-    t.name === "bash" ? createBashTool(root, { sandbox: !args.noSandbox }) : t,
+    t.name === "bash"
+      ? createBashTool(root, { sandbox: !args.noSandbox, extraRoots })
+      : t,
   );
 
   // skills
@@ -890,6 +936,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     tools: wiredTools,
     model: model.id,
     skills,
+    extraRoots,
   });
 
   // D20 boundary (--session-auto): resolve a fresh session path OUTSIDE any
@@ -955,13 +1002,15 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // the fail-closed mode (only read-only, non-sensitive bash).
   const mode: ApprovalMode = args.noApprove ? "no" : args.ask ? "ask" : "yes";
   const buildExecutor = (ask: AskApproval) =>
-    makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
+    makeToolExecutor({
+      beforeToolCall: makeSafetyHooks({ root, mode, ask, extraRoots }),
+    });
 
   // The behavior-settings summary shown at startup: the CURRENT approval
   // mode + sandbox state, and the OPTIONAL flags that change them. The TUI
   // seeds it as a single multi-line info item; the plain CLI prints it to
   // stderr (below).
-  const behavior = behaviorSettingsLines(mode, !args.noSandbox);
+  const behavior = behaviorSettingsLines(mode, !args.noSandbox, extraRoots);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the
@@ -1000,7 +1049,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // system prompt embeds the model name, so a switch must rebuild it).
       modelsFile,
       rebuildSystemPrompt: (modelId: string) =>
-        buildSystemPrompt({ cwd: root, tools: wiredTools, model: modelId, skills }),
+        buildSystemPrompt({ cwd: root, tools: wiredTools, model: modelId, skills, extraRoots }),
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
       sessionPath: sessionFile,

@@ -157,6 +157,22 @@ test("prompt: cwd + model appear", () => {
   assert.ok(p.includes("`m1`"));
 });
 
+test("prompt: C35 extra roots render in the Working-directory section; absent → byte-identical", () => {
+  const base = buildSystemPrompt({ cwd: "/some/cwd", tools: [READ] });
+  // No extra roots → the section is unchanged (no "Additional read/write roots").
+  assert.ok(!base.includes("Additional read/write roots"));
+  const withRoots = buildSystemPrompt({
+    cwd: "/some/cwd",
+    tools: [READ],
+    extraRoots: ["/home/u/projects/other", "/home/u/scratch"],
+  });
+  assert.ok(withRoots.includes("Additional read/write roots"));
+  assert.ok(withRoots.includes("`/home/u/projects/other`"));
+  assert.ok(withRoots.includes("`/home/u/scratch`"));
+  // The workspace line is still present and first.
+  assert.ok(withRoots.indexOf("`/some/cwd`") < withRoots.indexOf("`/home/u/projects/other`"));
+});
+
 test("prompt: no sections for empty optional inputs", () => {
   const p = buildSystemPrompt({ cwd: dir, tools: [] });
   assert.ok(!p.includes("# Tools"));
