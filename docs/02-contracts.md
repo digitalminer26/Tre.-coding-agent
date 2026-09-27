@@ -37,10 +37,10 @@ Rules:
 - **`toolCall.arguments` is a parsed object** — the wire layer owns JSON
   parse + salvage; everything downstream gets an object or an error.
 - **`stopReason` is the outcome channel**: `stop | length | toolUse |
-  error | aborted | budget | loop` (C26 added the last two). `length` is
-  load-bearing: the loop must fail *all* tool calls in that message
-  (truncated args may parse yet be incomplete). `budget`/`loop` are set by
-  the LOOP (never a wire finish_reason) and both are resumable.
+  error | aborted | budget | loop | stall`. `length` is load-bearing: the
+  loop must fail *all* tool calls in that message (truncated args may parse
+  yet be incomplete). `budget`/`loop`/`stall` are set by the LOOP (never a
+  wire finish_reason) and all three are resumable.
 - **C26 — the turn budget is per-cycle, and the runaway guard is
   pattern-based.** `maxTurns` (derived or explicit) caps one *cycle*; at
   exhaustion the loop injects `BUDGET_CONTINUE_TEXT` (a user message) and
@@ -51,6 +51,25 @@ Rules:
   is a runaway-loop signature: the third repeat is failed in-band with
   `LOOP_GUARD_TEXT` (never executed) and the run stops with `loop`.
   Two identical batches remain allowed (legit retries exist).
+- **Stall detection (tool pipeline) — the deterministic-failure guard.**
+  The kernel sandbox makes permission denials DETERMINISTIC: the same
+  operation fails identically forever ("Operation not permitted" /
+  "permission denied"). The tool pipeline (`makeToolExecutor`) counts
+  consecutive permission-signature failures PER TOOL (per executor
+  instance — the CLI builds one per run). The count is keyed on the tool
+  NAME, not the arguments: a model that rephrases the command each retry
+  (`git push` → `git push origin main` → …) defeats the loop's
+  3-identical-batch guard, and rephrasing is exactly the stall pattern —
+  so it must NOT reset the count. The 3rd permission failure of the same
+  tool is replaced in-band with `stallText(tool)` + `details.stall` (I3:
+  every call gets a result); the call WAS executed (a denial is a harmless
+  no-op), so a legitimate 3rd operation that SUCCEEDS never trips it. The
+  loop maps `details.stall` onto `stopReason: "stall"` and stops —
+  resumable like `loop` (exit 3). Non-permission failures (transient
+  errors are normal retries) and a different tool or success reset the
+  count. The two guards are complementary: byte-identical retries are
+  caught by the loop guard (stopReason `loop`); rephrased retries are
+  caught here (stopReason `stall`).
 
 ## Contract 2 — Events
 

@@ -13,6 +13,7 @@ import {
   bashTool,
   defaultRegistry,
   editTool,
+  isPermissionStallText,
   makeToolExecutor,
   readTool,
   writeTool,
@@ -165,6 +166,110 @@ test("pipeline: tool that throws (I3 violation) → isError result, never throws
   const r = await exec(tool, call("1", "t", {}));
   assert.equal(r.isError, true);
   assert.match(resultText(r), /threw: kaboom/);
+});
+
+// ─────────────────────────── stall guard (sandbox wall) ───────────────────────
+//
+// The kernel sandbox makes permission denials DETERMINISTIC: the same
+// operation fails identically forever. The guard keys on the TOOL (not the
+// arguments — rephrasing the command is exactly the stall pattern) and
+// counts consecutive permission failures of that tool. The 3rd failure is
+// replaced in-band with STALL_TEXT + details.stall (I3: every call gets a
+// result); the call WAS executed (a denial is a harmless no-op), so a
+// legitimate 3rd operation that SUCCEEDS never trips it.
+
+const permFail =
+  "bash: exit code 1\nOperation not permitted"; // the sandbox's EPERM spelling
+
+test("stall guard: same tool, permission failure 3× → 3rd replaced with STALL_TEXT + details.stall", async () => {
+  const { tool, calls } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: permFail }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const r1 = await executor(tool, call("1", "t", { p: "x" }), sig);
+  const r2 = await executor(tool, call("2", "t", { p: "x" }), sig);
+  assert.equal(r1.isError, true, "1st failure passes through");
+  assert.equal(r2.isError, true, "2nd failure passes through (legit retry)");
+  const r3 = await executor(tool, call("3", "t", { p: "x" }), sig);
+  assert.equal(r3.isError, true, "3rd failure is an in-band error result (I3)");
+  assert.match(resultText(r3), /NOT executed/);
+  assert.equal(r3.details?.stall, true, "the loop maps details.stall onto stopReason");
+  assert.equal(calls.length, 3, "all three executed (a denial is a harmless no-op)");
+});
+
+test("stall guard: REPHRASED arguments do NOT reset the count (the stall pattern)", async () => {
+  const { tool } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: permFail }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "git push" }), sig);
+  await executor(tool, call("2", "t", { p: "git push origin main" }), sig); // rephrased
+  const r3 = await executor(tool, call("3", "t", { p: "git push --set-upstream origin main" }), sig);
+  assert.equal(r3.details?.stall, true, "rephrasing the same tool does not reset the count");
+});
+
+test("stall guard: DIFFERENT tool resets the count", async () => {
+  const mk = (name: string) =>
+    makeTool(name, async () => ({
+      content: [{ type: "text" as const, text: permFail }],
+      isError: true,
+    }));
+  const a = mk("read");
+  const b = mk("write");
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(a.tool, call("1", "read", { p: "x" }), sig); // read fail (count 1)
+  await executor(b.tool, call("2", "write", { p: "x" }), sig); // write fail — resets to write (count 1)
+  await executor(a.tool, call("3", "read", { p: "x" }), sig); // read fail — resets to read (count 1)
+  await executor(a.tool, call("4", "read", { p: "x" }), sig); // read fail (count 2)
+  const r5 = await executor(a.tool, call("5", "read", { p: "x" }), sig); // read fail (count 3)
+  assert.equal(r5.details?.stall, true, "the read chain reached 3 after the reset");
+});
+
+test("stall guard: a SUCCESS resets the count (a legitimate 3rd op that succeeds never trips)", async () => {
+  const { tool } = makeTool("t", async (_id, args) =>
+    args.p === "x"
+      ? { content: [{ type: "text" as const, text: permFail }], isError: true }
+      : { content: [{ type: "text" as const, text: "ok" }] },
+  );
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "x" }), sig); // fail x (count 1)
+  await executor(tool, call("2", "t", { p: "x" }), sig); // fail x (count 2)
+  const r3 = await executor(tool, call("3", "t", { p: "y" }), sig); // success y — resets
+  assert.equal(r3.isError, undefined, "the success passes through");
+  assert.equal(r3.details?.stall, undefined);
+  await executor(tool, call("4", "t", { p: "x" }), sig); // fail x — new chain (count 1)
+  const r5 = await executor(tool, call("5", "t", { p: "x" }), sig); // fail x (count 2)
+  assert.equal(r5.details?.stall, undefined, "the chain restarted after the success");
+});
+
+test("stall guard: NON-permission failures never trip it (transient retries allowed)", async () => {
+  const { tool, calls } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: "bash: exit code 127\ncommand not found" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  for (let i = 1; i <= 5; i++) {
+    const r = await executor(tool, call(String(i), "t", { p: "x" }), sig);
+    assert.equal(r.details?.stall, undefined, `repeat ${i} of a transient failure never stalls`);
+  }
+  assert.equal(calls.length, 5, "all five executed");
+});
+
+test("stall guard: permission patterns (unit)", () => {
+  assert.equal(isPermissionStallText(["Operation not permitted"]), true);
+  assert.equal(isPermissionStallText(["cat: /etc/shadow: Permission denied"]), true);
+  assert.equal(isPermissionStallText(["EACCES: permission denied, open '/x'"]), true);
+  assert.equal(isPermissionStallText(["EPERM: operation not permitted, mkdir"]), true);
+  assert.equal(isPermissionStallText(["bash: exit code 127\ncommand not found"]), false);
+  assert.equal(isPermissionStallText(["ok"]), false);
+  assert.equal(isPermissionStallText([]), false);
 });
 
 test("pipeline: broken hooks never kill the run (I3)", async () => {

@@ -392,6 +392,11 @@ export function exitCodeFor(stopReason: StopReason): number {
       // C26: runaway-loop detection stopped the run (3 identical batches
       // in a row) — resumable like budget: a new prompt breaks the pattern.
       return 3;
+    case "stall":
+      // The same call failed 3× in a row with a permission denial (the
+      // deterministic sandbox wall) — resumable like loop: a different
+      // approach or --no-sandbox breaks the pattern.
+      return 3;
   }
 }
 
@@ -473,6 +478,11 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(
           `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${resume}\n`,
+        );
+      } else if (ev.stopReason === "stall") {
+        const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
+        sinks.err.write(
+          `\nstall: the same tool call failed 3 times in a row with a permission denial — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox${resume}\n`,
         );
       }
       break;

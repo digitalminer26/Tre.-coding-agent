@@ -561,6 +561,20 @@ test("agent_end: loop → error item explaining the runaway stop (C26)", () => {
   assert.equal(s.busy, false);
 });
 
+test("agent_end: stall → error item explaining the sandbox wall", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    { type: "agent_end", stopReason: "stall", messages: [] },
+  );
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "error");
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /stall: the same tool call failed 3 times in a row with a permission denial/);
+  assert.match(text, /--no-sandbox/);
+  assert.match(text, /send another prompt to continue/);
+  assert.equal(s.busy, false);
+});
+
 test("turn_budget → info item, run stays busy (C26 auto-continue)", () => {
   const s = applyEvent(
     { ...makeInitialState("m"), busy: true },

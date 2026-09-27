@@ -31,6 +31,7 @@ import type {
   AgentEvent,
   AgentMessage,
   AssistantMessage,
+  ExecuteToolCall,
   LlmContext,
   ModelConfig,
   StreamFn,
@@ -776,6 +777,61 @@ test("C26: loop detection — same batch 3× → third NOT executed, stopReason 
     .result.content[0] as { type: "text"; text: string };
   assert.match(text.text, /Runaway loop detected/);
   // No turn_budget was involved.
+  assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
+});
+
+test("stall: a result with details.stall → run stops with stopReason stall", async () => {
+  // The tool pipeline's stall guard answers the 3rd identical permission
+  // failure in-band with details.stall (never executed). The loop maps that
+  // detail onto stopReason "stall" and stops — resumable like "loop".
+  //
+  // NOTE: the batches use DIFFERENT arguments each turn so the loop's own
+  // C26 batch guard (3 identical batches, checked pre-execution) does NOT
+  // fire first — this test isolates the stall mapping. (When the model
+  // re-issues the EXACT same call 3×, the loop guard fires first and wins;
+  // the stall guard then covers the case where the batch varies but the
+  // same call keeps failing — see the pipeline tests in tools.test.ts.)
+  const { tool } = makeTool("bash");
+  let n = 0;
+  const executor: ExecuteToolCall = async (t, c, sig, onUpdate) => {
+    n += 1;
+    if (n >= 3) {
+      // Simulate the pipeline's stall guard on the 3rd failure.
+      return {
+        content: [{ type: "text", text: "STALL_TEXT (not executed)" }],
+        isError: true,
+        details: { stall: true },
+      };
+    }
+    return tool.execute(c.id, c.arguments, sig, onUpdate);
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "cat /etc/shadow" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "bash", args: { command: "cat /etc/shadow; echo 2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "cat /etc/shadow; echo 3" } }] },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, executeToolCall: executor });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall", "the stall detail stops the run");
+  const guarded = events.filter(
+    (e) => e.type === "tool_execution_end" && e.result.isError === true,
+  ) as Extract<AgentEvent, { type: "tool_execution_end" }>[];
+  assert.equal(guarded.length, 1, "the guarded call got one in-band error result (I3)");
+  assert.match(guarded[0]!.result.content[0]!.text, /STALL_TEXT/);
+});
+
+test("stall: a stall stop is NOT a budget or loop stop", async () => {
+  const { tool } = makeTool("bash");
+  const executor: ExecuteToolCall = async (t, c, sig, onUpdate) => {
+    const r = await tool.execute(c.id, c.arguments, sig, onUpdate);
+    return { ...r, details: { stall: true } };
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "x" } }] },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, executeToolCall: executor });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall");
   assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
 });
 

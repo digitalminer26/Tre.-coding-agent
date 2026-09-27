@@ -214,9 +214,11 @@ test("defaultSkillDirs: project .tre/skills first, then user ~/.tre/agent/skills
   assert.match(dirs[1]!, /^.*\/\.tre\/agent\/skills$/);
 });
 
-test("exitCodeFor: stop 0, budget 3, error/length/toolUse 1, aborted 130", () => {
+test("exitCodeFor: stop 0, budget/loop/stall 3, error/length/toolUse 1, aborted 130", () => {
   assert.equal(exitCodeFor("stop"), 0);
   assert.equal(exitCodeFor("budget"), 3);
+  assert.equal(exitCodeFor("loop"), 3);
+  assert.equal(exitCodeFor("stall"), 3);
   assert.equal(exitCodeFor("aborted"), 130);
   assert.equal(exitCodeFor("error"), 1);
   assert.equal(exitCodeFor("length"), 1);

@@ -1,3 +1,71 @@
+# HANDOFF — stall detection: a second, complementary loop guard for the sandbox wall (2026-09-27)
+
+**Status: COMPLETED, committed.**
+
+**Problem.** The C26 loop guard stops a run when the model re-issues the
+SAME batch (same tool names + same JSON args) 3× in a row. But it only
+fires on BYTE-IDENTICAL retries. A model that REPHRASES the command each
+attempt (`git push` → `git push origin main` → `git push --set-upstream …`)
+defeats it — every batch is "new" — and it keeps banging on the sandbox
+boundary forever. That is exactly the failure mode that stuck a prior
+session: the kernel sandbox denies `~/.ssh` (so `git push` over ssh fails
+with "Operation not permitted"), and the model retried with rephrased args,
+never tripping the identical-batch guard.
+
+**Fix.** A second guard in the tool pipeline (`makeToolExecutor`,
+`src/tools/pipeline.ts`) that keys on the TOOL, not the arguments. It counts
+consecutive permission-signature failures per tool; the 3rd is replaced
+in-band with `stallText(tool)` + `details.stall` (I3: every call gets a
+result) and the loop maps that detail onto a new `stopReason: "stall"` and
+stops (resumable, exit 3). The call WAS executed (a permission denial is a
+harmless no-op), so a legitimate 3rd operation that SUCCEEDS never trips it.
+A different tool, a success, or any non-permission failure (transient errors
+are normal retries) resets the count. The two guards are now complementary:
+byte-identical retries → `loop` (loop guard, pre-execution); rephrased
+retries → `stall` (pipeline guard, post-execution).
+
+**Permission signature** (`STALL_PERMISSION_PATTERNS`): "operation not
+permitted", "permission denied", "EACCES", "EPERM" (case-insensitive). Only
+these count — a non-zero exit / timeout / "command not found" is a transient
+failure and never trips the guard.
+
+**Files changed.**
+- `src/tools/pipeline.ts` — the stall guard (per-tool count, post-execution
+  state update, in-band `details.stall` on the 3rd), `stallText(tool)`,
+  `isPermissionStallText`, `STALL_PERMISSION_PATTERNS`.
+- `src/tools/index.ts` — re-exports the new symbols.
+- `src/loop/agent-loop.ts` — maps `details.stall` → `stopReason: "stall"`.
+- `src/types.ts` — `"stall"` added to `StopReason`.
+- `src/cli/main.ts` — `exitCodeFor("stall")` → 3.
+- `src/tui/state.ts` — `agent_end` with `stall` → an error item explaining
+  the sandbox wall + `--no-sandbox`, busy → false.
+- `docs/02-contracts.md` — `stall` in the stopReason table + a dedicated
+  paragraph describing the guard.
+- Tests: `test/tools.test.ts` (6 pipeline tests), `test/agent-loop.test.ts`
+  (2 loop-mapping tests), `test/cli.test.ts` (exit-code),
+  `test/tui-state.test.ts` (error item).
+
+**Gate.** `tsc` clean; `quality-check.sh` clean (31 files scanned, no
+violations; dep-freeze OK — 4 runtime / 4 dev); full suite 451 tests, 441
+pass, 2 fail, 8 skip. The 2 failures are the PRE-EXISTING bash-truncation
+tests (documented below) — confirmed by stashing this change and re-running
+on clean HEAD (identical 2 failures). No guardrail-zone file touched.
+
+**Note on the 2 pre-existing failures.** They spawn `node -e` in a
+SANDBOXED child bash. The sandbox re-allows the workspace but DENIES the
+node binary's directory (`/Users/xilcilus/.nvm/…`), so the child gets
+`node: command not found` (exit 127) → `isError`. This is a sandbox
+artifact, not a code bug — it passes when run outside the sandbox.
+
+**Not done (next session).** (1) Push the commits to GitHub — the sandbox
+denies `~/.ssh` and network, so `git push` must be run OUTSIDE the sandbox
+(or with `--no-sandbox`). (2) Optional: an end-to-end PTY capture showing a
+rephrased `git push` retry loop stopping at `stall` (the unit tests cover
+the pipeline + loop mapping; a live TUI capture would be the
+definition-of-done for a TUI-facing change).
+
+---
+
 # HANDOFF — default approval = `--yes` (auto-approve); startup behavior summary (2026-09-27)
 
 **Status: COMPLETED, committed.**

@@ -13,7 +13,15 @@ export { writeTool } from "./write.js";
 export { editTool } from "./edit.js";
 export { bashTool, createBashTool } from "./bash.js";
 export { ToolRegistry } from "./registry.js";
-export { makeToolExecutor, type ToolPipelineHooks, type BeforeToolCall, type AfterToolCall } from "./pipeline.js";
+export {
+  makeToolExecutor,
+  isPermissionStallText,
+  stallText,
+  STALL_PERMISSION_PATTERNS,
+  type ToolPipelineHooks,
+  type BeforeToolCall,
+  type AfterToolCall,
+} from "./pipeline.js";
 export { validateArgs } from "./validate.js";
 export {
   truncateHead,

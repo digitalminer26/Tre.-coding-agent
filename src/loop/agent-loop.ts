@@ -37,6 +37,12 @@
  *    stuck model is caught by LOOP DETECTION instead of a count: the same
  *    tool-call batch signature issued 3 times in a row is NOT executed on
  *    the third repeat, and the run stops with stopReason "loop".
+ *  - Stall detection (tool pipeline): the same tool call (same tool +
+ *    arguments) failing 3 times in a row with a permission denial (the
+ *    deterministic sandbox wall — "Operation not permitted") is NOT
+ *    executed on the third repeat, and the run stops with stopReason
+ *    "stall". The pipeline answers in-band with `details.stall`; the loop
+ *    maps it onto the stop reason.
  *  - Steering: guidance typed during a run is queued by the driver (a
  *    `SteeringQueue`) and delivered before the next LLM call — after the
  *    current turn's work completes. A pending steer also KEEPS THE RUN
@@ -472,6 +478,7 @@ export async function* runLoop(
 
     // Results (and their end events) always land in call order.
     let allTerminate = true;
+    let stalled = false;
     for (const call of calls) {
       const entry = results.get(call.id);
       const msg = resultMessage(
@@ -485,6 +492,15 @@ export async function* runLoop(
       }
       yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
       if (!entry?.result.terminate) allTerminate = false;
+      // Stall guard (tool pipeline): the same call failed 3× in a row with
+      // a permission denial — the third repeat was answered in-band and NOT
+      // executed. Stop the run; a new prompt (or a different approach)
+      // breaks the pattern, so the run is resumable like "loop".
+      if (entry?.result.details?.stall === true) stalled = true;
+    }
+    if (stalled) {
+      stopReason = "stall";
+      break;
     }
     if (allTerminate) break;
     if (signal.aborted) {

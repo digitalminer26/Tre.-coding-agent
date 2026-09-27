@@ -231,6 +231,17 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             text: "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue",
           },
         ];
+      } else if (ev.stopReason === "stall") {
+        // The same call failed 3× in a row with a permission denial (the
+        // deterministic sandbox wall). The third repeat was NOT executed;
+        // a different approach (or --no-sandbox) breaks the pattern.
+        items = [
+          ...items,
+          {
+            kind: "error",
+            text: "stall: the same tool call failed 3 times in a row with a permission denial — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox — send another prompt to continue",
+          },
+        ];
       }
       return { ...state, busy: false, approval: null, items };
     }
