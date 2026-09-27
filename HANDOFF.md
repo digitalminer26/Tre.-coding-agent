@@ -1,3 +1,53 @@
+# HANDOFF — TUI: highlight/copy restored (mouse tracking now opt-in) (2026-09-27)
+
+**Status: COMPLETED, committed.**
+
+**User report:** "I cannot highlight and copy in the TUI."
+
+**Root cause (confirmed by code, not guessed):** `src/tui/run.tsx` enabled
+mouse-tracking modes `ESC[?1002h` + `ESC[?1006h` ON BY DEFAULT (added for
+C27 wheel/trackpad scrolling). With any mouse-tracking mode active,
+xterm-compatible terminals forward pointer events to the app INSTEAD of
+doing their own highlight-and-copy — so text selection dies. The TUI is a
+read-mostly surface and PgUp/PgDn/Home/End already cover scrolling, so the
+wheel was not worth the selection.
+
+**Change (one behavior: mouse tracking opt-in):**
+- `src/tui/run.tsx`: mouse mode now requires `TRE_MOUSE=1` (and not
+  `TRE_NO_MOUSE=1` — legacy env still honored; it can only keep what is
+  already the default). Default: NO mouse modes → terminal keeps
+  highlight-and-copy.
+- `src/tui/app.tsx`: the hint line names the wheel ONLY when
+  `TRE_MOUSE` is set (`enter send · PgUp/PgDn/wheel scroll` vs
+  `enter send · PgUp/PgDn scroll`; same for the scrolled status). The
+  hint must not promise a wheel the terminal never forwards.
+- `test/e2e.sh`: scenario 15 (scrollback) now runs with
+  `TRE_MOUSE=1` (subshell export — the pty child inherits it); NEW
+  scenario 18 `tui-no-mouse-by-default` pins the default: TUI renders,
+  and NEITHER `ESC[?1002h` NOR `ESC[?1006h` appears in the PTY capture
+  (grep -F, fixed-string — the BSD-grep `[?` bracket trap is documented
+  in the C27 section).
+- `test/tui-app.test.tsx`: new test pins both hint variants (wheel
+  named iff TRE_MOUSE set), restoring the env in a finally.
+
+**PTY verification (mock SSE, 40-line reply):**
+- Default: zero `1002h/1006h` bytes in the capture; hint
+  `enter send · PgUp/PgDn scroll · …`; PgUp froze the view
+  (`↑17/28 scrolled — PgDn ↓ to bottom`); /quit rc=0.
+- `TRE_MOUSE=1`: `1002h`+`1006h` present, `1002l`+`1006l` on exit;
+  hint carries `/wheel`; SGR wheel-up `ESC[<64;10;20M` scrolled
+  16→19 (+3 lines); End back to the bottom.
+
+**Gate:** tsc clean; node --test 432 pass / 2 fail / 8 skip — the 2
+failures are PRE-EXISTING on clean HEAD (verified by stash + rebuild:
+`tools.test.js` bash-truncation asserts, unrelated to this change).
+TUI suites: 101/101 pass.
+
+**For the user:** highlight + copy works out of the box now. If you want
+trackpad/wheel scrolling in the TUI, set `TRE_MOUSE=1` (e.g.
+`TRE_MOUSE=1 tre. tui`) — the trade-off is that selection is captured by
+the app while it runs (PgUp/PgDn/Home/End scroll either way).
+
 # HANDOFF — .pi → .tre rename + docs de-pi-ification (2026-09-27)
 
 **Status: PARTIAL — two commits in (`21da855` code, `e5bccdf` docs), the

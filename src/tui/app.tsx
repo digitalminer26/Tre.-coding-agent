@@ -98,6 +98,9 @@ export function App(props: AppProps): React.ReactElement {
   // the frame stream.)
   const page = Math.max(1, rows - FIXED_NON_ITEM_LINES - extra);
   const halfPage = Math.max(1, Math.floor(page / 2));
+  // The wheel only scrolls when the driver enabled mouse tracking
+  // (TRE_MOUSE=1, run.tsx) — the hint names it only then.
+  const wheel = process.env.TRE_MOUSE ? "/wheel" : "";
 
   // The keybinding table: the ONLY place that maps keys to intents.
   useInput((input, key) => {
@@ -226,14 +229,16 @@ export function App(props: AppProps): React.ReactElement {
         <Text color="yellow">{approvalLine(state.approval.question, width)}</Text>
       )}
       {/* C27: the hint line doubles as the scroll status — while the view
-          is frozen above the bottom, say where it is and how to get back. */}
+          is frozen above the bottom, say where it is and how to get back.
+          The wheel only works when the driver enabled mouse tracking
+          (TRE_MOUSE=1, run.tsx) — don't promise it in the hint otherwise. */}
       <Text dimColor>
         {oneLine(
           state.approval !== null
             ? "y approve · n/esc deny"
             : layout.eff > 0
-              ? `↑${layout.eff}/${layout.maxScroll} scrolled — PgDn/wheel ↓ to bottom · Home top · /quit exit`
-              : "enter send · PgUp/PgDn/wheel scroll · ↑/↓ history · /quit exit",
+              ? `↑${layout.eff}/${layout.maxScroll} scrolled — PgDn${wheel} ↓ to bottom · Home top · /quit exit`
+              : `enter send · PgUp/PgDn${wheel} scroll · ↑/↓ history · /quit exit`,
           width
         )}
       </Text>

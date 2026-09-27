@@ -371,3 +371,42 @@ test("C28: pinned frame shows older items, clipped straddlers, and the scroll st
   assert.doesNotMatch(frame, /enter send ·/);
   app.unmount();
 });
+
+test("hint: the wheel is named only when mouse tracking is enabled (TRE_MOUSE)", () => {
+  // The driver enables mouse tracking only when TRE_MOUSE is set (run.tsx);
+  // the hint must not promise a wheel that the terminal never forwards.
+  // Selection is the default — no mouse mode — so the default hint omits it.
+  // 10 items of 200 chars = 39 content lines > the 16-row item budget
+  // (same geometry as the C28 test: maxScroll 23).
+  const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
+    kind: "user",
+    text: `item-${i} ` + "x".repeat(192),
+  }));
+  const prev = process.env.TRE_MOUSE;
+  try {
+    delete process.env.TRE_MOUSE;
+    const idle = makeApp(makeInitialState("m"));
+    const idleFrame = idle.lastFrame() ?? "";
+    assert.match(idleFrame, /enter send · PgUp\/PgDn scroll ·/);
+    assert.doesNotMatch(idleFrame, /wheel/);
+    idle.unmount();
+
+    const scrolled = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });
+    const scrolledFrame = scrolled.lastFrame() ?? "";
+    assert.match(scrolledFrame, /scrolled — PgDn ↓ to bottom/);
+    assert.doesNotMatch(scrolledFrame, /wheel/);
+    scrolled.unmount();
+
+    process.env.TRE_MOUSE = "1";
+    const idle2 = makeApp(makeInitialState("m"));
+    assert.match(idle2.lastFrame() ?? "", /enter send · PgUp\/PgDn\/wheel scroll ·/);
+    idle2.unmount();
+
+    const scrolled2 = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });
+    assert.match(scrolled2.lastFrame() ?? "", /scrolled — PgDn\/wheel ↓ to bottom/);
+    scrolled2.unmount();
+  } finally {
+    if (prev === undefined) delete process.env.TRE_MOUSE;
+    else process.env.TRE_MOUSE = prev;
+  }
+});

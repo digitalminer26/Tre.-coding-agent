@@ -372,8 +372,15 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
 
   // C27: terminal mouse-wheel forwarding so wheel/trackpad events reach the
   // input parser. The DRIVER owns the terminal: enable once here (never
-  // inside a component — a raw write would corrupt the frame stream). Opt
-  // out with TRE_NO_MOUSE=1 (keeps terminal text selection).
+  // inside a component — a raw write would corrupt the frame stream).
+  //
+  // OPT-IN (TRE_MOUSE=1), not on-by-default: with a mouse-tracking mode
+  // active the terminal forwards pointer events to the app INSTEAD of doing
+  // its own highlight-and-copy, so text selection dies — and the TUI is a
+  // read-mostly surface. PgUp/PgDn/Home/End already cover scrolling, so
+  // selection is the default; set TRE_MOUSE=1 for wheel/trackpad scrolling.
+  // (Legacy: TRE_NO_MOUSE=1 still forces the no-wheel mode — it can only
+  // keep what is already the default.)
   //
   // TWO modes, not one: 1006 is only the SGR *report format* — in
   // xterm-compatible terminals it enables NO mouse reporting on its own, so
@@ -384,7 +391,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // chosen over 1003 (any-event) so plain pointer motion is NOT reported —
   // less noise, and clicks/drags are still swallowed by the app.
   let mouseMode = false;
-  if (!process.env.TRE_NO_MOUSE) {
+  if (process.env.TRE_MOUSE && !process.env.TRE_NO_MOUSE) {
     process.stdout.write("\u001b[?1002h\u001b[?1006h");
     mouseMode = true;
   }

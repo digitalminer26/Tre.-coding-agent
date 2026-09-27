@@ -408,8 +408,10 @@ scenario_13() { # eval baseline (D9: regression baseline, variance-annotated)
 }
 
 scenario_15() { # TUI scrollback (C28): PgUp freezes the view + status hint;
-  # SGR wheel works (mouse mode 1006 on); End returns to the bottom; mouse
-  # mode restored on exit; and a single reply TALLER than the item budget
+  # SGR wheel works (mouse mode 1006 on — OPT-IN via TRE_MOUSE=1; the
+  # default is selection-friendly, see scenario 18); End returns to the
+  # bottom; mouse mode restored on exit; and a single reply TALLER than
+  # the item budget
   # actually scrolls (the C27 defect: straddle-skip left every scroll
   # position rendering the same overflow frame).
   local D="$WORK/15"; mkdir -p "$D"
@@ -431,8 +433,11 @@ printf '\x1b[4~'
 sleep 4
 quit_retry
 EOF
-  pty_feed 15 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
-    --session "$D/s.jsonl" --cwd "$D"
+  # Mouse tracking is OPT-IN (TRE_MOUSE=1) — the default is selection-
+  # friendly (no mouse mode), so this scenario opts in explicitly.
+  ( export TRE_MOUSE=1
+    pty_feed 15 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+      --session "$D/s.jsonl" --cwd "$D" )
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   # The long reply rendered at all (else there was nothing to scroll).
@@ -600,6 +605,30 @@ PY
   echo "rc=0, /display-bottom handled mid-run (feedback + rendered fields), run completed, selection persisted (C32)"
 }
 
+scenario_18() { # TUI default is SELECTION-FRIENDLY: no mouse-tracking mode
+  # is enabled (1002/1006) — the terminal keeps highlight-and-copy.
+  # (Mouse tracking is opt-in via TRE_MOUSE=1, scenario 15.)
+  local D="$WORK/18"; mkdir -p "$D"
+  cat > "$D/feed.sh" <<'EOF'
+printf 'Reply with exactly: PONG-18\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  pty_feed 18 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+    --session "$D/s.jsonl" --cwd "$D"
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  grep -qF "PONG-18" "$D/out.log" || { echo "no PONG-18 in frames"; return 1; }
+  # The TUI rendered (its hint line).
+  grep -qF "enter send" "$D/out.log" || { echo "no TUI hint line"; return 1; }
+  # NO mouse-tracking mode in the capture — the terminal keeps its own
+  # highlight-and-copy (grep -F: fixed-string, the ? must not parse).
+  grep -qF $'\x1b[?1002h' "$D/out.log" && { echo "mouse base mode 1002 enabled by default — text selection would die"; return 1; }
+  grep -qF $'\x1b[?1006h' "$D/out.log" && { echo "mouse SGR mode 1006 enabled by default — text selection would die"; return 1; }
+  echo "rc=0, TUI renders with NO mouse-tracking mode (highlight/copy works; wheel is opt-in TRE_MOUSE=1)"
+}
+
 # ───────────────────────────── runner ─────────────────────────────
 
 run_one() {
@@ -622,6 +651,7 @@ run_one() {
     15) name="tui-scrollback(C27)" ;;
     16) name="bare-tty-launches-tui" ;;
     17) name="tui-slash-mid-run(C32)" ;;
+    18) name="tui-no-mouse-by-default" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?
