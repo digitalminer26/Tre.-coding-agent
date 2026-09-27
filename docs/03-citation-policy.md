@@ -4,10 +4,15 @@ pi ([github.com/earendil-works/pi](https://github.com/earendil-works/pi), MIT, �
 Zechner) is the design reference for this project. We write our own code, but two
 degrees of borrowing are allowed — each with a **mandatory citation**.
 
-Reference implementation (read-only, for study and selective borrowing): the pi
-packages installed at `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/`
-— `@earendil-works/pi-ai` and `@earendil-works/pi-agent-core`, both **v0.85.1**
-(compiled JS under each package's `dist/`).
+Reference implementation: the pi packages `@earendil-works/pi-ai` and
+`@earendil-works/pi-agent-core`, audited at **v0.85.1** (compiled JS under each
+package's `dist/`). The local install that was at
+`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/` is **no longer
+present** (removed 2026-09-27), so **borrowing is frozen**: the L1/L2 code already
+cited in this repo (see `THIRD_PARTY.md`) stands as-is, but no NEW L1/L2 borrowing
+from pi is possible until the reference is re-installed and re-audited. New code
+should be **L3** (written independently) unless it deliberately re-derives a
+structure already cited above.
 
 ## Levels
 

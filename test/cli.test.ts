@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { fakeStream } from "./fake-stream.js";
 import {
+  defaultSkillDirs,
   exitCodeFor,
   main,
   parseArgs,
@@ -204,6 +205,13 @@ test("resolveTools: all / none / filter / unknown", () => {
   const f = resolveTools("bash,read");
   assert.deepEqual(f.tools.map((t) => t.name).sort(), ["bash", "read"]);
   assert.match(resolveTools("bash,nope")!.error ?? "", /unknown tool/);
+});
+
+test("defaultSkillDirs: project .tre/skills first, then user ~/.tre/agent/skills", () => {
+  const dirs = defaultSkillDirs("/some/cwd");
+  assert.equal(dirs.length, 2);
+  assert.equal(dirs[0]!, "/some/cwd/.tre/skills");
+  assert.match(dirs[1]!, /^.*\/\.tre\/agent\/skills$/);
 });
 
 test("exitCodeFor: stop 0, budget 3, error/length/toolUse 1, aborted 130", () => {

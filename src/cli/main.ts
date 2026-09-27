@@ -23,8 +23,8 @@
  *   --session <file>   session file: created if absent, resumed if present
  *   --resume <file>    resume an EXISTING session (error if absent)
  *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
- *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.pi/skills then
- *                      ~/.pi/agent/skills (project skills shadow user skills by name)
+ *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.tre/skills then
+ *                      ~/.tre/agent/skills (project skills shadow user skills by name)
  *   --max-turns <n>    per-cycle LLM-turn budget (default: derived from the
  *                      model's contextWindow/maxTokens — see deriveMaxTurns)
  *   --max-continuations <n>
@@ -284,7 +284,7 @@ export function resolveTools(spec: string): { tools: Tool[]; error?: string } {
 
 /** Default skill dir resolution: project first, then user (both optional). */
 export function defaultSkillDirs(cwd: string): string[] {
-  return [`${cwd}/.pi/skills`, `${homedir()}/.pi/agent/skills`];
+  return [`${cwd}/.tre/skills`, `${homedir()}/.tre/agent/skills`];
 }
 
 /** Load + dedupe skills across dirs by name (earlier dirs win). */
