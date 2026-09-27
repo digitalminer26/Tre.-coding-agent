@@ -21,54 +21,77 @@
  *   2. APPROVAL GATE — a classification + mode matrix. Every call is
  *      classified first, then the mode decides:
  *
- *        classification  ask (default)          yes                    no
- *        ─────────────── ─────────────────────  ─────────────────────  ─────────────────────
- *        read-only bash  allow, no prompt       allow, no prompt       ALLOW (only bash class)
- *        reversible bash allow, no prompt       allow, no prompt       block
- *        mutating bash   prompt                 allow, no prompt       block
- *        write/edit      allow, no prompt       allow, no prompt       block
- *        read (plain)   allow, no prompt       allow, no prompt       block (fail-closed)
- *        sensitive       prompt [SENSITIVE]     prompt [SENSITIVE]     block
- *        destructive     prompt [DESTRUCTIVE]   prompt [DESTRUCTIVE]   block
+ *        classification    yes (default)        ask                    no
+ *        ───────────────── ───────────────────  ─────────────────────  ─────────────────────
+ *        read-only bash    allow, no prompt     allow, no prompt       ALLOW (only bash class)
+ *        reversible bash   allow, no prompt     allow, no prompt       block
+ *        mutating bash     allow, no prompt     prompt                 block
+ *        write/edit        allow, no prompt     allow, no prompt       block
+ *        read (plain)     allow, no prompt     allow, no prompt       block (fail-closed)
+ *        sensitive (ws)    allow, no prompt     prompt [SENSITIVE]     block
+ *        sensitive (sys)   BLOCK                BLOCK                  block
+ *        destructive (ws)  allow, no prompt     prompt [DESTRUCTIVE]   block
+ *        destructive (sys) BLOCK                BLOCK                  block
  *
- *      The user is only prompted for SENSITIVE reads and DESTRUCTIVE /
- *      irreversible actions. Everything routine (read-only inspection,
- *      reversible git/npm/filesystem ops, in-workspace writes) runs without
- *      a prompt in "ask" mode. When a prompt IS shown for a plain mutating
- *      command, the question states its reversibility ("not provably
- *      reversible") so the human can weigh it.
+ *      (ws) = scoped to the workspace; (sys) = system-level (resolves outside
+ *      the workspace, or is inherently system-wide).
  *
- *      - mode "ask" (default): prompt only for sensitive and destructive
- *      - mode "yes": auto-approve everything EXCEPT sensitive and
- *        destructive (both confirm; deny when there is no human)
+ *      SYSTEMIC (sys) sensitive/destructive are BLOCKED in EVERY mode
+ *      (across the board — yes, ask, and no): they are the "never, ever"
+ *      category, not a confirm.
+ *        - DESTRUCTIVE (sys): dd to /dev/*, raw-device redirects, mkfs*,
+ *          fork bomb, shutdown/reboot/halt/poweroff — inherently system-wide,
+ *          cannot be confined to the workspace. (The kernel sandbox already
+ *          stops these for bash; the block is defense-in-depth and also
+ *          covers the non-sandboxed `read` tool.)
+ *        - SENSITIVE (sys): a sensitive path that resolves OUTSIDE the
+ *          workspace (system secrets: ~/.ssh/, ~/.aws/, /etc/shadow, ...).
+ *          A sensitive path INSIDE the workspace (e.g. a project .env) is
+ *          (ws) and allowed in the default.
+ *
+ *      The modes:
+ *      - mode "yes" (DEFAULT): auto-approve everything EXCEPT sys sensitive
+ *        reads and sys destructive commands (which are BLOCKED). Rationale:
+ *        the kernel sandbox confines bash to the workspace (so a sys
+ *        destructive can't reach the system), and the codebase is backed up
+ *        to git (so a ws destructive is recoverable). Workspace-scoped
+ *        sensitive reads and destructive commands run without a prompt.
+ *      - mode "ask": prompt for ws sensitive + destructive (the confirm
+ *        class) and for mutating bash; read-only, reversible, and
+ *        in-workspace write/edit run without a prompt. sys sensitive/
+ *        destructive are BLOCKED (across the board).
  *      - mode "no" (fail-closed): allow ONLY read-only, non-sensitive bash;
  *        everything else is blocked outright (no prompts, ever)
- *      A denial is a BLOCK → an isError result the model reads.
+ *      A denial/block is a BLOCK → an isError result the model reads.
  *
  *   3. CLASSIFIERS (pure, exported for tests). Bash check order:
  *      destructive → sensitive → read-only → reversible → mutating.
  *
- *      DESTRUCTIVE — irreversible; prompts in EVERY mode (D8):
- *        - rm with a recursive flag (-r / -R / --recursive), force or not
- *        - git push (ANY — publishing to a remote is irreversible)
- *        - git reset --hard
- *        - git clean with a force flag (-f / -fd / -x)
- *        - git branch -D (force-delete a branch)
- *        - git checkout . / git checkout -- <path> / git restore (without
- *          --source) — all discard uncommitted work
- *        - dd writing to /dev/* (raw block device)
- *        - shell redirection to raw block devices (>/dev/sd*, ...)
- *        - mkfs* (filesystem creation)
- *        - the classic fork bomb
- *        - shutdown / reboot / halt / poweroff
+ *      DESTRUCTIVE — irreversible (D8). Split into (ws) and (sys):
+ *        - (ws) workspace-scoped — prompt in "ask", ALLOWED in "yes" (the
+ *          sandbox confines them to the workspace, and git keeps a backup):
+ *          rm with a recursive flag (-r / -R / --recursive), force or not;
+ *          git push (ANY — publishing to a remote is irreversible);
+ *          git reset --hard; git clean with a force flag (-f / -fd / -x);
+ *          git branch -D (force-delete a branch); git checkout . /
+ *          git checkout -- <path> / git restore (without --source) — all
+ *          discard uncommitted work.
+ *        - (sys) system-level — BLOCKED in EVERY mode (across the board):
+ *          dd writing to /dev/* (raw block device); shell redirection to
+ *          raw block devices (>/dev/sd*, ...); mkfs* (filesystem creation);
+ *          the classic fork bomb; shutdown / reboot / halt / poweroff.
  *
- *      SENSITIVE — reading secret/key material; prompts in EVERY mode:
- *        - bash whose arguments reference sensitive paths: ~/.ssh/, ~/.aws/,
- *          ~/.gnupg/, ~/.kube/, ~/.config/gcloud/, ~/.docker/config.json,
- *          ~/.netrc, /etc/shadow, id_rsa*, id_ed25519*, *.pem, *.key,
- *          *.p12, *.pfx, and .env-family files (.env, .env.*, *.env)
- *        - the `read` tool when the RESOLVED path matches the same
- *          patterns (read stays unrestricted for all non-sensitive paths)
+ *      SENSITIVE — reading secret/key material. Split into (ws) and (sys):
+ *        - (sys) system-level — BLOCKED in EVERY mode (across the board):
+ *          a sensitive path that resolves OUTSIDE the workspace: ~/.ssh/,
+ *          ~/.aws/, ~/.gnupg/, ~/.kube/, ~/.config/gcloud/,
+ *          ~/.docker/config.json, ~/.netrc, /etc/shadow, id_rsa*,
+ *          id_ed25519*, *.pem, *.key, *.p12, *.pfx, and .env-family files
+ *          (.env, .env.*, *.env) when they live outside the workspace.
+ *        - (ws) workspace-scoped — prompt in "ask", ALLOWED in "yes": a
+ *          sensitive path INSIDE the workspace (e.g. a project .env).
+ *        - the `read` tool is checked the same way on its RESOLVED path
+ *          (read stays unrestricted for all non-sensitive paths).
  *
  *      READ-ONLY — inspection; no prompt in any mode that allows it:
  *        - read-only verbs: ls, cat, head, tail, wc, file, stat, du, df,
@@ -101,13 +124,13 @@
  *          (restore prior mode/owner), sed -i (in-place edit, undo via git),
  *          tee (writes to a file, undo via git)
  *
- *      MUTATING — everything else (curl, pip, unrecognized verbs): prompts
- *      in ask (the question notes it is "not provably reversible"),
- *      auto-allowed in yes, blocked in no.
+ *      MUTATING — everything else (curl, pip, unrecognized verbs): allowed
+ *      in the default (yes) mode, prompts in "ask" (the question notes it is
+ *      "not provably reversible"), blocked in "no".
  *
  *      Deliberately NOT destructive: "dangerous but not destructive"
  *      (curl|sh, exfiltration) — the approval gate covers those whenever
- *      "yes" mode is off.
+ *      "yes" mode is off (i.e. in "ask" mode).
  *
  * I3: this hook never throws. A failing ask() (closed stdin, throw) is
  * treated as DENY (fail-closed). The pipeline turns a block into
@@ -122,17 +145,17 @@ import type { BeforeToolCall } from "./pipeline.js";
 /** Human prompt. `false` (or a throw) means "no". */
 export type AskApproval = (question: string) => boolean | Promise<boolean>;
 
-/** ask = prompt only sensitive+destructive (default); yes = auto-approve
- *  except sensitive+destructive; no = allow only read-only non-sensitive
- *  bash, block everything else. */
+/** yes = auto-approve except sys sensitive/destructive (default); ask =
+ *  prompt for sensitive+destructive+mutating; no = allow only read-only
+ *  non-sensitive bash, block everything else. */
 export type ApprovalMode = "ask" | "yes" | "no";
 
 export interface SafetyOptions {
   /** Project root. Must exist — checked per call, fail-closed if not. */
   root: string;
   mode?: ApprovalMode;
-  /** Human prompt. Required for sensitive/destructive confirmations (and
-   *  mutating bash in "ask"); if absent, those calls are denied
+  /** Human prompt. Required for confirmations (sensitive/destructive in
+   *  "ask"; mutating bash in "ask"); if absent, those calls are denied
    *  (fail-closed). */
   ask?: AskApproval;
 }
@@ -142,9 +165,11 @@ export interface SafetyOptions {
  *  the module header. */
 const PATH_TOOLS = new Set(["write", "edit"]);
 /** Tools that go through the approval gate. `read` goes through the gate
- *  too, but only as a SENSITIVE check in ask/yes (sensitive paths prompt in
- *  every mode; all other reads are unrestricted) — and in no mode even
- *  plain reads are blocked (fail-closed: no human to confirm anything). */
+ *  too, but only as a SENSITIVE check: sys sensitive paths are BLOCKED in
+ *  every mode (across the board), ws sensitive paths prompt in "ask" and
+ *  are allowed in "yes"; all other reads are unrestricted — and in "no"
+ *  mode even plain reads are blocked (fail-closed: no human to confirm
+ *  anything). */
 const GATED_TOOLS = new Set(["bash", "write", "edit"]);
 
 export type PathCheck =
@@ -216,6 +241,12 @@ async function realpathExisting(p: string): Promise<string> {
  * labels of every matched pattern (empty = not destructive). Patterns are
  * regex/token based and deliberately over-trigger: a false positive is an
  * extra prompt, a false negative is a destroyed machine.
+ *
+ * The labels are SPLIT into (ws) and (sys) by `isSystemicDestructive`:
+ * (ws) = workspace-scoped (rm -rf, git push, git reset --hard, ...) —
+ * prompt in "ask", allowed in "yes"; (sys) = system-level (dd to /dev/*,
+ * raw-device redirects, mkfs, fork bomb, shutdown/reboot) — BLOCKED in
+ * every mode (across the board).
  */
 export function destructiveBashPatterns(command: string): string[] {
   // The raw scan sees tokens of the WHOLE command, but a destructive verb
@@ -369,6 +400,29 @@ function rawDestructiveHits(command: string): string[] {
   return hits;
 }
 
+/** System-level (sys) destructive labels — inherently system-wide, cannot
+ *  be confined to the workspace. These are BLOCKED in EVERY mode (across
+ *  the board); the other destructive labels are (ws) and are prompt/allow. */
+const SYSTEMIC_DESTRUCTIVE = new Set([
+  "dd writing to a raw device",
+  "write to a raw block device",
+  "mkfs (filesystem creation)",
+  "fork bomb",
+  "system shutdown/reboot",
+]);
+
+/** Which of the destructive `labels` are system-level (sys)? (ws) labels
+ *  (rm -rf, git push, git reset --hard, ...) are workspace-scoped and are
+ *  prompt/allow; (sys) labels are blocked in every mode. */
+export function systemicDestructiveLabels(labels: string[]): string[] {
+  return labels.filter((l) => SYSTEMIC_DESTRUCTIVE.has(l));
+}
+
+/** True when a command carries ANY system-level (sys) destructive label. */
+export function isSystemicDestructive(command: string): boolean {
+  return systemicDestructiveLabels(destructiveBashPatterns(command)).length > 0;
+}
+
 /** Sensitive path patterns, in priority order (first match labels the
  *  prompt). Two groups:
  *  - FILENAME: matches the basename of ANY command token (e.g. `cat
@@ -433,6 +487,47 @@ export function sensitiveBashPatterns(command: string): string[] {
     }
   }
   return hits;
+}
+
+/**
+ * Is a sensitive PATH (already sensitive-matched) system-level (sys)? A path
+ * is (sys) when it resolves OUTSIDE the workspace — system secrets (~/.ssh/,
+ * ~/.aws/, /etc/shadow, ...) live in the home dir / system dirs, never in
+ * the workspace. A sensitive path INSIDE the workspace (e.g. a project
+ * .env) is (ws). `~`/`~/` and `/`-absolute paths are always outside the
+ * workspace (the workspace is a project dir, never `/` or `~`); a relative
+ * path is (ws) when it stays under `root` (lexical — the kernel sandbox is
+ * the real boundary; a symlink escape is caught by the path sandbox for
+ * write/edit and by the sandbox for bash).
+ */
+export function isSystemicSensitivePath(p: string, root: string): boolean {
+  const expanded = expandHome(p);
+  if (p === "~" || p.startsWith("~/") || path.isAbsolute(expanded)) {
+    // `~` / `~/x` / absolute — outside the workspace unless it IS the root.
+    return !path.resolve(expanded).startsWith(root + path.sep) && path.resolve(expanded) !== root;
+  }
+  const resolved = path.resolve(root, expanded);
+  return resolved !== root && !resolved.startsWith(root + path.sep);
+}
+
+/**
+ * Which of a bash command's tokens are SYSTEM-LEVEL (sys) sensitive paths?
+ * Only tokens that (a) MATCH a sensitive pattern AND (b) resolve OUTSIDE the
+ * workspace are (sys). Bare FILENAME tokens (a bare `server.key`, `.env`)
+ * name a file in the cwd (inside the workspace) → (ws). A non-sensitive path
+ * (e.g. the `/` in `rm -rf /`) is never sensitive, sys or ws.
+ */
+export function systemicSensitiveBashPaths(command: string, root: string): string[] {
+  const sys: string[] = [];
+  for (const t of command.split(/\s+/).filter((x) => x.length > 0)) {
+    const pathLike = t.startsWith("~") || t.startsWith("/") || t.startsWith(".") || t.includes("/");
+    if (!pathLike) continue; // bare filename → (ws)
+    // Only tokens that actually match a sensitive pattern are candidates.
+    const segs = expandHome(t).split("/").filter((s) => s.length > 0);
+    if (![...SENSITIVE_FILENAME, ...SENSITIVE_PATH].some((p) => p.test(segs))) continue;
+    if (isSystemicSensitivePath(t, root) && !sys.includes(t)) sys.push(t);
+  }
+  return sys;
 }
 
 /** Read-only verbs (whole command = one of these, with any arguments). */
@@ -962,7 +1057,11 @@ function approvalQuestion(
  */
 export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
   const root = opts.root;
-  const mode = opts.mode ?? "ask"; // default: prompt only sensitive+destructive
+  // Default mode is "yes" (auto-approve): the kernel sandbox confines bash
+  // to the workspace and the codebase is backed up to git, so workspace-
+  // scoped work runs without a prompt. Only SYSTEMIC (sys) sensitive reads
+  // and destructive commands are blocked (across the board).
+  const mode = opts.mode ?? "yes";
 
   /** Prompt the human; fail-closed on any failure (no ask → deny). */
   const confirm = async (question: string): Promise<boolean> => {
@@ -976,40 +1075,67 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
 
   /**
    * Gate a call; returns a block reason or undefined (allow).
-   * `needsConfirm` (destructive or sensitive) prompts in EVERY mode;
-   * `gated` (mutating bash, write/edit) prompts only in "ask";
+   * `sysDestructive` / `sysSensitive` (systemic) are BLOCKED in EVERY mode
+   * (across the board) — the "never, ever" category. `wsDestructive` /
+   * `wsSensitive` (workspace-scoped) prompt in "ask" and are allowed in
+   * "yes". `gated` (mutating bash, write/edit) prompts only in "ask".
    * `readOnly` is the ONLY class "no" mode allows.
    */
   const gate = async (
     toolName: string,
     args: Record<string, unknown>,
-    destructive: string[],
-    sensitive: string[],
+    wsDestructive: string[],
+    wsSensitive: string[],
+    sysDestructive: string[],
+    sysSensitive: string[],
     readOnly: boolean,
     gated: boolean,
-    outside: string[] = [],
   ): Promise<string | undefined> => {
-    const needsConfirm = destructive.length > 0 || sensitive.length > 0;
+    // 1. Systemic (sys) sensitive/destructive: BLOCKED in EVERY mode
+    //    (across the board) — they target the system, not the workspace.
+    if (sysDestructive.length > 0) {
+      return (
+        `systemic destructive command is BLOCKED in every mode ` +
+        `(${sysDestructive.join(", ")}) — it targets the system, not the ` +
+        `workspace; the kernel sandbox would stop it, but the approval gate ` +
+        `refuses it outright`
+      );
+    }
+    if (sysSensitive.length > 0) {
+      return (
+        `access to system-level sensitive material is BLOCKED in every mode ` +
+        `(${sysSensitive.join(", ")}) — it resolves outside the workspace; ` +
+        `only workspace-scoped sensitive files may be read`
+      );
+    }
 
+    // 2. Fail-closed "no" mode: allow ONLY read-only, non-sensitive bash.
     if (mode === "no") {
-      if (readOnly && !needsConfirm) return undefined; // the only allowed class
+      if (readOnly && wsDestructive.length === 0 && wsSensitive.length === 0) return undefined;
       return (
         `approval is disabled (--no-approve): the "${toolName}" tool requires ` +
         `approval — re-run without --no-approve to allow it`
       );
     }
-    if (!needsConfirm && !(gated && mode === "ask")) return undefined; // allow
 
-    // Prompt: sensitive/destructive confirm (every mode) or a gated call
-    // in "ask" mode.
-    const question = approvalQuestion(toolName, args, destructive, sensitive, outside);
+    // 3. Auto-approve "yes" (default): everything else (ws sensitive/
+    //    destructive, read-only, reversible, mutating, write/edit) is
+    //    allowed — the sandbox confines it to the workspace and git keeps a
+    //    backup.
+    if (mode === "yes") return undefined;
+
+    // 4. "ask" mode: prompt for ws sensitive/destructive (the confirm class)
+    //    and for gated (mutating) calls; read-only/reversible/write/edit run
+    //    without a prompt.
+    if (wsDestructive.length === 0 && wsSensitive.length === 0 && !gated) return undefined;
+    const question = approvalQuestion(toolName, args, wsDestructive, wsSensitive);
     const ok = await confirm(question);
     if (!ok) {
-      if (destructive.length > 0) {
-        return `the user DENIED this destructive command (${destructive.join(", ")}) — do not retry it`;
+      if (wsDestructive.length > 0) {
+        return `the user DENIED this destructive command (${wsDestructive.join(", ")}) — do not retry it`;
       }
-      if (sensitive.length > 0) {
-        return `the user DENIED access to sensitive material (${sensitive.join(", ")}) — do not retry it`;
+      if (wsSensitive.length > 0) {
+        return `the user DENIED access to sensitive material (${wsSensitive.join(", ")}) — do not retry it`;
       }
       return `the user denied the "${toolName}" call — do not retry it unchanged`;
     }
@@ -1035,37 +1161,51 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
       // 2. approval gate (write/edit): no prompt in ask/yes (reversible via
       //    git, path-sandboxed to the root); blocked under --no-approve.
       if (GATED_TOOLS.has(tool.name)) {
-        const blocked = await gate(tool.name, newArgs, [], [], false, false);
+        const blocked = await gate(tool.name, newArgs, [], [], [], [], false, false);
         if (blocked !== undefined) return { blocked };
       }
       if (newArgs !== args) return { args: newArgs }; // rewrite for the tool
       return undefined;
     }
 
-    // 2b. read: sensitive paths confirm in every mode (fail-closed denial
-    //     when there is no human); plain reads are unrestricted in ask/yes
-    //     (no root restriction, no prompt) but blocked in no mode
-    //     (fail-closed: --no-approve allows only read-only bash).
+    // 2b. read: sys sensitive paths are BLOCKED in every mode (across the
+    //     board); ws sensitive paths prompt in "ask" and are allowed in
+    //     "yes"; plain reads are unrestricted (no root restriction, no
+    //     prompt) but blocked in "no" mode (fail-closed: --no-approve allows
+    //     only read-only bash).
     if (tool.name === "read") {
       const p = args.path;
       if (typeof p !== "string" || p.length === 0) return undefined; // validation catches it
       const sensitive = sensitivePathPatterns(p);
-      const blocked = await gate("read", args, [], sensitive, false, false);
+      const sysSensitive =
+        sensitive.length > 0 && isSystemicSensitivePath(p, root) ? sensitive : [];
+      const wsSensitive = sysSensitive.length > 0 ? [] : sensitive;
+      const blocked = await gate("read", args, [], wsSensitive, [], sysSensitive, false, false);
       if (blocked !== undefined) return { blocked };
       return undefined;
     }
 
     // 3. bash: classify (destructive → sensitive → read-only → reversible)
-    //    and apply the mode matrix.
+    //    and apply the mode matrix. Destructive/sensitive are SPLIT into
+    //    (ws) workspace-scoped and (sys) system-level: (sys) is blocked in
+    //    every mode (across the board); (ws) prompts in "ask" and is
+    //    allowed in "yes".
     if (tool.name === "bash") {
       const cmd = typeof args.command === "string" ? args.command : "";
       const destructive = cmd.length > 0 ? destructiveBashPatterns(cmd) : [];
       const sensitive = cmd.length > 0 ? sensitiveBashPatterns(cmd) : [];
+      const sysDestructive = systemicDestructiveLabels(destructive);
+      const wsDestructive = destructive.filter((l) => !SYSTEMIC_DESTRUCTIVE.has(l));
+      const sysSensitive = cmd.length > 0 ? systemicSensitiveBashPaths(cmd, root) : [];
+      const wsSensitive = sensitive.filter((l) => !sysSensitive.includes(l));
       const readOnly = cmd.length > 0 && destructive.length === 0 && isReadOnlyBash(cmd);
       const reversible =
         cmd.length > 0 && destructive.length === 0 && sensitive.length === 0 && isReversibleBash(cmd);
-      const gated = !readOnly && !reversible && destructive.length === 0 && sensitive.length === 0;
-      const blocked = await gate(tool.name, args, destructive, sensitive, readOnly, gated);
+      const gated =
+        !readOnly && !reversible && destructive.length === 0 && sensitive.length === 0;
+      const blocked = await gate(
+        tool.name, args, wsDestructive, wsSensitive, sysDestructive, sysSensitive, readOnly, gated,
+      );
       if (blocked !== undefined) return { blocked };
     }
     return undefined;

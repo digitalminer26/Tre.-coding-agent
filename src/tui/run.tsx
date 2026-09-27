@@ -124,6 +124,13 @@ export interface TuiRunOptions {
   cwd?: string;
   sessionPath?: string;
   /**
+   * The startup behavior-settings summary (approval mode, sandbox, what is
+   * blocked, the optional flags). Seeded as a single multi-line INFO item so
+   * the user sees the current behavior before the first prompt. Absent → no
+   * startup item (the TUI behaves exactly as before).
+   */
+  startupInfo?: string;
+  /**
    * C34: the parsed models.json catalog — feeds `/models` (list + switch).
    * The driver keeps the full ModelConfigs; on a switch it re-resolves by id
    * (resolveModel) and rebuilds the stream + system prompt. Absent → the
@@ -181,6 +188,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     systemPromptTokens,
     catalog,
   );
+  // The startup behavior-settings summary — a single multi-line INFO item
+  // (the ℹ gutter + dim text, wrapped at width−2) so the user sees the
+  // current approval/sandbox behavior and the optional flags before the
+  // first prompt. It scrolls away with the rest of the history.
+  if (opts.startupInfo !== undefined && opts.startupInfo !== "") {
+    state = { ...state, items: [{ kind: "info", text: opts.startupInfo }] };
+  }
   let context: AgentMessage[] = opts.context;
   let exitCode = 0;
   let controller = new AbortController();

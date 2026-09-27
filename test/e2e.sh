@@ -178,8 +178,9 @@ EOF
 }
 
 scenario_04() { # TUI deny: 'n' → isError result (✗) → run continues → rc=0
-  # The default mode is "ask", so EVERY bash call prompts — including
-  # workspace-scoped ones. The prompt is exercised here via a denial.
+  # --ask opts into the prompt-per-call behavior (the default is now
+  # auto-approve), so the bash call prompts; the prompt is exercised via a
+  # denial.
   local D="$WORK/04"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
 printf 'Run the bash command: cat /etc/hostname\r'
@@ -193,7 +194,7 @@ wait_turn_done "$SESS" 180 || true
 sleep 3
 quit_retry
 EOF
-  pty_feed 04 480 "$D/out.log" "$D/feed.sh" tui --session "$D/s.jsonl" --cwd "$D"
+  pty_feed 04 480 "$D/out.log" "$D/feed.sh" tui --ask --session "$D/s.jsonl" --cwd "$D"
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   grep -qF "✗ bash" "$D/out.log" || grep -q "✗" "$D/out.log" || { echo "no denied tool result (✗) in frames"; return 1; }
@@ -201,8 +202,9 @@ EOF
 }
 
 scenario_05() { # TUI ctrl+c: aborts the running turn, prompt returns, rc=0
-  # The default mode is "ask", so the bash call prompts first; the 'y'
-  # approval starts the (long) command, then ctrl+c aborts it mid-run.
+  # --ask opts into the prompt-per-call behavior (the default is now
+  # auto-approve), so the bash call prompts first; the 'y' approval starts
+  # the (long) command, then ctrl+c aborts it mid-run.
   local D="$WORK/05"; mkdir -p "$D"
   cat > "$D/feed.sh" <<'EOF'
 printf 'Run the bash command: sleep 40 && cat /etc/hostname\r'
@@ -220,7 +222,7 @@ fi
 sleep 3
 quit_retry
 EOF
-  pty_feed 05 480 "$D/out.log" "$D/feed.sh" tui --session "$D/s.jsonl" --cwd "$D"
+  pty_feed 05 480 "$D/out.log" "$D/feed.sh" tui --ask --session "$D/s.jsonl" --cwd "$D"
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   grep -qF "aborted" "$D/out.log" || { echo "no 'aborted' item in frames"; return 1; }

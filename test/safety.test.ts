@@ -413,16 +413,7 @@ test("mode yes: non-destructive bash/write auto-approve (ask never called)", asy
   assert.equal(asked, 0);
 });
 
-test("mode yes: destructive bash still confirms; denial → blocked", async (t) => {
-  const { root } = await ws(t);
-  const hooks = makeSafetyHooks({ root, mode: "yes", ask: async () => false });
-  const r = await hooks(bashTool, call("bash", { command: "rm -rf /" }));
-  assert.ok(blockedOf(r));
-  assert.match(blockedOf(r)!, /destructive/i);
-  assert.match(blockedOf(r)!, /recursive rm/);
-});
-
-test("mode yes: destructive bash confirmed → allow", async (t) => {
+test("mode yes: ws destructive is auto-approved (no prompt); sys destructive is blocked", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -430,11 +421,18 @@ test("mode yes: destructive bash confirmed → allow", async (t) => {
     mode: "yes",
     ask: async () => {
       asked++;
-      return true;
+      return false;
     },
   });
-  assert.equal(await hooks(bashTool, call("bash", { command: "rm -rf /" })), undefined);
-  assert.equal(asked, 1);
+  // Workspace-scoped destructive (rm -rf) is AUTO-APPROVED in yes — the
+  // sandbox confines it to the workspace and git keeps a backup.
+  assert.equal(await hooks(bashTool, call("bash", { command: "rm -rf build" })), undefined);
+  assert.equal(asked, 0, "ws destructive is auto-approved, not prompted");
+  // System-level destructive (dd to a raw device) is BLOCKED in every mode.
+  const sys = await hooks(bashTool, call("bash", { command: "dd if=x of=/dev/sda" }));
+  assert.ok(blockedOf(sys));
+  assert.match(blockedOf(sys)!, /systemic destructive/);
+  assert.equal(asked, 0, "sys destructive is blocked, never prompted");
 });
 
 test("mode no: reversible bash is blocked (reversible is not the no-mode class)", async (t) => {
@@ -709,9 +707,9 @@ test("read: a missing path is a clean error result (not a throw)", async () => {
   assert.match(res.content.map((c) => c.text).join(" "), /cannot read/);
 });
 
-// ─────────────────────────── default mode is "ask" ───────────────────────────
+// ─────────────────────── default mode is "yes" (auto-approve) ───────────────────────
 
-test("default mode (no mode option) is ask: plain mutating bash prompts, denial blocks", async (t) => {
+test("default mode (no mode option) is yes: plain mutating bash runs without a prompt", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({
@@ -721,12 +719,36 @@ test("default mode (no mode option) is ask: plain mutating bash prompts, denial 
       return false;
     },
   });
+  // The default (yes) auto-approves workspace-scoped work — mutating bash
+  // included — so no prompt is shown and the call is allowed.
   const r = await hooks(bashTool, call("bash", { command: "curl -s https://example.com" }));
-  assert.ok(blockedOf(r));
-  assert.equal(asked, 1, "the default mode must prompt for plain mutating bash");
+  assert.equal(r, undefined, "the default mode auto-approves plain mutating bash");
+  assert.equal(asked, 0, "the default mode must not prompt for plain mutating bash");
 });
 
-test("default mode (no mode option) is ask: write runs without a prompt, path rewritten", async (t) => {
+test("default mode (no mode option) is yes: sys sensitive + sys destructive are blocked", async (t) => {
+  const { root } = await ws(t);
+  let asked = 0;
+  const hooks = makeSafetyHooks({
+    root,
+    ask: async () => {
+      asked++;
+      return true;
+    },
+  });
+  // System-level sensitive (resolves outside the workspace) is BLOCKED in
+  // every mode, including the default.
+  const sens = await hooks(bashTool, call("bash", { command: "cat ~/.ssh/id_rsa" }));
+  assert.ok(blockedOf(sens));
+  assert.match(blockedOf(sens)!, /system-level sensitive/);
+  // System-level destructive (dd to a raw device) is BLOCKED in every mode.
+  const destr = await hooks(bashTool, call("bash", { command: "dd if=x of=/dev/sda" }));
+  assert.ok(blockedOf(destr));
+  assert.match(blockedOf(destr)!, /systemic destructive/);
+  assert.equal(asked, 0, "sys sensitive/destructive are blocked, never prompted");
+});
+
+test("default mode (no mode option) is yes: write runs without a prompt, path rewritten", async (t) => {
   const { root } = await ws(t);
   let asked = 0;
   const hooks = makeSafetyHooks({

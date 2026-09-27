@@ -1,3 +1,91 @@
+# HANDOFF — default approval = `--yes` (auto-approve); startup behavior summary (2026-09-27)
+
+**Status: COMPLETED, committed.**
+
+**User decision:** make `--yes` the DEFAULT approval mode for `tre.` —
+`--ask` becomes opt-in. And the default must ALSO allow sensitive and
+destructive (workspace-scoped) operations: the kernel sandbox is the real
+boundary, and the codebase is backed up to git (reversibility). The only
+things that stay blocked in EVERY mode are SYSTEMIC (sys) sensitive reads
+and destructive commands. At startup, show the current behavior settings
+and explain the optional flags.
+
+**The new mode matrix (the core of the change):**
+
+| classification   | yes (default)   | ask                | no            |
+| ──────────────── | ─────────────── | ───────────────── | ──────────── |
+| read-only bash   | allow, no prompt| allow, no prompt  | ALLOW (only bash class) |
+| reversible bash  | allow, no prompt| allow, no prompt  | block        |
+| mutating bash    | allow, no prompt| prompt            | block        |
+| write/edit       | allow, no prompt| allow, no prompt  | block        |
+| read (plain)     | allow, no prompt| allow, no prompt  | block        |
+| sensitive (ws)   | allow, no prompt| prompt [SENSITIVE]| block        |
+| sensitive (sys)  | **BLOCK**       | **BLOCK**         | block        |
+| destructive (ws) | allow, no prompt| prompt [DESTRUCTIVE] | block    |
+| destructive (sys)| **BLOCK**       | **BLOCK**         | block        |
+
+- **(ws)** = workspace-scoped (rm -rf, git push, git reset --hard, a project
+  `.env`, …). Allowed in the default, prompted in `--ask`.
+- **(sys)** = system-level: sensitive paths that resolve OUTSIDE the
+  workspace (`~/.ssh/`, `~/.aws/`, `/etc/shadow`, …) and inherently
+  system-wide destructive commands (dd to `/dev/*`, raw-device redirects,
+  mkfs, fork bomb, shutdown/reboot). BLOCKED in every mode — the "never,
+  ever" category, not a confirm.
+
+**Files changed:**
+- `src/tools/safety.ts`: the mode matrix reworked. New pure classifiers
+  `systemicDestructiveLabels` / `isSystemicDestructive` (split destructive
+  labels into ws/sys) and `isSystemicSensitivePath` /
+  `systemicSensitiveBashPaths` (a sensitive path is sys when it resolves
+  outside the workspace). `makeSafetyHooks` default mode is now `"yes"`; the
+  `gate` blocks sys sensitive/destructive first (every mode), then
+  fail-closed `no`, then auto-approve `yes`, then prompt `ask`.
+  `systemicSensitiveBashPaths` only flags tokens that BOTH match a sensitive
+  pattern AND resolve outside the workspace (so `rm -rf /` is NOT
+  sys-sensitive — `/` is not a sensitive path). Module header matrix +
+  comments updated.
+- `src/cli/main.ts`: mode derivation is now
+  `args.noApprove ? "no" : args.ask ? "ask" : "yes"` (default `yes`). New
+  exported `behaviorSettingsLines(mode, sandboxOn)` builds the startup
+  summary (current approval + sandbox + what's blocked + the optional
+  flags). TUI seeds it as a single multi-line info item (`startupInfo`);
+  the plain CLI (one-shot + REPL) prints it to stderr. HELP text + the
+  `--ask`/`--yes`/`--no-approve` option comments updated.
+- `src/tui/run.tsx`: new `TuiRunOptions.startupInfo` — when set, seeded as a
+  single multi-line INFO item (ℹ gutter, dim, wrapped) so the user sees the
+  current behavior before the first prompt; absent → unchanged.
+- `test/safety.test.ts`, `test/tools.test.ts`, `test/cli.test.ts`: the
+  mode-matrix + default-mode + `--yes` tests rewritten for the new matrix
+  (ws auto-allowed in yes; sys blocked in every mode; ws prompted in ask;
+  `--ask` exercised explicitly).
+- `test/e2e.sh`: scenarios 04 (deny) + 05 (ctrl+c after approval) now pass
+  `--ask` (they relied on the old default prompting; the default is now
+  auto-approve). Scenarios 01/02 still pass — `approval_or_done` returns 1
+  when the turn finishes first (no prompt), so an auto-approved write just
+  completes.
+
+**PTY verification (mock SSE):**
+- TUI: the first frame shows the `ℹ Behavior:` info item —
+  `approval: auto-approve (default) — workspace-scoped work runs without a
+  prompt`, `sandbox: on (bash confined to the workspace)`,
+  `blocked: system-level sensitive reads + destructive commands (across the
+  board)`, `optional: --ask … · --no-approve … · --no-sandbox`. /quit rc=0.
+- Plain REPL: the same 5-line summary is written to stderr (the transcript
+  sink is the model's context; the summary is for the human).
+- `behaviorSettingsLines` renders correctly for yes/ask/no × sandbox on/off.
+
+**Gate:** tsc clean; node --test 431 pass / 2 fail — the 2 failures are
+PRE-EXISTING on clean HEAD (verified by stash + rebuild: `tools.test.js`
+bash byte-limit / >2000-line truncation asserts, which spawn `node -e` and
+fail because `node` is not on the child's PATH in this sandbox — unrelated
+to this change).
+
+**For the user:** `tre.` now auto-approves by default (workspace-scoped
+work runs without a prompt); the sandbox + git backup are the safety net.
+`--ask` restores the prompt-per-call behavior; `--no-approve` stays
+fail-closed. Systemic sensitive reads + destructive commands are blocked in
+every mode. Every start shows the current behavior + the optional flags.
+
 # HANDOFF — TUI: highlight/copy restored (mouse tracking now opt-in) (2026-09-27)
 
 **Status: COMPLETED, committed.**

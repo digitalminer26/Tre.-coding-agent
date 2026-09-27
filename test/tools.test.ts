@@ -624,15 +624,32 @@ async function gateDecision(
   return { blocked: decision && "blocked" in decision ? decision.blocked : undefined, asked };
 }
 
-test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive/reversible/mutating)", async () => {
+test("safety: mode matrix — bash (yes/ask/no × readonly/sensitive/destructive/reversible/mutating)", async () => {
   const ro = "ls -la";
-  const sens = "cat ~/.ssh/id_rsa";
-  const destr = "git push origin main";
+  const sensSys = "cat ~/.ssh/id_rsa"; // sys sensitive (outside the workspace)
+  const sensWs = "cat .env"; // ws sensitive (a project .env in the cwd)
+  const destrWs = "git push origin main"; // ws destructive (workspace-scoped)
+  const destrSys = "dd if=x of=/dev/sda"; // sys destructive (raw device)
   const rev = "git add .";
   const revFs = "mv a b"; // undoable filesystem verb → reversible
   const mut = "curl -s https://example.com"; // not provably reversible → gated
 
-  // ask (default): read-only + reversible run free; mutating prompts.
+  // yes (default): read-only/reversible/mutating + ws sensitive + ws
+  // destructive are auto-approved; sys sensitive + sys destructive are
+  // BLOCKED (across the board, no prompt).
+  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["reversible fs", revFs], ["mutating", mut], ["ws sensitive", sensWs], ["ws destructive", destrWs]] as const) {
+    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `yes: ${label} is auto-approved`);
+    assert.equal(d.blocked, undefined, `yes: ${label} is allowed`);
+  }
+  for (const [label, cmd] of [["sys sensitive", sensSys], ["sys destructive", destrSys]] as const) {
+    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `yes: ${label} is never prompted`);
+    assert.ok(d.blocked, `yes: ${label} is blocked`);
+  }
+
+  // ask: read-only/reversible run free; mutating + ws sensitive + ws
+  // destructive prompt; sys sensitive + sys destructive are BLOCKED.
   for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["reversible fs", revFs]] as const) {
     const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 0, `ask: ${label} runs without a prompt`);
@@ -644,44 +661,33 @@ test("safety: mode matrix — bash (ask/yes/no × readonly/sensitive/destructive
   const askMutDenied = await gateDecision("ask", FAKE_TOOL, { command: mut }, false);
   assert.equal(askMutDenied.asked.length, 1);
   assert.match(askMutDenied.blocked!, /denied/i, "ask: a denied mutating call is blocked");
-  for (const [label, cmd] of [["sensitive", sens], ["destructive", destr]] as const) {
+  for (const [label, cmd] of [["ws sensitive", sensWs], ["ws destructive", destrWs]] as const) {
     const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 1, `ask: ${label} prompts`);
     assert.equal(d.blocked, undefined, `ask: ${label} is allowed when approved`);
   }
-  // ask: denying a destructive/sensitive call blocks it with a denial reason.
-  const denied = await gateDecision("ask", FAKE_TOOL, { command: destr }, false);
+  // ask: denying a ws destructive/sensitive call blocks it with a denial reason.
+  const denied = await gateDecision("ask", FAKE_TOOL, { command: destrWs }, false);
   assert.equal(denied.asked.length, 1);
   assert.match(denied.blocked!, /DENIED.*destructive/);
-  const deniedSens = await gateDecision("ask", FAKE_TOOL, { command: sens }, false);
+  const deniedSens = await gateDecision("ask", FAKE_TOOL, { command: sensWs }, false);
   assert.match(deniedSens.blocked!, /DENIED.*sensitive/);
-
-  // yes: sensitive + destructive STILL confirm; everything else auto-allowed.
-  for (const [label, cmd] of [["read-only", ro], ["reversible", rev], ["reversible fs", revFs], ["mutating", mut]] as const) {
-    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
-    assert.equal(d.asked.length, 0, `yes: ${label} is auto-approved`);
-    assert.equal(d.blocked, undefined);
+  // ask: sys sensitive + sys destructive are BLOCKED (across the board).
+  for (const [label, cmd] of [["sys sensitive", sensSys], ["sys destructive", destrSys]] as const) {
+    const d = await gateDecision("ask", FAKE_TOOL, { command: cmd }, true);
+    assert.equal(d.asked.length, 0, `ask: ${label} is never prompted`);
+    assert.ok(d.blocked, `ask: ${label} is blocked`);
   }
-  for (const [label, cmd] of [["sensitive", sens], ["destructive", destr]] as const) {
-    const d = await gateDecision("yes", FAKE_TOOL, { command: cmd }, true);
-    assert.equal(d.asked.length, 1, `yes: ${label} confirms`);
-    assert.equal(d.blocked, undefined);
-  }
-  const yesDenied = await gateDecision("yes", FAKE_TOOL, { command: destr }, false);
-  assert.equal(yesDenied.asked.length, 1);
-  assert.match(yesDenied.blocked!, /DENIED.*destructive/);
 
   // no: ONLY read-only, non-sensitive bash is allowed; no prompts, ever.
-  for (const [label, cmd] of [["reversible", rev], ["reversible fs", revFs], ["sensitive", sens], ["destructive", destr], ["mutating", mut]] as const) {
+  for (const [label, cmd] of [["reversible", rev], ["reversible fs", revFs], ["sys sensitive", sensSys], ["ws sensitive", sensWs], ["ws destructive", destrWs], ["sys destructive", destrSys], ["mutating", mut]] as const) {
     const d = await gateDecision("no", FAKE_TOOL, { command: cmd }, true);
     assert.equal(d.asked.length, 0, `no: ${label} never prompts`);
-    assert.match(d.blocked!, /no-approve/, `no: ${label} is blocked`);
+    assert.match(d.blocked!, /no-approve|systemic|system-level/, `no: ${label} is blocked`);
   }
   const noRo = await gateDecision("no", FAKE_TOOL, { command: ro }, true);
   assert.equal(noRo.asked.length, 0);
   assert.equal(noRo.blocked, undefined, "no: read-only bash is allowed");
-  const noSensRo = await gateDecision("no", FAKE_TOOL, { command: "cat ~/.ssh/id_rsa" }, true);
-  assert.match(noSensRo.blocked!, /no-approve/, "no: sensitive bash is blocked even if read-only-looking");
 });
 
 test("safety: ask mode — standard commit forms with safe substitution/heredoc do NOT prompt", async () => {
@@ -716,24 +722,31 @@ test("safety: mode matrix — write/edit (sandboxed, no prompt in ask/yes, block
   assert.match(no.blocked!, /no-approve/);
 });
 
-test("safety: mode matrix — read (unrestricted except sensitive; sensitive confirms in every mode)", async () => {
+test("safety: mode matrix — read (plain unrestricted; sys sensitive blocked, ws sensitive prompts in ask)", async () => {
   const plain = { path: path.join(dir, "plain.txt") };
-  const secret = { path: "~/.ssh/id_rsa" };
-  // ask: plain reads are unrestricted; sensitive reads prompt.
+  const secretSys = { path: "~/.ssh/id_rsa" }; // sys (outside the workspace)
+  const secretWs = { path: path.join(dir, ".env") }; // ws (inside the workspace)
+  // yes (default): plain + ws sensitive are allowed; sys sensitive is BLOCKED.
+  const yesPlain = await gateDecision("yes", FAKE_READ, plain, true);
+  assert.equal(yesPlain.asked.length, 0);
+  assert.equal(yesPlain.blocked, undefined, "yes: plain read is unrestricted");
+  const yesWs = await gateDecision("yes", FAKE_READ, secretWs, true);
+  assert.equal(yesWs.asked.length, 0, "yes: ws sensitive read is auto-approved");
+  assert.equal(yesWs.blocked, undefined);
+  const yesSys = await gateDecision("yes", FAKE_READ, secretSys, false);
+  assert.equal(yesSys.asked.length, 0, "yes: sys sensitive read is never prompted");
+  assert.match(yesSys.blocked!, /system-level sensitive/);
+  // ask: plain is unrestricted; ws sensitive prompts; sys sensitive is BLOCKED.
   const askPlain = await gateDecision("ask", FAKE_READ, plain, true);
   assert.equal(askPlain.asked.length, 0, "ask: plain read is unrestricted");
   assert.equal(askPlain.blocked, undefined);
-  const askSens = await gateDecision("ask", FAKE_READ, secret, true);
-  assert.equal(askSens.asked.length, 1, "ask: sensitive read prompts");
-  assert.match(askSens.asked[0]!, /SENSITIVE/);
-  assert.equal(askSens.blocked, undefined);
-  // yes: sensitive reads STILL confirm (deny → blocked).
-  const yesSens = await gateDecision("yes", FAKE_READ, secret, false);
-  assert.equal(yesSens.asked.length, 1);
-  assert.match(yesSens.blocked!, /DENIED.*sensitive/);
-  const yesPlain = await gateDecision("yes", FAKE_READ, plain, true);
-  assert.equal(yesPlain.asked.length, 0);
-  assert.equal(yesPlain.blocked, undefined);
+  const askWs = await gateDecision("ask", FAKE_READ, secretWs, true);
+  assert.equal(askWs.asked.length, 1, "ask: ws sensitive read prompts");
+  assert.match(askWs.asked[0]!, /SENSITIVE/);
+  assert.equal(askWs.blocked, undefined);
+  const askSys = await gateDecision("ask", FAKE_READ, secretSys, true);
+  assert.equal(askSys.asked.length, 0, "ask: sys sensitive read is never prompted");
+  assert.match(askSys.blocked!, /system-level sensitive/);
   // no: even plain reads are blocked (only read-only BASH is allowed).
   const noPlain = await gateDecision("no", FAKE_READ, plain, true);
   assert.equal(noPlain.asked.length, 0);

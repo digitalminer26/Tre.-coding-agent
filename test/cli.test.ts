@@ -865,17 +865,22 @@ test("WS7: read-only bash runs WITHOUT a prompt in default (ask) mode", async (t
   assert.match(S.out(), /total/, "the ls output is in the transcript");
 });
 
-test("WS7: --yes still confirms destructive bash (ask called, deny → isError)", async (t) => {
+test("WS7: --yes auto-approves read-only bash; sys destructive + sys sensitive are blocked (isError)", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   const streamFn = fakeStream([
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "git push origin main" } }] },
-    { type: "text", text: "denied" },
+    // A read-only command is auto-approved under --yes (the default) and runs.
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "ls -la" } }] },
+    // A system-level destructive (dd to a raw device) is BLOCKED in every mode.
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "dd if=x of=/dev/sda" } }] },
+    // A system-level sensitive read (outside the workspace) is BLOCKED.
+    { type: "toolcall", calls: [{ name: "read", args: { path: "~/.ssh/id_rsa" } }] },
+    { type: "text", text: "done" },
   ]);
   const S = mkSinks();
   const asked: string[] = [];
   const code = await main(
-    ["run", "push it", "--tools", "bash", "--yes", "--models", models, "--session", session],
+    ["run", "go", "--tools", "bash,read", "--yes", "--models", models, "--session", session],
     {
       streamFn,
       sinks: S.sinks,
@@ -886,16 +891,18 @@ test("WS7: --yes still confirms destructive bash (ask called, deny → isError)"
     },
   );
   assert.equal(code, 0);
-  assert.equal(asked.length, 1, "destructive bash confirms even under --yes");
-  assert.match(asked[0]!, /DESTRUCTIVE/);
+  assert.equal(asked.length, 0, "read-only auto-approved; sys destructive + sys sensitive blocked (no prompt)");
   const replayed = await replaySession(session);
-  const tr = replayed.context.find((m) => m.role === "toolResult");
-  assert.ok(tr && tr.role === "toolResult");
-  assert.equal(tr.isError, true);
-  assert.match(tr.content.map((c) => c.text).join(" "), /DENIED/);
+  const trs = replayed.context.filter((m) => m.role === "toolResult");
+  assert.equal(trs.length, 3, "all three tool results are in the session");
+  assert.equal(trs[0]?.isError, undefined, "read-only bash (ls) ran under --yes");
+  assert.equal(trs[1]?.isError, true, "sys destructive (dd) is blocked");
+  assert.match(trs[1]!.content.map((c) => c.text).join(" "), /systemic destructive/);
+  assert.equal(trs[2]?.isError, true, "sys sensitive read is blocked");
+  assert.match(trs[2]!.content.map((c) => c.text).join(" "), /system-level sensitive/);
 });
 
-test("WS7: sensitive read confirms even under --yes (deny → isError)", async (t) => {
+test("WS7: sys sensitive read is blocked even under --yes (isError)", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   const streamFn = fakeStream([
@@ -916,13 +923,12 @@ test("WS7: sensitive read confirms even under --yes (deny → isError)", async (
     },
   );
   assert.equal(code, 0);
-  assert.equal(asked.length, 1, "sensitive reads confirm even under --yes");
-  assert.match(asked[0]!, /SENSITIVE/);
+  assert.equal(asked.length, 0, "sys sensitive reads are blocked, never prompted");
   const replayed = await replaySession(session);
   const tr = replayed.context.find((m) => m.role === "toolResult");
   assert.ok(tr && tr.role === "toolResult");
   assert.equal(tr.isError, true);
-  assert.match(tr.content.map((c) => c.text).join(" "), /DENIED/);
+  assert.match(tr.content.map((c) => c.text).join(" "), /system-level sensitive/);
 });
 
 test("WS7: --no-approve allows read-only bash but blocks mutating (no prompts)", async (t) => {

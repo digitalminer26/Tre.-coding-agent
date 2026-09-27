@@ -129,14 +129,15 @@ export interface CliOptions {
   /** C26: undefined = default (3 auto-continuations → 4 cycles).
    *  0 restores the old hard-stop-at-first-budget-hit behavior. */
   maxContinuations?: number;
-  /** --yes: auto-approve everything EXCEPT sensitive + destructive (those
-   *  confirm in every mode). */
+  /** --yes (default): auto-approve everything EXCEPT system-level (sys)
+   *  sensitive reads + destructive commands (blocked in every mode). */
   yes: boolean;
   /** --no-approve: never prompt; only read-only, non-sensitive bash is
    *  allowed, everything else is blocked. */
   noApprove: boolean;
-  /** --ask (default): prompt only for sensitive + destructive; read-only,
-   *  reversible, and in-workspace write/edit run without a prompt. */
+  /** --ask: prompt for sensitive + destructive (workspace-scoped) and
+   *  mutating bash; read-only, reversible, and in-workspace write/edit run
+   *  without a prompt (the pre-auto-approve behavior). */
   ask: boolean;
   /** --no-compact (WS9): disable auto-compaction (default: always on). */
   noCompact: boolean;
@@ -668,12 +669,14 @@ Options:
   --max-turns <n>    per-run LLM-turn cap (default: derived from the model's
                      contextWindow/maxTokens — hundreds of turns for a large
                      window; the runaway guard is always on)
-  --ask              (DEFAULT) prompt only for SENSITIVE reads and
-                     DESTRUCTIVE/irreversible actions; read-only bash,
-                     reversible git/npm/filesystem ops, and in-workspace
-                     write/edit run without a prompt
-  --yes              auto-approve everything except SENSITIVE and
-                     DESTRUCTIVE (both confirm in every mode)
+  --ask              prompt for SENSITIVE + DESTRUCTIVE (workspace-scoped)
+                     and mutating bash; read-only bash, reversible
+                     git/npm/filesystem ops, and in-workspace write/edit run
+                     without a prompt (the pre-auto-approve behavior)
+  --yes              (DEFAULT) auto-approve everything except SYSTEMIC
+                     sensitive reads + destructive commands (blocked in
+                     every mode); workspace-scoped work runs without a
+                     prompt
   --no-approve       never prompt: only read-only, non-sensitive bash is
                      allowed; everything else is blocked with an error
                      result (fail-closed, for non-interactive runs)
@@ -686,28 +689,27 @@ Options:
                      the TUI — the default when stdin is piped anyway
 
 Safety (WS7/WS11): the read tool may read any file on the system (no root
-restriction) — EXCEPT sensitive material (secret/key paths: ~/.ssh/,
-~/.aws/, ~/.gnupg/, ~/.kube/, ~/.config/gcloud/, ~/.docker/config.json,
-~/.netrc, /etc/shadow, id_rsa*/id_ed25519*, *.pem/*.key/*.p12/*.pfx,
-.env-family), which confirms in every mode. write/edit are sandboxed to
-the project root (--cwd or the process cwd) — paths that escape it (../,
-absolute paths, symlinks) are refused. On macOS the bash tool runs in the
-project root under a kernel (Seatbelt) sandbox with the same boundary;
-elsewhere it runs in the project root unsandboxed.
-Approval (D8): the user is only prompted to confirm SENSITIVE reads and
-DESTRUCTIVE/irreversible actions (recursive rm, ANY git push,
-git reset --hard, forced git clean, git branch -D, git checkout . /
-checkout -- <path> / git restore, dd to /dev/*, raw-device redirects,
-mkfs, fork bomb, shutdown/reboot). The default mode (ask) runs everything
-else without a prompt — read-only bash (ls/cat/grep/… and read-only
-git/kubectl/docker subcommands), reversible bash (git add/commit/stash/
-switch/checkout <branch>/branch <new>/tag <new>, npm run/test, and the
-undoable in-workspace filesystem verbs mv/cp/mkdir/rmdir/touch/ln/chmod/
-chown/sed -i/tee), and in-workspace write/edit. --yes auto-approves
-everything except sensitive
-and destructive; --no-approve allows ONLY read-only, non-sensitive bash.
-Anything but y is a denial, and a denial comes back to the model as an
-error result.
+restriction) — EXCEPT system-level sensitive material (secret/key paths that
+resolve OUTSIDE the workspace: ~/.ssh/, ~/.aws/, ~/.gnupg/, ~/.kube/,
+~/.config/gcloud/, ~/.docker/config.json, ~/.netrc, /etc/shadow,
+id_rsa*/id_ed25519*, *.pem/*.key/*.p12/*.pfx, .env-family), which is
+BLOCKED in every mode (across the board). A sensitive path INSIDE the
+workspace (e.g. a project .env) is allowed in the default mode. write/edit
+are sandboxed to the project root (--cwd or the process cwd) — paths that
+escape it (../, absolute paths, symlinks) are refused. On macOS the bash
+tool runs in the project root under a kernel (Seatbelt) sandbox with the
+same boundary; elsewhere it runs in the project root unsandboxed.
+Approval (D8): the DEFAULT mode (yes) auto-approves everything except
+SYSTEMIC sensitive reads and SYSTEMIC destructive commands (dd to /dev/*,
+raw-device redirects, mkfs, fork bomb, shutdown/reboot — inherently
+system-wide), which are BLOCKED in every mode. Workspace-scoped destructive
+actions (recursive rm, ANY git push, git reset --hard, forced git clean,
+git branch -D, git checkout . / checkout -- <path> / git restore) are
+allowed in the default mode — the sandbox confines them to the workspace and
+the codebase is backed up to git. --ask prompts for those (plus SENSITIVE
+and mutating bash) instead; --no-approve allows ONLY read-only,
+non-sensitive bash. Anything but y is a denial, and a denial/block comes
+back to the model as an error result.
 
 SIGINT during a run aborts the run (second SIGINT exits).`;
 
@@ -768,6 +770,30 @@ export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): 
     if (!process.stdin.isTTY) err.write(q + "\n");
     return queued(q);
   };
+}
+
+/**
+ * The behavior-settings lines shown at startup: the CURRENT approval mode +
+ * sandbox state, what is always blocked (systemic sensitive/destructive),
+ * and the OPTIONAL flags that change the behavior. `mode` is the resolved
+ * ApprovalMode; `sandboxOn` is whether the kernel sandbox is active. The TUI
+ * seeds this as a single multi-line info item; the plain CLI prints it to
+ * stderr.
+ */
+export function behaviorSettingsLines(mode: ApprovalMode, sandboxOn: boolean): string[] {
+  const approval =
+    mode === "yes"
+      ? "auto-approve (default) — workspace-scoped work runs without a prompt"
+      : mode === "ask"
+        ? "ask — prompt for SENSITIVE + DESTRUCTIVE + mutating bash"
+        : "no-approve (fail-closed) — only read-only, non-sensitive bash runs";
+  return [
+    "Behavior:",
+    `  approval: ${approval}`,
+    `  sandbox:  ${sandboxOn ? "on (bash confined to the workspace)" : "off (--no-sandbox)"}`,
+    "  blocked:  system-level sensitive reads + destructive commands (across the board)",
+    "  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox",
+  ];
 }
 
 /**
@@ -911,13 +937,21 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const streamFn = deps.streamFn ?? openAiStream;
 
   // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
-  // tool pipeline. Default mode is "ask" (prompt only sensitive +
-  // destructive); --yes auto-approves everything except sensitive +
-  // destructive; --no-approve allows only read-only non-sensitive bash.
-  const mode: ApprovalMode =
-    args.noApprove ? "no" : args.yes ? "yes" : "ask";
+  // tool pipeline. The DEFAULT mode is "yes" (auto-approve): the kernel
+  // sandbox confines bash to the workspace and the codebase is backed up to
+  // git, so workspace-scoped work runs without a prompt; only SYSTEMIC
+  // (sys) sensitive reads and destructive commands are blocked (across the
+  // board). --ask opts into the prompt-per-call behavior; --no-approve is
+  // the fail-closed mode (only read-only, non-sensitive bash).
+  const mode: ApprovalMode = args.noApprove ? "no" : args.ask ? "ask" : "yes";
   const buildExecutor = (ask: AskApproval) =>
     makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode, ask }) });
+
+  // The behavior-settings summary shown at startup: the CURRENT approval
+  // mode + sandbox state, and the OPTIONAL flags that change them. The TUI
+  // seeds it as a single multi-line info item; the plain CLI prints it to
+  // stderr (below).
+  const behavior = behaviorSettingsLines(mode, !args.noSandbox);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the
@@ -960,11 +994,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
       sessionPath: sessionFile,
+      // The startup behavior-settings summary — seeded as a single multi-line
+      // info item so the user sees the current approval/sandbox behavior and
+      // the optional flags before the first prompt.
+      startupInfo: behavior.join("\n"),
       deps: { askApproval: deps.askApproval },
     });
     if (session) await session.close();
     return code;
   }
+
+  // Plain CLI (one-shot + REPL): the TUI shows the behavior summary as an
+  // info item, so here it goes to stderr (the transcript sink is the model's
+  // context; the behavior summary is for the human).
+  for (const line of behavior) sinks.err.write(line + "\n");
 
   // SIGINT: first aborts the active run, second exits (plain CLI only).
   let controller = new AbortController();
