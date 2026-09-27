@@ -22,7 +22,7 @@ PROTECTED="$PROTECTED|^src/tools/bash\.ts$"
 PROTECTED="$PROTECTED|^scripts/guardrail-check\.sh$"
 PROTECTED="$PROTECTED|^scripts/git-hooks/."
 PROTECTED="$PROTECTED|^scripts/check-deps\.mjs$"
-PROTECTED="$PROTECTED|^\.pi/skills/self-improve/SKILL\.md$"
+PROTECTED="$PROTECTED|^\.tre/skills/self-improve/SKILL\.md$"
 
 staged=$(git diff --cached --name-only --diff-filter=ACMRD)
 [ -z "$staged" ] && exit 0

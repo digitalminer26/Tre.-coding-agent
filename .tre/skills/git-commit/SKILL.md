@@ -47,7 +47,7 @@ commit you cannot explain in one sentence is too big).
 If the commit is rejected because it touches the guardrail zone
 (`src/tools/sandbox.ts`, `src/tools/safety.ts`, `src/tools/bash.ts`,
 `scripts/guardrail-check.sh`, `scripts/git-hooks/*`, `scripts/check-deps.mjs`,
-`.pi/skills/self-improve/SKILL.md`), STOP and tell the user. A human commits
+`.tre/skills/self-improve/SKILL.md`), STOP and tell the user. A human commits
 such a change themselves with `GUARDRAIL_BYPASS=1 git commit ...`. The agent
 must never set that variable.
 

@@ -42,7 +42,7 @@ src/tools/sandbox.ts   (your own kernel-sandbox policy generator)
 src/tools/safety.ts    (your own approval/gating logic)
 src/tools/bash.ts      (sandbox wiring in the bash tool)
 scripts/guardrail-check.sh, scripts/git-hooks/*
-.pi/skills/self-improve/SKILL.md
+.tre/skills/self-improve/SKILL.md
 ```
 
 These are your own cage. A pre-commit hook REJECTS any commit touching them
