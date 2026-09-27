@@ -2,6 +2,8 @@ node_modules/
 dist/
 .history/
 context-fold/
+# Local PTY repro scratch (mock endpoint, capture logs, sessions) — never in git.
+.repro/
 # Per-machine endpoint config (baseUrl + apiKey) — never in git.
 # Copy models.json.example to models.json and fill it in (or run tre. with no
 # models.json: it prints a step-by-step setup guide).

@@ -523,9 +523,11 @@ export function steerInput(
       historyIdx: null,
       history: [...s.history, t],
       items: [...s.items, { kind: "user", text: t }],
-      // Follow the bottom: the steer's effect (the model's reaction) is
-      // the interesting thing.
-      viewTop: null,
+      // viewTop is intentionally NOT reset: a steer is queued into the
+      // running loop, and the user's scroll position (e.g. reading earlier
+      // output) must survive. If they were following the bottom, viewTop
+      // is already null and stays null; if they scrolled up, the window
+      // stays put (the new user item lands below the viewport).
     },
     text: t,
   };

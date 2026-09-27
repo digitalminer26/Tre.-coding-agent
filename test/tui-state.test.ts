@@ -615,6 +615,19 @@ test("steerInput: busy + non-slash line → user item appended, input cleared, s
   assert.deepEqual(r!.state.items[0], { kind: "user", text: "fix the bug" });
 });
 
+test("steerInput: scrolled-up viewTop is preserved (a steer must not yank the viewport to the bottom)", () => {
+  const s = { ...makeInitialState("m"), busy: true, input: "be brief", viewTop: 30 };
+  const r = steerInput(s, "be brief");
+  assert.notEqual(r, null);
+  assert.equal(r!.state.viewTop, 30, "scrolled-up position survives a steer");
+});
+
+test("steerInput: following the bottom (viewTop null) stays following", () => {
+  const s = { ...makeInitialState("m"), busy: true, input: "be brief" };
+  const r = steerInput(s, "be brief");
+  assert.equal(r!.state.viewTop, null);
+});
+
 test("steerInput: idle → null (a fresh prompt is a run, not a steer)", () => {
   const s = { ...makeInitialState("m"), busy: false, input: "hello" };
   assert.equal(steerInput(s, "hello"), null);

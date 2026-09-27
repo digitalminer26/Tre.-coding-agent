@@ -1,3 +1,60 @@
+# HANDOFF — TUI scroll: stop resetting the viewport when steering (IN PROGRESS, 2026-09-26)
+
+**User report:** two-finger trackpad drag doesn't scroll the TUI, and the
+screen "resets/clears" when steering (typing a line + Enter mid-run).
+**User chose option 2:** keep the pinned TUI; (a) preserve scroll position
+across steers, (b) make wheel/trackpad handling more robust. Two small
+increments, PTY-verified.
+
+**Root cause CONFIRMED (PTY repro, not guessed):**
+- SGR wheel events DO work: feeding `ESC[<64;10;20M` under `script` scrolls the
+  viewport (hint line goes `enter send` → `↑3/15 scrolled` → `↑22/22`).
+- The single `ESC[3J`/`ESC[2J` in the capture is at the very end (documented
+  one-time clear on unmount) — **no mid-run scrollback clear**.
+- The "reset" = **`steerInput` in `src/tui/state.ts` sets `viewTop: null`**
+  (follow bottom), so a steer yanks the viewport back to the bottom. Repro:
+  scroll up to `↑22/22`, steer "be brief" → hint flips back to `enter send`.
+
+**Increment 1 (next): preserve `viewTop` in `steerInput`.**
+- Change: `src/tui/state.ts` `steerInput` — drop `viewTop: null` from the
+  returned state (keep `input:""`, `cursorPos:0`, `historyIdx:null`, history
+  push, user item, `busy:true`).
+- Test: `test/tui-state.test.ts` — the "steerInput: busy + non-slash line"
+  test (line ~605) must assert `viewTop` is preserved (set `viewTop: 30` on
+  the input state, assert `r.state.viewTop === 30`).
+- PTY verify: re-run `.repro/feed-steer.sh` flow (mock on `.repro/mock-port.txt`
+  port, `script -q /dev/null node dist/src/cli/main.js tui --yes --models
+  .repro/models.json --session .repro/s.jsonl --cwd .repro`), expect the hint
+  to STAY at `↑N/M scrolled` after the steer (not flip to `enter send`).
+- Then: build+test gate, commit (message: `fix(tui): keep scroll position when steering`),
+  update this section to COMPLETED.
+
+**Increment 2 (after 1): wheel/trackpad robustness.**
+- Investigate: which terminals send SGR (`ESC[<64;...M`) vs legacy (`ESC[64;...M`
+  / `ESC[M`) wheel events for two-finger trackpad. `src/tui/run.tsx` `onMouse`
+  currently handles SGR wheel (button 64/65) — check whether legacy `ESC[M`
+  (button 64/65, 0-based y) is also parsed; if not, add it.
+- Also consider: some terminals (e.g. certain kitty/ghostty/iTerm2 modes) only
+  send wheel when mouse reporting is on — verify `run.tsx` enables the right
+  mouse mode (`ESC[?1006h` SGR + possibly `ESC[?1003h` any-event).
+- PTY-verify legacy `ESC[M`-style wheel if added.
+
+**Repro assets (in `.repro/`, gitignored):**
+- `mock-slow.mjs` — SSE mock streaming 60 lines @ 200ms on 127.0.0.1 (port in
+  `.repro/mock-port.txt`; restart: `node .repro/mock-slow.mjs > .repro/mock-port.txt 2>&1 &`
+  then `sed -i '' "s#http://127.0.0.1:[0-9]*/v1#http://127.0.0.1:$PORT/v1#" .repro/models.json`).
+- `feed-steer.sh` — prompt, sleep 6s, 5× SGR wheel-up, sleep 1.5s, steer
+  "be brief", sleep 1.5s, /quit.
+- `out2.log` + python one-liner (strip ANSI, print lines containing
+  'scrolled' or 'enter send') = the hint-sequence check.
+- `out.log` / `out-clean.txt` — earlier plain wheel repro.
+
+**State at compaction:** tree clean (last commit `21a2333` merge), NO source
+changes made yet, mock server running (port in `.repro/mock-port.txt`,
+`pkill -f mock-slow.mjs` to stop). Next action: edit `steerInput`.
+
+---
+
 # HANDOFF — Deployable on another endpoint / another Mac (2026-09-26)
 
 **Status: COMPLETED.** Three commits: `6de4856` (startup config guide),
