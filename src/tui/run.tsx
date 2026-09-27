@@ -53,6 +53,7 @@ import {
 } from "./state.js";
 import { makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { resolveModel, type ModelsFile } from "../config/models.js";
+import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
 import type { AskApproval } from "../tools/safety.js";
 import type {
@@ -60,6 +61,7 @@ import type {
   ExecuteToolCall,
   ModelConfig,
   StreamFn,
+  TextBlock,
   Tool,
 } from "../types.js";
 import type { Session } from "../session/session.js";
@@ -205,6 +207,96 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // so leftovers from an aborted run are discarded (never delivered later).
   let steerQueue: SteeringQueue = { push: () => {}, drain: () => [] };
 
+  // ── Telegram (30s poller) ────────────────────────────────────────────────
+  // While the TUI is open, poll the bot every 30s. A poll is a non-blocking
+  // HTTPS GET to the Telegram Bot API (the LLM endpoint is NOT involved);
+  // the LLM is only spent when a real message arrives and a turn runs to
+  // answer it. Incoming messages become prompts (idle → new run, busy →
+  // steer into the running loop); the run's final text is replied via the
+  // bot. The poller is inert until setup is done (.tre/telegram.json).
+  const telegram = makeTelegramBridge(opts.cwd ?? process.cwd());
+  let telegramTimer: NodeJS.Timeout | undefined;
+  // Routed through setState (not a bare `state =`) so the Ink app re-renders —
+  // a bare mutation would update the state var but never repaint the frame.
+  // setState is declared below but initialized before any of these are CALLED.
+  const telegramInfo = (text: string): void => {
+    setState({ ...state, items: [...state.items, { kind: "info", text }] });
+  };
+  // Extract the final assistant text from a run's context (the reply that
+  // goes back to the bot). Empty when the run produced no text (e.g. it
+  // ended on a tool call or an error) — the caller then sends a fallback.
+  const finalAssistantText = (ctx: AgentMessage[]): string => {
+    for (let i = ctx.length - 1; i >= 0; i--) {
+      const m = ctx[i]!;
+      if (m.role !== "assistant") continue;
+      const text = m.content
+        .filter((b): b is TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("")
+        .trim();
+      if (text !== "") return text;
+    }
+    return "";
+  };
+  const telegramTick = async (): Promise<void> => {
+    // A run is in flight (state.busy is set synchronously before a run
+    // starts, so it is accurate here) — skip this tick.
+    if (state.busy) return;
+    let msgs: [string, string, string][] | null;
+    try {
+      msgs = await telegram.poll();
+    } catch (err) {
+      telegramInfo(`telegram poll error: ${String(err)}`);
+      return; // retry on the next tick
+    }
+    if (msgs === null) return;
+    // Re-check after the await: a user prompt may have started a run while
+    // the poll was in flight.
+    if (state.busy) {
+      // Steer every message into the ACTIVE running loop (the queue that
+      // runPrompt installed — it is drained before the next LLM call). No
+      // reply is sent here: the running run's final text answers the user's
+      // prompt.
+      for (const [, sender, text] of msgs) {
+        const prompt = `[telegram from ${sender}] ${text}`;
+        setState({ ...state, items: [...state.items, { kind: "user", text: prompt }] });
+        steerQueue.push(prompt);
+      }
+      telegramInfo(`telegram: ${msgs.length} message(s) steered into the running turn`);
+      return;
+    }
+    // Idle — fold the whole batch into ONE prompt (a single run answers all
+    // of them, and one reply goes back to the bot). Folding avoids the
+    // stale-queue trap: runPrompt installs a FRESH steering queue, so extra
+    // messages pushed before the run would be lost. Set busy NOW (the
+    // runPrompt→agent_start gap is async — the session append happens before
+    // the first event, and busy is only flipped by agent_start) so a
+    // concurrent user submit can't start a second runTurn on the same
+    // context — exactly why submitInput sets busy eagerly. Follow the
+    // bottom, as a fresh run does.
+    const prompt = msgs.map(([, sender, text]) => `[telegram from ${sender}] ${text}`).join("\n");
+    setState({ ...state, busy: true, viewTop: null, items: [...state.items, { kind: "user", text: prompt }] });
+    void (async () => {
+      try {
+        // runPrompt returns the run's resulting context, or null when the
+        // run errored (the net case) — never read the shared `context` var
+        // here, which would hold the PREVIOUS run's text on error.
+        const resultCtx = await runPrompt(prompt);
+        if (resultCtx === null) {
+          telegramInfo("telegram: run errored — no reply sent");
+          return;
+        }
+        const reply = finalAssistantText(resultCtx);
+        await telegram.send(
+          reply !== "" ? reply : "I received your message but produced no reply this turn.",
+        );
+        telegramInfo("telegram: replied via the bot");
+      } catch (err) {
+        telegramInfo(`telegram reply error: ${String(err)}`);
+      }
+    })();
+  };
+
   // ── state + render ───────────────────────────────────────────────────────
   const setState = (s: TuiState): void => {
     state = s;
@@ -218,7 +310,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     app.unmount();
   };
 
-  const runPrompt = async (prompt: string): Promise<void> => {
+  const runPrompt = async (prompt: string): Promise<AgentMessage[] | null> => {
     controller = new AbortController();
     // One steering queue per run — a closure over a plain array (the
     // contract is push/drain; the loop drains, onSubmit pushes).
@@ -252,9 +344,11 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         tap: (ev) => setState(applyEvent(state, ev)),
       });
       context = result.context;
+      return result.context;
     } catch (err) {
       // I3: runTurn does not throw for expected failures — this is a net.
       setState(noteError({ ...state, busy: false }, `run error: ${String(err)}`));
+      return null;
     }
   };
 
@@ -432,6 +526,23 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // behind the 2GB OOM crash. Sweep it so long sessions stay flat.
   const stopPerfSweep = startPerfEntrySweep();
 
+  // Telegram poller: start only when setup is done (a config exists). The
+  // timer is unref'd so it never keeps the process alive on its own, and it
+  // is cleared on every exit path below.
+  const stopTelegram = (): void => {
+    if (telegramTimer !== undefined) {
+      clearInterval(telegramTimer);
+      telegramTimer = undefined;
+    }
+  };
+  if (telegram.enabled) {
+    telegramInfo(`telegram: polling every ${TELEGRAM_POLL_MS / 1000}s (reply via bot)`);
+    telegramTimer = setInterval(() => {
+      void telegramTick();
+    }, TELEGRAM_POLL_MS);
+    telegramTimer.unref?.();
+  }
+
   // ── approval + executor ──────────────────────────────────────────────────
   const ask: AskApproval =
     opts.deps?.askApproval ??
@@ -447,7 +558,8 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     // a key event (handlers.onCtrlC) instead of a process signal.
     if (state.busy) controller.abort();
     else {
-      restoreMouseMode(); // process.exit skips the finally below
+      stopTelegram(); // process.exit skips the finally below
+      restoreMouseMode();
       process.exit(130);
     }
   };
@@ -455,6 +567,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   try {
     await app.waitUntilExit();
   } finally {
+    stopTelegram();
     restoreMouseMode();
     stopPerfSweep();
     process.off("SIGINT", onSigint);

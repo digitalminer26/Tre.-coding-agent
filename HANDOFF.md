@@ -1,3 +1,84 @@
+# HANDOFF — Telegram TUI poller: 30s background poll, incoming messages become prompts, replies go back via the bot (2026-09-27)
+
+**Status: WORK COMPLETE, gate green — COMMITTED.**
+
+**Why.** The telegram skill (always-active, previous increment) told the
+agent to poll "at natural breakpoints," but the agent is TURN-BASED: while
+the TUI is open and IDLE, no turn runs, so nothing ever polled — messages
+the user sent from their phone sat unconsumed in the queue with no
+acknowledgement. The user wanted: as long as `tre.` is running, respond and
+acknowledge, and the reply must come back via Telegram.
+
+**What changed.**
+- `src/tui/telegram.ts` (NEW) — `makeTelegramBridge(cwd)`: wraps the skill's
+  stdlib-`python3` helper (`.tre/skills/telegram/telegram.py`) as
+  `poll()` (non-blocking `getUpdates` via a 15s-capped `execFile`, parsing
+  the `[chatId from <name>] <text>` lines) and `send(text)` (writes the
+  message to `.tre/telegram/out.txt` and runs `send`). `enabled` is false
+  when `.tre/telegram.json` or the helper is missing → the driver never
+  starts the timer (setup not done). `TELEGRAM_POLL_MS = 30_000`.
+- `src/tui/run.tsx` — the driver owns a `setInterval` (unref'd, cleared on
+  every exit path: finally + the SIGINT exit branch) that calls
+  `telegramTick()` every 30s while the TUI is open. Tick logic:
+  - skip when `state.busy` (a run is in flight) — messages accumulate in
+    Telegram's queue until idle (getUpdates is offset-based, nothing is
+    lost);
+  - **busy** (checked again after the poll await, in case a user prompt
+    started a run mid-poll) → steer every message into the ACTIVE
+    steering queue (the one `runPrompt` installed), echo as user items,
+    no reply sent (the running run's final text answers the user);
+  - **idle** → fold the whole batch into ONE prompt (avoids the
+    stale-queue trap: `runPrompt` installs a FRESH steering queue, so
+    extra messages pushed before the run would be lost), set `busy: true`
+    EAGERLY (the runPrompt→agent_start gap is async — session append runs
+    first — so a concurrent user submit can't start a second runTurn on
+    the same context; mirrors why `submitInput` sets busy eagerly), run it,
+    then send the run's final assistant text back to the bot (fallback
+    line when the run produced no text; no reply when the run errored).
+  - `runPrompt` now returns the resulting context (null on the net-error
+    case) so the reply path never reads the shared `context` var that would
+    hold the PREVIOUS run's text on error.
+  - All Telegram activity goes through `setState` (a bare `state =` would
+    never repaint the Ink frame) and shows as info items:
+    `telegram: polling every 30s (reply via bot)` at startup, plus
+    steered/replied/error lines.
+- `.tre/skills/telegram/SKILL.md` (LOCAL, gitignored) — Receiving section
+  rewritten: in the TUI the DRIVER polls and replies; the agent must NOT
+  run `telegram.py poll` itself (it would split the shared offset
+  `.tre/telegram/last_update_id` and double-handle). Manual poll/ack
+  remains the contract for plain/one-shot mode, which has no driver.
+
+**Cost model (user question, answered before building).** Polling does NOT
+touch the LLM endpoint: one non-blocking HTTPS GET to the Telegram Bot API
+per 30s tick (free, far inside Bot API rate limits; `python3` is the
+sandbox-safe network path). The LLM is only spent when a real message
+arrives and a turn runs to answer it.
+
+**Gate.** `tsc` clean; source scan clean (32 files); dep-freeze OK (4/4);
+`node --test` → 458 pass / 0 fail. PTY capture (mock server on 127.0.0.1):
+startup frame renders, `ℹ telegram: polling every 30s (reply via bot)`
+present, `/display-bottom` + `/quit` unaffected. Bridge unit-verified:
+`enabled: true`, `poll()` → null on the no-messages sentinel, parse regex
+matches the helper's line format, `send()` delivered a real test message
+(bot @Tredot_bot).
+
+**Bugs caught during review (before commit).** (1) bare `state =` mutations
+would never re-render the Ink app → routed through `setState`. (2)
+`runPrompt` doesn't set `busy` (only `agent_start` does) → set it eagerly
+before the run to close the async double-run gap. (3) extra batch messages
+pushed before `runPrompt` would land in the stale steering queue → fold the
+batch into one prompt. (4) on a run error the shared `context` var holds the
+previous run's text → `runPrompt` returns its context; the reply path uses
+it, sends nothing on null.
+
+**Known limitations.** Not real-time: worst-case latency is one 30s tick.
+While a long task is in flight, incoming messages steer into it and get no
+separate reply (by design — one reply per run). Plain/one-shot mode has no
+poller (the driver is TUI-only). The timer is unref'd, so it never keeps the
+process alive on its own.
+
+---
+
 # HANDOFF — always-active skills: `always: true` frontmatter includes the SKILL.md body in the system prompt (2026-09-27)
 
 **Status: WORK COMPLETE, gate green — COMMITTED.**
