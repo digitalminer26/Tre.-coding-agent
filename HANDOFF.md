@@ -1,3 +1,43 @@
+# HANDOFF — sandbox: re-allow /private/etc/ssl/openssl.cnf so curl & git https work under the policy (2026-09-28)
+
+**Status: gate green — AWAITING HUMAN COMMIT (guardrail zone: the user
+commits with `GUARDRAIL_BYPASS=1`).**
+
+**Why.** Under the kernel sandbox, every TLS-using CLI died: `curl` and
+`git`'s https helper (both link macOS LibreSSL) open the system TLS config
+`/private/etc/ssl/openssl.cnf` at init; the `/private` read-deny turned that
+into EPERM → "Auto configuration failed" / `fatal: remote helper 'https'
+aborted session` (verified 2026-09-20: the error names the exact path;
+`OPENSSL_CONF=` does not help — libressl still probes the default path).
+`python3` (stdlib ssl, no config file) was unaffected, which is why the
+telegram skill works but curl/git don't. The documented escape hatch was
+`--no-sandbox` for the whole session.
+
+**What changed.** ONE line in `src/tools/sandbox.ts`,
+`generateBashSandboxPolicy`: a single-file literal read re-allow
+`(allow file-read* (literal "/private/etc/ssl/openssl.cnf"))`, emitted
+right after the existing `xcode_select_link` literal (same pattern: one
+file, no traversal; the system's own world-readable config, not a secret
+surface). No other policy lines moved; the workspace re-allow stays LAST
+in both read and write sections.
+
+**Gate.** `tsc` clean; source scan clean (32 files); dep-freeze OK (4/4);
+`node --test` → 458 pass / 0 fail / 9 skipped. (Inherited-sandbox note:
+`npm` is unusable inside a sandboxed session — it's a symlink and the
+policy has no readlink allowance for /Users — so the gate was run via the
+absolute node path: `node node_modules/typescript/lib/tsc.js` +
+`node --test dist/test/*.test.js` + `node scripts/check-deps.mjs`.)
+
+**Verify after the commit** (inside a normal sandboxed session):
+`curl -sS -o /dev/null -w '%{http_code}' https://example.com` → 200, and
+`git ls-remote https://github.com/octocat/Hello-World` succeeds.
+Could not be kernel-verified from inside this session: a process already
+under a policy cannot apply a different one (sandbox_apply → EPERM), and
+`sandbox-exec` from inside can't read a policy file outside the allowed
+regions.
+
+---
+
 # HANDOFF — Telegram TUI poller: 30s background poll, incoming messages become prompts, replies go back via the bot (2026-09-27)
 
 **Status: WORK COMPLETE, gate green — COMMITTED.**

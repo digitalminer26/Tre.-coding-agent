@@ -243,6 +243,12 @@ export function generateBashSandboxPolicy(
     // the CLT/Xcode dir; denied, it dies with rc=1 + stderr noise on every
     // call. One file, no traversal (verified 2026-09-19).
     '(allow file-read* (literal "/private/var/db/xcode_select_link"))',
+    // macOS curl and git's https helper link LibreSSL, which opens the
+    // system TLS config at init; denied, TLS init dies with EPERM
+    // ("Auto configuration failed" + fatal: remote helper 'https' aborted).
+    // One file, no traversal — the system's own world-readable config, not a
+    // secret surface (verified 2026-09-20: error names this exact path).
+    '(allow file-read* (literal "/private/etc/ssl/openssl.cnf"))',
     // Ancestor metadata for node's realpathSync walk-down — workspace chain
     // and per-user tmp chain (npm/tsc/child processes touch $TMPDIR even
     // when the workspace is elsewhere). No file content is opened.
