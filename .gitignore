@@ -11,6 +11,8 @@ models.json
 # Per-machine Telegram bot credentials (token) + poll state — never in git.
 .tre/telegram.json
 .tre/telegram/
+# Per-machine GitHub push token (transient — deleted after the push).
+.tre/github-token
 # Skills are deployment-specific — never in git by default. The two
 # exceptions are the repo's own development protocol (force-added):
 .tre/skills/

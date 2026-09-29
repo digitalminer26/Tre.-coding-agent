@@ -42,6 +42,32 @@ commit you cannot explain in one sentence is too big).
 | 10 | nothing to commit (tree already clean) |
 | 11 | quality gate failed (nothing staged, nothing committed) |
 
+## Pushing to GitHub
+
+The remote is HTTPS (`https://github.com/digitalminer26/Tre.-coding-agent.git`).
+This machine has no credential helper and no `gh` CLI, so pushes use a
+**persistent, gitignored token file** — the user keeps it on purpose, pushes
+are a repeated action. **Keep the file after pushing; never delete it.**
+
+- **Token**: `.tre/github-token` (gitignored). **Never echo it** into chat,
+  tool output, or the transcript.
+- **Push** — the token must not appear on any command line, so use an
+  askpass shim that cats the file (shim lives in TMPDIR, outside the repo,
+  so the tree stays clean; it contains no secret, only the file path):
+  ```sh
+  printf '#!/bin/sh\ncat /Users/xilcilus/projects/Tre.-coding-agent/.tre/github-token\n' > "${TMPDIR}/tre-askpass.sh"
+  chmod +x "${TMPDIR}/tre-askpass.sh"
+  GIT_ASKPASS="${TMPDIR}/tre-askpass.sh" git push origin main
+  ```
+  (The username prompt also receives the token value — harmless; GitHub
+  accepts any username with a PAT.)
+- **Verify**: `GIT_ASKPASS="${TMPDIR}/tre-askpass.sh" git ls-remote origin main`
+  — the remote SHA must equal local `HEAD`.
+- **On 401/403** (token missing/revoked/expired): tell the user to refresh
+  `.tre/github-token`. Do not retry-loop.
+- The token file must never show in `git status` (it is gitignored — if it
+  does, stop and fix `.gitignore` before committing anything).
+
 ## Guardrail zone — the agent NEVER bypasses
 
 If the commit is rejected because it touches the guardrail zone
