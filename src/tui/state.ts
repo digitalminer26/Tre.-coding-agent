@@ -1034,6 +1034,7 @@ export interface SlashCommand {
 /** The D16 registry — single source of truth for the menu; run.tsx
     dispatches by name. Adding a command = one entry here. */
 export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: "compact", summary: "manually compact the context now (summarize older messages)" },
   { name: "context", summary: "context breakdown: system/summary/messages + compaction trigger" },
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },

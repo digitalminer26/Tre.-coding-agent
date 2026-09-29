@@ -841,6 +841,10 @@ export interface MainDeps {
   sinks?: PrintSinks;
   /** Injectable approval prompt (tests); default: a readline question. */
   askApproval?: AskApproval;
+  /** Injectable REPL input stream (tests): a fresh Readable per test — the
+   *  shared process.stdin can only be pushed-to ONCE (EOF), so multiple
+   *  REPL tests in one process would otherwise hit ERR_STREAM_PUSH_AFTER_EOF. */
+  stdin?: NodeJS.ReadableStream;
 }
 
 /**
@@ -1194,7 +1198,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
 
     // REPL
-    const r = createInterface({ input: process.stdin, output: process.stdout });
+    const r = createInterface({ input: deps.stdin ?? process.stdin, output: process.stdout });
     rl = r;
     // WS7: one pending question at a time — either the "you> " REPL prompt
     // or a tool-approval prompt — both routed to the same readline
@@ -1271,6 +1275,37 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const prompt = line.trim();
       if (prompt === "") continue;
       if (prompt === "/quit" || prompt === "/exit") break;
+      // A6: manual compaction — the same compactNow the auto trigger uses,
+      // forced (the trigger check is skipped). The ✂ line prints via the
+      // context_compacted event, like the auto path.
+      if (prompt === "/compact") {
+        if (args.noCompact) {
+          sinks.err.write("compact: compaction disabled (--no-compact)\n");
+        } else {
+          const newCtx = await compactNow({
+            streamFn,
+            model,
+            signal: controller.signal,
+            context,
+            session,
+            ids: entryIds,
+            systemPrompt,
+            compactKeepTokens: args.compactKeepTokens,
+            charsPerToken: cpt,
+            force: true,
+            sinks,
+            onEvent: async (ev) => {
+              printEvent(ev, sinks, session?.path);
+            },
+          });
+          if (newCtx === undefined) {
+            sinks.err.write("compact: nothing to compact (context too short)\n");
+          } else {
+            context = newCtx;
+          }
+        }
+        continue;
+      }
       if (prompt.startsWith("/")) {
         sinks.err.write(`unknown command: ${prompt}\n`);
         continue;

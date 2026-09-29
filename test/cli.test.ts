@@ -18,6 +18,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, readFile, mkdir } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { fakeStream } from "./fake-stream.js";
@@ -248,17 +249,96 @@ test("main: bare launch on piped stdin → plain REPL (ui auto), exits 0 on EOF"
   if (process.stdin.isTTY) t.skip("stdin is a TTY");
   const { dir, models } = await workspace(t);
   const S = mkSinks();
-  // Feed one prompt + EOF into the real (piped) stdin the REPL reads — the
-  // same burst the e2e harness sends to a piped `tre.` (WS10 s8).
-  process.stdin.push("say hi\n");
-  process.stdin.push(null);
+  // Feed one prompt + EOF into the REPL's input — the same burst the e2e
+  // harness sends to a piped `tre.` (WS10 s8). An injectable stream (not
+  // process.stdin) so multiple REPL tests can run in one process.
   const code = await main(["--tools", "none", "--models", models, "--cwd", dir], {
     streamFn: fakeStream([{ type: "text", text: "hi there" }]),
     sinks: S.sinks,
+    stdin: pipedStdin(["say hi\n"]),
   });
   assert.equal(code, 0);
   assert.match(S.err(), /REPL/); // the plain REPL banner, not the Ink TUI
   assert.match(S.out(), /hi there/); // the scripted turn's text was streamed
+});
+
+/** A fresh piped REPL stdin (per test) — the shared process.stdin can only
+ *  be pushed-to ONCE (EOF), so each REPL test owns its own stream. */
+function pipedStdin(lines: string[]): NodeJS.ReadableStream {
+  const r = new Readable({ read: () => {} });
+  for (const l of lines) r.push(l);
+  r.push(null);
+  return r;
+}
+
+test("A6: REPL /compact forces a compaction (summarizer call + session entry + ✂ line)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const session = join(dir, "s.jsonl");
+  await seedHistory(dir, models, session);
+
+  const S = mkSinks();
+  // turn 1 (a normal run), then /compact (the silent summarizer call), EOF.
+  const code = await main(
+    ["--resume", session, "--tools", "none", "--models", models, "--cwd", dir],
+    {
+      streamFn: fakeStream([
+        { type: "text", text: "ok" }, // turn 1
+        { type: "text", text: "SUMMARY." }, // the /compact summarizer call
+      ]),
+      sinks: S.sinks,
+      stdin: pipedStdin(["go\n", "/compact\n"]),
+    },
+  );
+  assert.equal(code, 0);
+  assert.match(S.err(), /✂ context compacted/, "the ✂ line prints like the auto path");
+  const replayed = await replaySession(session);
+  // [summary, a1, u2, a2] — the folded prefix (u1) became the summary.
+  assert.equal(replayed.context.length, 4);
+  const head = replayed.context[0]!;
+  assert.equal(head.role, "user");
+  if (head.role === "user") {
+    assert.match(head.content, /Compaction summary of earlier context/);
+    assert.match(head.content, /SUMMARY\./);
+  }
+  const compact = replayed.entries.find((e) => e.type === "compaction");
+  assert.ok(compact, "a compaction entry was appended");
+});
+
+test("A6: REPL /compact with --no-compact → disabled note, no summarizer call", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  let calls = 0;
+  const code = await main(
+    ["--tools", "none", "--models", models, "--cwd", dir, "--no-compact"],
+    {
+      streamFn: (m, ctx, o) => {
+        calls += 1;
+        return fakeStream([{ type: "text", text: "x" }])(m, ctx, o);
+      },
+      sinks: S.sinks,
+      stdin: pipedStdin(["/compact\n"]),
+    },
+  );
+  assert.equal(code, 0);
+  assert.match(S.err(), /compaction disabled/);
+  assert.equal(calls, 0, "no LLM call");
+});
+
+test("A6: REPL /compact with nothing to fold → 'nothing to compact'", async (t) => {
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  let calls = 0;
+  const code = await main(["--tools", "none", "--models", models, "--cwd", dir], {
+    streamFn: (m, ctx, o) => {
+      calls += 1;
+      return fakeStream([{ type: "text", text: "x" }])(m, ctx, o);
+    },
+    sinks: S.sinks,
+    stdin: pipedStdin(["/compact\n"]),
+  });
+  assert.equal(code, 0);
+  assert.match(S.err(), /nothing to compact/);
+  assert.equal(calls, 0, "no LLM call (the plan check precedes it)");
 });
 
 // ─────────────────────────────── printer ───────────────────────────────

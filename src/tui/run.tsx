@@ -51,7 +51,7 @@ import {
   submitSlashBusy,
   type TuiState,
 } from "./state.js";
-import { makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { resolveModel, type ModelsFile } from "../config/models.js";
 import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
@@ -357,6 +357,58 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     }
   };
 
+  /**
+   * A6 — manual `/compact` (idle only). A silent summarizer call OUTSIDE a
+   * run: force:true skips the trigger, the ladder (D) and the session entry
+   * are shared with auto-compaction via compactNow. Events flow through the
+   * same applyEvent tap as a run (the ✂ line + context field update).
+   * `context` (and the busy flag) update when the call settles.
+   */
+  const manualCompact = (s: TuiState): void => {
+    if (opts.noCompact) {
+      setState({
+        ...s,
+        busy: false,
+        items: [...s.items, { kind: "info", text: "compact: compaction disabled (--no-compact)" }],
+      });
+      return;
+    }
+    setState({
+      ...s,
+      items: [...s.items, { kind: "info", text: "compact: summarizing older messages…" }],
+    });
+    void (async () => {
+      try {
+        const newCtx = await compactNow({
+          streamFn: opts.streamFn,
+          model,
+          signal: new AbortController().signal,
+          context,
+          session: opts.session,
+          ids: opts.entryIds,
+          systemPrompt,
+          compactKeepTokens: opts.compactKeepTokens,
+          charsPerToken: cpt,
+          force: true,
+          sinks: NULL_SINKS,
+          onEvent: async (ev) => setState(applyEvent(state, ev)),
+        });
+        if (newCtx === undefined) {
+          setState({
+            ...state,
+            busy: false,
+            items: [...state.items, { kind: "info", text: "compact: nothing to compact (context too short)" }],
+          });
+        } else {
+          context = newCtx;
+          setState({ ...state, busy: false });
+        }
+      } catch (err) {
+        setState(noteError({ ...state, busy: false }, `compact error: ${String(err)}`));
+      }
+    })();
+  };
+
   const handlers = {
     onChar: (ch: string): void => setState(inputChar(state, ch)),
     onBackspace: (): void => setState(inputBackspace(state)),
@@ -400,6 +452,18 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // non-slash lines steer.
         const slashBusy = submitSlashBusy(state);
         if (slashBusy !== null) {
+          // A6: /compact is never a steer — reject it while a run is in
+          // flight (the auto trigger will compact at the next turn boundary).
+          if (slashBusy.line === "/compact") {
+            setState({
+              ...slashBusy.state,
+              items: [
+                ...slashBusy.state.items,
+                { kind: "info", text: "compact: cannot compact while a run is in flight" },
+              ],
+            });
+            return;
+          }
           const prevBottom = state.bottom;
           const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
           setState(slash.handled ? slash.state : slashBusy.state);
@@ -435,6 +499,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const prompt = r.prompt;
       if (prompt === "/quit" || prompt === "/exit") {
         quit(0);
+        return;
+      }
+      // A6: manual compaction — the driver runs the silent summarizer call
+      // (side effects stay in the driver; the pure machine only carries the
+      // registry entry for the completion menu).
+      if (prompt === "/compact") {
+        manualCompact(r.state);
         return;
       }
       // D15: slash commands are UI commands, not runs — dispatch through the
