@@ -10,6 +10,8 @@
  *     units, keepTokens target, short context → no plan
  *   - compactContext: keep target capped by the model's window
  *   - renderTranscript / summarizePrompt (incl. iterative)
+ *   - extractFileOps (deterministic read/modified paths) + the structured
+ *     summarizePrompt sections (GOAL/DONE/STATE/FILES/NEXT, FILES verbatim)
  *   - compactContext: happy path (silent call, no tools), not-needed,
  *     summary-call failure and empty summary → undefined, never throws (I3)
  */
@@ -30,6 +32,7 @@ import {
   SUMMARY_MARKER,
   compactContext,
   estimateTokens,
+  extractFileOps,
   isSummaryMessage,
   makeSummaryMessage,
   planCompaction,
@@ -37,6 +40,7 @@ import {
   shouldCompact,
   summarizePrompt,
   SUMMARIZER_SYSTEM,
+  type CompactionPlan,
 } from "../src/context/compact.js";
 import { fakeStream } from "./fake-stream.js";
 
@@ -202,6 +206,37 @@ test("renderTranscript: long messages are middle-truncated (head + tail survive)
   assert.doesNotMatch(t, /H{10}/, "the middle was cut");
 });
 
+test("extractFileOps: read → read, write/edit → modified; deduped, first-seen order", () => {
+  const ctx: AgentMessage[] = [
+    user("q"),
+    assistantToolCall("read", { path: "a.ts" }),
+    toolResult("..."),
+    assistantToolCall("write", { path: "b.ts", content: "x" }),
+    toolResult("ok"),
+    assistantToolCall("read", { path: "a.ts" }), // deduped
+    assistantToolCall("edit", { path: "c.ts", oldText: "x", newText: "y" }),
+    assistantToolCall("bash", { command: "cat a.ts" }), // not parsed
+    assistantToolCall("read", { offset: 1 }), // no path arg — ignored
+    assistantToolCall("read", { path: "  " }), // whitespace path — ignored
+  ];
+  const ops = extractFileOps(ctx);
+  assert.deepEqual(ops.read, ["a.ts"]);
+  assert.deepEqual(ops.modified, ["b.ts", "c.ts"]);
+});
+
+test("extractFileOps: caps each list at 50, first-seen order", () => {
+  const ctx: AgentMessage[] = [];
+  for (let i = 0; i < 60; i++) {
+    ctx.push(assistantToolCall("read", { path: `f${i}.ts` }));
+    ctx.push(toolResult("ok"));
+  }
+  const ops = extractFileOps(ctx);
+  assert.equal(ops.read.length, 50);
+  assert.equal(ops.read[0], "f0.ts");
+  assert.equal(ops.read[49], "f49.ts");
+  assert.equal(ops.modified.length, 0);
+});
+
 test("summarizePrompt: contains the transcript; iterative asks to fold the earlier summary", () => {
   const plan = planCompaction(
     [user("a"), assistantText("b"), user("c"), assistantText("d"), user("e"), assistantText("f")],
@@ -213,6 +248,41 @@ test("summarizePrompt: contains the transcript; iterative asks to fold the earli
   const iterative = { ...plan, isIterative: true };
   assert.match(summarizePrompt(iterative), /UPDATED summary/);
   assert.doesNotMatch(p, /UPDATED summary/);
+});
+
+test("summarizePrompt: structured sections + deterministic FILES section (verbatim)", () => {
+  // Hand-built plan: the planner's keep-walk always keeps from the 2nd unit
+  // (and the last user message), so a small context would never fold the
+  // tool calls into toSummarize — the prompt is tested on a direct plan.
+  const plan: CompactionPlan = {
+    keepFrom: 3,
+    toSummarize: [
+      user("fix the bug"),
+      assistantToolCall("read", { path: "src/a.ts" }),
+      toolResult("code"),
+      assistantToolCall("edit", { path: "src/b.ts", oldText: "x", newText: "y" }),
+      toolResult("ok"),
+    ],
+    kept: [user("now check the tests"), assistantText("ok", usageOf(10))],
+    isIterative: false,
+  };
+  const p = summarizePrompt(plan);
+  for (const s of ["GOAL", "DONE", "STATE", "FILES", "NEXT"]) assert.match(p, new RegExp(`\\b${s}\\b`));
+  assert.match(p, /copy the FILES section below VERBATIM/);
+  assert.match(p, /read: src\/a\.ts/);
+  assert.match(p, /modified: src\/b\.ts/);
+  assert.match(p, /extracted from the transcript — verified/);
+});
+
+test("summarizePrompt: no file ops → no FILES section", () => {
+  const plan: CompactionPlan = {
+    keepFrom: 1,
+    toSummarize: [user("a"), assistantText("b")],
+    kept: [user("c"), assistantText("d")],
+    isIterative: false,
+  };
+  const p = summarizePrompt(plan);
+  assert.doesNotMatch(p, /FILES \(extracted/);
 });
 
 test("makeSummaryMessage / isSummaryMessage: marker round-trip", () => {

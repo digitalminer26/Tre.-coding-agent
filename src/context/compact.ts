@@ -21,6 +21,10 @@
  *   summary   — ONE silent LLM call (no tools, events consumed, not yielded)
  *               over the folded messages. Iterative: if the context already
  *               starts with a previous summary, the prompt folds it in.
+ *               Structured: a sectioned prompt (GOAL/DONE/STATE/FILES/NEXT);
+ *               the FILES section is extracted DETERMINISTICALLY from the
+ *               folded tool calls (extractFileOps) so file paths never
+ *               depend on the LLM remembering them.
  *   failure   — I3: a failed/empty summary call ABORTS COMPACTATION for that
  *               turn (context unchanged), never the run.
  *
@@ -206,17 +210,71 @@ export const SUMMARIZER_SYSTEM =
   "You summarize a coding-agent conversation so the agent can continue without seeing the original. " +
   "Output ONLY the summary — no preamble, no questions.";
 
+/** File paths touched by the folded messages, extracted DETERMINISTICALLY
+ *  from the assistant toolCall blocks (read → read; write/edit → modified).
+ *  bash is not parsed (its commands are ambiguous). */
+export interface FileOps {
+  read: string[];
+  modified: string[];
+}
+
+/** Cap on listed paths per list — a summary that enumerates hundreds of
+ *  paths is noise; the agent can re-read what it needs. */
+const FILE_OPS_CAP = 50;
+
+/**
+ * Deterministic file-ops extraction (the FILES section of the summary).
+ * Walks assistant toolCall blocks in order: `read` → read list,
+ * `write`/`edit` → modified list. Non-string/empty/whitespace `path` args
+ * are ignored; deduped, first-seen order, capped at FILE_OPS_CAP each.
+ * Pure — no I/O, no model.
+ */
+export function extractFileOps(messages: AgentMessage[]): FileOps {
+  const read: string[] = [];
+  const modified: string[] = [];
+  const seen = new Set<string>();
+  const push = (list: string[], p: string): void => {
+    if (list.length >= FILE_OPS_CAP || seen.has(p)) return;
+    seen.add(p);
+    list.push(p);
+  };
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    for (const b of m.content) {
+      if (b.type !== "toolCall") continue;
+      const p = b.arguments.path;
+      if (typeof p !== "string" || p.trim() === "") continue;
+      if (b.name === "read") push(read, p);
+      else if (b.name === "write" || b.name === "edit") push(modified, p);
+      // bash (and anything else): not parsed — commands are ambiguous.
+    }
+  }
+  return { read, modified };
+}
+
+/** The FILES section of the summarizer prompt ("" when no file ops). */
+function filesSection(plan: CompactionPlan): string {
+  const ops = extractFileOps(plan.toSummarize);
+  if (ops.read.length === 0 && ops.modified.length === 0) return "";
+  const lines = ["FILES (extracted from the transcript — verified, copy verbatim):"];
+  if (ops.read.length > 0) lines.push(`read: ${ops.read.join(", ")}`);
+  if (ops.modified.length > 0) lines.push(`modified: ${ops.modified.join(", ")}`);
+  return lines.join("\n");
+}
+
 /** The user message for the summarizer call. */
 export function summarizePrompt(plan: CompactionPlan): string {
   const transcript = renderTranscript(plan.toSummarize);
-  const base = `Summarize the conversation below so the agent can continue without seeing it. Include:
-1. The user's goal(s) and any constraints they stated.
-2. What was done: files touched (paths), commands run and their outcomes, decisions made.
-3. Current state: what is in progress, what is done, what is blocked or failed.
-4. Anything the user explicitly asked to remember or avoid.
+  const files = filesSection(plan);
+  const base = `Summarize the conversation below so the agent can continue without seeing it. Use these sections:
+1. GOAL — the user's goal(s) and constraints they stated, verbatim where possible.
+2. DONE — what was completed: files touched, commands run and their outcomes, decisions made.
+3. STATE — what is in progress, what is blocked or failed, open questions.
+4. FILES — copy the FILES section below VERBATIM (it was extracted from the transcript; do not guess paths).
+5. NEXT — the immediate next step(s) to continue the work.
 Be concrete (exact paths, commands, values). Omit chit-chat. Under 500 words.
 
-${plan.isIterative ? "An earlier summary of the older context is included at the top of the transcript; produce an UPDATED summary that folds it in with the newer messages. Do not repeat its header line.\n\n" : ""}TRANSCRIPT:
+${files ? files + "\n\n" : ""}${plan.isIterative ? "An earlier summary of the older context is included at the top of the transcript; produce an UPDATED summary that folds it in with the newer messages. Do not repeat its header line.\n\n" : ""}TRANSCRIPT:
 ${transcript}`;
   return base;
 }
