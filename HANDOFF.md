@@ -1,3 +1,58 @@
+# HANDOFF — Durable extra roots: `tre.json` persists the C35 boundary (C36/D22) (2026-09-29)
+
+**Status: gate green — committed (see git log).**
+
+**Why.** C35's `--extra-root` was flag-only: the explicitly assigned writable
+directory had to be re-passed on EVERY launch, so it was not durable. The user
+confirmed the flag works (top-level session: the probe
+`echo test > /Users/xilcilus/projects/.extra-root-probe` succeeds) and asked
+for durability as part of the feature. The spec's §6 had deferred exactly this:
+"Config-file persistence of extra roots … A future `tre.json` could carry them."
+
+**What changed.** A new config file `tre.json` with a single field
+`extraRoots` (array of directory strings) is the durable baseline for the C35
+boundary.
+
+- **Lookup** mirrors D19's models.json convention (`src/config/tre-config.ts`,
+  new module mirroring `models.ts`): walk UP from the launch directory for a
+  `tre.json` (same convention as a `.git` dir / a `models.json`), then fall
+  back to `~/.tre/tre.json`. `parseTreConfig` / `loadTreConfig` /
+  `findTreConfig`.
+- **Precedence:** the CLI flag APPENDS to the config — `tre.json` is the
+  durable baseline, `--extra-root` is the per-launch addition. Both go through
+  the SAME `validateExtraRoot` (exists, non-sensitive, under home).
+- **Fail-closed guard:** a malformed `tre.json` (bad JSON, non-array
+  `extraRoots`, a non-string/empty entry) or a refused entry REFUSES the
+  startup (exit 2, like a bad `--extra-root`) — never a silent ignore. A
+  missing `tre.json` = the flag-only C35 behavior (no durable roots).
+- `src/cli/main.ts` — resolves the config (via a new `MainDeps.treConfigPath`
+  test seam) BEFORE the C35 validation loop; the flag entries are appended
+  after the config entries. Help text updated.
+- `docs/02-contracts.md` — C36 recorded. `docs/05-extra-roots-spec.md` — §6
+  persistence item marked DONE (C36/D22); status line updated. `PLAN.md` — D22
+  decision line.
+
+**Gate.** `tsc` clean; source scan clean (33 files); dep-freeze OK (4/4, no new
+deps); `node --test dist/test/*.test.js` → **498 pass / 0 fail / 9 skipped**
+(+14 new in `test/tre-config.test.ts`: parse/load/find unit tests + the CLI
+integration — config+flag append, and the fail-closed refusals for sensitive /
+outside-home / missing / malformed entries). The 9 skips are the TTY/TUI-live
+scenarios.
+
+**Usage.** Add to a `tre.json` (project dir or `~/.tre/tre.json`):
+```json
+{ "extraRoots": [ "/Users/xilcilus/projects" ] }
+```
+then launch `tre.` normally — no `--extra-root` needed. The startup summary
+lists the durable roots; `--extra-root` still works and appends.
+
+**Note.** This increment touches NO guardrail-zone file (only
+`src/config/tre-config.ts`, `src/cli/main.ts`, docs, tests) — the C35
+guardrail files (`sandbox.ts`/`safety.ts`/`bash.ts`) are unchanged; the
+durable roots flow through the EXISTING C35 wiring.
+
+---
+
 # HANDOFF — WS9 compaction hardening (A1–A6, D) (2026-09-29)
 
 **Status: gate green — committed (A1 0bc3dfe · A2+A3 181fadf · D 4595815 ·

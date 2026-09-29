@@ -94,6 +94,21 @@ Rules:
   caller's confinement and the per-call policy is not re-applied), so extra
   roots are inert there — same as the workspace re-allow today. Full spec:
   `docs/05-extra-roots-spec.md`.
+- **C36 — durable extra roots: `tre.json` persists the C35 boundary.** C35's
+  extra roots were flag-only (`--extra-root`, re-passed every launch). C36 adds
+  a config file `tre.json` with a single field, `extraRoots` (an array of
+  directory strings). **Lookup** mirrors D19's models.json convention: walk UP
+  from the launch directory for a `tre.json` (the same convention as a `.git`
+  dir or a `models.json`), then fall back to `~/.tre/tre.json`. **Precedence:**
+  the CLI flag APPENDS to the config — `tre.json` is the durable baseline and
+  `--extra-root` is the per-launch addition (both are validated). **Guard
+  (fail-closed):** every `tre.json` entry is validated at startup EXACTLY like a
+  `--extra-root` value (`validateExtraRoot` — exists, non-sensitive, under
+  home); a malformed file (bad JSON, non-array `extraRoots`, non-string/empty
+  entry) or a refused entry REFUSES the startup (exit 2, like a bad flag) —
+  never a silent ignore. A missing `tre.json` is the flag-only C35 behavior
+  (no durable roots). `tre.json` is the first durable config surface; `extraRoots`
+  is its first field (future fields are additive).
 
 ## Contract 2 — Events
 

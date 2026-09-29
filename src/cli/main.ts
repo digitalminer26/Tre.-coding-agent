@@ -66,6 +66,7 @@ import {
   readActiveModelLenient,
   resolveModel,
 } from "../config/models.js";
+import { findTreConfig, loadTreConfig } from "../config/tre-config.js";
 import {
   calibrateCharsPerToken,
   compactContext,
@@ -780,7 +781,10 @@ Options:
                      workspace (repeatable). Must be an existing, non-sensitive
                      dir under your home dir — the startup refuses otherwise
                      (the kernel sandbox + the write/edit path sandbox both
-                     re-allow it; siblings and everything else stay denied)
+                     re-allow it; siblings and everything else stay denied).
+                     C36: durable — a tre.json (nearest above the launch dir,
+                     then ~/.tre/tre.json) with { "extraRoots": [ ... ] }
+                     supplies the baseline; the flag appends to it
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -845,6 +849,9 @@ export interface MainDeps {
    *  shared process.stdin can only be pushed-to ONCE (EOF), so multiple
    *  REPL tests in one process would otherwise hit ERR_STREAM_PUSH_AFTER_EOF. */
   stdin?: NodeJS.ReadableStream;
+  /** C36: override the tre.json path (tests). undefined = the normal
+   *  lookup (nearest tre.json above the launch dir, then ~/.tre/tre.json). */
+  treConfigPath?: string;
 }
 
 /**
@@ -1004,10 +1011,34 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     sinks.err.write(`error: cwd ${root} is not an existing directory\n`);
     return 2;
   }
+  // C36: durable extra roots — tre.json (nearest above the launch dir, then
+  // ~/.tre/tre.json) supplies the baseline; the --extra-root flag APPENDS
+  // (per-launch additions). A malformed tre.json refuses the startup
+  // (exit 2), like a bad --extra-root — never a silent ignore.
+  const treConfigPath =
+    deps.treConfigPath ?? findTreConfig(undefined, path.resolve(process.cwd()));
+  let configExtraRoots: string[] = [];
+  if (treConfigPath !== null) {
+    try {
+      configExtraRoots = loadTreConfig(treConfigPath).extraRoots;
+    } catch (err) {
+      sinks.err.write(`error: ${treConfigPath}: ${String(err)}\n`);
+      return 2;
+    }
+  }
   // C35: validate the explicitly assigned extra roots BEFORE wiring anything
   // (fail-closed: a root that would widen the boundary onto a secret surface
   // or outside the home dir refuses the startup).
   const extraRoots: string[] = [];
+  for (let i = 0; i < configExtraRoots.length; i++) {
+    const dir = configExtraRoots[i]!;
+    const reason = validateExtraRoot(path.resolve(dir));
+    if (reason !== undefined) {
+      sinks.err.write(`error: ${treConfigPath} extraRoots[${i}]: ${reason}\n`);
+      return 2;
+    }
+    extraRoots.push(path.resolve(dir));
+  }
   for (const dir of args.extraRoots) {
     const reason = validateExtraRoot(path.resolve(dir));
     if (reason !== undefined) {

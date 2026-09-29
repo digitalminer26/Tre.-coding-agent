@@ -1,6 +1,7 @@
 # Spec — `--extra-root`: explicitly assigned directories outside the workspace
 
-**Status: IMPLEMENTED (C35 / D21).** This is a **guardrail-zone** change (touches
+**Status: IMPLEMENTED (C35 / D21); persistence added in C36 / D22 (`tre.json`).**
+This is a **guardrail-zone** change (touches
 `sandbox.ts`, `safety.ts`, `bash.ts`) — the agent does all the work, the
 **human commits** it with `GUARDRAIL_BYPASS=1`. See §9.
 
@@ -230,8 +231,11 @@ non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
 ## 6. Out of scope (v1)
 - Extra roots outside the home dir (external mounts, `/opt`) — §3.
 - Per-root read-only vs read-write (all extra roots are read+write).
-- Config-file persistence of extra roots (flag-only; no `models.json`/config
-  entry). A future `tre.json` could carry them.
+- ~~Config-file persistence of extra roots~~ — **DONE in C36 (D22):** a
+  `tre.json` (nearest above the launch dir, then `~/.tre/tre.json`) with
+  `{ "extraRoots": [ ... ] }` is the durable baseline; the `--extra-root` flag
+  appends to it. Each entry is validated exactly like a flag value (fail-closed
+  on a malformed file or a refused entry). See `docs/02-contracts.md` C36.
 - Changing the `read` tool (it stays unrestricted).
 
 ## 7. Definition of done
