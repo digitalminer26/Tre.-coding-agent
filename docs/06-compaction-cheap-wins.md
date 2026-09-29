@@ -1,9 +1,11 @@
 # Spec — Compaction cheap wins + failure escalation
 
-Status: **approved 2026-09-28, not yet implemented.** One behavior per commit
-(self-improve protocol). All new logic is L3 (independent); prior art is
-cited in the PLAN.md decision log, not in code headers (see
-`docs/03-citation-policy.md`).
+Status: **approved 2026-09-28; implemented 2026-09-29.** All items landed,
+one behavior per commit (self-improve protocol): A4 `1fe6651`, A1 `0bc3dfe`,
+D `4595815`, A2+A3 `181fadf`, A6 `3d9d76c` (handoff: `7fd70db`). A5 was
+rejected (see below); A7/B/C/E/F remain deferred. All new logic is L3
+(independent); prior art is cited in the PLAN.md decision log, not in code
+headers (see `docs/03-citation-policy.md`).
 
 Scope: `src/context/compact.ts`, `src/cli/main.ts`, `src/tui/state.ts`,
 `src/tui/run.tsx`, `test/compact.test.ts`, `test/tui-state.test.ts`, and ONE
@@ -318,8 +320,7 @@ test includes `compact`.
 
 ## Open questions
 
-1. **D's `degraded?: boolean`** — the single optional `types.ts` field.
-   Flagged per policy; user sign-off requested before commit 3 lands.
-   (If vetoed: encode the degraded state in the summary text only.)
-2. A6 while busy — reject (spec) or queue for the next `prepareNextTurn`?
-   Spec says reject.
+1. **D's `degraded?: boolean`** — RESOLVED 2026-09-29: landed as specified
+   (optional field on the `context_compacted` event, `src/types.ts`), commit
+   `4595815`.
+2. A6 while busy — RESOLVED 2026-09-29: reject, per spec (commit `3d9d76c`).
