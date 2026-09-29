@@ -1,3 +1,32 @@
+# HANDOFF — README/PLAN phase-naming fix + docs index refresh (2026-09-29)
+
+**Status: gate green — committed (see git log).**
+
+**Why.** The user audited README.md and found the Status section's phase
+naming inconsistent: "Phase A / B / C / 3". The convention is A/B/C/D —
+PLAN.md's own wave table (A, B, C, D) and prose (Phase A/B/C) agree; "Phase 3"
+was the outlier, appearing in PLAN.md's ASCII build-order diagram and risk
+table, and inherited by the README. The README's Docs section also listed
+only 3 of the 6 docs, and PLAN.md's decision range was stale (D1–D6; the
+log now runs to D23).
+
+**What changed.**
+
+- `README.md` — Status: "Phase 3" → "Phase D" (WS9/WS10/WS11 line). Docs
+  section: added `docs/03-citation-policy.md`, `docs/04-skill-authoring.md`,
+  `docs/05-extra-roots-spec.md`, `docs/06-compaction-cheap-wins.md`; PLAN.md
+  line now says "locked decisions (D1–D23)".
+- `PLAN.md` — ASCII diagram "Phase 3: WS9 compaction · WS10 TUI" → "Phase D";
+  risk table "They're Phase 3 by design" → "Phase D by design".
+- `docs/01-walkthrough-harness-llm.md` — §9 MVP-recommendation table:
+  "Defer to Phase 3" → "Defer to Phase D" (our planning column, not the
+  frozen pi record).
+
+Docs-only; no code touched. Gate green; no "Phase 3"/"Phase <digit>"
+references remain repo-wide (grep-verified).
+
+---
+
 # HANDOFF — Background Telegram driver for the plain CLI, with loop prevention (C37/D23) (2026-09-29)
 
 **Status: gate green — committed (see git log).**
