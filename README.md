@@ -19,7 +19,7 @@ All planned workstreams are complete; the project is in ongoing hardening.
 - [x] Phase A — WS0: repo scaffold + the three contracts (`src/types.ts`)
 - [x] Phase B — WS1 wire · WS2 loop · WS3 tools · WS4 prompt · WS5 session · WS8 tests
 - [x] Phase C — WS6 CLI integration · WS7 safety
-- [x] Phase 3 — WS9 compaction · WS10 TUI (Ink) · WS11 bash kernel sandbox (macOS Seatbelt)
+- [x] Phase D — WS9 compaction · WS10 TUI (Ink) · WS11 bash kernel sandbox (macOS Seatbelt)
 
 Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
 opt-in mouse tracking, `/models` switching, a context/compaction readout, an
@@ -32,7 +32,11 @@ runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 
 - `docs/01-walkthrough-harness-llm.md` — how a coding-agent harness talks to an LLM endpoint (reference behavior, source-traceable; frozen record of the v0.85.1 reference)
 - `docs/02-contracts.md` — the three WS0 contracts (the gate for parallel work)
-- `PLAN.md` — workstreams, locked decisions (D1–D6), build order
+- `docs/03-citation-policy.md` — the L1/L2/L3 borrowing rules for the pi reference (mandatory citations)
+- `docs/04-skill-authoring.md` — skill constraints (load paths, write boundary, sandbox network, secrets)
+- `docs/05-extra-roots-spec.md` — `--extra-root` + durable `tre.json` `extraRoots` (C35/C36)
+- `docs/06-compaction-cheap-wins.md` — compaction cheap wins + failure escalation (A1–A6, D)
+- `PLAN.md` — workstreams, locked decisions (D1–D23), build order
 
 ## Quickstart
 

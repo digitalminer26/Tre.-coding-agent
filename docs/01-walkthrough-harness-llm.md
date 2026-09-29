@@ -326,7 +326,7 @@ replay from an earlier entry."
 | `length` → fail all calls | Salvage parser + safety guard                                         | **Copy** (cheap, prevents corrupt edits)                                                                    |
 | Truncation                | 2000 lines / 50KB, head vs tail, temp file recovery                   | **Copy**                                                                                                    |
 | System prompt             | Sections: tools, guidelines, context files, skills index, cwd         | **Copy the shape**; keep it < ~2k tokens                                                                    |
-| Compaction                | Structured summary between turns, never split call/result             | **Defer to Phase 3** — MVP just warns near the limit; but design the context-rebuild seam now               |
+| Compaction                | Structured summary between turns, never split call/result             | **Defer to Phase D** — MVP just warns near the limit; but design the context-rebuild seam now               |
 | Sessions                  | JSONL append-only + replay                                            | **Copy** (it's trivially simple and gets resume + branching for free)                                       |
 | Skills                    | Index in prompt, body on demand                                       | **Copy the pattern**; very high value, ~0 cost                                                              |
 | UI                        | Ink TUI over an event stream                                          | **Defer.** MVP = plain CLI that prints events; the event vocabulary (§3/§4) is the UI's API                 |

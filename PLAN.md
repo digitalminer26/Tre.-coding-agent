@@ -260,7 +260,7 @@ suggested subagent type (see §5); **size** = rough effort.
                        │  safety   │
                        └─────┬─────┘
                              ▼
-                 Phase 3:  WS9 compaction · WS10 TUI
+                 Phase D:  WS9 compaction · WS10 TUI
 ```
 
 ## 4. Build order & vertical slice
@@ -312,7 +312,7 @@ before it merges.
 | Local model's tool calling is flaky (malformed/truncated JSON) | **High**   | WS8 eval suite gates model choice; the `length`→fail-all guard + JSON salvage (WS1/WS2) make bad calls non-destructive; keep an API model as the quality bar.     |
 | Contract churn after parallel work starts                      | Med        | WS0 is explicitly the gate; any contract change is a *broadcast* — all of Wave B re-checks. Keep WS0 small and reviewed hard.                                     |
 | SSE parser edge cases across endpoints                         | Med        | Mock SSE (WS8) encodes the tricky cases (split frames, multi-tool, `length`, error) as fixtures; live llama.cpp check is the final gate, not the unit-test basis. |
-| Scope creep into TUI/compaction early                          | Med        | They're Phase 3 by design; the CLI prints the same event stream the TUI would render, so nothing is lost by deferring.                                            |
+| Scope creep into TUI/compaction early                          | Med        | They're Phase D by design; the CLI prints the same event stream the TUI would render, so nothing is lost by deferring.                                            |
 | Running `bash` unsandboxed on a live box                       | Med        | WS7 approval gate is the gate to "daily use"; until then run with `--yes` off by default.                                                                         |
 
 ## 8. Out of scope (MVP)
