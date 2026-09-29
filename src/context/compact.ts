@@ -56,8 +56,10 @@ export function isSummaryMessage(m: AgentMessage): boolean {
   return m.role === "user" && m.content.startsWith(SUMMARY_MARKER);
 }
 
-/** Estimated tokens for one message: total chars / 4 (ceiling). */
-export function estimateMessageTokens(m: AgentMessage): number {
+/** Estimated tokens for one message: total chars / charsPerToken (ceiling).
+ *  charsPerToken defaults to 4 (the chars/4 heuristic); a calibrated value
+ *  (calibrateCharsPerToken) makes the budget honest for dense content. */
+export function estimateMessageTokens(m: AgentMessage, charsPerToken = 4): number {
   let chars = 0;
   if (m.role === "user") {
     chars = m.content.length;
@@ -72,13 +74,40 @@ export function estimateMessageTokens(m: AgentMessage): number {
     chars += m.toolName.length;
     for (const b of m.content) chars += b.text.length;
   }
-  return Math.ceil(chars / 4);
+  return Math.ceil(chars / charsPerToken);
 }
 
-export function estimateTokens(messages: AgentMessage[]): number {
+export function estimateTokens(messages: AgentMessage[], charsPerToken = 4): number {
   let t = 0;
-  for (const m of messages) t += estimateMessageTokens(m);
+  for (const m of messages) t += estimateMessageTokens(m, charsPerToken);
   return t;
+}
+
+/**
+ * Calibrated chars-per-token from ONE real usage sample. `usage` is the last
+ * assistant message's usage; `context` is the context at the moment of that
+ * call (it MAY include the last assistant message itself — it is excluded
+ * from the estimate, since its tokens were not in the prompt); `systemChars`
+ * is the system prompt's char count (its tokens are in the prompt but not in
+ * the message list — added to the estimate, since the prompt included them).
+ *
+ * Ratio: estimated prompt (messages + system, chars/4) ÷ actual prompt
+ * tokens (usage.input = totalTokens − output). Returns 4 (uncalibrated)
+ * when the sample is degenerate; clamped to [1, 4] so a pathological sample
+ * can't collapse the budget (Cline caps the same underestimate factor at 4).
+ */
+export function calibrateCharsPerToken(
+  usage: Usage,
+  context: AgentMessage[],
+  systemChars: number,
+): number {
+  let est = estimateTokens(context);
+  const last = context[context.length - 1];
+  if (last && last.role === "assistant") est -= estimateMessageTokens(last);
+  est += Math.ceil(systemChars / 4);
+  const actual = usage.input; // prompt tokens (system + messages + tool schema)
+  if (est <= 0 || actual <= 0) return 4;
+  return Math.min(4, Math.max(1, (4 * est) / actual));
 }
 
 /**
@@ -130,10 +159,11 @@ function unitBoundaries(context: AgentMessage[]): number[] {
 export function planCompaction(
   context: AgentMessage[],
   keepTokens = 8192,
+  charsPerToken = 4,
 ): CompactionPlan | undefined {
   const bounds = unitBoundaries(context);
   if (bounds.length < 3) return undefined; // need ≥1 unit to fold + ≥2 kept
-  const per = context.map(estimateMessageTokens);
+  const per = context.map((m) => estimateMessageTokens(m, charsPerToken));
 
   // Walk backward from the last unit, growing the kept suffix until it
   // reaches keepTokens; never below the 2nd unit (kept ≥ 2 units,
@@ -299,6 +329,8 @@ export async function compactContext(opts: {
   signal: AbortSignal;
   context: AgentMessage[];
   keepTokens?: number;
+  /** Calibrated chars-per-token (calibrateCharsPerToken); default 4. */
+  charsPerToken?: number;
 }): Promise<CompactContextResult | undefined> {
   let lastAssistant: AssistantMessage | undefined;
   for (let i = opts.context.length - 1; i >= 0; i--) {
@@ -316,7 +348,8 @@ export async function compactContext(opts: {
   // the window (WS10 e2e s12). Cap it at what the trigger already budgets:
   // window - maxTokens - slack.
   const windowCap = Math.max(512, opts.model.contextWindow - opts.model.maxTokens - 1024);
-  const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap));
+  const cpt = opts.charsPerToken ?? 4;
+  const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap), cpt);
   if (!plan) return undefined;
 
   let text = "";

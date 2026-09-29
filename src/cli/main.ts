@@ -67,6 +67,7 @@ import {
   resolveModel,
 } from "../config/models.js";
 import {
+  calibrateCharsPerToken,
   compactContext,
   estimateTokens,
   makeSummaryMessage,
@@ -539,11 +540,15 @@ export async function runTurn(opts: {
   noCompact?: boolean;
   /** WS9: estimated tokens kept after a compaction (default 8192). */
   compactKeepTokens?: number;
+  /** Calibrated chars-per-token (calibrateCharsPerToken) — session-lifetime
+   *  state the driver carries across turns; runTurn refines it from each
+   *  assistant usage and returns the updated value. Default 4 (uncalibrated). */
+  charsPerToken?: number;
   /** WS10: extra consumer of the event stream (the TUI renders from it). */
   tap?: (ev: AgentEvent) => void;
   /** Steering queue (TUI): guidance typed during the run, drained per turn. */
   steeringQueue?: SteeringQueue;
-}): Promise<{ outcome: RunOutcome; context: AgentMessage[] }> {
+}): Promise<{ outcome: RunOutcome; context: AgentMessage[]; charsPerToken: number }> {
   const { controller, context, session } = opts;
   const user: UserMessage = { role: "user", content: opts.prompt, timestamp: Date.now() };
   const seeded: AgentMessage[] = [...context, user];
@@ -564,15 +569,28 @@ export async function runTurn(opts: {
   // present) additionally gets a `compaction` entry so a resume replays the
   // boundary. The UI gets a context_compacted event. A failed/empty summary
   // call skips compaction (context unchanged) — it never fails the run (I3).
+  // Session-lifetime calibrated chars-per-token (A1): the driver seeds it
+  // (opts.charsPerToken) and each runTurn returns the refined value.
+  let cpt = opts.charsPerToken ?? 4;
   let prepareNextTurn: ((ctx: AgentMessage[]) => Promise<AgentMessage[] | undefined>) | undefined;
   if (!opts.noCompact) {
     prepareNextTurn = async (ctx: AgentMessage[]) => {
+      // Calibrate the token estimate from the last real usage (chars/4
+      // underestimates dense code/JSON 2–3×, which would leave the
+      // compacted context OVER the window → immediate re-compaction).
+      const lastAsst = [...ctx]
+        .reverse()
+        .find((m): m is AssistantMessage => m.role === "assistant");
+      if (lastAsst?.usage) {
+        cpt = calibrateCharsPerToken(lastAsst.usage, ctx, opts.systemPrompt.length);
+      }
       const r = await compactContext({
         streamFn: opts.streamFn,
         model: opts.model,
         signal: controller.signal,
         context: ctx,
         keepTokens: opts.compactKeepTokens,
+        charsPerToken: cpt,
       });
       if (!r) {
         // I3 skip visibility (WS10 e2e s12): when the trigger DID fire, a
@@ -613,7 +631,7 @@ export async function runTurn(opts: {
         tokensBefore: r.tokensBefore,
         messagesKept: r.kept.length,
         summaryChars: r.summary.length,
-        contextTokens: estimateTokens(newContext),
+        contextTokens: estimateTokens(newContext, cpt),
       });
       return newContext;
     };
@@ -653,7 +671,7 @@ export async function runTurn(opts: {
     steeringQueue: opts.steeringQueue,
   });
 
-  return { outcome, context: outcome.messages };
+  return { outcome, context: outcome.messages, charsPerToken: cpt };
 }
 
 // ─────────────────────────────────── main ───────────────────────────────────
@@ -956,6 +974,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // session (resume / create / --session-auto)
   let session: SessionType | undefined;
   let context: AgentMessage[] = [];
+  // A1: session-lifetime calibrated chars-per-token (runTurn refines it
+  // from each assistant usage; the REPL carries it across turns).
+  let cpt = 4;
   // WS9: message → session entry id, for the session's lifetime. Seeded
   // from the replay on resume (a compaction's firstKeptEntryId must name a
   // kept message's entry); filled as new messages are appended.
@@ -1183,8 +1204,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
           prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
           executeToolCall: executor,
           entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+          charsPerToken: cpt,
         });
         context = result.context;
+        cpt = result.charsPerToken;
       } finally {
         active = false;
       }

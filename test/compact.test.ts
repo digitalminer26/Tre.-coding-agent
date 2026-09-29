@@ -4,6 +4,8 @@
  *
  * Covered:
  *   - estimateTokens / shouldCompact (the trigger)
+ *   - calibrateCharsPerToken (A1: dense → <4, sparse → clamps 4, degenerate
+ *     → 4, last-assistant exclusion) + compactContext honoring it
  *   - planCompaction invariants: unit boundaries (a toolCall is never split
  *     from its result), the last user message survives (verbatim, or via the
  *     summary when it is the only prompt), toSummarize non-empty, kept ≥ 2
@@ -30,6 +32,7 @@ import type {
 } from "../src/types.js";
 import {
   SUMMARY_MARKER,
+  calibrateCharsPerToken,
   compactContext,
   estimateTokens,
   extractFileOps,
@@ -104,6 +107,50 @@ test("estimateTokens: ~chars/4, tool results count their text", () => {
   assert.equal(estimateTokens([user("a".repeat(4000))]), 1000);
   assert.ok(estimateTokens([toolResult("x".repeat(8000))]) >= 2000);
   assert.equal(estimateTokens([]), 0);
+});
+
+test("estimateTokens: honors a calibrated charsPerToken", () => {
+  assert.equal(estimateTokens([user("a".repeat(4000))], 2), 2000);
+  assert.equal(estimateTokens([user("a".repeat(4000))], 8), 500);
+});
+
+test("calibrateCharsPerToken: dense sample → below 4; sparse → clamps at 4", () => {
+  // est: 4000-char user (1000 est) + 16000-char system (4000 est) = 5000
+  // est; actual prompt = 10000 tokens → dense content (2× the estimate),
+  // cpt = 4*5000/10000 = 2.
+  const dense = calibrateCharsPerToken(
+    usageOf(10010), // input 10000, output 10
+    [user("a".repeat(4000))],
+    16000, // system prompt char count
+  );
+  assert.equal(dense, 2);
+  // Sparse: the same 5000 est tokens measured only 1250 actual prompt
+  // tokens → 4*5000/1250 = 16 → clamped at 4 (the chars/4 default).
+  const sparse = calibrateCharsPerToken(
+    usageOf(1260), // input 1250, output 10
+    [user("a".repeat(4000))],
+    16000,
+  );
+  assert.equal(sparse, 4);
+});
+
+test("calibrateCharsPerToken: degenerate samples → 4 (uncalibrated)", () => {
+  // no messages, no system → est 0
+  assert.equal(calibrateCharsPerToken(usageOf(100), [], 0), 4);
+  // zero usage
+  assert.equal(calibrateCharsPerToken({ input: 0, output: 0, totalTokens: 0 }, [user("abc")], 0), 4);
+});
+
+test("calibrateCharsPerToken: excludes the last assistant message from the estimate", () => {
+  // context includes the assistant message whose usage is the sample: its
+  // tokens were NOT in the prompt. est = 4000-char user (1000) only;
+  // actual 1000 → cpt 4 (ratio 1).
+  const cpt = calibrateCharsPerToken(
+    usageOf(1010), // input 1000, output 10
+    [user("a".repeat(4000)), assistantText("b".repeat(4000))],
+    0,
+  );
+  assert.equal(cpt, 4);
 });
 
 test("shouldCompact: no usage → false; under budget → false; over → true", () => {
@@ -364,6 +411,41 @@ test("compactContext: keep target is capped by the model's window (small-window 
   assert.ok(r, "compaction happened");
   assert.equal(r!.kept[0], ctx[2]!, "the keep window stops at the capped size (unit 2)");
   assert.deepEqual(r!.kept, ctx.slice(2), "kept is the suffix from unit 2");
+});
+
+test("compactContext: calibrated charsPerToken shrinks the keep window for dense content", async () => {
+  // Each big message ~2000 est tokens at chars/4. With cpt 2 (dense), each
+  // counts ~4000, so the keep walk stops earlier (keeps fewer messages)
+  // than the uncalibrated default.
+  const big = "x".repeat(8000); // ~2000 est at chars/4
+  const ctx: AgentMessage[] = [
+    user("old " + "y".repeat(8000)), // unit 0
+    assistantText(big), // unit 1
+    user("mid " + "y".repeat(8000)), // unit 2
+    assistantText(big), // unit 3
+    user("current task"), // unit 4
+    assistantText("ok", usageOf(3100)), // unit 5 (trigger: 3100+100+1024 > 4000)
+  ];
+  const small: ModelConfig = { ...MODEL, contextWindow: 4000, maxTokens: 100 };
+  const sig = new AbortController().signal;
+  const rDefault = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: "SUMMARY." }]),
+    model: small,
+    signal: sig,
+    context: ctx,
+  });
+  const rDense = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: "SUMMARY." }]),
+    model: small,
+    signal: sig,
+    context: ctx,
+    charsPerToken: 2,
+  });
+  assert.ok(rDefault && rDense);
+  assert.ok(
+    rDense!.kept.length < rDefault!.kept.length,
+    `dense cpt keeps fewer messages (${rDense!.kept.length} < ${rDefault!.kept.length})`,
+  );
 });
 
 test("compactContext: empty summary text → undefined (skip, keep context)", async () => {

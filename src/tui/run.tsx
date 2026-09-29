@@ -198,6 +198,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     state = { ...state, items: [{ kind: "info", text: opts.startupInfo }] };
   }
   let context: AgentMessage[] = opts.context;
+  // A1: session-lifetime calibrated chars-per-token (runTurn refines it
+  // from each assistant usage; carried across turns like `context`).
+  let cpt = 4;
   let exitCode = 0;
   let controller = new AbortController();
   let mounted = true;
@@ -340,10 +343,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         entryIds: opts.entryIds,
         noCompact: opts.noCompact,
         compactKeepTokens: opts.compactKeepTokens,
+        charsPerToken: cpt,
         steeringQueue: steerQueue,
         tap: (ev) => setState(applyEvent(state, ev)),
       });
       context = result.context;
+      cpt = result.charsPerToken;
       return result.context;
     } catch (err) {
       // I3: runTurn does not throw for expected failures — this is a net.
