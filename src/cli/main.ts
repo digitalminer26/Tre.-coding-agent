@@ -71,7 +71,9 @@ import {
   compactContext,
   estimateTokens,
   makeSummaryMessage,
+  ruleBasedShrink,
   shouldCompact,
+  SUMMARY_MARKER,
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
 import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
@@ -453,8 +455,11 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       break;
     }
     case "context_compacted":
+      // D: degraded = the LLM summary failed twice; the folded prefix was
+      // replaced by a rule-based notice (no LLM summary).
+      const degradedNote = ev.degraded ? " [degraded: rule-based shrink, no LLM summary]" : "";
       sinks.err.write(
-        `\n✂ context compacted: ~${Math.round(ev.tokensBefore / 100) / 10}k tokens → summary (${ev.summaryChars} chars) + last ${ev.messagesKept} message(s) kept\n`,
+        `\n✂ context compacted: ~${Math.round(ev.tokensBefore / 100) / 10}k tokens → summary (${ev.summaryChars} chars) + last ${ev.messagesKept} message(s) kept${degradedNote}\n`,
       );
       break;
     case "turn_budget":
@@ -505,6 +510,115 @@ async function flushSinks(sinks: PrintSinks): Promise<void> {
     new Promise<void>((r) => sinks.out.write("", () => r())),
     new Promise<void>((r) => sinks.err.write("", () => r())),
   ]);
+}
+
+// ─────────────────────────────── compaction (shared) ───────────────────────────────
+
+/**
+ * D — the compaction ladder, shared by the auto trigger (prepareNextTurn)
+ * and the manual `/compact` (A6). When the trigger fired (or `force`) but
+ * `compactContext` returned undefined:
+ *   1. retry once with a shrunken transcript (halved clips) — covers
+ *      transient failures and "summarizer input too big";
+ *   2. rule-based fallback (no LLM) — the folded prefix becomes a small
+ *      notice (SUMMARY_MARKER + count + file ops); the event carries
+ *      `degraded: true`;
+ *   3. no plan at all (context too short to fold) → skip, stderr message.
+ * Session entry + `context_compacted` event are written here (one place).
+ * Returns the new context, or undefined when nothing could be compacted.
+ */
+export async function compactNow(deps: {
+  streamFn: StreamFn;
+  model: ModelConfig;
+  signal: AbortSignal;
+  context: AgentMessage[];
+  session?: SessionType | null;
+  ids: Map<AgentMessage, string>;
+  systemPrompt: string;
+  compactKeepTokens?: number;
+  charsPerToken?: number;
+  /** A6: skip the shouldCompact trigger check (manual /compact). */
+  force?: boolean;
+  sinks: PrintSinks;
+  onEvent: (ev: AgentEvent) => Promise<void>;
+}): Promise<AgentMessage[] | undefined> {
+  const { session, ids, sinks } = deps;
+  const cpt = deps.charsPerToken ?? 4;
+  const lastAsst = [...deps.context]
+    .reverse()
+    .find((m): m is AssistantMessage => m.role === "assistant");
+  if (!deps.force && !shouldCompact(lastAsst?.usage, deps.model.contextWindow, deps.model.maxTokens)) {
+    return undefined;
+  }
+  const tokensBefore = lastAsst?.usage?.totalTokens ?? 0;
+  const windowCap = Math.max(512, deps.model.contextWindow - deps.model.maxTokens - 1024);
+  const keepTokens = Math.min(deps.compactKeepTokens ?? 8192, windowCap);
+  const emit = async (
+    rawSummary: string,
+    kept: AgentMessage[],
+    degraded: boolean,
+  ): Promise<AgentMessage[] | undefined> => {
+    const summaryMsg = makeSummaryMessage(rawSummary);
+    if (session) {
+      const firstId = ids.get(kept[0]!);
+      if (!firstId) {
+        sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");
+        return undefined;
+      }
+      const entryId = await session.appendCompaction(rawSummary, firstId, tokensBefore);
+      ids.set(summaryMsg, entryId);
+    }
+    const newContext = [summaryMsg, ...kept];
+    await deps.onEvent({
+      type: "context_compacted",
+      tokensBefore,
+      messagesKept: kept.length,
+      summaryChars: rawSummary.length,
+      contextTokens: estimateTokens(newContext, cpt),
+      ...(degraded ? { degraded: true } : {}),
+    });
+    return newContext;
+  };
+
+  let r = await compactContext({
+    streamFn: deps.streamFn,
+    model: deps.model,
+    signal: deps.signal,
+    context: deps.context,
+    keepTokens,
+    charsPerToken: cpt,
+    force: deps.force,
+  });
+  if (r) return await emit(r.summary, r.kept, false);
+
+  // D1: retry once with a shrunken transcript (halved clips).
+  sinks.err.write("compaction: summary call failed — retrying with a smaller transcript\n");
+  r = await compactContext({
+    streamFn: deps.streamFn,
+    model: deps.model,
+    signal: deps.signal,
+    context: deps.context,
+    keepTokens,
+    charsPerToken: cpt,
+    transcriptOpts: { perMessageChars: 750, totalChars: 12000 },
+    force: deps.force,
+  });
+  if (r) return await emit(r.summary, r.kept, false);
+
+  // D2: rule-based fallback (no LLM).
+  const shrink = ruleBasedShrink(deps.context, keepTokens, cpt);
+  if (shrink) {
+    sinks.err.write("compaction: summary failed twice — fell back to rule-based shrink\n");
+    // The notice is a full UserMessage (marker + raw); the session entry
+    // stores the raw part so replay re-adds the marker (same as the LLM path).
+    const raw = shrink.notice.content.startsWith(SUMMARY_MARKER)
+      ? shrink.notice.content.slice(SUMMARY_MARKER.length + 2)
+      : shrink.notice.content;
+    return await emit(raw, shrink.kept, true);
+  }
+  // D3: context too short to fold — today's skip behavior.
+  sinks.err.write("compaction failed and no safe shrink is possible — the next call may exceed the window.\n");
+  return undefined;
 }
 
 // ─────────────────────────────── one turn (persist) ───────────────────────────────
@@ -584,56 +698,21 @@ export async function runTurn(opts: {
       if (lastAsst?.usage) {
         cpt = calibrateCharsPerToken(lastAsst.usage, ctx, opts.systemPrompt.length);
       }
-      const r = await compactContext({
+      // D: the trigger check, retry ladder, rule-based fallback, session
+      // entry, and the context_compacted event all live in compactNow.
+      return compactNow({
         streamFn: opts.streamFn,
         model: opts.model,
         signal: controller.signal,
         context: ctx,
-        keepTokens: opts.compactKeepTokens,
+        session,
+        ids,
+        systemPrompt: opts.systemPrompt,
+        compactKeepTokens: opts.compactKeepTokens,
         charsPerToken: cpt,
+        sinks: opts.sinks,
+        onEvent: report,
       });
-      if (!r) {
-        // I3 skip visibility (WS10 e2e s12): when the trigger DID fire, a
-        // missing result means the summary call failed or came back empty —
-        // say so, instead of the skip being invisible.
-        const lastAsst = [...ctx]
-          .reverse()
-          .find((m): m is AssistantMessage => m.role === "assistant");
-        if (
-          lastAsst &&
-          shouldCompact(
-            lastAsst.usage,
-            opts.model.contextWindow,
-            opts.model.maxTokens,
-          )
-        ) {
-          opts.sinks.err.write(
-            "compaction skipped: summary call failed or returned empty (context unchanged)\n",
-          );
-        }
-        return undefined;
-      }
-      const summaryMsg = makeSummaryMessage(r.summary);
-      if (session) {
-        // The compaction entry references the first kept message so a resume
-        // knows where the summary boundary is — session-only bookkeeping.
-        const firstId = ids.get(r.kept[0]!);
-        if (!firstId) {
-          opts.sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");
-          return undefined;
-        }
-        const entryId = await session.appendCompaction(r.summary, firstId, r.tokensBefore);
-        ids.set(summaryMsg, entryId);
-      }
-      const newContext = [summaryMsg, ...r.kept];
-      await report({
-        type: "context_compacted",
-        tokensBefore: r.tokensBefore,
-        messagesKept: r.kept.length,
-        summaryChars: r.summary.length,
-        contextTokens: estimateTokens(newContext, cpt),
-      });
-      return newContext;
     };
   }
 

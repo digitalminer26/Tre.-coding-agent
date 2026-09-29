@@ -23,6 +23,7 @@ import { join, dirname, basename } from "node:path";
 import { fakeStream } from "./fake-stream.js";
 import {
   behaviorSettingsLines,
+  compactNow,
   defaultSkillDirs,
   exitCodeFor,
   main,
@@ -1272,7 +1273,7 @@ test("WS9: sessionless run still compacts (context management, not persistence)"
   assert.match(seen[4]!.first, /SUMMARY: the earlier turns were answered\./);
 });
 
-test("WS9: failed summary call → run continues uncompacted (I3)", async (t) => {
+test("WS9: failed summary call → D ladder: retry fails too → rule-based fallback (degraded), run continues", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
   await seedHistory(dir, models, session);
@@ -1280,6 +1281,7 @@ test("WS9: failed summary call → run continues uncompacted (I3)", async (t) =>
   const base = fakeStream([
     { type: "toolcall", calls: [{ name: "bash", args: { command: "echo fresh" } }], usage: { input: 1890, output: 10, totalTokens: 1900 } },
     { type: "error", message: "summarizer down" }, // the silent call fails
+    { type: "error", message: "summarizer still down" }, // the retry fails too
     { type: "text", text: "final" },
   ]);
   const S = mkSinks();
@@ -1288,8 +1290,205 @@ test("WS9: failed summary call → run continues uncompacted (I3)", async (t) =>
     sinks: S.sinks,
   });
   assert.equal(code, 0, "a failed summary call never fails the run");
-  assert.doesNotMatch(S.err(), /context compacted/);
+  assert.match(S.err(), /retrying with a smaller transcript/, "the retry is announced");
+  assert.match(S.err(), /rule-based shrink/, "the fallback is announced");
+  assert.match(S.err(), /✂ context compacted.*degraded/, "the ✂ line notes the degraded mode");
   const replayed = await replaySession(session);
-  assert.equal(replayed.context.length, 6, "context kept whole (+ turn 2's final answer)");
-  assert.equal(replayed.entries.some((e) => e.type === "compaction"), false, "no compaction entry");
+  // [notice, a1, u2, a1', tr] + turn 2's final answer = 6 — the folded
+  // prefix (u1) is replaced by the rule-based notice.
+  assert.equal(replayed.context.length, 6);
+  const head = replayed.context[0]!;
+  assert.equal(head.role, "user");
+  if (head.role === "user") {
+    assert.match(head.content, /Compaction summary of earlier context/);
+    assert.match(head.content, /discarded without an LLM summary/);
+  }
+  // The fallback still wrote a compaction entry (replay boundary).
+  const compact = replayed.entries.find((e) => e.type === "compaction");
+  assert.ok(compact, "a compaction entry was appended");
+  if (compact.type === "compaction") {
+    assert.ok(replayed.contextEntryIds.includes(compact.firstKeptEntryId), "firstKeptEntryId resolves");
+  }
+});
+
+// ─────────────────────────────── D: compactNow (failure escalation) ───────────────────────────────
+
+/** A context that trips the trigger on SMALL_WINDOW (2000/100): the last
+ *  assistant usage (1900) + maxTokens (100) + slack (1024) > 2000. */
+function overBudgetContext(): AgentMessage[] {
+  return [
+    { role: "user", content: "q1".repeat(200), timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "src/a.ts" } }],
+      model: "fake-model",
+      provider: "fake",
+      stopReason: "toolUse",
+      timestamp: 2,
+      usage: { input: 1890, output: 10, totalTokens: 1900 },
+    },
+    // Big folded tool result: the retry's shrunken clips (750/12000 vs
+    // 1500/24000) actually make the retry prompt smaller.
+    { role: "toolResult", toolCallId: "call_1", toolName: "read", content: [{ type: "text", text: "r".repeat(10000) }], timestamp: 3 },
+    // The kept tail must reach keepTokens (windowCap 876) so the folded
+    // prefix includes the toolCall unit (its file op lands in the notice).
+    { role: "user", content: "q2".repeat(2000), timestamp: 4 },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "a2".repeat(2000) }],
+      model: "fake-model",
+      provider: "fake",
+      stopReason: "stop",
+      timestamp: 5,
+      usage: { input: 1890, output: 10, totalTokens: 1900 },
+    },
+  ];
+}
+
+function compactNowDeps(streamFn: StreamFn, extra?: Record<string, unknown>) {
+  const events: AgentEvent[] = [];
+  const S = mkSinks();
+  return {
+    deps: {
+      streamFn,
+      model: SMALL_WINDOW,
+      signal: new AbortController().signal,
+      context: overBudgetContext(),
+      session: null,
+      ids: new Map<AgentMessage, string>(),
+      systemPrompt: "sys",
+      sinks: S.sinks,
+      onEvent: async (ev: AgentEvent) => {
+        events.push(ev);
+      },
+      ...extra,
+    },
+    events,
+    err: S.err,
+  };
+}
+
+test("D: compactNow — first call fails, retry succeeds (no degraded flag)", async () => {
+  const { deps, events, err } = compactNowDeps(
+    fakeStream([{ type: "error", message: "down" }, { type: "text", text: "SUMMARY." }]),
+  );
+  const r = await compactNow(deps);
+  assert.ok(r, "the retry produced a new context");
+  assert.equal(r![0]!.role, "user");
+  if (r![0]!.role === "user") assert.match(r![0]!.content, /SUMMARY\./);
+  assert.match(err(), /retrying with a smaller transcript/);
+  assert.doesNotMatch(err(), /rule-based shrink/);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.type, "context_compacted");
+  if (events[0]!.type === "context_compacted") assert.equal(events[0]!.degraded, undefined);
+});
+
+test("D: compactNow — both calls fail → rule-based fallback, degraded: true", async () => {
+  const { deps, events, err } = compactNowDeps(
+    fakeStream([{ type: "error", message: "down" }, { type: "error", message: "still down" }]),
+  );
+  const r = await compactNow(deps);
+  assert.ok(r, "the fallback produced a new context");
+  assert.equal(r![0]!.role, "user");
+  if (r![0]!.role === "user") {
+    assert.match(r![0]!.content, /Compaction summary of earlier context/);
+    assert.match(r![0]!.content, /discarded without an LLM summary/);
+    // C3: the folded prefix's file ops survive in the notice.
+    assert.match(r![0]!.content, /src\/a\.ts/);
+  }
+  assert.match(err(), /summary failed twice — fell back to rule-based shrink/);
+  assert.equal(events.length, 1);
+  if (events[0]!.type === "context_compacted") assert.equal(events[0]!.degraded, true);
+  // The context strictly shrank.
+  assert.ok(r!.length < deps.context.length);
+});
+
+test("D: compactNow — retry prompt is smaller than the first", async () => {
+  const ctxs: LlmContext[] = [];
+  const base = fakeStream([{ type: "error", message: "down" }, { type: "text", text: "S." }]);
+  const fn: StreamFn = (m, ctx, o) => {
+    ctxs.push({ ...ctx, messages: [...ctx.messages] });
+    return base(m, ctx, o);
+  };
+  const { deps } = compactNowDeps(fn);
+  const r = await compactNow(deps);
+  assert.ok(r);
+  assert.equal(ctxs.length, 2);
+  const first = ctxs[0]!.messages[0]!;
+  const second = ctxs[1]!.messages[0]!;
+  assert.equal(first.role, "user");
+  assert.equal(second.role, "user");
+  assert.ok(second.content.length < first.content.length, "the retry prompt is smaller");
+});
+
+test("D: compactNow — trigger not met → undefined, no LLM call", async () => {
+  let calls = 0;
+  const fn: StreamFn = () => {
+    calls += 1;
+    return (async function* () {})();
+  };
+  const { deps, events } = compactNowDeps(fn, {
+    context: [
+      { role: "user", content: "q1", timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "a1" }],
+        model: "fake-model",
+        provider: "fake",
+        stopReason: "stop",
+        timestamp: 2,
+        usage: { input: 100, output: 10, totalTokens: 110 },
+      },
+    ],
+  });
+  const r = await compactNow(deps);
+  assert.equal(r, undefined);
+  assert.equal(calls, 0, "no summarizer call when the trigger is not met");
+  assert.equal(events.length, 0);
+});
+
+test("D: compactNow — force: true compacts even when the trigger is not met", async () => {
+  const { deps, events } = compactNowDeps(
+    fakeStream([{ type: "text", text: "SUMMARY." }]),
+    {
+      force: true,
+      // Sized so a plan exists (the tail reaches keepTokens 876 and the
+      // first unit is foldable).
+      context: [
+        { role: "user", content: "q1".repeat(1000), timestamp: 1 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "a1".repeat(1000) }],
+          model: "fake-model",
+          provider: "fake",
+          stopReason: "stop",
+          timestamp: 2,
+          usage: { input: 100, output: 10, totalTokens: 110 },
+        },
+        { role: "user", content: "q2".repeat(1000), timestamp: 3 },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "a2".repeat(1000) }],
+          model: "fake-model",
+          provider: "fake",
+          stopReason: "stop",
+          timestamp: 4,
+          usage: { input: 100, output: 10, totalTokens: 110 },
+        },
+      ],
+    },
+  );
+  const r = await compactNow(deps);
+  assert.ok(r, "force compacts without the trigger");
+  if (events[0]!.type === "context_compacted") assert.equal(events[0]!.degraded, undefined);
+});
+
+test("D: compactNow — force with a too-short context → undefined (no plan)", async () => {
+  const { deps, err } = compactNowDeps(
+    fakeStream([{ type: "text", text: "S." }]),
+    { force: true, context: [{ role: "user", content: "q1", timestamp: 1 }] },
+  );
+  const r = await compactNow(deps);
+  assert.equal(r, undefined);
+  assert.match(err(), /no safe shrink is possible/);
 });

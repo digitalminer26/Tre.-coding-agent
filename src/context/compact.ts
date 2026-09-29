@@ -292,9 +292,13 @@ function filesSection(plan: CompactionPlan): string {
   return lines.join("\n");
 }
 
-/** The user message for the summarizer call. */
-export function summarizePrompt(plan: CompactionPlan): string {
-  const transcript = renderTranscript(plan.toSummarize);
+/** The user message for the summarizer call. `transcriptOpts` (D retry)
+ *  shrink the transcript clips. */
+export function summarizePrompt(
+  plan: CompactionPlan,
+  transcriptOpts?: { perMessageChars?: number; totalChars?: number },
+): string {
+  const transcript = renderTranscript(plan.toSummarize, transcriptOpts);
   const files = filesSection(plan);
   const base = `Summarize the conversation below so the agent can continue without seeing it. Use these sections:
 1. GOAL — the user's goal(s) and constraints they stated, verbatim where possible.
@@ -317,6 +321,32 @@ export interface CompactContextResult {
 }
 
 /**
+ * D — deterministic shrink, no LLM. Same keep plan as `planCompaction`, but
+ * the folded prefix is replaced by a small notice user message
+ * (SUMMARY_MARKER + message count + the deterministic file-ops list)
+ * instead of an LLM summary. The marker keeps session replay,
+ * `isSummaryMessage`, and the iterative fold-in working unchanged; the
+ * context strictly shrinks (notice ≈ a few hundred chars vs. the folded
+ * prefix). Returns undefined when no plan exists (context too short).
+ */
+export function ruleBasedShrink(
+  context: AgentMessage[],
+  keepTokens: number,
+  charsPerToken: number,
+): { notice: UserMessage; kept: AgentMessage[] } | undefined {
+  const plan = planCompaction(context, keepTokens, charsPerToken);
+  if (!plan) return undefined;
+  const ops = extractFileOps(plan.toSummarize);
+  const lines = [
+    `Earlier context (${plan.toSummarize.length} message(s)) was discarded without an LLM summary (the summarizer call failed).`,
+    "Only the recent tail below is retained; re-read any file you need.",
+  ];
+  if (ops.read.length > 0) lines.push(`FILES read: ${ops.read.join(", ")}`);
+  if (ops.modified.length > 0) lines.push(`FILES modified: ${ops.modified.join(", ")}`);
+  return { notice: makeSummaryMessage(lines.join("\n")), kept: plan.kept };
+}
+
+/**
  * Run a compaction if `context` needs it: check the trigger on the last
  * assistant message's usage, plan the split, and make ONE silent summarizer
  * call (no tools). Returns undefined — never throws — when compaction is not
@@ -331,6 +361,10 @@ export async function compactContext(opts: {
   keepTokens?: number;
   /** Calibrated chars-per-token (calibrateCharsPerToken); default 4. */
   charsPerToken?: number;
+  /** D — retry with a shrunken transcript (halved clips). */
+  transcriptOpts?: { perMessageChars?: number; totalChars?: number };
+  /** A6 — skip the shouldCompact trigger check (manual /compact). */
+  force?: boolean;
 }): Promise<CompactContextResult | undefined> {
   let lastAssistant: AssistantMessage | undefined;
   for (let i = opts.context.length - 1; i >= 0; i--) {
@@ -340,7 +374,7 @@ export async function compactContext(opts: {
       break;
     }
   }
-  if (!shouldCompact(lastAssistant?.usage, opts.model.contextWindow, opts.model.maxTokens)) {
+  if (!opts.force && !shouldCompact(lastAssistant?.usage, opts.model.contextWindow, opts.model.maxTokens)) {
     return undefined;
   }
   // The keep target must fit the model's window: with a small contextWindow,
@@ -357,7 +391,9 @@ export async function compactContext(opts: {
   try {
     for await (const ev of opts.streamFn(opts.model, {
       systemPrompt: SUMMARIZER_SYSTEM,
-      messages: [{ role: "user", content: summarizePrompt(plan), timestamp: Date.now() }],
+      messages: [
+        { role: "user", content: summarizePrompt(plan, opts.transcriptOpts), timestamp: Date.now() },
+      ],
       tools: [],
     }, { signal: opts.signal })) {
       if (ev.type === "text_delta") text += ev.delta;
@@ -370,5 +406,5 @@ export async function compactContext(opts: {
     failed = true;
   }
   if (failed || text.trim() === "") return undefined;
-  return { summary: text.trim(), kept: plan.kept, tokensBefore: lastAssistant!.usage!.totalTokens };
+  return { summary: text.trim(), kept: plan.kept, tokensBefore: lastAssistant?.usage?.totalTokens ?? 0 };
 }

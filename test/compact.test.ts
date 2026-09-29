@@ -39,6 +39,7 @@ import {
   isSummaryMessage,
   makeSummaryMessage,
   planCompaction,
+  ruleBasedShrink,
   renderTranscript,
   shouldCompact,
   summarizePrompt,
@@ -445,6 +446,92 @@ test("compactContext: calibrated charsPerToken shrinks the keep window for dense
   assert.ok(
     rDense!.kept.length < rDefault!.kept.length,
     `dense cpt keeps fewer messages (${rDense!.kept.length} < ${rDefault!.kept.length})`,
+  );
+});
+
+// ─────────────────────────────── D: failure escalation ───────────────────────────────
+
+test("ruleBasedShrink: context too short → undefined (no plan)", () => {
+  assert.equal(ruleBasedShrink([user("q"), assistantText("a")], 8192, 4), undefined);
+});
+
+test("ruleBasedShrink: same keep plan as planCompaction; marker; strictly smaller; file ops", () => {
+  // Sizing: the tail (u2 + a2 = 8500 est) exceeds keepTokens (8192) so the
+  // keep window stops at u2 and BOTH toolCall units are FOLDED (their file
+  // ops land in the notice).
+  const ctx: AgentMessage[] = [
+    user("q1".repeat(200)),
+    assistantToolCall("read", { path: "src/a.ts" }),
+    toolResult("r".repeat(32000)),
+    assistantToolCall("write", { path: "src/b.ts" }),
+    toolResult("bbb"),
+    user("q2".repeat(17000)),
+    assistantText("a2".repeat(17000)),
+  ];
+  const shrink = ruleBasedShrink(ctx, 8192, 4);
+  assert.ok(shrink);
+  const plan = planCompaction(ctx, 8192, 4)!;
+  assert.equal(shrink!.kept.length, plan.kept.length, "same keep plan (unit boundary)");
+  assert.deepEqual(shrink!.kept, plan.kept);
+  // The notice is a summary message (replay / iterative fold-in keep working).
+  assert.ok(isSummaryMessage(shrink!.notice));
+  assert.ok(shrink!.notice.content.startsWith(SUMMARY_MARKER));
+  // The context strictly shrinks.
+  assert.ok(
+    estimateTokens([shrink!.notice, ...shrink!.kept]) < estimateTokens(ctx),
+    "shrunken context is smaller than the original",
+  );
+  // The folded prefix's file ops survive in the notice (C3).
+  assert.match(shrink!.notice.content, /src\/a\.ts/);
+  assert.match(shrink!.notice.content, /src\/b\.ts/);
+  // Unit boundaries intact: kept starts on a unit boundary, never a toolResult.
+  assert.notEqual(shrink!.kept[0]!.role, "toolResult");
+});
+
+test("summarizePrompt: transcriptOpts shrink the prompt (D retry)", () => {
+  const long = "x".repeat(5000);
+  const ctx: AgentMessage[] = [
+    user(long),
+    assistantText("a".repeat(5000)),
+    user("q2"),
+    assistantText("a2"),
+  ];
+  const plan = planCompaction(ctx, 8192, 4)!;
+  const full = summarizePrompt(plan);
+  const shrunken = summarizePrompt(plan, { perMessageChars: 750, totalChars: 12000 });
+  assert.ok(shrunken.length < full.length, "shrunken prompt is smaller");
+  assert.ok(shrunken.length < 12000 + 2000, "bounded by totalChars + section overhead");
+});
+
+test("compactContext: transcriptOpts pass through to the summarizer prompt", async () => {
+  const long = "x".repeat(5000);
+  const ctx: AgentMessage[] = [
+    user(long),
+    assistantText("a".repeat(5000)),
+    user("q2"),
+    assistantToolCall("bash", { command: "ls" }, usageOf(1900)),
+    toolResult("ok"),
+  ];
+  const { fn, ctxs } = withCapture(
+    fakeStream([{ type: "text", text: "SUMMARY." }, { type: "text", text: "SUMMARY2." }]),
+  );
+  const sig = new AbortController().signal;
+  await compactContext({ streamFn: fn, model: MODEL, signal: sig, context: ctx });
+  await compactContext({
+    streamFn: fn,
+    model: MODEL,
+    signal: sig,
+    context: ctx,
+    transcriptOpts: { perMessageChars: 750, totalChars: 12000 },
+  });
+  assert.equal(ctxs.length, 2);
+  const first = ctxs[0]!.messages[0]!;
+  const second = ctxs[1]!.messages[0]!;
+  assert.equal(first.role, "user");
+  assert.equal(second.role, "user");
+  assert.ok(
+    (second.content.length < first.content.length),
+    "the retry prompt is smaller than the first",
   );
 });
 

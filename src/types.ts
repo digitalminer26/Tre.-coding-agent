@@ -216,6 +216,9 @@ export type AgentEvent =
       /** Estimated tokens of the NEW context ([summary, …kept]) — what the
        *  next prompt starts from (estimateTokens; chars/4). */
       contextTokens?: number;
+      /** D (failure escalation): the summary call failed twice and the
+       *  context was shrunk by the rule-based fallback (no LLM summary). */
+      degraded?: boolean;
     }
   | AssistantStreamEvent;
 
