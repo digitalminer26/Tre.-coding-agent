@@ -206,12 +206,23 @@ function clip(s: string, max: number): string {
   return `${s.slice(0, half)}\n…[truncated ${s.length - max} chars]…\n${s.slice(s.length - half)}`;
 }
 
-/** Render messages as a transcript for the summarizer prompt. */
+/** Render messages as a transcript for the summarizer prompt.
+ *  A2: thinking blocks are the most ephemeral content — EXCLUDED by default
+ *  (`includeThinking: true` opts back in). A3: tool results get their own
+ *  clip (`toolResultChars`, default 2000) with the existing middle-
+ *  truncation shape (head = imports/structure, tail = final error/exit);
+ *  user/assistant lines keep the `perMessageChars` clip. */
 export function renderTranscript(
   messages: AgentMessage[],
-  opts: { perMessageChars?: number; totalChars?: number } = {},
+  opts: {
+    perMessageChars?: number;
+    totalChars?: number;
+    includeThinking?: boolean;
+    toolResultChars?: number;
+  } = {},
 ): string {
   const per = opts.perMessageChars ?? 1500;
+  const toolPer = opts.toolResultChars ?? 2000;
   const out: string[] = [];
   for (const m of messages) {
     if (m.role === "user") {
@@ -219,18 +230,19 @@ export function renderTranscript(
     } else if (m.role === "assistant") {
       for (const b of m.content) {
         if (b.type === "text" && b.text) out.push(`[Assistant] ${b.text}`);
-        if (b.type === "thinking" && b.thinking) out.push(`[Assistant thought] ${b.thinking}`);
+        if (opts.includeThinking && b.type === "thinking" && b.thinking)
+          out.push(`[Assistant thought] ${b.thinking}`);
         if (b.type === "toolCall")
           out.push(`[Assistant → tool] ${b.name} ${JSON.stringify(b.arguments)}`);
       }
     } else {
       const status = m.isError ? " (ERROR)" : "";
       for (const b of m.content) {
-        out.push(`[Tool result: ${m.toolName}${status}] ${b.text}`);
+        out.push(`[Tool result: ${m.toolName}${status}] ${clip(b.text, toolPer)}`);
       }
     }
   }
-  let text = out.map((l) => clip(l, per)).join("\n");
+  let text = out.map((l) => (l.startsWith("[Tool result:") ? l : clip(l, per))).join("\n");
   const total = opts.totalChars ?? 24000;
   if (text.length > total) text = clip(text, total);
   return text;
@@ -293,12 +305,23 @@ function filesSection(plan: CompactionPlan): string {
 }
 
 /** The user message for the summarizer call. `transcriptOpts` (D retry)
- *  shrink the transcript clips. */
+ *  shrink the transcript clips; `contextWindow` (A3) scales the total
+ *  transcript budget to the model's window. */
 export function summarizePrompt(
   plan: CompactionPlan,
-  transcriptOpts?: { perMessageChars?: number; totalChars?: number },
+  transcriptOpts?: { perMessageChars?: number; totalChars?: number; toolResultChars?: number },
+  contextWindow?: number,
 ): string {
-  const transcript = renderTranscript(plan.toSummarize, transcriptOpts);
+  // A3: the folded prefix must fit the window anyway — let the summarizer
+  // use its full available input (default 24000 for unknown windows).
+  const totalChars =
+    transcriptOpts?.totalChars ??
+    (contextWindow && contextWindow > 0 ? Math.max(24000, Math.floor(contextWindow / 4)) : 24000);
+  const transcript = renderTranscript(plan.toSummarize, {
+    includeThinking: false, // A2: decisions live in text/tool calls, not reasoning traces
+    totalChars,
+    ...transcriptOpts,
+  });
   const files = filesSection(plan);
   const base = `Summarize the conversation below so the agent can continue without seeing it. Use these sections:
 1. GOAL — the user's goal(s) and constraints they stated, verbatim where possible.
@@ -362,7 +385,7 @@ export async function compactContext(opts: {
   /** Calibrated chars-per-token (calibrateCharsPerToken); default 4. */
   charsPerToken?: number;
   /** D — retry with a shrunken transcript (halved clips). */
-  transcriptOpts?: { perMessageChars?: number; totalChars?: number };
+  transcriptOpts?: { perMessageChars?: number; totalChars?: number; toolResultChars?: number };
   /** A6 — skip the shouldCompact trigger check (manual /compact). */
   force?: boolean;
 }): Promise<CompactContextResult | undefined> {
@@ -392,7 +415,11 @@ export async function compactContext(opts: {
     for await (const ev of opts.streamFn(opts.model, {
       systemPrompt: SUMMARIZER_SYSTEM,
       messages: [
-        { role: "user", content: summarizePrompt(plan, opts.transcriptOpts), timestamp: Date.now() },
+        {
+          role: "user",
+          content: summarizePrompt(plan, opts.transcriptOpts, opts.model.contextWindow),
+          timestamp: Date.now(),
+        },
       ],
       tools: [],
     }, { signal: opts.signal })) {

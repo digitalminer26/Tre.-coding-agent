@@ -600,7 +600,7 @@ export async function compactNow(deps: {
     context: deps.context,
     keepTokens,
     charsPerToken: cpt,
-    transcriptOpts: { perMessageChars: 750, totalChars: 12000 },
+    transcriptOpts: { perMessageChars: 750, totalChars: 12000, toolResultChars: 1000 },
     force: deps.force,
   });
   if (r) return await emit(r.summary, r.kept, false);

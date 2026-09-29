@@ -285,6 +285,82 @@ test("extractFileOps: caps each list at 50, first-seen order", () => {
   assert.equal(ops.modified.length, 0);
 });
 
+test("A2: renderTranscript drops thinking by default; includeThinking restores it", () => {
+  const think: AssistantMessage = {
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "SECRET-REASONING" }, { type: "text", text: "answer" }],
+    model: "fake-model",
+    provider: "fake",
+    stopReason: "stop",
+    timestamp: 2,
+  };
+  const t = renderTranscript([think]);
+  assert.doesNotMatch(t, /SECRET-REASONING/, "thinking is excluded by default");
+  assert.match(t, /\[Assistant\] answer/);
+  const t2 = renderTranscript([think], { includeThinking: true });
+  assert.match(t2, /\[Assistant thought\] SECRET-REASONING/);
+});
+
+test("A2: summarizePrompt never includes thinking (even if the model emits it)", () => {
+  const plan: CompactionPlan = {
+    keepFrom: 1,
+    toSummarize: [
+      user("q"),
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "SECRET-REASONING" }, { type: "text", text: "a" }],
+        model: "fake-model",
+        provider: "fake",
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    ],
+    kept: [user("c"), assistantText("d")],
+    isIterative: false,
+  };
+  assert.doesNotMatch(summarizePrompt(plan), /SECRET-REASONING/);
+});
+
+test("A3: tool results are middle-truncated at toolResultChars (default 2000, head + tail survive)", () => {
+  const head = "IMPORTS-HEAD";
+  const tail = "FINAL-ERROR";
+  const body = "x".repeat(10000);
+  const t = renderTranscript([toolResult(head + body + tail)]);
+  assert.match(t, /IMPORTS-HEAD/, "the head survives");
+  assert.match(t, /FINAL-ERROR/, "the tail survives");
+  assert.match(t, /truncated/, "the middle was cut");
+  // The clip is 2000 total: the surviving x's (head + tail halves) are far
+  // below the 10000 in the middle.
+  const xCount = (t.match(/x/g) ?? []).length;
+  assert.ok(xCount < 2000, `only the clipped head+tail survive (${xCount} < 2000)`);
+  // The clip is at 2000, not the 1500 per-message default.
+  const t1500 = renderTranscript([toolResult(head + body + tail)], { toolResultChars: 1500 });
+  assert.ok(t.length > t1500.length, "2000 keeps more than 1500");
+  // Short results are unchanged.
+  assert.match(renderTranscript([toolResult("short ok")]), /\[Tool result: bash\] short ok/);
+});
+
+test("A3: summarizePrompt scales totalChars to the model's window", () => {
+  // 30 lines of ~1000 chars each: under the per-message clip (1500), over
+  // the small-window total (24000), under the big-window total (32768).
+  const many: AgentMessage[] = [];
+  for (let i = 0; i < 30; i++) many.push(user(`m${i} ` + "a".repeat(1000)));
+  const plan: CompactionPlan = {
+    keepFrom: 1,
+    toSummarize: many,
+    kept: [user("c"), assistantText("d")],
+    isIterative: false,
+  };
+  // Small window (2000): totalChars = max(24000, 500) = 24000.
+  const pSmall = summarizePrompt(plan, undefined, 2000);
+  // Big window (131072): totalChars = 32768 — the transcript survives longer.
+  const pBig = summarizePrompt(plan, undefined, 131072);
+  assert.ok(pBig.length > pSmall.length, "the bigger window keeps more of the transcript");
+  // D retry's explicit totalChars wins over the window-derived one.
+  const pRetry = summarizePrompt(plan, { totalChars: 1000 }, 131072);
+  assert.ok(pRetry.length < pBig.length);
+});
+
 test("summarizePrompt: contains the transcript; iterative asks to fold the earlier summary", () => {
   const plan = planCompaction(
     [user("a"), assistantText("b"), user("c"), assistantText("d"), user("e"), assistantText("f")],
