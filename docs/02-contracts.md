@@ -110,6 +110,33 @@ Rules:
   (no durable roots). `tre.json` is the first durable config surface; `extraRoots`
   is its first field (future fields are additive).
 
+- **C37 — background Telegram driver for the plain CLI (one-shot + REPL),
+  with loop prevention.** The TUI already polls the bot (`src/tui/run.tsx`);
+  the plain CLI did not (the user's messages were only seen after the
+  workstream finished). C37 adds a background driver
+  (`src/telegram/driver.ts` + `src/telegram/bridge.ts`) that LONG-POLLS the
+  bot (one `getUpdates` per cycle, blocking up to 30s via the helper's new
+  `poll --timeout N`) and routes each message: a turn in flight → **steer** it
+  into the running loop (the existing `SteeringQueue`); idle → run a turn and
+  reply via the bot (REPL only — one-shot is a single turn). **Loop
+  prevention is the contract's core** — a naive `while (true) { poll(); }`
+  hot-spins (hundreds of process spawns/sec) when a poll fails FAST (network
+  down, bad token). Three independent mechanisms make that impossible:
+  (1) **long-poll self-pacing** — each poll blocks up to 30s, so a no-message
+  cycle takes ~30s; (2) **min-interval guard** — a hard cap keeps ≥30s between
+  poll STARTS even if a poll returns instantly (a helper that ignores
+  `--timeout`, or a fast failure); (3) **capped exponential backoff on
+  failure** — a fast-failing poll backs off `min(base·2ⁿ, cap)` (default
+  1s→60s), so a persistent failure settles to one poll per 60s, never a spin;
+  a success (even "no message") resets the counter. The driver is also
+  **interruptible** (`stop()` kills the in-flight poll child and wakes any
+  sleep) and **single-flight** (a turn mutex serializes user + telegram turns
+  so two turns never run concurrently on the shared context). The driver is
+  **inert** when the bridge is not enabled (no `.tre/telegram.json` + helper)
+  — the no-telegram path is byte-for-byte the old behavior. The LLM endpoint
+  is NOT involved in polling (a poll is one HTTPS GET); the LLM is only spent
+  when a real message arrives and a turn runs.
+
 ## Contract 2 — Events
 
 ### `AssistantStreamEvent` (emitted by `StreamFn`, one per assistant message)

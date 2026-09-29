@@ -1,3 +1,71 @@
+# HANDOFF — Background Telegram driver for the plain CLI, with loop prevention (C37/D23) (2026-09-29)
+
+**Status: gate green — committed (see git log).**
+
+**Why.** The TUI already polls the bot every 30s, but the PLAIN CLI
+(one-shot `tre. run` + `--plain` REPL) had no driver — a user's Telegram
+message was only seen AFTER the workstream finished. The user asked for the
+background long-poll driver and, after a prior infinite-loop incident, for a
+robust loop-prevention mechanism.
+
+**What changed.**
+
+- `src/telegram/bridge.ts` (new) — the plain CLI's bridge over the skill's
+  stdlib-`python3` helper (same spawn seam as the TUI's `src/tui/telegram.ts`,
+  intentionally a small duplicate to keep the TUI untouched). Adds
+  `pollLong(timeoutSec, signal)` — a LONG-POLL (blocks up to N seconds) that
+  honors an `AbortSignal` (node kills the in-flight poll child on stop).
+  `TELEGRAM_LONG_POLL_SEC = 30`.
+- `src/telegram/driver.ts` (new) — the background poll loop + routing.
+  **Loop prevention is the core requirement** — a naive
+  `while (true) { poll(); }` hot-spins (hundreds of process spawns/sec,
+  network hammering, Telegram 429s) when a poll FAILS FAST (network down,
+  bad token → 401). Three independent mechanisms make it impossible:
+  1. **Long-poll self-pacing** — each poll blocks up to 30s, so a no-message
+     cycle takes ~30s; the loop cannot run faster than ~1 poll/30s.
+  2. **Min-interval guard** — a hard cap keeps ≥30s between poll STARTS even
+     if a poll returns instantly (a helper ignoring `--timeout`, or a fast
+     failure). This is what kills the hot-spin regardless of poll speed.
+  3. **Capped exponential backoff on failure** — a fast-failing poll backs
+     off `min(base·2ⁿ, cap)` (default 1s → 60s), so a persistent failure
+     settles to one poll per 60s, never a spin; a success (even "no message")
+     resets the counter.
+  The driver is also **interruptible** (`stop()` kills the in-flight poll
+  child + wakes any sleep) and **single-flight** (a turn mutex serializes
+  user + telegram turns — two turns never run concurrently on the shared
+  context). Routing: a message STEERS the in-flight turn (the existing
+  `SteeringQueue`) or, when idle, runs a turn + replies via the bot (REPL
+  only; one-shot is `allowIdleTurns:false` — a single turn).
+- `src/cli/main.ts` — wires the driver into the one-shot branch (steers the
+  run; no idle turns) and the REPL (steers in-flight turns; idle turns run in
+  the background under the driver's mutex and reply via the bot). `stop()`
+  runs in the `finally` (and after the one-shot run) so the process exits
+  cleanly. `finalAssistantText` (the reply extractor) added + exported.
+  Inert when the bridge is disabled (no `.tre/telegram.json` + helper) — the
+  no-telegram path is the old behavior.
+- `.tre/skills/telegram/telegram.py` (LOCAL, gitignored — deployment-specific)
+  — `poll` gains `--timeout N` (default 0 = the old non-blocking behavior);
+  the api() HTTP read gets `60 + N` margin so the long-poll can block.
+- `test/telegram-driver.test.ts` (new, 12 tests) — the loop-prevention
+  mechanisms (backoff curve + cap, reset on success, the min-interval
+  hot-spin guard), routing (steer-vs-idle, one-shot), lifecycle (stop,
+  disabled bridge), the turn mutex, + no-telegram regressions (one-shot and
+  REPL unchanged).
+- Docs: `docs/02-contracts.md` (C37), `PLAN.md` (D23), this file.
+
+**Gate.** `tsc` clean; source scan clean (35 files, +2); dep-freeze OK
+(4/4, no new deps); `node --test dist/test/*.test.js` → **510 pass / 0 fail /
+9 skipped** (+12 new). The 9 skips are the TTY/TUI-live scenarios.
+
+**Note.** No guardrail-zone file touched (only `src/telegram/*`,
+`src/cli/main.ts`, docs, tests) — committed directly, no `GUARDRAIL_BYPASS`.
+The helper edit is local (gitignored); a fresh deployment's helper without
+`--timeout` still works with the driver's non-blocking default (the driver
+passes `--timeout 30`, which an old helper would ignore → the min-interval
+guard still prevents a hot spin).
+
+---
+
 # HANDOFF — Durable extra roots: `tre.json` persists the C35 boundary (C36/D22) (2026-09-29)
 
 **Status: gate green — committed (see git log).**

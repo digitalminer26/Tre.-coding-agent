@@ -94,6 +94,8 @@ import {
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
+import { makeTelegramBridge, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
+import { TelegramDriver } from "../telegram/driver.js";
 
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
 import type {
@@ -104,6 +106,7 @@ import type {
   ModelConfig,
   StopReason,
   StreamFn,
+  TextBlock,
   Tool,
   UserMessage,
 } from "../types.js";
@@ -754,6 +757,23 @@ export async function runTurn(opts: {
   return { outcome, context: outcome.messages, charsPerToken: cpt };
 }
 
+/** Extract the final assistant text from a run's context (the reply that
+ *  goes back to the bot). Empty when the run produced no text (e.g. it ended
+ *  on a tool call or an error) — the caller then sends a fallback. */
+export function finalAssistantText(ctx: AgentMessage[]): string {
+  for (let i = ctx.length - 1; i >= 0; i--) {
+    const m = ctx[i]!;
+    if (m.role !== "assistant") continue;
+    const text = m.content
+      .filter((b): b is TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    if (text !== "") return text;
+  }
+  return "";
+}
+
 // ─────────────────────────────────── main ───────────────────────────────────
 
 const HELP = `tre. — Tre Coding Agent: a small, fully-owned coding-agent harness
@@ -852,6 +872,10 @@ export interface MainDeps {
   /** C36: override the tre.json path (tests). undefined = the normal
    *  lookup (nearest tre.json above the launch dir, then ~/.tre/tre.json). */
   treConfigPath?: string;
+  /** Telegram driver bridge (tests inject a fake). undefined = the real
+   *  spawn-based bridge (enabled only when .tre/telegram.json + the helper
+   *  exist). */
+  telegramBridge?: TelegramBridge;
 }
 
 /**
@@ -1203,6 +1227,39 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // context; the behavior summary is for the human).
   for (const line of behavior) sinks.err.write(line + "\n");
 
+  // ── Telegram background driver (plain CLI: one-shot + REPL) ─────────────
+  // Long-polls the bot in the background (one getUpdates per cycle, blocking
+  // up to 30s). A message STEERS the in-flight turn (if any) or runs a turn
+  // + replies (when idle, REPL only). LOOP PREVENTION lives in the driver
+  // (long-poll self-pacing + min-interval guard + capped backoff) — see
+  // src/telegram/driver.ts. Inert when the bridge is not enabled (no
+  // .tre/telegram.json + helper). The driver is created per branch below
+  // (one-shot vs REPL) because the executor + turn bookkeeping differ.
+  const telegramBridge = deps.telegramBridge ?? makeTelegramBridge(root);
+  // The in-flight run's steer sink (the driver's onSteer pushes into it).
+  let activeSteer: SteeringQueue | null = null;
+  // One steering queue per run — a closure over a plain array (the contract
+  // is push/drain; the loop drains before each LLM call).
+  const makeSteerQueue = (): SteeringQueue => {
+    const state: { q: string[] } = { q: [] };
+    return {
+      push: (t) => state.q.push(t),
+      drain: () => {
+        const out = state.q;
+        state.q = [];
+        return out;
+      },
+    };
+  };
+  const telegramInfo = (text: string): void => {
+    sinks.err.write(`telegram: ${text}\n`);
+  };
+  const telegramDriverOpts = {
+    onPollError: (err: unknown, delayMs: number) =>
+      telegramInfo(`poll error — backing off ${Math.round(delayMs / 1000)}s: ${String(err)}`),
+    onHandlerError: (err: unknown) => telegramInfo(`idle-turn error: ${String(err)}`),
+  };
+
   // SIGINT: first aborts the active run, second exits (plain CLI only).
   let controller = new AbortController();
   let active = false;
@@ -1213,17 +1270,35 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   process.on("SIGINT", onSigint);
 
   let rl: Interface | undefined;
+  // The REPL's background Telegram driver (declared here so the `finally` can
+  // stop it — a block-scoped const inside the `try` would be out of scope).
+  let telegramDriver: TelegramDriver | undefined;
   try {
     if (args.oneShot) {
       active = true;
       const ask = deps.askApproval ?? makeTempReadlineAsk();
       const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
-      const { outcome } = await runTurn({
-        model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-        prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
-        executeToolCall: executor,
-        entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
-      });
+      const steerQueue = makeSteerQueue();
+      // The background driver STEERS this one-shot run (a message that arrives
+      // mid-run is injected as guidance on the next turn). allowIdleTurns is
+      // false: one-shot is a single turn — a message with no run in flight does
+      // NOT start a new run. The driver is loop-prevented (see driver.ts).
+      const driver = new TelegramDriver(
+        telegramBridge,
+        { onSteer: (m) => steerQueue.push(`[telegram from ${m.sender}] ${m.text}`) },
+        { ...telegramDriverOpts, allowIdleTurns: false },
+      );
+      void driver.start();
+      const { outcome } = await driver.withTurn(() =>
+        runTurn({
+          model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+          prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+          executeToolCall: executor,
+          entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+          steeringQueue: steerQueue,
+        }),
+      );
+      driver.stop();
       await flushSinks(sinks);
       return exitCodeFor(outcome.stopReason);
     }
@@ -1296,6 +1371,53 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       });
     const ask = deps.askApproval ?? replAsk;
     const executor = buildExecutor(makeInteractiveAsk(ask, sinks.err));
+    // The REPL's background driver: a message STEERS the in-flight turn
+    // (onSteer → activeSteer) or, when idle, runs a turn + replies (onIdle,
+    // serialized with user turns by the driver's mutex). Loop-prevented
+    // (long-poll self-pacing + min-interval guard + capped backoff — driver.ts).
+    const td = new TelegramDriver(
+      telegramBridge,
+      {
+        onSteer: (m) => {
+          activeSteer?.push(`[telegram from ${m.sender}] ${m.text}`);
+        },
+        onIdle: async (msgs) => {
+          const prompt = msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`).join("\n");
+          // Mirror the user-turn bookkeeping so SIGINT aborts the idle turn
+          // (active=true → onSigint aborts `controller`, not exits).
+          active = true;
+          controller = new AbortController();
+          const steerQueue = makeSteerQueue();
+          activeSteer = steerQueue;
+          try {
+            const result = await runTurn({
+              model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+              prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+              executeToolCall: executor,
+              entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+              charsPerToken: cpt,
+              steeringQueue: steerQueue,
+            });
+            context = result.context;
+            cpt = result.charsPerToken;
+            const reply = finalAssistantText(result.context);
+            await telegramBridge.send(
+              reply !== "" ? reply : "I received your message but produced no reply this turn.",
+            );
+            telegramInfo("replied via the bot");
+          } finally {
+            active = false;
+            activeSteer = null;
+          }
+        },
+      },
+      telegramDriverOpts,
+    );
+    if (telegramBridge.enabled) {
+      telegramInfo(`polling every ${30}s (long-poll; reply via bot)`);
+      void td.start();
+    }
+    telegramDriver = td;
     sinks.err.write("tre. REPL — /quit to exit, SIGINT aborts the current run\n");
     for (;;) {
       // EOF on piped stdin — but only once queued burst lines are drained:
@@ -1343,24 +1465,35 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       }
       controller = new AbortController();
       active = true;
+      const steerQueue = makeSteerQueue();
+      activeSteer = steerQueue;
       try {
-        const result = await runTurn({
-          model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-          prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
-          executeToolCall: executor,
-          entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
-          charsPerToken: cpt,
-        });
+        // Run under the driver's turn mutex so a telegram idle-turn and a user
+        // turn never run concurrently on the shared context.
+        const result = await td.withTurn(() =>
+          runTurn({
+            model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+            prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+            executeToolCall: executor,
+            entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+            charsPerToken: cpt,
+            steeringQueue: steerQueue,
+          }),
+        );
         context = result.context;
         cpt = result.charsPerToken;
       } finally {
         active = false;
+        activeSteer = null;
       }
     }
     await flushSinks(sinks);
     return 0;
   } finally {
     process.off("SIGINT", onSigint);
+    // Stop the background Telegram driver (kills the in-flight poll child and
+    // wakes any backoff sleep) so the process can exit cleanly.
+    if (telegramBridge.enabled) telegramDriver?.stop();
     // Cleanup is best-effort: the REPL may already have ended (EOF).
     try {
       rl?.close();
