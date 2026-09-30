@@ -1155,18 +1155,33 @@ test("C35 parseArgs: --extra-root is repeatable and collected in order", () => {
 test("C35 behaviorSettingsLines: extra roots render; empty → no extra line", () => {
   const none = behaviorSettingsLines("yes", true);
   assert.ok(none.some((l) => l.includes("sandbox:  on (bash confined to the workspace)")));
-  assert.ok(!none.some((l) => l.includes("extra roots:")));
-  const withRoots = behaviorSettingsLines("yes", true, ["/home/u/a", "/home/u/b"]);
+  assert.ok(!none.some((l) => l.includes("extra roots")));
+  // durable (tre.json) and one-shot (--extra-root) roots render SEPARATELY,
+  // each labeled; a one-shot root also earns the "not written to tre.json" note.
+  const withRoots = behaviorSettingsLines("yes", true, ["/home/u/d"], ["/home/u/o"]);
   assert.ok(
     withRoots.some((l) => l.includes("sandbox:  on (bash confined to the workspace + extra roots)")),
   );
   assert.ok(
     withRoots.some((l) =>
-      l.includes("extra roots: /home/u/a, /home/u/b  (read+write, in addition to the workspace)"),
+      l.includes("extra roots (durable, from tre.json): /home/u/d  (read+write, in addition to the workspace)"),
     ),
   );
+  assert.ok(
+    withRoots.some((l) =>
+      l.includes("extra roots (THIS LAUNCH ONLY, --extra-root): /home/u/o  (read+write, in addition to the workspace)"),
+    ),
+  );
+  assert.ok(withRoots.some((l) => l.includes("is one-shot (this launch only) and is NOT written to tre.json")));
+  // durable-only → no one-shot line, no note; one-shot-only → no durable line.
+  const durableOnly = behaviorSettingsLines("yes", true, ["/home/u/d"]);
+  assert.ok(durableOnly.some((l) => l.includes("extra roots (durable, from tre.json): /home/u/d")));
+  assert.ok(!durableOnly.some((l) => l.includes("THIS LAUNCH ONLY")));
+  const oneShotOnly = behaviorSettingsLines("yes", true, [], ["/home/u/o"]);
+  assert.ok(oneShotOnly.some((l) => l.includes("extra roots (THIS LAUNCH ONLY, --extra-root): /home/u/o")));
+  assert.ok(!oneShotOnly.some((l) => l.includes("durable, from tre.json")));
   // sandbox off still reports off (extra roots don't change that line's state).
-  const off = behaviorSettingsLines("yes", false, ["/home/u/a"]);
+  const off = behaviorSettingsLines("yes", false, ["/home/u/d"], ["/home/u/o"]);
   assert.ok(off.some((l) => l.includes("sandbox:  off (--no-sandbox)")));
 });
 
@@ -1208,7 +1223,9 @@ test(
       { streamFn: fakeStream([{ type: "text", text: "x" }]), sinks: S.sinks },
     );
     assert.equal(code, 0);
-    assert.match(S.err(), /extra roots: .*\(read\+write, in addition to the workspace\)/);
+    // The --extra-root value is a ONE-SHOT root: it renders on the labeled
+    // "THIS LAUNCH ONLY" line (not the durable tre.json line).
+    assert.match(S.err(), /extra roots \(THIS LAUNCH ONLY, --extra-root\): .*\(read\+write, in addition to the workspace\)/);
   },
 );
 

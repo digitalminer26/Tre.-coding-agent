@@ -66,7 +66,7 @@ import {
   readActiveModelLenient,
   resolveModel,
 } from "../config/models.js";
-import { findTreConfig, loadTreConfig } from "../config/tre-config.js";
+import { expandTilde, findTreConfig, loadTreConfig } from "../config/tre-config.js";
 import {
   calibrateCharsPerToken,
   compactContext,
@@ -156,7 +156,9 @@ export interface CliOptions {
   noSandbox: boolean;
   /** C35: --extra-root <dir> (repeatable): explicitly assigned additional
    *  read/write regions (non-sensitive dirs under the user's home), in
-   *  addition to the workspace. Validated at startup; a refusal exits 2. */
+   *  addition to the workspace. ONE-SHOT — applies to this launch only, never
+   *  written to tre.json (the durable baseline; C36). Validated at startup;
+   *  a refusal exits 2. */
   extraRoots: string[];
 }
 
@@ -799,13 +801,18 @@ Options:
   --cwd <dir>        project root: the agent's working directory and the
                      sandbox boundary for file tools (default: process cwd)
   --extra-root <dir> C35: an ADDITIONAL read/write root in addition to the
-                     workspace (repeatable). Must be an existing, non-sensitive
-                     dir under your home dir — the startup refuses otherwise
-                     (the kernel sandbox + the write/edit path sandbox both
-                     re-allow it; siblings and everything else stay denied).
-                     C36: durable — a tre.json (nearest above the launch dir,
-                     then ~/.tre/tre.json) with { "extraRoots": [ ... ] }
-                     supplies the baseline; the flag appends to it
+                     workspace (repeatable). ONE-SHOT: it applies to THIS launch
+                     only and is NEVER written to tre.json — re-pass it on each
+                     launch, or add it to tre.json to make it durable. Must be
+                     an existing, non-sensitive dir under your home dir — the
+                     startup refuses otherwise (the kernel sandbox + the
+                     write/edit path sandbox both re-allow it; siblings and
+                     everything else stay denied). C36: the DURABLE baseline is
+                     tre.json (nearest above the launch dir, then
+                     ~/.tre/tre.json) with { "extraRoots": [ ... ] }; the flag
+                     appends to it for this launch. Entries (config or flag)
+                     may use ~ or ~/ (expanded against your home dir, like a
+                     shell) — e.g. ~/kubeconfigs
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -842,7 +849,9 @@ workspace (e.g. a project .env) is allowed in the default mode. write/edit
 are sandboxed to the project root (--cwd or the process cwd) — paths that
 escape it (../, absolute paths, symlinks) are refused. C35: --extra-root
 adds explicitly assigned read/write roots (non-sensitive dirs under your
-home) to that boundary, for the file tools AND the bash sandbox. On macOS
+home) to that boundary, for the file tools AND the bash sandbox — ONE-SHOT
+(this launch only, never written to tre.json); the durable baseline is
+tre.json (C36), which the flag appends to. On macOS
 the bash tool runs in the project root under a kernel (Seatbelt) sandbox
 with the same boundary; elsewhere it runs in the project root unsandboxed.
 Approval (D8): the DEFAULT mode (yes) auto-approves everything except
@@ -934,14 +943,18 @@ export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): 
  * sandbox state, what is always blocked (systemic sensitive/destructive),
  * and the OPTIONAL flags that change the behavior. `mode` is the resolved
  * ApprovalMode; `sandboxOn` is whether the kernel sandbox is active;
- * `extraRoots` (C35) are the explicitly assigned additional read/write
- * regions (omitted from the summary when empty). The TUI seeds this as a
+ * `durableRoots` (C36, from tre.json) and `oneShotRoots` (C35, from the
+ * --extra-root flag) are the explicitly assigned additional read/write
+ * regions, shown SEPARATELY so the one-shot-vs-durable distinction is
+ * unmissable (each is omitted from the summary when empty; a one-shot root
+ * also earns a note that it does not persist). The TUI seeds this as a
  * single multi-line info item; the plain CLI prints it to stderr.
  */
 export function behaviorSettingsLines(
   mode: ApprovalMode,
   sandboxOn: boolean,
-  extraRoots: string[] = [],
+  durableRoots: string[] = [],
+  oneShotRoots: string[] = [],
 ): string[] {
   const approval =
     mode === "yes"
@@ -949,8 +962,9 @@ export function behaviorSettingsLines(
       : mode === "ask"
         ? "ask — prompt for SENSITIVE + DESTRUCTIVE + mutating bash"
         : "no-approve (fail-closed) — only read-only, non-sensitive bash runs";
+  const totalRoots = durableRoots.length + oneShotRoots.length;
   const sandbox = sandboxOn
-    ? extraRoots.length > 0
+    ? totalRoots > 0
       ? `on (bash confined to the workspace + extra roots)`
       : "on (bash confined to the workspace)"
     : "off (--no-sandbox)";
@@ -959,12 +973,22 @@ export function behaviorSettingsLines(
     `  approval: ${approval}`,
     `  sandbox:  ${sandbox}`,
   ];
-  if (extraRoots.length > 0) {
-    lines.push(`  extra roots: ${extraRoots.join(", ")}  (read+write, in addition to the workspace)`);
+  if (durableRoots.length > 0) {
+    lines.push(
+      `  extra roots (durable, from tre.json): ${durableRoots.join(", ")}  (read+write, in addition to the workspace)`,
+    );
+  }
+  if (oneShotRoots.length > 0) {
+    lines.push(
+      `  extra roots (THIS LAUNCH ONLY, --extra-root): ${oneShotRoots.join(", ")}  (read+write, in addition to the workspace)`,
+    );
+    lines.push(
+      "  note: --extra-root is one-shot (this launch only) and is NOT written to tre.json — to make a root durable, add it to tre.json",
+    );
   }
   lines.push(
     "  blocked:  system-level sensitive reads + destructive commands (across the board)",
-    "  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir>",
+    "  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)",
   );
   return lines;
 }
@@ -1053,25 +1077,32 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   }
   // C35: validate the explicitly assigned extra roots BEFORE wiring anything
   // (fail-closed: a root that would widen the boundary onto a secret surface
-  // or outside the home dir refuses the startup).
-  const extraRoots: string[] = [];
+  // or outside the home dir refuses the startup). Tracked in two lists so the
+  // startup summary can label each: durableRoots (C36, from tre.json — persist
+  // across launches) and oneShotRoots (C35, from --extra-root — THIS launch
+  // only, never written to tre.json). extraRoots = durable + one-shot is the
+  // combined boundary wired into the bash policy / write-edit sandbox / prompt.
+  const durableRoots: string[] = [];
   for (let i = 0; i < configExtraRoots.length; i++) {
-    const dir = configExtraRoots[i]!;
+    const dir = expandTilde(configExtraRoots[i]!);
     const reason = validateExtraRoot(path.resolve(dir));
     if (reason !== undefined) {
       sinks.err.write(`error: ${treConfigPath} extraRoots[${i}]: ${reason}\n`);
       return 2;
     }
-    extraRoots.push(path.resolve(dir));
+    durableRoots.push(path.resolve(dir));
   }
+  const oneShotRoots: string[] = [];
   for (const dir of args.extraRoots) {
-    const reason = validateExtraRoot(path.resolve(dir));
+    const resolved = expandTilde(dir);
+    const reason = validateExtraRoot(path.resolve(resolved));
     if (reason !== undefined) {
       sinks.err.write(`error: --extra-root ${reason}\n`);
       return 2;
     }
-    extraRoots.push(path.resolve(dir));
+    oneShotRoots.push(path.resolve(resolved));
   }
+  const extraRoots: string[] = [...durableRoots, ...oneShotRoots];
   // bash runs in the project root, so its relative paths mean the same
   // thing as the file tools' (the safety hook resolves those against it);
   // on darwin the child is kernel-sandboxed to the same boundary (WS11).
@@ -1169,8 +1200,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // The behavior-settings summary shown at startup: the CURRENT approval
   // mode + sandbox state, and the OPTIONAL flags that change them. The TUI
   // seeds it as a single multi-line info item; the plain CLI prints it to
-  // stderr (below).
-  const behavior = behaviorSettingsLines(mode, !args.noSandbox, extraRoots);
+  // stderr (below). Durable (tre.json) and one-shot (--extra-root) roots are
+  // passed separately so the summary labels each (one-shot is flagged as
+  // this-launch-only + not written to tre.json).
+  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the
