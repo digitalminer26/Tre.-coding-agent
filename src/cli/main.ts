@@ -407,9 +407,10 @@ export function exitCodeFor(stopReason: StopReason): number {
       // in a row) — resumable like budget: a new prompt breaks the pattern.
       return 3;
     case "stall":
-      // The same call failed 3× in a row with a permission denial (the
-      // deterministic sandbox wall) — resumable like loop: a different
-      // approach or --no-sandbox breaks the pattern.
+      // The same tool failed 3× with a permission denial within its recent
+      // calls (the deterministic sandbox wall — docs/08 H1: windowed, so
+      // interleaved successes don't hide it) — resumable like loop: a
+      // different approach or --no-sandbox breaks the pattern.
       return 3;
   }
 }
@@ -499,7 +500,7 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       } else if (ev.stopReason === "stall") {
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(
-          `\nstall: the same tool call failed 3 times in a row with a permission denial — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox${resume}\n`,
+          `\nstall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox${resume}\n`,
         );
       }
       break;

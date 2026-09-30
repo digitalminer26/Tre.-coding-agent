@@ -1,3 +1,52 @@
+# HANDOFF — Loop hardening H1: windowed stall guard (docs/08) (2026-09-30)
+
+**Status: committed (see git log). Gate NOT run in-session — see below.**
+
+**Why.** The loop issue keeps happening (2026-09-30 WIP session: the model
+displayed the same directory over and over and burned the session). The
+three existing guards (C26 identical-batch, permission stall, turn budget)
+have a gap: the stall guard counted CONSECUTIVE permission failures, so a
+probe loop (denied call, legitimate successful call, denied call, …) never
+reached 3-in-a-row and only the turn budget stopped it, late. Spec:
+`docs/08-loop-hardening.md` (H1 approved; H2 same-failure repetition,
+H3 loop visibility, H4 checkpoint commits logged).
+
+**What changed.**
+
+- `src/tools/pipeline.ts` — the stall guard is now WINDOWED: per tool, a
+  window of its last `STALL_WINDOW` (8) calls (any outcome); the count is
+  permission failures inside it; `STALL_THRESHOLD` (3) wall-hits in the
+  window → in-band `stallText` + `details.stall` (stopReason `stall`,
+  unchanged). A success or a non-permission failure no longer resets the
+  count (it occupies a slot); the window sliding past a failure drops it;
+  each tool has its own window/count. `stallText` updated ("3 times …
+  within its last 8 calls").
+- `test/tools.test.ts` — the "success resets" case replaced with the
+  windowed behavior (probe loop fail/ok/fail/ok/fail → stall; window slide
+  → no stall; non-permission failure no reset); the "different tool" case
+  now asserts independent per-tool counts (stalls one call earlier).
+- `docs/02-contracts.md` — stall bullet restated (window, not
+  consecutive).
+- User-facing stall messages + doc comments updated in `src/cli/main.ts`,
+  `src/types.ts`, `src/loop/agent-loop.ts`.
+
+**Carried in the WIP tree (NOT in this commit):** `src/tui/state.ts` (the
+TUI stall error-item message) and `test/tui-state.test.ts` (its assertion)
+are shared with the user's uncommitted docs/07 item-1 WIP — the message
+update + assertion ride along with that WIP commit. The committed tree is
+self-consistent (old message + old assertion).
+
+**Gate caveat.** `node`/`npm` live under `~/.nvm`, which this session's
+sandbox cannot reach — `npm test` could NOT be run before this commit.
+The change is small and hand-traced against every stall test; the
+`tre.json` extra root for `~/.nvm` is in place (gitignored) so the NEXT
+launch can run the gate. Run `npm test` on relaunch to confirm.
+
+**Tree note.** Committed on top of the user's uncommitted docs/07 item-1
+WIP (flagged; the WIP files were left out of this commit deliberately).
+
+---
+
 # HANDOFF — `tre.json` gitignored: per-deployment durable extra roots (2026-09-29)
 
 **Status: gate green — committed (see git log).**

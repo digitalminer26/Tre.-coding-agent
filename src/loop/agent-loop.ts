@@ -50,12 +50,13 @@
  *    stuck model is caught by LOOP DETECTION instead of a count: the same
  *    tool-call batch signature issued 3 times in a row is NOT executed on
  *    the third repeat, and the run stops with stopReason "loop".
- *  - Stall detection (tool pipeline): the same tool call (same tool +
- *    arguments) failing 3 times in a row with a permission denial (the
- *    deterministic sandbox wall — "Operation not permitted") is NOT
- *    executed on the third repeat, and the run stops with stopReason
- *    "stall". The pipeline answers in-band with `details.stall`; the loop
- *    maps it onto the stop reason.
+ *  - Stall detection (tool pipeline): the same tool failing 3 times with a
+ *    permission denial (the deterministic sandbox wall — "Operation not
+ *    permitted") within its last 8 calls (docs/08 H1: windowed —
+ *    interleaved successes do not reset) is NOT executed on the failing
+ *    call, and the run stops with stopReason "stall". The pipeline
+ *    answers in-band with `details.stall`; the loop maps it onto the stop
+ *    reason.
  *  - Steering: guidance typed during a run is queued by the driver (a
  *    `SteeringQueue`) and delivered before the next LLM call — after the
  *    current turn's work completes. A pending steer also KEEPS THE RUN

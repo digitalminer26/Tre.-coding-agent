@@ -75,10 +75,11 @@ export interface Usage {
  *   loop     — C26: the model issued the same tool-call batch 3 times in
  *              a row (runaway-loop detection); the third repeat was not
  *              executed; set by the LOOP; the run is resumable
- *   stall    — the same tool call (same tool + arguments) failed 3 times
- *              in a row with a permission denial (Operation not permitted
- *              / permission denied — the deterministic sandbox wall); the
- *              third repeat was not executed; set by the LOOP (from the
+ *   stall    — the same tool failed 3 times with a permission denial
+ *              (Operation not permitted / permission denied — the
+ *              deterministic sandbox wall) within its last 8 calls (docs/08
+ *              H1: windowed — interleaved successes do not reset); the
+ *              failing call was not executed; set by the LOOP (from the
  *              tool pipeline's `stall` detail); the run is resumable
  */
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted" | "budget" | "loop" | "stall";

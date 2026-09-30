@@ -173,10 +173,12 @@ test("pipeline: tool that throws (I3 violation) → isError result, never throws
 // The kernel sandbox makes permission denials DETERMINISTIC: the same
 // operation fails identically forever. The guard keys on the TOOL (not the
 // arguments — rephrasing the command is exactly the stall pattern) and
-// counts consecutive permission failures of that tool. The 3rd failure is
-// replaced in-band with STALL_TEXT + details.stall (I3: every call gets a
-// result); the call WAS executed (a denial is a harmless no-op), so a
-// legitimate 3rd operation that SUCCEEDS never trips it.
+// counts permission failures of that tool within its last STALL_WINDOW (8)
+// calls (docs/08 H1 — WINDOWED: interleaved successes must NOT reset the
+// count, the probe loop). The failing call is replaced in-band with
+// STALL_TEXT + details.stall (I3: every call gets a result); the call WAS
+// executed (a denial is a harmless no-op), so a legitimate call that
+// SUCCEEDS never trips it.
 
 const permFail =
   "bash: exit code 1\nOperation not permitted"; // the sandbox's EPERM spelling
@@ -212,7 +214,7 @@ test("stall guard: REPHRASED arguments do NOT reset the count (the stall pattern
   assert.equal(r3.details?.stall, true, "rephrasing the same tool does not reset the count");
 });
 
-test("stall guard: DIFFERENT tool resets the count", async () => {
+test("stall guard: DIFFERENT tool has its OWN count (no inheritance, no reset) — docs/08 H1", async () => {
   const mk = (name: string) =>
     makeTool(name, async () => ({
       content: [{ type: "text" as const, text: permFail }],
@@ -222,15 +224,31 @@ test("stall guard: DIFFERENT tool resets the count", async () => {
   const b = mk("write");
   const executor = makeToolExecutor();
   const sig = new AbortController().signal;
-  await executor(a.tool, call("1", "read", { p: "x" }), sig); // read fail (count 1)
-  await executor(b.tool, call("2", "write", { p: "x" }), sig); // write fail — resets to write (count 1)
-  await executor(a.tool, call("3", "read", { p: "x" }), sig); // read fail — resets to read (count 1)
-  await executor(a.tool, call("4", "read", { p: "x" }), sig); // read fail (count 2)
-  const r5 = await executor(a.tool, call("5", "read", { p: "x" }), sig); // read fail (count 3)
-  assert.equal(r5.details?.stall, true, "the read chain reached 3 after the reset");
+  await executor(a.tool, call("1", "read", { p: "x" }), sig); // read fail (read count 1)
+  await executor(b.tool, call("2", "write", { p: "x" }), sig); // write fail — write's OWN count (1)
+  await executor(a.tool, call("3", "read", { p: "x" }), sig); // read fail (read count 2)
+  const r4 = await executor(a.tool, call("4", "read", { p: "x" }), sig); // read fail (read count 3)
+  assert.equal(r4.details?.stall, true, "the read chain reached 3 in its OWN window — the write failure neither inherited nor reset it");
 });
 
-test("stall guard: a SUCCESS resets the count (a legitimate 3rd op that succeeds never trips)", async () => {
+test("stall guard (H1): an interleaved SUCCESS does NOT reset the count (the probe loop)", async () => {
+  const { tool } = makeTool("t", async (_id, args) =>
+    args.p === "x"
+      ? { content: [{ type: "text" as const, text: permFail }], isError: true }
+      : { content: [{ type: "text" as const, text: "ok" }] },
+  );
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "x" }), sig); // fail x (count 1)
+  await executor(tool, call("2", "t", { p: "y" }), sig); // success y — occupies a slot, does NOT reset
+  await executor(tool, call("3", "t", { p: "x" }), sig); // fail x (count 2)
+  const r4 = await executor(tool, call("4", "t", { p: "y" }), sig); // success y — still no reset
+  assert.equal(r4.details?.stall, undefined, "2 failures within the window is not yet a stall");
+  const r5 = await executor(tool, call("5", "t", { p: "x" }), sig); // fail x (count 3 within 8 calls)
+  assert.equal(r5.details?.stall, true, "the probe loop (fail/ok/fail/ok/fail) stalls on the 3rd wall-hit");
+});
+
+test("stall guard (H1): the window slides — a stale failure does not stall a fresh retry", async () => {
   const { tool } = makeTool("t", async (_id, args) =>
     args.p === "x"
       ? { content: [{ type: "text" as const, text: permFail }], isError: true }
@@ -240,12 +258,27 @@ test("stall guard: a SUCCESS resets the count (a legitimate 3rd op that succeeds
   const sig = new AbortController().signal;
   await executor(tool, call("1", "t", { p: "x" }), sig); // fail x (count 1)
   await executor(tool, call("2", "t", { p: "x" }), sig); // fail x (count 2)
-  const r3 = await executor(tool, call("3", "t", { p: "y" }), sig); // success y — resets
-  assert.equal(r3.isError, undefined, "the success passes through");
-  assert.equal(r3.details?.stall, undefined);
-  await executor(tool, call("4", "t", { p: "x" }), sig); // fail x — new chain (count 1)
-  const r5 = await executor(tool, call("5", "t", { p: "x" }), sig); // fail x (count 2)
-  assert.equal(r5.details?.stall, undefined, "the chain restarted after the success");
+  for (let i = 3; i <= 9; i++) {
+    const r = await executor(tool, call(String(i), "t", { p: "y" }), sig); // 7 successes — the window slides past both failures
+    assert.equal(r.details?.stall, undefined, `call ${i}: the stale failures have left the window`);
+  }
+  const r10 = await executor(tool, call("10", "t", { p: "x" }), sig); // fail x — only 1 failure in the window
+  assert.equal(r10.details?.stall, undefined, "a stale denial 8+ calls ago must not stall a fresh retry");
+});
+
+test("stall guard (H1): a NON-permission failure does not reset the count", async () => {
+  const { tool } = makeTool("t", async (_id, args) =>
+    args.p === "x"
+      ? { content: [{ type: "text" as const, text: permFail }], isError: true }
+      : { content: [{ type: "text" as const, text: "bash: exit code 127\ncommand not found" }], isError: true },
+  );
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "x" }), sig); // perm fail (count 1)
+  await executor(tool, call("2", "t", { p: "y" }), sig); // transient fail — occupies a slot, does NOT reset
+  await executor(tool, call("3", "t", { p: "x" }), sig); // perm fail (count 2)
+  const r4 = await executor(tool, call("4", "t", { p: "x" }), sig); // perm fail (count 3 within 8 calls)
+  assert.equal(r4.details?.stall, true, "the count is wall-hits in the window, not wall-hits in a row");
 });
 
 test("stall guard: NON-permission failures never trip it (transient retries allowed)", async () => {

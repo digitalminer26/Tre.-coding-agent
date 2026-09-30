@@ -14,8 +14,9 @@
  *      beforeToolCall (rewrite or block) → execute(signal, onUpdate) →
  *      afterToolCall, errors never leave as exceptions (docs/01 §5, §9).
  *      Simplified: no prepareArguments step.
- *      Added: the stall guard (3 consecutive permission-denial failures
- *      stop the run; 2026-09-27).
+ *      Added: the stall guard (permission-denial failures of one tool
+ *      within its recent window stop the run; 2026-09-27, windowed per
+ *      docs/08 H1 2026-09-30).
  *
  * I3: this never throws. Every failure path returns a ToolResult with
  * `isError: true` whose text the model reads (D7).
@@ -42,23 +43,33 @@ import { validateArgs } from "./validate.js";
 // `git push --set-upstream …`) defeats that guard: every batch is "new".
 //
 // The stall guard closes that hole: it keys on the TOOL, not the
-// arguments. The same tool failing 3 times in a row with a permission
-// signature (arguments may vary — rephrasing is exactly the stall
-// pattern) is a model banging on the sandbox boundary. The third failure
-// is replaced in-band with STALL_TEXT (I3: every call gets a result) and
-// the run stops with stopReason "stall" (the loop maps the `stall` detail
-// onto it). The call WAS executed — a permission denial is a harmless
-// no-op — so a legitimate third operation that SUCCEEDS never trips the
-// guard.
+// arguments. The same tool failing 3 times with a permission signature
+// within its recent calls (arguments may vary — rephrasing is exactly
+// the stall pattern) is a model banging on the sandbox boundary. The
+// failing call is replaced in-band with STALL_TEXT (I3: every call gets
+// a result) and the run stops with stopReason "stall" (the loop maps the
+// `stall` detail onto it). The call WAS executed — a permission denial
+// is a harmless no-op.
+//
+// WINDOWED (docs/08 H1, 2026-09-30): the count is "how many permission
+// failures of this tool within its last STALL_WINDOW (8) calls", NOT
+// "how many in a row". A model PROBEING the boundary interleaves
+// legitimate successful calls with the denied ones (`ls dir` denied,
+// `ls other` ok, `ls dir` denied, …) — consecutive counting never reaches
+// 3, and the loop burns the whole turn budget (the 2026-09-30 WIP
+// session: the same directory displayed over and over). A success or a
+// non-permission failure no longer resets the count; it occupies a slot
+// in the window, and the window sliding past a failure drops it (a stale
+// denial 8+ calls ago must not stall a fresh retry). Each tool has its
+// OWN count + window — a different tool never inherits or resets it.
 //
 // Only failures that carry a permission signature count: a transient
 // failure (non-zero exit, timeout, network blip) is a legitimate retry —
 // the signature filter keeps the guard from eating normal retry behavior.
-// A DIFFERENT tool or a SUCCESS resets the count.
 //
 // The two guards are complementary: byte-identical retries are caught by
-// the loop guard (pre-execution, stopReason "loop"); rephrased retries
-// are caught here (stopReason "stall").
+// the loop guard (pre-execution, stopReason "loop"); rephrased or
+// interleaved retries are caught here (stopReason "stall").
 
 /** beforeToolCall: return undefined (allow, args unchanged), a rewritten
  *  args object (allow with new args), or a block decision. */
@@ -84,6 +95,16 @@ export interface ToolPipelineHooks {
 }
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
+
+/** docs/08 H1 — the stall guard's window: the last N calls of a tool
+ *  (any outcome) in which its permission failures are counted. 8 is wide
+ *  enough that a normal retry discipline (fail → investigate → retry)
+ *  never accumulates 3 wall-hits, narrow enough that a probe loop reaches
+ *  the threshold within a handful of turns. Exported for tests/tuning. */
+export const STALL_WINDOW = 8;
+/** docs/08 H1 — the stall threshold: permission failures of one tool
+ *  within its window. 3 (two identical retries remain legitimate). */
+export const STALL_THRESHOLD = 3;
 
 /** Permission-denial signatures in tool error text (case-insensitive).
  *  Covers the kernel-sandbox EPERM spellings (bash + file tools) and the
@@ -112,8 +133,9 @@ export function isPermissionStallText(texts: string[]): boolean {
 export function stallText(toolName: string): string {
   return (
     `This call was NOT executed: the "${toolName}" tool has now failed 3 ` +
-    "times in a row with a permission denial (Operation not permitted / " +
-    "permission denied). That failure is deterministic — the sandbox " +
+    "times with a permission denial (Operation not permitted / permission " +
+    "denied) within its last 8 calls. That failure is deterministic — the " +
+    "sandbox " +
     "boundary will not move, so rephrasing or retrying the same operation " +
     "will not help, and the run stops here (stopReason 'stall'). Change " +
     "approach: use a different tool or a target INSIDE the workspace (a " +
@@ -130,15 +152,16 @@ export function stallText(toolName: string): string {
  *
  * The executor carries the stall guard's state (per executor instance — the
  * CLI builds one per run, so it is per-run like the loop's batch history):
- * the last failed call's identity (tool name + stable-JSON args) and how
- * many consecutive times it failed with a permission signature.
+ * per tool, the window of its last STALL_WINDOW calls (any outcome) and
+ * how many of those were permission failures (docs/08 H1).
  */
 export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall {
-  // Stall-guard state (see the module header): the tool that is currently
-  // stalling (keyed on TOOL NAME — rephrased arguments must not reset the
-  // chain) and how many consecutive permission failures it has had.
-  let lastFailTool: string | undefined;
-  let failCount = 0;
+  // Stall-guard state (see the module header; docs/08 H1): per tool, a
+  // window of its last STALL_WINDOW calls (true = permission failure) and
+  // the count of permission failures within it. A success or a
+  // non-permission failure does NOT reset the count (the probe loop) — it
+  // occupies a slot in the window. Each tool is counted independently.
+  const stallByTool = new Map<string, { window: boolean[]; count: number }>();
   return async (tool, call, signal, onUpdate) => {
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
@@ -206,43 +229,36 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       }
     }
 
-    // 5. stall guard — the same tool failing 3 times in a row with a
-    //    permission signature is a model banging on the sandbox boundary
-    //    (arguments may vary — rephrasing is exactly the stall pattern).
-    //    The count is per TOOL, not per argument: rephrasing must not
-    //    reset it. The third failure is replaced in-band with STALL_TEXT
-    //    (I3: every call gets a result) + details.stall; the loop maps
-    //    that detail onto stopReason "stall" and stops. The call WAS
-    //    executed (a permission denial is a harmless no-op), so a
-    //    legitimate third operation that SUCCEEDS never trips the guard —
-    //    a success resets the count, as does any non-permission failure
-    //    (transient errors are normal retries).
-    if (result.isError === true) {
-      const permission = isPermissionStallText(
-        result.content.map((c) => c.text),
-      );
-      if (permission) {
-        if (tool.name === lastFailTool) {
-          failCount += 1;
-        } else {
-          lastFailTool = tool.name;
-          failCount = 1;
-        }
-        if (failCount >= 3) {
-          return {
-            content: text(stallText(tool.name)),
-            isError: true,
-            details: { stall: true },
-          };
-        }
-      } else {
-        // Not a permission failure — it may be transient. Reset.
-        lastFailTool = undefined;
-        failCount = 0;
+    // 5. stall guard (docs/08 H1) — permission failures of one tool within
+    //    its last STALL_WINDOW calls are a model banging on the sandbox
+    //    boundary (arguments may vary — rephrasing is exactly the stall
+    //    pattern; interleaved successes must NOT reset — the probe loop).
+    //    Every call of the tool occupies a slot in the window (success,
+    //    permission failure, or non-permission failure); the count is the
+    //    number of permission failures inside it, so a stale failure slides
+    //    out after STALL_WINDOW calls. The failing call is replaced
+    //    in-band with STALL_TEXT (I3: every call gets a result) +
+    //    details.stall; the loop maps that detail onto stopReason "stall"
+    //    and stops. The call WAS executed (a denial is a harmless no-op).
+    //    Each tool is counted independently — a different tool has its own
+    //    window and count.
+    {
+      const entry =
+        stallByTool.get(tool.name) ?? { window: [] as boolean[], count: 0 };
+      const permission =
+        result.isError === true &&
+        isPermissionStallText(result.content.map((c) => c.text));
+      entry.window.push(permission);
+      if (entry.window.length > STALL_WINDOW) entry.window.shift();
+      entry.count = entry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
+      stallByTool.set(tool.name, entry);
+      if (permission && entry.count >= STALL_THRESHOLD) {
+        return {
+          content: text(stallText(tool.name)),
+          isError: true,
+          details: { stall: true },
+        };
       }
-    } else {
-      lastFailTool = undefined;
-      failCount = 0;
     }
 
     return result;

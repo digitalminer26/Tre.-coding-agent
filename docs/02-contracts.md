@@ -55,21 +55,29 @@ Rules:
   The kernel sandbox makes permission denials DETERMINISTIC: the same
   operation fails identically forever ("Operation not permitted" /
   "permission denied"). The tool pipeline (`makeToolExecutor`) counts
-  consecutive permission-signature failures PER TOOL (per executor
-  instance — the CLI builds one per run). The count is keyed on the tool
-  NAME, not the arguments: a model that rephrases the command each retry
-  (`git push` → `git push origin main` → …) defeats the loop's
+  permission-signature failures PER TOOL (per executor instance — the CLI
+  builds one per run), WINDOWED (docs/08 H1, 2026-09-30): the count is
+  "how many permission failures of this tool within its last
+  `STALL_WINDOW` (8) calls" — NOT "how many in a row". The count is keyed
+  on the tool NAME, not the arguments: a model that rephrases the command
+  each retry (`git push` → `git push origin main` → …) defeats the loop's
   3-identical-batch guard, and rephrasing is exactly the stall pattern —
-  so it must NOT reset the count. The 3rd permission failure of the same
-  tool is replaced in-band with `stallText(tool)` + `details.stall` (I3:
-  every call gets a result); the call WAS executed (a denial is a harmless
-  no-op), so a legitimate 3rd operation that SUCCEEDS never trips it. The
+  so it must NOT reset the count. A model PROBEING the boundary
+  interleaves successful calls with the denied ones — so a success or a
+  non-permission failure must NOT reset the count either (it occupies a
+  slot in the window); the window sliding past a failure drops it (a
+  stale denial 8+ calls ago must not stall a fresh retry). Each tool has
+  its own window and count — a different tool neither inherits nor resets
+  it. The `STALL_THRESHOLD` (3)th permission failure of a tool within its
+  window is replaced in-band with `stallText(tool)` + `details.stall`
+  (I3: every call gets a result); the call WAS executed (a denial is a
+  harmless no-op), so a legitimate call that SUCCEEDS never trips it. The
   loop maps `details.stall` onto `stopReason: "stall"` and stops —
   resumable like `loop` (exit 3). Non-permission failures (transient
-  errors are normal retries) and a different tool or success reset the
-  count. The two guards are complementary: byte-identical retries are
-  caught by the loop guard (stopReason `loop`); rephrased retries are
-  caught here (stopReason `stall`).
+  errors are normal retries) never count toward the threshold. The two
+  guards are complementary: byte-identical retries are caught by the loop
+  guard (stopReason `loop`); rephrased or interleaved retries are caught
+  here (stopReason `stall`).
 - **C35 — extra roots: an explicitly assigned, non-sensitive directory under
   home becomes an additional read/write region (one boundary, two layers).**
   The boundary is a *set* of roots, not a single value: the workspace
