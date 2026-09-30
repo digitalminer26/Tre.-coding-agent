@@ -153,6 +153,18 @@ export interface TuiState {
   /** docs/07 item 1 — session-cumulative cache-write tokens (0 when the
    *  endpoint never reports them). */
   cacheWriteTotal: number;
+  /**
+   * docs/07 item 2 — the change in context size on the last `done`/compaction
+   * (new − old), or null when it can't be computed (first turn, or the event
+   * carried no size). Feeds the `context` field's `+N`/`−N` suffix and the
+   * `/context` report's growth line.
+   */
+  contextDelta: number | null;
+  /** docs/07 item 2 — the last up to 8 context deltas (a compaction resets it
+   *  to `[delta]` — the pre-compaction trend is not comparable to after). The
+   *  turns-until-compaction prediction uses the MEAN, so one noisy turn doesn't
+   *  wreck the estimate. */
+  deltaHistory: number[];
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -199,6 +211,8 @@ export function makeInitialState(
     lastUsage: null,
     cacheReadTotal: 0,
     cacheWriteTotal: 0,
+    contextDelta: null,
+    deltaHistory: [],
     info,
     viewTop: null,
     models,
@@ -323,6 +337,13 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // record (the plain CLI prints nothing; the TUI shows it dimmed).
       // D15: tally usage for the optional `tokens` bottom field.
       const used = ev.message.usage?.totalTokens ?? 0;
+      // docs/07 item 2: the context grew by (new − old) on this turn —
+      // computed only when the new size is known (usage present) AND the old
+      // size was known (a prior turn/compaction set contextTokens). First
+      // turn or a usage-less endpoint → no delta (null), no history change.
+      const newContext = used > 0 ? used : state.contextTokens;
+      const delta =
+        used > 0 && state.contextTokens > 0 ? newContext - state.contextTokens : null;
       return {
         ...state,
         totalTokens: state.totalTokens + used,
@@ -330,7 +351,9 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // the context size the NEXT prompt starts from — the same number
         // the compaction trigger (shouldCompact) compares against the
         // window. No usage (some endpoints) → keep the previous estimate.
-        contextTokens: used > 0 ? used : state.contextTokens,
+        contextTokens: newContext,
+        contextDelta: delta,
+        deltaHistory: delta === null ? state.deltaHistory : [...state.deltaHistory, delta].slice(-8),
         // docs/07 item 1: keep the last call's FULL usage (input/output +
         // cache read/write) for the `cache` field and the report; the
         // cache fields are cumulative across the session. Absent
@@ -399,7 +422,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         ev.toolCallId,
       );
     }
-    case "context_compacted":
+    case "context_compacted": {
+      // docs/07 item 2: the compaction SHRINKS the context — the delta is
+      // (new − old), a large NEGATIVE number, recorded only when the event
+      // carries the new estimate (ev.contextTokens) AND the old size was
+      // known. It RESETS the delta history to [delta]: the pre-compaction
+      // trend is not comparable to the post-compaction one.
+      const delta =
+        ev.contextTokens !== undefined && state.contextTokens > 0
+          ? ev.contextTokens - state.contextTokens
+          : null;
       return {
         ...state,
         // The context is now [summary, …kept] — the estimate the event
@@ -407,6 +439,8 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // would overstate it). Event without the field → keep the last
         // usage-based estimate.
         contextTokens: ev.contextTokens ?? state.contextTokens,
+        contextDelta: delta,
+        deltaHistory: delta === null ? state.deltaHistory : [delta],
         // The summary is a user message in the new context — track its size
         // separately so the context breakdown can show system / summary /
         // messages. Estimate from the summary's char count (chars/4, the
@@ -422,6 +456,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           },
         ],
       };
+    }
     default:
       return state;
   }
@@ -1174,6 +1209,37 @@ export function compactThreshold(window: number, maxTokens: number, slack = 1024
 }
 
 /**
+ * docs/07 item 2 — render a context delta compactly: `+820` for a growth,
+ * `−170k` for a shrink (U+2212 minus, matching the spec's negative form).
+ * `fmtTokens` handles the magnitude; the sign is added here (fmtTokens(0) →
+ * "0", so a flat turn renders `+0` — still worth showing). No leading space:
+ * the `context` field joins its parts with " · ", which supplies the spacing.
+ */
+function fmtDelta(d: number): string {
+  const mag = fmtTokens(Math.abs(d));
+  return d < 0 ? `−${mag}` : `+${mag}`;
+}
+
+/**
+ * docs/07 item 2 — the turns-until-compaction prediction line for the
+ * `/context` report, or null when it must be omitted. The MEAN of the delta
+ * history (not the last value) smooths one noisy turn. Three cases:
+ *   - `headroom <= 0` → null (already at/past the trigger — the DUE line
+ *     covers it; a "~N turns" prediction would be meaningless);
+ *   - `avgDelta <= 0` (the context is flat or shrinking, e.g. right after a
+ *     compaction) → "compaction is not approaching";
+ *   - otherwise → `~N turns until compaction` where N = floor(headroom/avg).
+ * No history yet (the first turn) → null (nothing to average).
+ */
+function compactionPrediction(state: TuiState): string | null {
+  const bd = contextBreakdown(state);
+  if (bd.headroom <= 0 || state.deltaHistory.length === 0) return null;
+  const avg = state.deltaHistory.reduce((a, b) => a + b, 0) / state.deltaHistory.length;
+  if (avg <= 0) return "compaction is not approaching";
+  return `~${Math.floor(bd.headroom / avg)} turns until compaction`;
+}
+
+/**
  * Where the current context's tokens come from, plus when compaction fires.
  * The state machine holds one context number (contextTokens — the last
  * usage's total, or the post-compaction estimate) and the static system
@@ -1246,6 +1312,18 @@ export function contextReport(state: TuiState): string {
         : `  compaction: DUE — over the trigger by ${fmtTokens(-bd.headroom)}`,
     );
   }
+  // docs/07 item 2: how fast the context is filling (the last turn's delta +
+  // the mean of the recent history) and how many turns until compaction.
+  // Omitted on the first turn (no delta yet).
+  if (state.contextDelta !== null) {
+    const avg =
+      state.deltaHistory.reduce((a, b) => a + b, 0) / state.deltaHistory.length;
+    lines.push(
+      `  growth: ${fmtDelta(state.contextDelta)} last turn · ${fmtDelta(avg)} avg (${state.deltaHistory.length} turn${state.deltaHistory.length === 1 ? "" : "s"})`,
+    );
+    const pred = compactionPrediction(state);
+    if (pred !== null) lines.push(`  ${pred}`);
+  }
   return lines.join("\n");
 }
 
@@ -1298,6 +1376,9 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       if (bd.threshold > 0) {
         parts.push(bd.headroom > 0 ? `@${fmtTokens(bd.threshold)}` : "DUE");
       }
+      // docs/07 item 2: how much the context changed on the last turn
+      // (`+820` / ` −170k`) — omitted on the first turn (no prior size).
+      if (state.contextDelta !== null) parts.push(fmtDelta(state.contextDelta));
       return parts.join(" · ");
     }
     case "cache": {

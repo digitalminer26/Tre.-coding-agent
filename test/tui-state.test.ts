@@ -409,6 +409,129 @@ test("docs/07 item 1: /context report gains the last-call line + session cache; 
   assert.match(contextReport(s3), /  session cache: read 23k · write 0.2k/);
 });
 
+test("docs/07 item 2: done computes contextDelta (new−old) + appends to deltaHistory; first turn has none", () => {
+  const s0 = makeInitialState("m", {}, 131072, 32768);
+  // first turn: no prior size → no delta, empty history.
+  const s1 = applyEvent(s0, doneEv([], { usage: { input: 9000, output: 1000, totalTokens: 10000 } }));
+  assert.equal(s1.contextTokens, 10000);
+  assert.equal(s1.contextDelta, null);
+  assert.deepEqual(s1.deltaHistory, []);
+  // second turn: delta = 11000 − 10000.
+  const s2 = applyEvent(s1, doneEv([], { usage: { input: 10000, output: 1000, totalTokens: 11000 } }));
+  assert.equal(s2.contextDelta, 1000);
+  assert.deepEqual(s2.deltaHistory, [1000]);
+  // third turn: delta = 13000 − 11000 (the average is over the history, not
+  // the last value — 1500, not 2000).
+  const s3 = applyEvent(s2, doneEv([], { usage: { input: 12000, output: 1000, totalTokens: 13000 } }));
+  assert.equal(s3.contextDelta, 2000);
+  assert.deepEqual(s3.deltaHistory, [1000, 2000]);
+  // a done WITHOUT usage keeps the context size and records no delta.
+  const s4 = applyEvent(s3, doneEv());
+  assert.equal(s4.contextTokens, 13000);
+  assert.equal(s4.contextDelta, null);
+  assert.deepEqual(s4.deltaHistory, [1000, 2000]);
+});
+
+test("docs/07 item 2: the `context` bottom field appends the last delta; omitted on the first turn", () => {
+  // first turn (context known, no delta yet) → no `+N` suffix.
+  const first = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 11000 };
+  assert.equal(
+    bottomValue(first, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k",
+  );
+  // a growth → `· +1k` at the end.
+  const grown = { ...first, contextDelta: 1000 };
+  assert.equal(
+    bottomValue(grown, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · +1k",
+  );
+  // a shrink (e.g. after a compaction) → `· −170k` (U+2212 minus).
+  const shrunken = { ...first, contextDelta: -170000 };
+  assert.equal(
+    bottomValue(shrunken, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · −170k",
+  );
+});
+
+test("docs/07 item 2: /context report gains the growth line + turns-until-compaction prediction", () => {
+  // window 131072, maxTokens 32768 → threshold 97280. After a 13000-context
+  // turn with deltas [1000, 2000]: headroom 84280, avg 1500 → ~56 turns.
+  const s = {
+    ...makeInitialState("m", {}, 131072, 32768),
+    contextTokens: 13000,
+    contextDelta: 2000,
+    deltaHistory: [1000, 2000],
+  };
+  const r = contextReport(s);
+  assert.match(r, /  growth: \+2k last turn · \+1\.5k avg \(2 turns\)/);
+  assert.match(r, /  ~56 turns until compaction/);
+  // the prediction uses the MEAN, not the last value (1500, not 2000).
+  assert.ok(!r.includes("~42 turns"), "prediction must use the mean, not the last delta");
+});
+
+test("docs/07 item 2: prediction omitted when shrinking or DUE; the growth line still shows", () => {
+  // shrinking (avgDelta <= 0) → "compaction is not approaching", no count.
+  const shrinking = {
+    ...makeInitialState("m", {}, 131072, 32768),
+    contextTokens: 13000,
+    contextDelta: -5000,
+    deltaHistory: [1000, -6000],
+  };
+  const rs = contextReport(shrinking);
+  assert.match(rs, /  growth: −5k last turn · −2\.5k avg \(2 turns\)/);
+  assert.match(rs, /  compaction is not approaching/);
+  assert.ok(!rs.includes("turns until compaction"));
+  // DUE (headroom <= 0) → the DUE line covers it; no prediction at all.
+  const due = {
+    ...makeInitialState("m", {}, 131072, 32768),
+    contextTokens: 100000,
+    contextDelta: 1000,
+    deltaHistory: [1000],
+  };
+  const rd = contextReport(due);
+  assert.match(rd, /compaction: DUE — over the trigger by/);
+  assert.match(rd, /  growth: \+1k last turn · \+1k avg \(1 turn\)/);
+  assert.ok(!rd.includes("turns until compaction"));
+  assert.ok(!rd.includes("not approaching"));
+});
+
+test("docs/07 item 2: deltaHistory caps at 8; a compaction resets it to [delta] (negative)", () => {
+  // ten growing turns → the history keeps only the last 8.
+  let s = makeInitialState("m", {}, 131072, 32768);
+  for (let i = 1; i <= 10; i++) {
+    s = applyEvent(s, doneEv([], { usage: { input: i * 900, output: 100, totalTokens: i * 1000 } }));
+  }
+  assert.equal(s.deltaHistory.length, 8);
+  assert.deepEqual(s.deltaHistory, [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]);
+  // a compaction SHRINKS the context: the delta is (new − old), a large
+  // negative, and it RESETS the history to [delta].
+  const pre = {
+    ...makeInitialState("m", {}, 131072, 32768),
+    contextTokens: 90000,
+    contextDelta: 1000,
+    deltaHistory: [1000, 1000, 1000],
+  };
+  const post = applyEvent(pre, {
+    type: "context_compacted",
+    tokensBefore: 90000,
+    messagesKept: 12,
+    summaryChars: 36000,
+    contextTokens: 10000,
+  });
+  assert.equal(post.contextTokens, 10000);
+  assert.equal(post.contextDelta, -80000);
+  assert.deepEqual(post.deltaHistory, [-80000]);
+  // a compaction WITHOUT the new estimate → no delta, history untouched.
+  const noEst = applyEvent(pre, {
+    type: "context_compacted",
+    tokensBefore: 90000,
+    messagesKept: 12,
+    summaryChars: 36000,
+  });
+  assert.equal(noEst.contextDelta, null);
+  assert.deepEqual(noEst.deltaHistory, [1000, 1000, 1000]);
+});
+
 test("handleSlashCommand: /context appends the breakdown as an info item", () => {
   const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
   const r = handleSlashCommand(s, "/context");
