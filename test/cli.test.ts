@@ -1043,6 +1043,11 @@ test("WS7: --no-approve allows read-only bash but blocks mutating (no prompts)",
 
 test("WS7: sandbox — absolute path outside root is refused even with --yes", async (t) => {
   const { dir, models } = await workspace(t);
+  // Hermetic: pin an EMPTY tre.json (no durable extra roots) so the refusal
+  // message is the no-extra-roots form, regardless of the repo's own
+  // (gitignored) tre.json that findTreConfig would otherwise walk up to.
+  const treConfig = join(dir, "tre.json");
+  await writeFile(treConfig, JSON.stringify({ extraRoots: [] }));
   // A SIBLING of the root — outside the sandbox (unique name per run).
   const target = join(dirname(dir), `ws7-evil-${basename(dir)}.txt`);
   const streamFn = fakeStream([
@@ -1053,7 +1058,7 @@ test("WS7: sandbox — absolute path outside root is refused even with --yes", a
   const session = join(dir, "s.jsonl");
   const code = await main(
     ["run", "write it", "--tools", "write", "--yes", "--models", models, "--cwd", dir, "--session", session],
-    { streamFn, sinks: S.sinks },
+    { streamFn, sinks: S.sinks, treConfigPath: treConfig },
   );
   assert.equal(code, 0);
   assert.match(S.out(), /✗/, "the blocked call prints an error line");
@@ -1068,6 +1073,11 @@ test("WS7: sandbox — absolute path outside root is refused even with --yes", a
 
 test("WS7: sandbox — ../ escape is refused even with --yes", async (t) => {
   const { dir, models } = await workspace(t);
+  // Hermetic: pin an EMPTY tre.json (no durable extra roots) so the refusal
+  // message is the no-extra-roots form, regardless of the repo's own
+  // (gitignored) tre.json that findTreConfig would otherwise walk up to.
+  const treConfig = join(dir, "tre.json");
+  await writeFile(treConfig, JSON.stringify({ extraRoots: [] }));
   // Root = dir/sub, so "../escape.txt" lands in dir (outside the root).
   const sub = join(dir, "sub");
   await mkdir(sub);
@@ -1079,7 +1089,7 @@ test("WS7: sandbox — ../ escape is refused even with --yes", async (t) => {
   const session = join(sub, "s.jsonl");
   const code = await main(
     ["run", "write it", "--tools", "write", "--yes", "--models", models, "--cwd", sub, "--session", session],
-    { streamFn, sinks: S.sinks },
+    { streamFn, sinks: S.sinks, treConfigPath: treConfig },
   );
   assert.equal(code, 0);
   assert.match(S.out(), /✗/);
