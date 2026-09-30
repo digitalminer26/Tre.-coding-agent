@@ -1,3 +1,31 @@
+# HANDOFF — `tre.json` gitignored: per-deployment durable extra roots (2026-09-29)
+
+**Status: gate green — committed (see git log).**
+
+**Why.** C36's `tre.json` lookup finds the NEAREST file above the launch
+dir, so a project-root `tre.json` is the natural place for durable extra
+roots. But it was NOT gitignored — a project-root `tre.json` would be
+committed and propagate to every clone/deployment, while the extra-root
+boundary is a per-deployment decision (this machine's `/Users/xilcilus/projects`
+is not another deployment's). The user wanted the project-dir location
+(co-located with the project, found by the same walk-up) WITHOUT repo
+propagation — i.e. the `models.json` pattern.
+
+**What changed.**
+
+- `.gitignore` — `tre.json` added next to `models.json` (same pattern:
+  local file, never in git, documented shape in the comment). The
+  `~/.tre/tre.json` home fallback is unchanged and remains an option for
+  machine-wide roots.
+- No code change: `findTreConfig` already prefers the nearest project-dir
+  file; gitignoring it only stops it from being committed.
+
+**Usage.** Create `<project>/tre.json` locally (now gitignored):
+`{ "extraRoots": [ "/abs/or/~/relative/dir", ... ] }` — validated at
+startup like `--extra-root` (exists, non-sensitive, under home).
+
+---
+
 # HANDOFF — L2 citation headers for the pi-modeled core + docs/01 §9 status (2026-09-29)
 
 **Status: gate green — committed (see git log).**

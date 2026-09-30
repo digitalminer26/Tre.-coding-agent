@@ -8,6 +8,10 @@ context-fold/
 # Copy models.json.example to models.json and fill it in (or run tre. with no
 # models.json: it prints a step-by-step setup guide).
 models.json
+# Per-deployment durable extra roots (C36) — local to this machine, never in
+# git. Copy the shape from docs/05-extra-roots-spec.md:
+#   { "extraRoots": [ "/abs/or/~/relative/dir", ... ] }
+tre.json
 # Per-machine Telegram bot credentials (token) + poll state — never in git.
 .tre/telegram.json
 .tre/telegram/
