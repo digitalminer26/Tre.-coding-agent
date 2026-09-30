@@ -1,3 +1,41 @@
+# HANDOFF — L2 citation headers for the pi-modeled core + docs/01 §9 status (2026-09-29)
+
+**Status: gate green — committed (see git log).**
+
+**Why.** The user manually audited the code and found very few L1/L2
+citations. Verification: the code is original — zero L1 (verbatim) code;
+only `src/session/session.ts` carried a formal L2 header, while
+`docs/01` §9 had explicitly planned "Copy"/"Copy exactly" for ~8 items.
+The other files were defensible L3 (independent implementations of a
+documented design), but the user asked to make the audit airtight: add the
+L2 headers and update §9 to reflect what actually shipped.
+
+**What changed.**
+
+- L2 headers added (per `docs/03-citation-policy.md` format — level +
+  source + what was taken + simplified/added): `src/types.ts` (message
+  model, event vocabulary, Tool protocol), `src/loop/agent-loop.ts` (inner
+  loop + hooks; lists the added guards: length fail-all, C22 nudge, C26
+  budget/loop detection, stall stop, steering keep-alive),
+  `src/tools/pipeline.ts` (validate → beforeToolCall → execute →
+  afterToolCall; stall guard added), `src/tools/truncate.ts` (the
+  truncation RULES are L2; implementation L3),
+  `src/wire/openai-completions.ts` (wire shape + salvage parser;
+  implementation L3), `src/prompt/system-prompt.ts` (section SHAPE is L2,
+  contents L3), `src/prompt/skills.ts` (skills pattern L2; `always: true`
+  added). `src/session/session.ts` already had one.
+- `THIRD_PARTY.md` — aggregate table now has 8 L2 rows (was 1).
+- `docs/01-walkthrough-harness-llm.md` §9 — gained a **Status (2026-09-29)**
+  column: every row is **Done**, naming the implementing file(s) and the
+  L2/L3 split, plus the simplifications and additions (steering replaced
+  the planned follow-up queue; compaction and the Ink TUI — both "Defer" —
+  shipped in Phase D). Intro notes that all "Copy" items are L2
+  adaptations of pi's DESIGN, not its code, and that the repo has no L1.
+
+Docs + comment-only; no behavior change. Gate green (tsc + full suite).
+
+---
+
 # HANDOFF — README/PLAN phase-naming fix + docs index refresh (2026-09-29)
 
 **Status: gate green — committed (see git log).**
