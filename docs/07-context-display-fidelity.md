@@ -1,8 +1,11 @@
 # Spec — Context display fidelity (bottom field + `/context` report)
 
-Status: **approved 2026-09-29 (scope: items 1, 2, 4); not yet implemented.**
-Items 3 and 5 are logged as future work (§7). All new logic is L3
-(independent); no pi prior art is involved (see `docs/03-citation-policy.md`).
+Status: **approved 2026-09-29 (scope: items 1, 2, 4); implemented
+2026-09-30.** Items 1, 2, 4 landed, one behavior per commit (self-improve
+protocol): item 1 `b97a7e6`, item 2 `a7d0a31`, item 4 `6f0373c` (handoff:
+top section of `HANDOFF.md`). Items 3 and 5 are logged as future work (§7).
+All new logic is L3 (independent); no pi prior art is involved (see
+`docs/03-citation-policy.md`).
 
 Scope: `src/tui/state.ts` (state fields, `applyEvent`, `contextBreakdown` /
 `contextReport` / `bottomValue`, `BOTTOM_FIELDS`), `test/tui-state.test.ts`.

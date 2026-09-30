@@ -1,3 +1,72 @@
+# HANDOFF — docs/07 context display fidelity: items 1, 2, 4 (2026-09-30)
+
+**Status: gate green — committed (4 commits, see git log).** All three
+approved items of `docs/07-context-display-fidelity.md` are implemented.
+Items 3 and 5 remain future work (spec §7). No guardrail-zone file touched
+(`src/tui/state.ts` is NOT in the zone).
+
+**Why.** The `context` bottom field and `/context` report received more data
+than they displayed: the full per-call `usage` (cache read/write) was dropped
+after `totalTokens` was tallied, the previous context size was forgotten (so
+growth per turn was invisible), and compaction events were rendered as items
+but never counted. This work adds the fidelity that costs nothing: display
+what the events already carry.
+
+**What changed** (all in `src/tui/state.ts` + `test/tui-state.test.ts`; the
+`done`/`context_compacted` handlers, `contextBreakdown`/`contextReport`/
+`bottomValue`, `BOTTOM_FIELDS`):
+
+- **Item 1 — cache visibility.** New state: `lastUsage` (the last call's
+  full usage), `cacheReadTotal`/`cacheWriteTotal` (session cumulative). New
+  pinnable bottom field `cache` (added to `BOTTOM_FIELDS`): the last call's
+  hit rate `cached 11k/12.1k (91%)`, or `—` when the endpoint reports no
+  `cached_tokens` (absence ≠ 0% — never a misleading zero). `/context` gains
+  `last call: in … (cached …) / out …` and `session cache: read … · write …`
+  (both omitted without data). This also landed the H1 TUI stall message +
+  assertion that the H1 commit had deferred (the WIP carried them).
+- **Item 2 — growth per turn + turns-until-compaction.** New state:
+  `contextDelta` (new − old on the last `done`/compaction) and
+  `deltaHistory` (last 8 deltas; a compaction resets it to `[delta]`). The
+  `context` field appends the last delta (`+1k` / `−170k`, U+2212 minus);
+  `/context` gains `growth: +N last turn · +N avg (N turns)` (mean of the
+  history, not the last value) and `~N turns until compaction`
+  (`floor(headroom/avg)` — "compaction is not approaching" when `avg <= 0`,
+  omitted when DUE or on the first turn).
+- **Item 4 — compaction history.** New state: `compactionCount` +
+  `lastCompaction` (tokensBefore/messagesKept/summaryChars/degraded). The
+  `context` field appends `×N` (×1 already notable); `/context` gains
+  `compactions: N · last: 90k → 9k summary + 12 msgs kept` with a
+  `(degraded)` suffix for the rule-based fallback.
+
+**Also this session (separate commit):** the two WS7 sandbox-refusal tests in
+`test/cli.test.ts` were environment-fragile — `main()` walks up from
+`process.cwd()` (the repo root) and finds the repo's gitignored `tre.json`
+(extra roots), which changes the refusal message from "outside the project
+root" to "outside the working directory … and its extra roots". They now pin
+an EMPTY `tre.json` via the C36 `treConfigPath` seam, so the no-extra-roots
+message is asserted deterministically on any machine.
+
+**Gate.** `tsc` clean; quality-check clean (35 files); dep-freeze OK (4/4);
+`node --test` → **522 pass / 0 fail / 10 skipped** (the 10 skips are the
+TTY/TUI-live scenarios). +21 new tests across the three items.
+
+**TUI verification (PTY capture, mock reporting `cached_tokens`):** the
+bottom line renders `context: 13.2k/131.1k (10%) · sys 2.4k · msgs 10.8k ·
+@97.3k · +1k` + `cache: cached 11k/12.1k (91%)`; the `+1k` appears only from
+turn 2 (turn 1 has no prior size); `/context` shows `last call: in 12.1k
+(cached 11k) / out 1.1k`, `session cache: read 22k` (2 turns × 11k), `growth:
++1k last turn · +1k avg (1 turn)`, `~84 turns until compaction`. No
+compaction fired in the capture (item 4's `×N` + history line are unit-
+covered). Mock: `.repro/mock-cache.mjs` + `.repro/feed-docs07.sh` (local,
+gitignored).
+
+**Remaining (future, spec §7):** item 3 (message composition — tools/model/
+user split) and item 5 (system-prompt section split) are logged, not
+designed. docs/08 H2–H4 (same-failure repetition, loop visibility,
+checkpoint commits) also remain.
+
+---
+
 # HANDOFF — Loop hardening H1: windowed stall guard (docs/08) (2026-09-30)
 
 **Status: committed (see git log). Gate NOT run in-session — see below.**
@@ -36,14 +105,17 @@ are shared with the user's uncommitted docs/07 item-1 WIP — the message
 update + assertion ride along with that WIP commit. The committed tree is
 self-consistent (old message + old assertion).
 
-**Gate caveat.** `node`/`npm` live under `~/.nvm`, which this session's
-sandbox cannot reach — `npm test` could NOT be run before this commit.
-The change is small and hand-traced against every stall test; the
-`tre.json` extra root for `~/.nvm` is in place (gitignored) so the NEXT
-launch can run the gate. Run `npm test` on relaunch to confirm.
+**Gate caveat (RESOLVED 2026-09-30).** The gate was NOT run before this
+commit (node under `~/.nvm` was outside the sandbox). It has since been
+run and is GREEN (see the docs/07 section below): the `tre.json` extra root
+for `~/.nvm` is in place (gitignored), so `npm test` runs in-session. The
+H1 stall-guard tests (`test/tools.test.ts`) pass.
 
-**Tree note.** Committed on top of the user's uncommitted docs/07 item-1
-WIP (flagged; the WIP files were left out of this commit deliberately).
+**Tree note (RESOLVED 2026-09-30).** This was committed on top of the
+user's uncommitted docs/07 item-1 WIP (the WIP files were left out of this
+commit deliberately). That WIP has since been committed — see the docs/07
+section below (item 1 landed as its own commit, carrying the H1 TUI stall
+message + assertion that this commit deferred).
 
 ---
 
