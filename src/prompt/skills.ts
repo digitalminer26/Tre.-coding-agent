@@ -18,6 +18,12 @@
  * body is included verbatim in the system prompt (see `SkillIndexEntry`).
  * Use it for skills that must be in effect even when the user is absent,
  * e.g. a messaging channel the agent is expected to monitor and answer.
+ *
+ * L2: structure adapted from @earendil-works/pi-agent-core 0.85.1 (MIT,
+ *      © Mario Zechner) — the skills PATTERN (docs/01 §1, §9 "Copy the
+ *      pattern"): SKILL.md with YAML frontmatter, index (name + description
+ *      + path) in the prompt, body read on demand.
+ *      Added: the `always: true` frontmatter (always-active skills).
  */
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";

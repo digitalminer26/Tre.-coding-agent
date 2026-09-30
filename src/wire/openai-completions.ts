@@ -7,6 +7,14 @@
  *   - per-index tool-call argument accumulation + best-effort JSON salvage
  *   - usage capture, bounded retry (in wire/http.ts), abort
  *
+ * L2: structure adapted from @earendil-works/pi-ai 0.85.1 (MIT, © Mario
+ *      Zechner) — the OpenAI-compatible wire shape (docs/01 §2–3):
+ *      request building (assistant content as a string, tool args as a
+ *      JSON string, per-model compat flags), SSE → normalized events
+ *      (`start`/`text_delta`/`thinking_delta`/`toolcall_*`/`done`), and
+ *      the best-effort salvage parse of truncated tool-call argument JSON
+ *      (docs/01 §3, §4.1, §9 "Simplify"/"Copy"). The implementation is L3.
+ *
  * Invariants: exactly one `start` … one `done` per call, even on failure
  * (I2/I3). Endpoint quirks live in ModelCompat — one code path for all
  * OpenAI-compatible servers (incl. llama.cpp, whose quirks: `model` is the

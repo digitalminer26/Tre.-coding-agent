@@ -1,5 +1,5 @@
 /**
- * WS3 — output truncation (copy of pi's rules, docs/01 §5):
+ * WS3 — output truncation (docs/01 §5):
  *  - two independent limits, whichever hits first: 2000 lines or 50 KB
  *  - `read` keeps the HEAD (you want the beginning); `bash` keeps the TAIL
  *    (you want the final lines / errors)
@@ -7,6 +7,11 @@
  *  - truncated output is a FEATURE with a recovery path: the full text is
  *    saved to a temp file and the tool result carries
  *    `details: { truncated: true, fullOutputPath }` so the model can read on.
+ *
+ * L2: structure adapted from @earendil-works/pi-ai 0.85.1 (MIT, © Mario
+ *      Zechner) — the truncation RULES (2000 lines / 50 KB, head-vs-tail
+ *      per tool, whole lines only, temp-file recovery; docs/01 §5, §9
+ *      "Copy"). The implementation is L3.
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";

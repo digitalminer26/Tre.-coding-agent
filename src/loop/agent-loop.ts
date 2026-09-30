@@ -5,6 +5,19 @@
  * one `AgentMessage[]` context, and emits `AgentEvent`s: wire events pass
  * through unchanged, plus lifecycle events and tool events.
  *
+ * L2: structure adapted from @earendil-works/pi-agent-core 0.85.1 (MIT,
+ *      © Mario Zechner) — the inner loop: stream one assistant response
+ *      into a single context slot, dispatch tool calls (parallel by
+ *      default, sequential opt-out), append results in call order,
+ *      `prepareNextTurn` hook between turns, batch `terminate`
+ *      (docs/01 §4, §9 "Copy the inner loop + hooks").
+ *      Simplified: no outer/inner split, no follow-up queue (steering
+ *      covers it).
+ *      Added: the `length`→fail-all guard (docs/01 §4.1), the no-call
+ *      `length` nudge (C22), per-cycle turn budget + auto-continuation
+ *      (C26), identical-batch loop detection (C26), stall stop,
+ *      steering keep-alive.
+ *
  * Contract notes (docs/02-contracts.md):
  *  - I2: the in-progress assistant message lives in ONE context slot —
  *    pushed on `start`, replaced on every event — so an abort at any point

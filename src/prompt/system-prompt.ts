@@ -9,6 +9,13 @@
  *    `always` skills have their body included verbatim)
  *  - working directory
  *
+ * L2: structure adapted from @earendil-works/pi-agent-core 0.85.1 (MIT,
+ *      © Mario Zechner) — the section SHAPE of the system prompt (docs/01
+ *      §1, §9 "Copy the shape"): base identity, one line per enabled tool,
+ *      guidelines derived from the enabled tool set, project-context files
+ *      verbatim, skills index (bodies on demand), working directory.
+ *      The section contents are L3.
+ *
  * No timestamps, no randomness: same inputs → same string (test-pinned).
  */
 import { readFileSync } from "node:fs";

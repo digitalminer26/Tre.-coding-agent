@@ -6,6 +6,17 @@
  *   2. AgentEvent / AssistantStreamEvent — the event vocabulary.
  *   3. StreamFn + Tool — the loop's only two dependencies.
  *
+ * L2: structure adapted from @earendil-works/pi-agent-core 0.85.1 (MIT,
+ *      © Mario Zechner) — the provider-neutral message model (ContentBlock
+ *      union, Usage, StopReason), the event vocabulary (AssistantStreamEvent
+ *      with `partial` on every event; AgentEvent), and the Tool protocol
+ *      (execute(toolCallId, args, signal, onUpdate), error-as-result) —
+ *      docs/01 §3–5, §9 "Copy" / "Copy exactly".
+ *      Simplified: no bashExecution/custom/branchSummary message kinds, no
+ *      per-tool usage, no cost tracking, no prepareArguments.
+ *      Added: StopReason "budget"/"loop"/"stall" (C26 + stall detection),
+ *      `details` on tool results.
+ *
  * Invariants (see docs/02-contracts.md):
  *   I1. Everything the model sees is a message; everything it can do is a
  *       tool; results flow back through the same message channel.

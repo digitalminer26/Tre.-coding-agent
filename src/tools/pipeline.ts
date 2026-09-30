@@ -9,6 +9,14 @@
  *   3. execute with AbortSignal + partial-update callback
  *   4. afterToolCall hook — may rewrite the result (redaction, annotation)
  *
+ * L2: structure adapted from @earendil-works/pi-agent-core 0.85.1 (MIT,
+ *      © Mario Zechner) — the per-call pipeline: validate →
+ *      beforeToolCall (rewrite or block) → execute(signal, onUpdate) →
+ *      afterToolCall, errors never leave as exceptions (docs/01 §5, §9).
+ *      Simplified: no prepareArguments step.
+ *      Added: the stall guard (3 consecutive permission-denial failures
+ *      stop the run; 2026-09-27).
+ *
  * I3: this never throws. Every failure path returns a ToolResult with
  * `isError: true` whose text the model reads (D7).
  */
