@@ -261,7 +261,10 @@ export async function checkPathWithinRoots(
  *     extra roots are non-sensitive dirs under ~; outside-home regions are
  *     --no-sandbox territory, not a contract).
  * Returns undefined when the root is acceptable, else the refusal reason.
- * Never throws.
+ * Never throws. A path that EXISTS but cannot be resolved (a permission
+ * error from realpathSync, e.g. under a stricter sandbox) is reported as
+ * "cannot be verified" — NOT "does not exist" — and still fails closed (we
+ * can't prove it isn't a symlink onto a secret surface).
  */
 export function validateExtraRoot(
   dir: string,
@@ -270,8 +273,17 @@ export function validateExtraRoot(
   let real: string;
   try {
     real = realpathSync(dir);
-  } catch {
-    return `${dir} does not exist`;
+  } catch (err) {
+    // Distinguish "doesn't exist" from "exists but can't be resolved".
+    // realpathSync throws ENOENT for a genuinely missing path, but a
+    // PERMISSION error (EPERM/EACCES) means the path EXISTS yet the current
+    // process can't lstat it (e.g. running under a stricter sandbox). That is
+    // NOT "does not exist" — report it accurately. Either way we fail closed:
+    // if we can't resolve the real path we can't prove the root isn't a
+    // symlink onto a secret surface, so we refuse to re-allow it.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return `${dir} does not exist`;
+    return `${dir} cannot be verified (${code ?? "unknown error"}) — the path exists but cannot be resolved; refusing to avoid a symlink/sensitive escape`;
   }
   if (!statSync(real).isDirectory()) {
     return `${dir} is not a directory`;

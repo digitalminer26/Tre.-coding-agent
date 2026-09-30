@@ -14,6 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmod,
   mkdtemp,
   mkdir,
   writeFile,
@@ -898,3 +899,30 @@ test("C35 validateExtraRoot: accepts a plain dir under home; refuses missing, se
   // home itself is allowed (it is "under home" by the realPath identity).
   assert.equal(validateExtraRoot(base, base), undefined);
 });
+
+test(
+  "validateExtraRoot: an EXISTING but unresolvable dir (EPERM) → 'cannot be verified', NOT 'does not exist'",
+  {
+    // chmod 000 on the parent makes realpathSync throw EPERM (the dir exists
+    // but the process can't lstat it) — the case a stricter sandbox hits.
+    // Skipped under root (root bypasses permission checks, so no EPERM).
+    skip: process.getuid?.() === 0 ? "running as root — chmod 000 won't trigger EPERM" : false,
+  },
+  async (t) => {
+    const base = await mkdtemp(join(tmpdir(), "c35-perm-"));
+    const locked = join(base, "locked");
+    // ONE after hook: restore the mode FIRST (a chmod-000 dir can't be
+    // scandir'd by the cleanup rm otherwise), then remove the tree.
+    t.after(async () => {
+      await chmod(locked, 0o755).catch(() => {}); // mode 000 → can't scandir for rm
+      await rm(base, { recursive: true, force: true });
+    });
+    const target = join(locked, "dir");
+    await mkdir(target, { recursive: true });
+    await chmod(locked, 0o000);
+    const reason = validateExtraRoot(target, base);
+    assert.notEqual(reason, undefined, "an unresolvable root must be refused (fail-closed)");
+    assert.match(reason!, /cannot be verified/);
+    assert.doesNotMatch(reason!, /does not exist/);
+  },
+);
