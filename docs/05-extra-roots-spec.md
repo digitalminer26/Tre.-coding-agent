@@ -235,7 +235,9 @@ non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
   `tre.json` (nearest above the launch dir, then `~/.tre/tre.json`) with
   `{ "extraRoots": [ ... ] }` is the durable baseline; the `--extra-root` flag
   appends to it. Each entry is validated exactly like a flag value (fail-closed
-  on a malformed file or a refused entry). See `docs/02-contracts.md` C36.
+  on a malformed file or a refused entry). Entries may use `~` / `~/` (expanded
+  against the home dir at startup, shell-style — 2026-09-30, so the config is
+  portable across machines). See `docs/02-contracts.md` C36.
 - Changing the `read` tool (it stays unrestricted).
 
 ## 7. Definition of done

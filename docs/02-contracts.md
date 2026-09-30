@@ -109,7 +109,13 @@ Rules:
   from the launch directory for a `tre.json` (the same convention as a `.git`
   dir or a `models.json`), then fall back to `~/.tre/tre.json`. **Precedence:**
   the CLI flag APPENDS to the config — `tre.json` is the durable baseline and
-  `--extra-root` is the per-launch addition (both are validated). **Guard
+  `--extra-root` is the per-launch addition (both are validated). **Tilde
+  (2026-09-30):** an entry (config OR flag) may start with `~` or `~/` — it is
+  expanded against the home dir at startup (`expandTilde` in
+  `src/config/tre-config.ts`), shell-style, BEFORE the C35 validation, so
+  `~/kubeconfigs` is portable across machines/users; `~` alone means the home
+  dir; a bare `~name` is NOT expanded (no user-lookup — it resolves to the
+  literal `~name` path and fails the exists check, fail-closed). **Guard
   (fail-closed):** every `tre.json` entry is validated at startup EXACTLY like a
   `--extra-root` value (`validateExtraRoot` — exists, non-sensitive, under
   home); a malformed file (bad JSON, non-array `extraRoots`, non-string/empty
