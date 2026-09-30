@@ -1,3 +1,38 @@
+# HANDOFF — TUI: Ctrl+U/Ctrl+D half-page scroll (laptop fallback) (2026-09-30)
+
+**Status: gate green — committed.** One behavior: the output viewport gains
+two half-page scroll keys that exist on every keyboard.
+
+**Why.** PgUp/PgDn/Home/End are the only built-in scroll keys, and they don't
+exist on compact laptop keyboards (the user's machine: no PgUp/PgDn/Home
+buttons; `Fn+arrow` is swallowed by macOS Terminal.app's own shortcuts). The
+mouse-wheel path is opt-in (`TRE_MOUSE=1`) because enabling mouse tracking
+kills native text selection on a read-mostly surface. So the default
+scrolling had no usable binding on a laptop. Ctrl+letter always exists, so
+`Ctrl+U` (half-page up) / `Ctrl+D` (half-page down) — the Emacs convention —
+fill the gap with zero cost.
+
+**Change (one behavior: two keys):**
+- `src/tui/app.tsx`: two new routes in the keybinding table, placed BEFORE
+  the `key.ctrl` catch-all (which previously swallowed them) and the char
+  path. Raw `0x15`/`0x04` are parsed by Ink as `ctrl+u`/`ctrl+d` (name from
+  the control byte), so the handler keys on `key.ctrl && input === "u"/"d"`
+  and calls `onScrollBy(±halfPage)`. The idle hint now names them:
+  `enter send · PgUp/PgDn/Ctrl+U/Ctrl+D scroll · …`.
+- `test/tui-app.test.tsx`: new test (raw `0x15`/`0x04` → `onScrollBy(±8)`,
+  half-page on the 24-row fake terminal); the two hint assertions updated to
+  the new idle string.
+
+**Gate.** `tsc` clean; `node --test` → **523 pass / 0 fail / 10 skipped**.
+**TUI verification (PTY capture):** the pinned frame's hint line reads
+`enter send · PgUp/PgDn/Ctrl+U/Ctrl+D scroll · ↑/↓ history · /quit exit`.
+
+**Note:** this does NOT change the mouse-tracking default (still
+selection-friendly, `TRE_MOUSE=1` for wheel). The two paths coexist: keyboard
+scrolling is now laptop-proof, wheel remains opt-in.
+
+---
+
 # HANDOFF — docs/07 context display fidelity: items 1, 2, 4 (2026-09-30)
 
 **Status: gate green — committed (4 commits, see git log).** All three
