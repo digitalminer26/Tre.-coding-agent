@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type Usage } from "../types.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
@@ -141,6 +141,18 @@ export interface TuiState {
    * (no assistant turn yet).
    */
   contextTokens: number;
+  /**
+   * docs/07 item 1 — the LAST assistant call's full usage (input, output,
+   * cache read/write). null until the first `done` with usage. Feeds the
+   * `cache` bottom field and the `/context` report's last-call line.
+   */
+  lastUsage: Usage | null;
+  /** docs/07 item 1 — session-cumulative cached prompt tokens (0 when the
+   *  endpoint never reports `prompt_tokens_details.cached_tokens`). */
+  cacheReadTotal: number;
+  /** docs/07 item 1 — session-cumulative cache-write tokens (0 when the
+   *  endpoint never reports them). */
+  cacheWriteTotal: number;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -184,6 +196,9 @@ export function makeInitialState(
     systemPromptTokens,
     summaryTokens: 0,
     contextTokens: 0,
+    lastUsage: null,
+    cacheReadTotal: 0,
+    cacheWriteTotal: 0,
     info,
     viewTop: null,
     models,
@@ -232,14 +247,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           },
         ];
       } else if (ev.stopReason === "stall") {
-        // The same call failed 3× in a row with a permission denial (the
-        // deterministic sandbox wall). The third repeat was NOT executed;
-        // a different approach (or --no-sandbox) breaks the pattern.
+        // The same tool failed 3× with a permission denial within its
+        // recent calls (the deterministic sandbox wall — docs/08 H1: the
+        // count is windowed, so interleaved successes don't hide it). The
+        // failing call was NOT executed; a different approach (or
+        // --no-sandbox) breaks the pattern.
         items = [
           ...items,
           {
             kind: "error",
-            text: "stall: the same tool call failed 3 times in a row with a permission denial — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox — send another prompt to continue",
+            text: "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox — send another prompt to continue",
           },
         ];
       }
@@ -314,6 +331,14 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // the compaction trigger (shouldCompact) compares against the
         // window. No usage (some endpoints) → keep the previous estimate.
         contextTokens: used > 0 ? used : state.contextTokens,
+        // docs/07 item 1: keep the last call's FULL usage (input/output +
+        // cache read/write) for the `cache` field and the report; the
+        // cache fields are cumulative across the session. Absent
+        // `cached_tokens` (endpoints that don't report it) → 0, and the
+        // display treats "no data" as unknown, not a 0% hit rate.
+        lastUsage: ev.message.usage ?? state.lastUsage,
+        cacheReadTotal: state.cacheReadTotal + (ev.message.usage?.cacheRead ?? 0),
+        cacheWriteTotal: state.cacheWriteTotal + (ev.message.usage?.cacheWrite ?? 0),
         items: state.items.map((it) =>
           it.kind === "assistant" && it.streaming ? { ...it, streaming: false, thinking: false } : it,
         ),
@@ -1123,7 +1148,7 @@ export function menuComplete(s: TuiState): TuiState | null {
 // ---------------------------------------------------------------------------
 
 /** Fields the user may pin into the bottom lines, in menu order. */
-export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cwd", "session"] as const;
+export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cache", "cwd", "session"] as const;
 export type BottomField = (typeof BOTTOM_FIELDS)[number];
 
 /** Compact token count: 0 → "0", 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
@@ -1200,6 +1225,20 @@ export function contextReport(state: TuiState): string {
   ];
   if (bd.summary > 0) lines.push(`  summary: ${fmtTokens(bd.summary)}`);
   lines.push(`  messages: ${fmtTokens(bd.messages)}`);
+  // docs/07 item 1: the last call's in/out split + how much of the input
+  // came from the endpoint's prompt cache, and the session-cumulative
+  // cache traffic. Omitted entirely when the endpoint reports no cache
+  // data (no misleading zeros).
+  const u = state.lastUsage;
+  if (u) {
+    const cached =
+      u.cacheRead !== undefined && u.cacheRead > 0 ? ` (cached ${fmtTokens(u.cacheRead)})` : "";
+    lines.push(`  last call: in ${fmtTokens(u.input)}${cached} / out ${fmtTokens(u.output)}`);
+  }
+  if (state.cacheReadTotal > 0 || state.cacheWriteTotal > 0) {
+    const w = state.cacheWriteTotal > 0 ? ` · write ${fmtTokens(state.cacheWriteTotal)}` : "";
+    lines.push(`  session cache: read ${fmtTokens(state.cacheReadTotal)}${w}`);
+  }
   if (bd.threshold > 0) {
     lines.push(
       bd.headroom > 0
@@ -1226,7 +1265,7 @@ export function contextUrgencyColor(state: TuiState): string | undefined {
 }
 
 /** The value shown for one field ("—" when a static label is absent). */
-function bottomValue(state: TuiState, field: BottomField): string {
+export function bottomValue(state: TuiState, field: BottomField): string {
   switch (field) {
     case "model":
       return state.modelLabel;
@@ -1260,6 +1299,16 @@ function bottomValue(state: TuiState, field: BottomField): string {
         parts.push(bd.headroom > 0 ? `@${fmtTokens(bd.threshold)}` : "DUE");
       }
       return parts.join(" · ");
+    }
+    case "cache": {
+      // docs/07 item 1: the last call's prompt-cache hit rate — how much of
+      // the input the endpoint served from cache. `—` when the endpoint
+      // never reports cached_tokens (absence of the field is NOT a 0% hit
+      // rate — the two must not be confused).
+      const u = state.lastUsage;
+      if (!u || u.cacheRead === undefined || u.input <= 0) return "—";
+      const pct = Math.min(100, Math.round((u.cacheRead / u.input) * 100));
+      return `cached ${fmtTokens(u.cacheRead)}/${fmtTokens(u.input)} (${pct}%)`;
     }
     case "cwd":
       return state.info.cwd ?? "—";

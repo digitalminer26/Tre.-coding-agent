@@ -480,7 +480,7 @@ test("handleSlashCommand: /display-bottom set, clear, report, unknown, passthrou
   assert.deepEqual(r0.state.bottom, []);
   const info0 = r0.state.items[r0.state.items.length - 1];
   assert.equal(info0?.kind, "info");
-  assert.match((info0 as { text: string }).text, /display-bottom: \(none\) — fields: model status turn tokens context cwd session/);
+  assert.match((info0 as { text: string }).text, /display-bottom: \(none\) — fields: model status turn tokens context cache cwd session/);
 
   // set (deduped, order preserved)
   const r1 = handleSlashCommand(s, "/display-bottom status model status");

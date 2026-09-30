@@ -15,6 +15,9 @@ import {
   applyEvent,
   applyModelSwitch,
   bottomLineColors,
+  bottomLines,
+  bottomValue,
+  BOTTOM_FIELDS,
   compactThreshold,
   contextBreakdown,
   contextReport,
@@ -336,6 +339,76 @@ test("contextReport: multi-line breakdown + compaction trigger (the /context bod
   assert.match(contextReport(over), /compaction: DUE — over the trigger by/);
 });
 
+test("docs/07 item 1: done with usage tracks lastUsage + cumulative cache; absent cache stays unknown", () => {
+  const withCache = doneEv([{ type: "text", text: "a" }], {
+    usage: { input: 10000, output: 100, cacheRead: 9000, cacheWrite: 500, totalTokens: 10100 },
+  });
+  const s1 = applyEvent(makeInitialState("m"), withCache);
+  assert.deepEqual(s1.lastUsage, { input: 10000, output: 100, cacheRead: 9000, cacheWrite: 500, totalTokens: 10100 });
+  assert.equal(s1.cacheReadTotal, 9000);
+  assert.equal(s1.cacheWriteTotal, 500);
+  // a second call accumulates the cache totals; lastUsage is replaced.
+  const s2 = applyEvent(s1, doneEv([], { usage: { input: 12000, output: 200, cacheRead: 10000, totalTokens: 12200 } }));
+  assert.equal(s2.cacheReadTotal, 19000);
+  assert.equal(s2.cacheWriteTotal, 500); // the second call reported no write
+  assert.equal(s2.lastUsage?.input, 12000);
+  // an endpoint that never reports cached_tokens: the field stays ABSENT
+  // (not 0) and the cumulative stays 0 — the display must not call that a
+  // 0% hit rate.
+  const s3 = applyEvent(makeInitialState("m"), doneEv([], { usage: { input: 500, output: 50, totalTokens: 550 } }));
+  assert.equal(s3.lastUsage?.cacheRead, undefined);
+  assert.equal(s3.cacheReadTotal, 0);
+  // a done without usage keeps the previous lastUsage (some endpoints).
+  const s4 = applyEvent(s2, doneEv());
+  assert.equal(s4.lastUsage?.input, 12000);
+  assert.equal(s4.cacheReadTotal, 19000);
+});
+
+test("docs/07 item 1: the `cache` bottom field shows the last call's hit rate; — when unknown", () => {
+  // no usage yet → "—".
+  assert.equal(bottomValue(makeInitialState("m"), "cache"), "—");
+  // usage without cached_tokens → "—" (absence ≠ 0%).
+  const noCache = applyEvent(makeInitialState("m"), doneEv([], { usage: { input: 500, output: 50, totalTokens: 550 } }));
+  assert.equal(bottomValue(noCache, "cache"), "—");
+  // a warm cache: ratio of the LAST call, compact numbers, percent.
+  const warm = applyEvent(makeInitialState("m"), doneEv([], {
+    usage: { input: 12100, output: 340, cacheRead: 11000, totalTokens: 12440 },
+  }));
+  assert.equal(bottomValue(warm, "cache"), "cached 11k/12.1k (91%)");
+  // cacheRead > input (an endpoint quirk) clamps to 100%, never >100%.
+  const over = applyEvent(makeInitialState("m"), doneEv([], {
+    usage: { input: 100, output: 10, cacheRead: 150, totalTokens: 110 },
+  }));
+  assert.equal(bottomValue(over, "cache"), "cached 0.2k/0.1k (100%)");
+  // the field is pinnable and renders in bottomLines.
+  assert.ok((BOTTOM_FIELDS as readonly string[]).includes("cache"));
+  assert.equal(bottomLines({ ...warm, bottom: ["cache"] }, 80)[0], "cache: cached 11k/12.1k (91%)");
+});
+
+test("docs/07 item 1: /context report gains the last-call line + session cache; omitted without data", () => {
+  // no usage → unchanged report (no cache lines at all).
+  const s0 = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
+  assert.doesNotMatch(contextReport(s0), /last call|session cache/);
+  // usage with a warm cache: the last-call line names the cached slice, and
+  // the session line shows read (write only when non-zero).
+  const s1 = applyEvent(s0, doneEv([], {
+    usage: { input: 12100, output: 340, cacheRead: 11000, cacheWrite: 200, totalTokens: 12440 },
+  }));
+  const r1 = contextReport(s1);
+  assert.match(r1, /  last call: in 12.1k \(cached 11k\) \/ out 0.3k/);
+  assert.match(r1, /  session cache: read 11k · write 0.2k/);
+  // usage without cached_tokens: the last-call line appears WITHOUT the
+  // cached slice, and no session line (the cumulative is 0).
+  const s2 = applyEvent(s0, doneEv([], { usage: { input: 500, output: 50, totalTokens: 550 } }));
+  const r2 = contextReport(s2);
+  assert.match(r2, /  last call: in 0.5k \/ out 0.1k/);
+  assert.doesNotMatch(r2, /cached|session cache/);
+  // cumulative across calls: the session line reflects the SUM, not the
+  // last call.
+  const s3 = applyEvent(s1, doneEv([], { usage: { input: 13000, output: 100, cacheRead: 12000, totalTokens: 13100 } }));
+  assert.match(contextReport(s3), /  session cache: read 23k · write 0.2k/);
+});
+
 test("handleSlashCommand: /context appends the breakdown as an info item", () => {
   const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
   const r = handleSlashCommand(s, "/context");
@@ -569,7 +642,7 @@ test("agent_end: stall → error item explaining the sandbox wall", () => {
   const last = s.items[s.items.length - 1]!;
   assert.equal(last.kind, "error");
   const text = last.kind === "error" ? last.text : "<not an error item>";
-  assert.match(text, /stall: the same tool call failed 3 times in a row with a permission denial/);
+  assert.match(text, /stall: the same tool failed 3 times with a permission denial within its last 8 calls/);
   assert.match(text, /--no-sandbox/);
   assert.match(text, /send another prompt to continue/);
   assert.equal(s.busy, false);
