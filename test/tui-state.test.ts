@@ -532,6 +532,75 @@ test("docs/07 item 2: deltaHistory caps at 8; a compaction resets it to [delta] 
   assert.deepEqual(noEst.deltaHistory, [1000, 1000, 1000]);
 });
 
+test("docs/07 item 4: context_compacted increments compactionCount + captures the last event", () => {
+  const s0 = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 90000 };
+  assert.equal(s0.compactionCount, 0);
+  assert.equal(s0.lastCompaction, null);
+  // first compaction: count 1, the event captured (degraded defaults false).
+  const s1 = applyEvent(s0, {
+    type: "context_compacted",
+    tokensBefore: 90000,
+    messagesKept: 12,
+    summaryChars: 36000,
+    contextTokens: 10000,
+  });
+  assert.equal(s1.compactionCount, 1);
+  assert.deepEqual(s1.lastCompaction, { tokensBefore: 90000, messagesKept: 12, summaryChars: 36000, degraded: false });
+  // second compaction: count 2, the LAST event replaces the first.
+  const s2 = applyEvent(s1, {
+    type: "context_compacted",
+    tokensBefore: 95000,
+    messagesKept: 8,
+    summaryChars: 20000,
+    contextTokens: 9000,
+    degraded: true,
+  });
+  assert.equal(s2.compactionCount, 2);
+  assert.deepEqual(s2.lastCompaction, { tokensBefore: 95000, messagesKept: 8, summaryChars: 20000, degraded: true });
+});
+
+test("docs/07 item 4: the `context` bottom field appends ×N; omitted before the first compaction", () => {
+  const base = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 11000 };
+  // no compaction yet → no ×N.
+  assert.equal(bottomValue(base, "context"), "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k");
+  // ×1 is already notable (the count is the point).
+  assert.equal(
+    bottomValue({ ...base, compactionCount: 1 }, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×1",
+  );
+  assert.equal(
+    bottomValue({ ...base, compactionCount: 2 }, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×2",
+  );
+  // ×N sits BEFORE the delta (item 2) when both are present.
+  assert.equal(
+    bottomValue({ ...base, compactionCount: 2, contextDelta: 1000 }, "context"),
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×2 · +1k",
+  );
+});
+
+test("docs/07 item 4: /context report gains the compactions line; (degraded) suffix; omitted before the first", () => {
+  // no compaction → no compactions line.
+  const s0 = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 25000 };
+  assert.doesNotMatch(contextReport(s0), /compactions:/);
+  // a normal compaction: count + tokensBefore → summary + msgs kept.
+  const s1 = {
+    ...makeInitialState("m", {}, 131072, 32768),
+    contextTokens: 10000,
+    compactionCount: 1,
+    lastCompaction: { tokensBefore: 90000, messagesKept: 12, summaryChars: 36000, degraded: false },
+  };
+  // summaryChars 36000 → 9000 tokens (chars/4).
+  assert.match(contextReport(s1), /  compactions: 1 · last: 90k → 9k summary \+ 12 msgs kept/);
+  // a degraded compaction: the (degraded) suffix.
+  const s2 = {
+    ...s1,
+    compactionCount: 2,
+    lastCompaction: { tokensBefore: 95000, messagesKept: 8, summaryChars: 20000, degraded: true },
+  };
+  assert.match(contextReport(s2), /  compactions: 2 · last: 95k → 5k summary \+ 8 msgs kept \(degraded\)/);
+});
+
 test("handleSlashCommand: /context appends the breakdown as an info item", () => {
   const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
   const r = handleSlashCommand(s, "/context");

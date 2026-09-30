@@ -165,6 +165,19 @@ export interface TuiState {
    *  turns-until-compaction prediction uses the MEAN, so one noisy turn doesn't
    *  wreck the estimate. */
   deltaHistory: number[];
+  /** docs/07 item 4 — how many times compaction has fired this session.
+   *  0 = none yet. Feeds the `context` field's `×N` suffix and the `/context`
+   *  report's history line. */
+  compactionCount: number;
+  /** docs/07 item 4 — the LAST compaction event (what it compressed, how much
+   *  it kept, whether it degraded to the rule-based fallback). null until the
+   *  first `context_compacted`. */
+  lastCompaction: {
+    tokensBefore: number;
+    messagesKept: number;
+    summaryChars: number;
+    degraded: boolean;
+  } | null;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -213,6 +226,8 @@ export function makeInitialState(
     cacheWriteTotal: 0,
     contextDelta: null,
     deltaHistory: [],
+    compactionCount: 0,
+    lastCompaction: null,
     info,
     viewTop: null,
     models,
@@ -441,6 +456,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         contextTokens: ev.contextTokens ?? state.contextTokens,
         contextDelta: delta,
         deltaHistory: delta === null ? state.deltaHistory : [delta],
+        // docs/07 item 4: how often compaction has fired + what the LAST one
+        // did (so the report can show the compression, and flag a degraded
+        // rule-based fallback).
+        compactionCount: state.compactionCount + 1,
+        lastCompaction: {
+          tokensBefore: ev.tokensBefore,
+          messagesKept: ev.messagesKept,
+          summaryChars: ev.summaryChars,
+          degraded: ev.degraded === true,
+        },
         // The summary is a user message in the new context — track its size
         // separately so the context breakdown can show system / summary /
         // messages. Estimate from the summary's char count (chars/4, the
@@ -1312,6 +1337,18 @@ export function contextReport(state: TuiState): string {
         : `  compaction: DUE — over the trigger by ${fmtTokens(-bd.headroom)}`,
     );
   }
+  // docs/07 item 4: how often compaction has fired this session and what the
+  // LAST one did (tokensBefore → summary size + msgs kept). The summary size
+  // is the same chars/4 estimate the breakdown's `summary` line uses. A
+  // (degraded) suffix marks a rule-based fallback (no LLM summary).
+  if (state.compactionCount > 0 && state.lastCompaction !== null) {
+    const lc = state.lastCompaction;
+    const summaryTok = fmtTokens(Math.ceil(lc.summaryChars / 4));
+    const degraded = lc.degraded ? " (degraded)" : "";
+    lines.push(
+      `  compactions: ${state.compactionCount} · last: ${fmtTokens(lc.tokensBefore)} → ${summaryTok} summary + ${lc.messagesKept} msgs kept${degraded}`,
+    );
+  }
   // docs/07 item 2: how fast the context is filling (the last turn's delta +
   // the mean of the recent history) and how many turns until compaction.
   // Omitted on the first turn (no delta yet).
@@ -1376,6 +1413,9 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       if (bd.threshold > 0) {
         parts.push(bd.headroom > 0 ? `@${fmtTokens(bd.threshold)}` : "DUE");
       }
+      // docs/07 item 4: how many times compaction has fired (×1 is already
+      // notable) — omitted until the first compaction.
+      if (state.compactionCount > 0) parts.push(`×${state.compactionCount}`);
       // docs/07 item 2: how much the context changed on the last turn
       // (`+820` / ` −170k`) — omitted on the first turn (no prior size).
       if (state.contextDelta !== null) parts.push(fmtDelta(state.contextDelta));
