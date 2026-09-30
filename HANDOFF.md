@@ -49,7 +49,9 @@ WIP (flagged; the WIP files were left out of this commit deliberately).
 
 # HANDOFF — `tre.json` gitignored: per-deployment durable extra roots (2026-09-29)
 
-**Status: gate green — committed (see git log).**
+**Status: committed (see git log). Gate NOT run in-session** (node under
+`~/.nvm` was outside the sandbox for the whole session) — low-risk change:
+`.gitignore` + docs only, no code.
 
 **Why.** C36's `tre.json` lookup finds the NEAREST file above the launch
 dir, so a project-root `tre.json` is the natural place for durable extra
