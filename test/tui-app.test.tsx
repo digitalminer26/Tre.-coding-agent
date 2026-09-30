@@ -272,6 +272,22 @@ test("C27: PageUp/PageDown route to onScrollBy with ±page (Shift halves)", asyn
   app.unmount();
 });
 
+test("C27: Ctrl+U/Ctrl+D route to onScrollBy with ±halfPage (laptop fallback)", async () => {
+  // PgUp/PgDn don't exist on compact keyboards; Ctrl+letter always does.
+  // Raw 0x15 / 0x04 — Ink parses them as ctrl+u / ctrl+d (name from the
+  // control byte), so the handler keys on key.ctrl + input.
+  const calls: number[] = [];
+  const app = makeApp(makeInitialState("m"), {
+    onScrollBy: (d: number) => calls.push(d),
+  });
+  app.stdin.write("\x15"); // Ctrl+U
+  await tick();
+  app.stdin.write("\x04"); // Ctrl+D
+  await tick();
+  assert.deepEqual(calls, [8, -8]);
+  app.unmount();
+});
+
 test("C27: Home/End route to onScrollToTop/onScrollToBottom (incl. Ctrl-modified)", async () => {
   let top = 0, bottom = 0;
   const app = makeApp(makeInitialState("m"), {
@@ -387,7 +403,7 @@ test("hint: the wheel is named only when mouse tracking is enabled (TRE_MOUSE)",
     delete process.env.TRE_MOUSE;
     const idle = makeApp(makeInitialState("m"));
     const idleFrame = idle.lastFrame() ?? "";
-    assert.match(idleFrame, /enter send · PgUp\/PgDn scroll ·/);
+    assert.match(idleFrame, /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D scroll ·/);
     assert.doesNotMatch(idleFrame, /wheel/);
     idle.unmount();
 
@@ -399,7 +415,7 @@ test("hint: the wheel is named only when mouse tracking is enabled (TRE_MOUSE)",
 
     process.env.TRE_MOUSE = "1";
     const idle2 = makeApp(makeInitialState("m"));
-    assert.match(idle2.lastFrame() ?? "", /enter send · PgUp\/PgDn\/wheel scroll ·/);
+    assert.match(idle2.lastFrame() ?? "", /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D\/wheel scroll ·/);
     idle2.unmount();
 
     const scrolled2 = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });

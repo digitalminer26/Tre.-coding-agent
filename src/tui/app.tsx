@@ -162,11 +162,11 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
     // C27/C28: scroll the output area. Placed BEFORE the ctrl catch-all
-    // below (Ctrl+Home/End arrive with key.ctrl set) and before the char
-    // path (mouse SGR sequences have no `name` and would be typed
-    // otherwise). delta = rows the viewport moves UP: wheel up / PageUp
-    // add, wheel down / PageDown subtract (scrollBy clamps; reaching the
-    // bottom resumes following).
+    // below (Ctrl+Home/End/Ctrl+U/Ctrl+D arrive with key.ctrl set) and
+    // before the char path (mouse SGR sequences have no `name` and would
+    // be typed otherwise). delta = rows the viewport moves UP: wheel up /
+    // PageUp / Ctrl+U add, wheel down / PageDown / Ctrl+D subtract
+    // (scrollBy clamps; reaching the bottom resumes following).
     if (MOUSE_WHEEL_UP.test(input)) {
       props.onScrollBy(SCROLL_LINES, layout.maxScroll);
       return;
@@ -189,6 +189,20 @@ export function App(props: AppProps): React.ReactElement {
     }
     if (key.end) {
       props.onScrollToBottom();
+      return;
+    }
+    // Ctrl+U / Ctrl+D — half-page scroll (Emacs convention). The
+    // laptop-friendly fallback: PgUp/PgDn/Home/End don't exist on many
+    // compact keyboards, but Ctrl+letter always does (raw 0x15 / 0x04,
+    // parsed by Ink as ctrl+u / ctrl+d). Placed BEFORE the ctrl catch-all
+    // below (which would otherwise swallow them) and the char path (a raw
+    // ctrl byte has no printable char to type).
+    if (key.ctrl && input === "u") {
+      props.onScrollBy(halfPage, layout.maxScroll);
+      return;
+    }
+    if (key.ctrl && input === "d") {
+      props.onScrollBy(-halfPage, layout.maxScroll);
       return;
     }
     // Any other SGR mouse event (clicks, drags, releases): ignore — it
@@ -238,7 +252,7 @@ export function App(props: AppProps): React.ReactElement {
             ? "y approve · n/esc deny"
             : layout.eff > 0
               ? `↑${layout.eff}/${layout.maxScroll} scrolled — PgDn${wheel} ↓ to bottom · Home top · /quit exit`
-              : `enter send · PgUp/PgDn${wheel} scroll · ↑/↓ history · /quit exit`,
+              : `enter send · PgUp/PgDn/Ctrl+U/Ctrl+D${wheel} scroll · ↑/↓ history · /quit exit`,
           width
         )}
       </Text>
