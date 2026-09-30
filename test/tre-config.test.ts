@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  expandTilde,
   findTreConfig,
   loadTreConfig,
   parseTreConfig,
@@ -112,6 +113,20 @@ test("findTreConfig: null when neither walk nor home has one", (t) => {
   assert.equal(findTreConfig(undefined, dir, path.join(dir, "nohome")), null);
 });
 
+// ─────────────────────────────── tilde expansion ───────────────────────────────
+
+test("expandTilde: ~ and ~/ expand against the home dir", () => {
+  assert.equal(expandTilde("~", "/home/u"), "/home/u");
+  assert.equal(expandTilde("~/kubeconfigs", "/home/u"), "/home/u/kubeconfigs");
+  assert.equal(expandTilde("~/a/b", "/home/u"), "/home/u/a/b");
+});
+
+test("expandTilde: non-~ entries are unchanged (absolute or relative)", () => {
+  assert.equal(expandTilde("/abs/dir", "/home/u"), "/abs/dir");
+  assert.equal(expandTilde("rel/dir", "/home/u"), "rel/dir");
+  assert.equal(expandTilde("~name/x", "/home/u"), "~name/x"); // no user-lookup
+});
+
 // ─────────────────────────── CLI integration ───────────────────────────
 
 test(
@@ -141,9 +156,40 @@ test(
       },
     );
     assert.equal(code, 0, `startup should succeed (stderr: ${S.err()})`);
-    // The durable root AND the flag root are both in the boundary summary,
-    // in order (tre.json first, then the flag).
-    assert.match(S.err(), new RegExp(`extra roots: ${esc(extra1)}, ${esc(extra2)}  \\(read\\+write`));
+    // The durable root (tre.json) and the one-shot flag root are BOTH in the
+    // boundary summary, on SEPARATE labeled lines (tre.json durable, flag
+    // this-launch-only).
+    assert.match(S.err(), new RegExp(`extra roots \\(durable, from tre\\.json\\): ${esc(extra1)}  \\(read\\+write`));
+    assert.match(S.err(), new RegExp(`extra roots \\(THIS LAUNCH ONLY, --extra-root\\): ${esc(extra2)}  \\(read\\+write`));
+  },
+);
+
+test(
+  "main: tre.json with a ~/ entry → expanded against home, accepted",
+  {
+    // The repo root is under home — spell it as ~/… (the portable form) and
+    // assert it is expanded to the absolute path in the boundary summary.
+    skip:
+      !process.env.HOME || !process.cwd().startsWith(process.env.HOME + "/")
+        ? "repo is not under $HOME — cannot spell the root as ~/…"
+        : false,
+  },
+  async (t) => {
+    const { dir, models } = await workspace(t);
+    const tildeRoot = "~" + process.cwd().slice(process.env.HOME!.length);
+    assert.ok(tildeRoot.startsWith("~/"), `expected a ~/… form, got ${tildeRoot}`);
+    const cfg = path.join(dir, "tre.json");
+    fs.writeFileSync(cfg, JSON.stringify({ extraRoots: [tildeRoot] }));
+    const S = mkSinks();
+    const code = await main(
+      ["run", "x", "--tools", "none", "--models", models, "--cwd", dir],
+      { streamFn: fakeStream([{ type: "text", text: "ok" }]), sinks: S.sinks, treConfigPath: cfg },
+    );
+    assert.equal(code, 0, `startup should succeed (stderr: ${S.err()})`);
+    // The summary (durable line) shows the EXPANDED absolute path, not the
+    // ~/… spelling.
+    assert.match(S.err(), new RegExp(`extra roots \\(durable, from tre\\.json\\): ${esc(process.cwd())}  \\(read\\+write`));
+    assert.doesNotMatch(S.err(), new RegExp(esc(tildeRoot)));
   },
 );
 

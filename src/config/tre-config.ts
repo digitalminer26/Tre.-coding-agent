@@ -9,6 +9,11 @@
  * tre.json shape:
  *   { "extraRoots": [ "/abs/or/~/relative/dir", ... ] }
  *
+ * Entries may start with `~` or `~/` (expanded against the home dir at
+ * startup, like a shell) — e.g. `"~/kubeconfigs"`. `~` alone means the home
+ * dir itself. A bare `~name` is NOT expanded (no user-lookup — it would
+ * resolve to the literal `~name` path and fail the exists check, fail-closed).
+ *
  * Lookup (mirrors D19's models.json convention): walk UP from the launch
  * directory looking for a `tre.json` — the same convention as a `.git`
  * directory or a `models.json` — then fall back to the permanent home
@@ -54,6 +59,20 @@ export function parseTreConfig(raw: string): TreConfig {
 /** Read + parse a tre.json from disk. */
 export function loadTreConfig(path: string): TreConfig {
   return parseTreConfig(readFileSync(path, "utf8"));
+}
+
+/**
+ * Expand a leading `~` / `~/` in a config entry against the home dir (shell
+ * convention — keeps tre.json portable across machines/users: `~/kubeconfigs`
+ * instead of `/Users/<name>/kubeconfigs`). `~` alone → the home dir;
+ * `~name` is NOT expanded (no user-lookup — it would resolve to the literal
+ * `~name` path and fail the exists check, fail-closed). Non-`~` entries are
+ * returned unchanged (absolute or cwd-relative, as before).
+ */
+export function expandTilde(p: string, home: string = homedir()): string {
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return home + p.slice(1);
+  return p;
 }
 
 /**
