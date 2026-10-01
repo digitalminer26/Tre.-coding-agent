@@ -11,6 +11,8 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import type { Tool, ToolResult } from "../types.js";
 import {
+  MAX_BYTES,
+  MAX_LINES,
   saveFullOutput,
   truncationMarker,
   truncateHead,
@@ -130,11 +132,17 @@ export const readTool: Tool = {
     // Truncated: save the FULL paged (pre-truncation) content and tell the
     // model where it went.
     const fullOutputPath = await saveFullOutput("read", paged);
-    const body =
-      t.text +
-      "\n" +
-      truncationMarker("head", t, fullOutputPath) +
-      `\ncontinue with offset=${offset + t.keptLines} (file has ${total} lines)`;
+    let hint = `continue with offset=${offset + t.keptLines} (file has ${total} lines)`;
+    // Why was the page truncated? The line cap allows min(page, MAX_LINES)
+    // lines; if fewer were kept, the BYTE cap is the binding constraint.
+    // Following offset alone then re-hits the cap — suggest a smaller page.
+    const byteCapped = t.keptLines < Math.min(slice.length, MAX_LINES);
+    if (byteCapped && t.keptLines > 0) {
+      const avgLineBytes = t.keptBytes / t.keptLines;
+      const suggestedLimit = Math.max(1, Math.floor(MAX_BYTES / avgLineBytes) - 1);
+      hint += `; wide lines hit the byte cap — also pass limit=${suggestedLimit}`;
+    }
+    const body = t.text + "\n" + truncationMarker("head", t, fullOutputPath) + `\n${hint}`;
     return {
       content: text(body),
       details: { truncated: true, fullOutputPath },

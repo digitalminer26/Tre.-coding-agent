@@ -375,6 +375,34 @@ test("read: >2000 lines → head-truncated with fullOutputPath + continue hint",
   assert.equal(r.details?.truncated, true);
 });
 
+test("read: byte-limit truncation (wide lines) → hint suggests a smaller limit", async () => {
+  // 500 lines of ~2000 bytes each: the page is cut by the 50 KB byte cap,
+  // not the 2000-line cap. Following offset alone would re-truncate, so the
+  // hint must also suggest a limit.
+  const wide = Array.from({ length: 500 }, () => "x".repeat(2000));
+  const p = write("wide.txt", wide.join("\n") + "\n");
+  const r = await readTool.execute("1", { path: p }, new AbortController().signal);
+  assert.equal(r.isError, undefined);
+  const text = resultText(r);
+  assert.match(text, /\[truncated: showing first \d+ of 500 lines/);
+  assert.match(text, /wide lines hit the byte cap — also pass limit=\d+/);
+  const m = text.match(/limit=(\d+)/);
+  assert.ok(m, "hint carries a numeric limit");
+  assert.ok(Number(m![1]) >= 1, "suggested limit is positive");
+  assert.equal(r.details?.truncated, true);
+});
+
+test("read: line-limit truncation (many short lines) → hint has NO limit suggestion", async () => {
+  // 3000 short lines: cut by the 2000-line cap, not the byte cap. The hint
+  // must stay the plain offset continuation (pinned format).
+  const lines = Array.from({ length: 3000 }, (_, i) => `line-${i + 1}`);
+  const p = write("many.txt", lines.join("\n") + "\n");
+  const r = await readTool.execute("1", { path: p }, new AbortController().signal);
+  const text = resultText(r);
+  assert.match(text, /continue with offset=2001 \(file has 3000 lines\)/);
+  assert.ok(!/limit=/.test(text), "no limit suggestion for line-limit truncation");
+});
+
 // ────────────────────────────── write ──────────────────────────────
 
 test("write: creates parents and writes content", async () => {
