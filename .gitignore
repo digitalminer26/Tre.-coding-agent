@@ -15,6 +15,9 @@ tre.json
 # Per-machine Telegram bot credentials (token) + poll state — never in git.
 .tre/telegram.json
 .tre/telegram/
+# Parallel-delegation skill state (plan files, prompts, logs, sessions) —
+# local orchestration artifacts, never in git.
+.tre/delegation/
 # Per-machine GitHub push token (transient — deleted after the push).
 .tre/github-token
 # Skills are deployment-specific — never in git by default. The two
