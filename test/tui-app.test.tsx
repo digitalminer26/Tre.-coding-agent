@@ -31,6 +31,9 @@ interface Cbs {
   onCtrlC?: () => void;
   onApproval?: (ok: boolean) => void;
   onQuit?: () => void;
+  onModelPickerNav?: (dir: -1 | 1) => void;
+  onModelPickerConfirm?: () => void;
+  onModelPickerClose?: () => void;
 }
 
 const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
@@ -48,6 +51,9 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       onCtrlC: () => cbs?.onCtrlC?.(),
       onApproval: (ok: boolean) => cbs?.onApproval?.(ok),
       onQuit: () => cbs?.onQuit?.(),
+      onModelPickerNav: (dir: -1 | 1) => cbs?.onModelPickerNav?.(dir),
+      onModelPickerConfirm: () => cbs?.onModelPickerConfirm?.(),
+      onModelPickerClose: () => cbs?.onModelPickerClose?.(),
     }),
   );
 
@@ -425,4 +431,66 @@ test("hint: the wheel is named only when mouse tracking is enabled (TRE_MOUSE)",
     if (prev === undefined) delete process.env.TRE_MOUSE;
     else process.env.TRE_MOUSE = prev;
   }
+});
+
+// ─────────────────────── C38: the interactive model picker ─────────────────
+// The picker is a modal: while open, ↑/↓ move the highlight, enter confirms
+// (switch + close), esc closes (no switch), and nothing else types. The
+// pure math is pinned in tui-state.test.ts; here we pin the KEY ROUTING
+// (app.tsx) and the frame rendering.
+
+const PICKER_CATALOG = [
+  { id: "small", provider: "p", contextWindow: 32768, maxTokens: 4096 },
+  { id: "big", provider: "p", contextWindow: 200000, maxTokens: 8192 },
+];
+
+test("C38: the picker renders the catalog with the highlighted row marked", () => {
+  const state = { ...makeInitialState("small", {}, 32768, 4096), models: PICKER_CATALOG, modelPicker: 0 };
+  const app = makeApp(state);
+  const frame = app.lastFrame() ?? "";
+  assert.match(frame, /small  \[p\]  window 32.8k/);
+  assert.match(frame, /big  \[p\]  window 200k/);
+  assert.match(frame, /↑\/↓ select · enter switch model · esc close/);
+  app.unmount();
+});
+
+test("C38: while the picker is open, arrows/enter/esc route to the picker, not the input", async () => {
+  const calls: string[] = [];
+  const state = { ...makeInitialState("small", {}, 32768, 4096), models: PICKER_CATALOG, modelPicker: 0 };
+  const app = makeApp(state, {
+    onModelPickerNav: (dir: -1 | 1) => calls.push(`nav:${dir}`),
+    onModelPickerConfirm: () => calls.push("confirm"),
+    onModelPickerClose: () => calls.push("close"),
+    onChar: (ch: string) => calls.push(`char:${ch}`),
+    onHistory: (dir: -1 | 1) => calls.push(`hist:${dir}`),
+    onSubmit: () => calls.push("submit"),
+  });
+  app.stdin.write("\x1b[B"); // down → nav:1
+  await tick();
+  app.stdin.write("\x1b[A"); // up → nav:-1
+  await tick();
+  app.stdin.write("\r"); // enter → confirm
+  await tick();
+  app.stdin.write("x"); // typed char → ignored (input locked)
+  await tick();
+  app.stdin.write("\x1b"); // esc → close
+  await settle();
+  app.unmount();
+  assert.deepEqual(calls, ["nav:1", "nav:-1", "confirm", "close"]);
+});
+
+test("C38: the picker frame stays exactly `rows` tall (item budget shrinks by the picker lines)", () => {
+  // The frame is exactly `rows` tall by construction; the picker steals item
+  // budget (like the D16 menu), so the total height must NOT change when it
+  // opens. Compare the idle frame to the picker-open frame.
+  const base = makeInitialState("small", {}, 32768, 4096);
+  const idle = makeApp({ ...base, models: PICKER_CATALOG });
+  const idleFrame = idle.lastFrame() ?? "";
+  idle.unmount();
+  const open = makeApp({ ...base, models: PICKER_CATALOG, modelPicker: 0 });
+  const openFrame = open.lastFrame() ?? "";
+  open.unmount();
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  const lineCount = (f: string) => strip(f).replace(/\n$/, "").split("\n").length;
+  assert.equal(lineCount(openFrame), lineCount(idleFrame), "picker-open frame is the same height as idle");
 });

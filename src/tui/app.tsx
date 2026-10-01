@@ -16,6 +16,7 @@ import {
   bottomLines,
   fitItemsScrollable,
   inputWrap,
+  modelPickerMenu,
   suggestMenu,
 } from "./state.js";
 
@@ -63,6 +64,12 @@ export interface AppProps {
   onApproval: (ok: boolean) => void;
   /** /quit while idle — exit 0 (the driver owns the unmount). */
   onQuit: () => void;
+  /** C38: the model picker is open — ↑/↓ move the highlight (dir -1/1). */
+  onModelPickerNav: (dir: -1 | 1) => void;
+  /** C38: enter on the highlighted model — switch + close the picker. */
+  onModelPickerConfirm: () => void;
+  /** C38: esc — close the picker without switching. */
+  onModelPickerClose: () => void;
 }
 
 export function App(props: AppProps): React.ReactElement {
@@ -81,15 +88,18 @@ export function App(props: AppProps): React.ReactElement {
   // renders BETWEEN the hint and the top separator, so it steals budget
   // from the item area exactly like the approval line does.
   const menu = suggestMenu(state, width);
+  // C38: the model picker lines (empty when the picker is closed).
+  const picker = modelPickerMenu(state, width);
   // The input WRAPS at the terminal width (inputWrap): the extra lines beyond
   // the one the pinned block reserves steal item budget, exactly like the
   // approval line and the menu do — the frame stays exactly `rows` tall.
   const inputLines = inputWrap(state.input, state.cursorPos, width);
   // C28: the item area is a scrollable viewport pinned at content row
   // viewTop (null = follow the bottom). `extra` = the lines reserved below
-  // the item area (approval, menu, wrapped input) — the SAME reservation
-  // the fit math uses.
-  const extra = (state.approval !== null ? 1 : 0) + menu.length + (inputLines.length - 1);
+  // the item area (approval, menu, picker, wrapped input) — the SAME
+  // reservation the fit math uses.
+  const extra =
+    (state.approval !== null ? 1 : 0) + menu.length + picker.length + (inputLines.length - 1);
   const layout = fitItemsScrollable(state.items, width, rows, extra, state.viewTop);
   // A page = one item-area budget (Shift halves it) — sized in the SAME
   // rows the fit uses, so PgUp/PgDn move exactly one window of content.
@@ -124,6 +134,19 @@ export function App(props: AppProps): React.ReactElement {
       }
       if (first === "y" || key.return) props.onApproval(true);
       else if (first === "n" || key.escape) props.onApproval(false);
+      return;
+    }
+    if (state.modelPicker !== null) {
+      // C38: the model picker is open — the input is locked (as with an
+      // approval): only ↑/↓ (move the highlight), enter (switch to the
+      // highlighted model) and esc (close, no switch) mean anything.
+      // (The input line is always empty while the picker is open — it was
+      // cleared by the `/models` submit that opened it — so no /quit path
+      // is needed here; ctrl+c still aborts/exits as usual.)
+      if (key.upArrow) props.onModelPickerNav(-1);
+      else if (key.downArrow) props.onModelPickerNav(1);
+      else if (key.return) props.onModelPickerConfirm();
+      else if (key.escape) props.onModelPickerClose();
       return;
     }
     if (key.return) {
@@ -250,7 +273,9 @@ export function App(props: AppProps): React.ReactElement {
         {oneLine(
           state.approval !== null
             ? "y approve · n/esc deny"
-            : layout.eff > 0
+            : state.modelPicker !== null
+              ? "↑/↓ select · enter switch model · esc close"
+              : layout.eff > 0
               ? `↑${layout.eff}/${layout.maxScroll} scrolled — PgDn${wheel} ↓ to bottom · Home top · /quit exit`
               : `enter send · PgUp/PgDn/Ctrl+U/Ctrl+D${wheel} scroll · ↑/↓ history · /quit exit`,
           width
@@ -261,6 +286,16 @@ export function App(props: AppProps): React.ReactElement {
           chrome is dim; the pick is the one line that should stand out). */}
       {menu.map((m, i) => (
         <Text key={`menu-${i}`} dimColor={!m.selected} color={m.selected ? "yellow" : undefined}>
+          {m.line}
+        </Text>
+      ))}
+      {/* C38: the model picker — the same grey-menu treatment as the D16
+          completion menu (selected row marked with "> " and YELLOW). The
+          picker and the completion menu are never visible at once (the
+          picker only opens after the `/models` submit, which clears the
+          input). */}
+      {picker.map((m, i) => (
+        <Text key={`picker-${i}`} dimColor={!m.selected} color={m.selected ? "yellow" : undefined}>
           {m.line}
         </Text>
       ))}

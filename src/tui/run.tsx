@@ -40,6 +40,9 @@ import {
   makeInitialState,
   menuComplete,
   menuNav,
+  modelPickerClose,
+  modelPickerConfirm,
+  modelPickerNav,
   noteError,
   pushUser,
   scrollBy,
@@ -547,6 +550,35 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
     onApproval: (ok: boolean): void => setState(approvalAnswer(state, ok)),
     onQuit: (): void => quit(0),
+    // C38: the model picker — pure state transitions (nav/close); confirm
+    // switches via applyModelSwitch AND re-resolves the full ModelConfig +
+    // system prompt (the same driver work as a typed `/models <id>` switch).
+    onModelPickerNav: (dir: -1 | 1): void => {
+      const nav = modelPickerNav(state, dir);
+      if (nav !== null) setState(nav);
+    },
+    onModelPickerConfirm: (): void => {
+      // Capture the OLD label BEFORE setState: setState reassigns the outer
+      // `state` to the confirmed state, so comparing confirmed against
+      // `state` afterwards would compare it to itself (always equal) and the
+      // driver's model re-resolution would never fire — the header would
+      // switch but the wire would keep the old model.
+      const prevLabel = state.modelLabel;
+      const confirmed = modelPickerConfirm(state);
+      if (confirmed === null) return; // picker closed — nothing to do
+      setState(confirmed);
+      if (confirmed.modelLabel !== prevLabel) {
+        const nm = resolveSwitchedModel(opts.modelsFile, confirmed.modelLabel);
+        if (nm !== null) {
+          model = nm;
+          if (opts.rebuildSystemPrompt !== undefined) systemPrompt = opts.rebuildSystemPrompt(nm.id);
+        }
+      }
+    },
+    onModelPickerClose: (): void => {
+      const closed = modelPickerClose(state);
+      if (closed !== null) setState(closed);
+    },
     // C28: output scrollback — pure state transitions (see state.ts).
     onScrollBy: (delta: number, maxScroll: number): void =>
       setState(scrollBy(state, delta, maxScroll)),

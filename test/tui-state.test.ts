@@ -26,7 +26,14 @@ import {
   inputBackspace,
   inputChar,
   inputHistory,
+  inputMove,
   makeInitialState,
+  modelPickerClose,
+  modelPickerConfirm,
+  modelPickerInitialIndex,
+  modelPickerMenu,
+  modelPickerNav,
+  modelPickerOpen,
   modelsListReport,
   noteError,
   pushUser,
@@ -665,15 +672,111 @@ test("applyModelSwitch: re-seeds label + context field; null on unknown id", () 
   assert.equal(applyModelSwitch(makeInitialState("m"), "big"), null);
 });
 
-test("handleSlashCommand: /models lists, /models <id> switches, unknown reports", () => {
+// ── C38: the interactive model picker (↑/↓ + enter/esc) ───────────────────
+
+test("modelPickerOpen: opens on the active model's row; no catalog → unchanged", () => {
+  const s = { ...makeInitialState("big", {}, 200000, 8192), models: CATALOG };
+  const open = modelPickerOpen(s);
+  assert.equal(open.modelPicker, 1); // "big" is the second catalog row
+  assert.equal(open.modelLabel, "big"); // no switch yet
+  // active model not in the catalog (e.g. catalog replaced after startup)
+  const orphan = modelPickerOpen({ ...makeInitialState("ghost"), models: CATALOG });
+  assert.equal(orphan.modelPicker, null);
+  // no catalog → the state is returned unchanged (same reference)
+  const empty = makeInitialState("m");
+  assert.equal(modelPickerOpen(empty), empty);
+});
+
+test("modelPickerInitialIndex: active row, null when absent", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
+  assert.equal(modelPickerInitialIndex(s), 0);
+  assert.equal(modelPickerInitialIndex({ ...s, modelLabel: "big" }), 1);
+  assert.equal(modelPickerInitialIndex({ ...s, modelLabel: "ghost" }), null);
+});
+
+test("modelPickerNav: moves the highlight with wrap-around; null when closed", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG, modelPicker: 0 };
+  assert.equal(modelPickerNav(s, 1)!.modelPicker, 1);
+  assert.equal(modelPickerNav(s, -1)!.modelPicker, 1); // wraps to the last row
+  const last = { ...s, modelPicker: 1 };
+  assert.equal(modelPickerNav(last, 1)!.modelPicker, 0); // wraps to the first row
+  assert.equal(modelPickerNav(last, -1)!.modelPicker, 0);
+  // closed → null (the caller falls through to history navigation)
+  assert.equal(modelPickerNav(makeInitialState("m", {}, 0, 0, [], 0, CATALOG), 1), null);
+  // closed + empty catalog → null
+  assert.equal(modelPickerNav(makeInitialState("m"), 1), null);
+});
+
+test("modelPickerConfirm: switches to the highlighted model and closes", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG, modelPicker: 0 };
+  const toBig = modelPickerConfirm({ ...s, modelPicker: 1 });
+  assert.ok(toBig !== null);
+  assert.equal(toBig.modelPicker, null); // closed
+  assert.equal(toBig.modelLabel, "big"); // switched (applyModelSwitch)
+  assert.equal(toBig.contextWindow, 200000);
+  assert.equal(toBig.maxTokens, 8192);
+  // confirming the ACTIVE model → closes, no switch (label + fields as-is)
+  const same = modelPickerConfirm(s);
+  assert.ok(same !== null);
+  assert.equal(same.modelPicker, null);
+  assert.equal(same.modelLabel, "small");
+  assert.equal(same.contextWindow, 32768);
+  // closed → null (the caller runs the normal submit path)
+  assert.equal(modelPickerConfirm({ ...s, modelPicker: null }), null);
+  assert.equal(modelPickerConfirm(makeInitialState("m", {}, 0, 0, [], 0, CATALOG)), null);
+});
+
+test("modelPickerClose: esc closes without switching; null when closed", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG, modelPicker: 1 };
+  const closed = modelPickerClose(s);
+  assert.ok(closed !== null);
+  assert.equal(closed.modelPicker, null);
+  assert.equal(closed.modelLabel, "small"); // no switch
+  assert.equal(closed.contextWindow, 32768);
+  assert.equal(modelPickerClose(makeInitialState("m")), null);
+});
+
+test("modelPickerMenu: one line per model, highlighted row marked, hidden when closed", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG, modelPicker: 1 };
+  const lines = modelPickerMenu(s, 80);
+  assert.deepEqual(
+    lines.map((l) => l.line),
+    ["  small  [p]  window 32.8k", "> big  [p]  window 200k"],
+  );
+  assert.deepEqual(lines.map((l) => l.selected), [false, true]);
+  // closed → no lines (the frame renders nothing)
+  assert.deepEqual(modelPickerMenu(makeInitialState("m", {}, 0, 0, [], 0, CATALOG), 80), []);
+  // an approval pending hides the picker (the input is locked then anyway)
+  const appr = setApproval(s, "run rm -rf?", () => {});
+  assert.deepEqual(modelPickerMenu(appr, 80), []);
+});
+
+test("C38: input is locked while the model picker is open", () => {
+  const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG, modelPicker: 0 };
+  assert.equal(inputChar(s, "x"), s); // same reference — nothing typed
+  assert.equal(inputBackspace(s), s);
+  assert.equal(inputMove(s, -1), s);
+  assert.equal(submitInput(s), null); // enter confirms the picker, not a submit
+});
+
+test("handleSlashCommand: /models opens the picker, /models <id> switches, unknown reports", () => {
   const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
 
-  // bare /models → the list as an info item, state otherwise untouched
+  // C38: bare /models → opens the interactive picker (modelPicker set to the
+  // active model's row) — no info item, no switch yet
   const list = handleSlashCommand(s, "/models");
   assert.equal(list.handled, true);
-  assert.equal(list.state.items.length, s.items.length + 1);
-  assert.equal((list.state.items[list.state.items.length - 1] as { kind: string }).kind, "info");
+  assert.equal(list.state.items.length, s.items.length);
+  assert.equal(list.state.modelPicker, 0); // "small" is the first catalog row
   assert.equal(list.state.modelLabel, "small");
+
+  // C38: bare /models with NO catalog → the old "no models" note (info item)
+  const none = handleSlashCommand(makeInitialState("m"), "/models");
+  assert.equal(none.handled, true);
+  assert.equal(none.state.modelPicker, null);
+  const noneInfo = none.state.items[none.state.items.length - 1] as { kind: string; text: string };
+  assert.equal(noneInfo.kind, "info");
+  assert.match(noneInfo.text, /no catalog supplied/);
 
   // /models big → switched: label + window re-seeded, feedback info item
   const sw = handleSlashCommand(s, "/models big");

@@ -107,6 +107,15 @@ export interface TuiState {
   bottom: string[];
   /** D16: selected candidate in the slash-command menu (null = first). */
   suggestIdx: number | null;
+  /**
+   * C38: the interactive model picker is open — `models[index]` is the
+   * highlighted entry (null = closed). Opened by bare `/models` (on the
+   * active model's row); ↑/↓ move the highlight (modelPickerNav), enter
+   * switches to the highlighted model (modelPickerConfirm), esc closes
+   * without switching (modelPickerClose). While open the input is locked,
+   * exactly like a pending approval.
+   */
+  modelPicker: number | null;
   /** Cumulative Usage.totalTokens across assistant `done` events. */
   totalTokens: number;
   /** Count of tool executions started (tool_execution_start events). */
@@ -214,6 +223,7 @@ export function makeInitialState(
     modelLabel,
     bottom,
     suggestIdx: null,
+    modelPicker: null,
     totalTokens: 0,
     toolCalls: 0,
     contextWindow: window,
@@ -527,6 +537,7 @@ const clampCursor = (pos: number, len: number): number =>
 
 export function inputChar(s: TuiState, ch: string): TuiState {
   if (s.approval) return s; // input locked while an approval is pending
+  if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
   const pos = clampCursor(s.cursorPos, s.input.length);
   const input = s.input.slice(0, pos) + ch + s.input.slice(pos);
   return { ...s, input, cursorPos: pos + ch.length, historyIdx: null };
@@ -534,6 +545,7 @@ export function inputChar(s: TuiState, ch: string): TuiState {
 
 export function inputBackspace(s: TuiState): TuiState {
   if (s.approval) return s;
+  if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
   const pos = clampCursor(s.cursorPos, s.input.length);
   if (pos === 0) return s; // nothing before the cursor to delete
   const input = s.input.slice(0, pos - 1) + s.input.slice(pos);
@@ -548,6 +560,7 @@ export function inputBackspace(s: TuiState): TuiState {
  */
 export function inputMove(s: TuiState, dir: -1 | 1): TuiState {
   if (s.approval) return s;
+  if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
   const pos = clampCursor(s.cursorPos, s.input.length) + dir;
   if (pos < 0 || pos > s.input.length) return s;
   return { ...s, cursorPos: pos };
@@ -574,7 +587,7 @@ export function inputHistory(s: TuiState, dir: -1 | 1): TuiState {
  * only handles the idle case (a fresh prompt starts a new run).
  */
 export function submitInput(s: TuiState): { state: TuiState; prompt: string } | null {
-  if (s.approval !== null || s.busy) return null;
+  if (s.approval !== null || s.modelPicker !== null || s.busy) return null; // C38: picker open = enter confirms the picker, not a submit
   const prompt = s.input.trim();
   if (prompt === "") return null;
   return {
@@ -1123,7 +1136,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "context", summary: "context breakdown: system/summary/messages + compaction trigger" },
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },
-  { name: "models", summary: "list models / switch the active model" },
+  { name: "models", summary: "pick the active model (↑/↓ + enter) / /models <id> switches" },
   { name: "quit", summary: "end the session" },
   { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
 ];
@@ -1529,6 +1542,81 @@ export function applyModelSwitch(state: TuiState, modelId: string): TuiState | n
   };
 }
 
+// ── C38 — the interactive model picker ─────────────────────────────────────
+// Bare `/models` opens a modal list of the catalog (the active model's row
+// highlighted); ↑/↓ move the highlight, enter switches to the highlighted
+// model, esc closes without switching. The state machine only carries the
+// highlight (modelPicker); the SWITCH itself is applyModelSwitch (the driver
+// re-resolves the full ModelConfig by id, as for the typed `/models <id>`).
+// The picker is an input lock like a pending approval: while open, typing,
+// history and submit are inert (the keybinding table in app.tsx routes
+// arrows/enter/esc here instead).
+
+/** The row the picker opens on: the ACTIVE model's index (null when the
+ * catalog is empty or the active model is not in it — e.g. a catalog that
+ * was replaced after startup). */
+export function modelPickerInitialIndex(state: TuiState): number | null {
+  const i = state.models.findIndex((m) => m.id === state.modelLabel);
+  return i >= 0 ? i : null;
+}
+
+/** Open the picker (bare `/models`). No catalog → the closed state,
+ * unchanged (the caller reports "no catalog supplied"). */
+export function modelPickerOpen(state: TuiState): TuiState {
+  const idx = modelPickerInitialIndex(state);
+  if (idx === null) return state;
+  return { ...state, modelPicker: idx };
+}
+
+/**
+ * ↑/↓ while the picker is open: move the highlight (wrap-around, like the
+ * D16 completion menu). Null when the picker is closed — the caller falls
+ * through to history navigation.
+ */
+export function modelPickerNav(s: TuiState, dir: -1 | 1): TuiState | null {
+  if (s.modelPicker === null || s.models.length === 0) return null;
+  const cur = Math.min(s.modelPicker, s.models.length - 1);
+  return { ...s, modelPicker: (cur + dir + s.models.length) % s.models.length };
+}
+
+/**
+ * Enter while the picker is open: switch to the highlighted model (the
+ * switch is applyModelSwitch — label + context field re-seeded; the driver
+ * re-resolves the full ModelConfig by id, exactly as for a typed
+ * `/models <id>`), then close the picker. Null when the picker is closed —
+ * the caller runs the normal submit path.
+ */
+export function modelPickerConfirm(s: TuiState): TuiState | null {
+  if (s.modelPicker === null || s.models.length === 0) return null;
+  const cur = Math.min(s.modelPicker, s.models.length - 1);
+  const m = s.models[cur]!;
+  const next = applyModelSwitch(s, m.id);
+  if (next === null) return { ...s, modelPicker: null }; // defensive: can't happen
+  return { ...next, modelPicker: null };
+}
+
+/** Esc while the picker is open: close it, no switch. Null when closed. */
+export function modelPickerClose(s: TuiState): TuiState | null {
+  if (s.modelPicker === null) return null;
+  return { ...s, modelPicker: null };
+}
+
+/**
+ * The picker lines the frame renders above the top separator ("" → no
+ * picker). One row per model: `> id  [provider]  window Nk` (highlighted)
+ * or two leading spaces (not) — the same line shape modelsListReport uses
+ * for its info item, so the modal and the list read identically. Hidden
+ * while an approval is pending (the input is locked then anyway).
+ */
+export function modelPickerMenu(state: TuiState, width: number): { line: string; selected: boolean }[] {
+  if (state.modelPicker === null || state.approval !== null) return [];
+  const sel = Math.min(state.modelPicker, state.models.length - 1);
+  return state.models.map((m, i) => {
+    const full = `${i === sel ? "> " : "  "}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}`;
+    return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i === sel };
+  });
+}
+
 /**
  * Handle a submitted `/…` line. Commands:
  *   /context                   multi-line info item: the context breakdown
@@ -1537,8 +1625,11 @@ export function applyModelSwitch(state: TuiState, modelId: string): TuiState | n
  *   /display-bottom            report current selection + the field menu
  *   /display-bottom off|none   clear the bottom lines
  *   /display-bottom f1 f2 …    set the fields (deduped, order preserved)
- *   /models                    multi-line info item: the catalog, active
- *                              model marked with `*`
+ *   /models                    C38: opens the interactive model picker
+ *                              (modelPicker: the catalog as a modal, the
+ *                              active model's row highlighted; ↑/↓ move,
+ *                              enter switches, esc closes). No catalog →
+ *                              the "no models" note as an info item.
  *   /models <id>               switch the active model (re-seeds modelLabel +
  *                              the context field; the driver re-resolves the
  *                              full ModelConfig by id — see applyModelSwitch)
@@ -1569,8 +1660,13 @@ export function handleSlashCommand(
   if (mm !== null) {
     const arg = (mm[1] ?? "").trim();
     if (arg === "") {
-      // list the catalog (active marked)
-      return { state: withInfo(s, modelsListReport(s)), handled: true };
+      // C38: bare /models opens the interactive picker (↑/↓ + enter/esc)
+      // instead of a static list. No catalog → the old note (the driver
+      // seeds the catalog, so this only happens if it supplied none).
+      if (s.models.length === 0) {
+        return { state: withInfo(s, modelsListReport(s)), handled: true };
+      }
+      return { state: modelPickerOpen(s), handled: true };
     }
     const next = applyModelSwitch(s, arg);
     if (next === null) {

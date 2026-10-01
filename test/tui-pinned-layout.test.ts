@@ -97,6 +97,9 @@ const renderApp = (state: TuiState) =>
       onCtrlC: () => {},
       onApproval: () => {},
       onQuit: () => {},
+      onModelPickerNav: () => {},
+      onModelPickerConfirm: () => {},
+      onModelPickerClose: () => {},
     }),
   );
 
