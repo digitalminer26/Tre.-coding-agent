@@ -1183,6 +1183,17 @@ test("C35 behaviorSettingsLines: extra roots render; empty → no extra line", (
   // sandbox off still reports off (extra roots don't change that line's state).
   const off = behaviorSettingsLines("yes", false, ["/home/u/d"], ["/home/u/o"]);
   assert.ok(off.some((l) => l.includes("sandbox:  off (--no-sandbox)")));
+  // skills: empty/undefined → NO skills lines (block unchanged).
+  assert.ok(!behaviorSettingsLines("yes", true, [], [], []).some((l) => l.includes("skills:")));
+  // non-empty → count line + one line per skill, description truncated to 60 chars.
+  const longDesc =
+    "A very long description that definitely goes well beyond the sixty character limit for truncation";
+  const withSkills = behaviorSettingsLines("yes", true, [], [], [
+    { name: "my-skill", description: longDesc },
+  ]);
+  assert.ok(withSkills.some((l) => l.includes("skills:   1 available")));
+  assert.ok(withSkills.some((l) => l.includes("· my-skill —")));
+  assert.ok(!withSkills.some((l) => l.includes(longDesc)));
 });
 
 test("C35 main: --extra-root pointing at a nonexistent dir → exit 2 + refusal", async (t) => {

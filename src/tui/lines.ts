@@ -202,6 +202,34 @@ export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[]
       // C31: an ℹ icon leads the info line (2 columns); the text hangs under it.
       if (item.text === "") return lines;
       const rows = wrapRows(item.text, Math.max(1, width - 2));
+      if (item.startup) {
+        // Startup behavior block: the SAME wrap and the SAME "ℹ "/"  " gutter
+        // as the plain-info rendering — only the spans/colors change, so the
+        // line count is identical and the lockstep contract with itemHeight
+        // holds. Coloring is GENERIC (no hardcoded line names):
+        //   · a line that is exactly "Behavior:" → whole line CYAN (not dim)
+        //   · a "label:" line → GREEN label (gutter + indent + colon) + dim value
+        //   · anything else → dim (unchanged)
+        const body = rows.map((l, i) => {
+          const gutter = i === 0 ? "ℹ " : "  ";
+          if (l.trimStart() === "Behavior:") {
+            return { spans: [{ text: gutter + l, color: "cyan" }] };
+          }
+          const m = /^(\s*)([A-Za-z][\w-]*):/.exec(l);
+          if (m !== null) {
+            // The green span is the gutter + the label match (up to and
+            // including the colon); the remainder of the line is dim.
+            return {
+              spans: [
+                { text: gutter + l.slice(0, m[0].length), color: "green" },
+                { text: l.slice(m[0].length), dim: true },
+              ],
+            };
+          }
+          return { spans: [{ text: gutter + l, dim: true }] };
+        });
+        return [...lines, ...body];
+      }
       const body = rows.map((l, i) => ({ spans: [{ text: (i === 0 ? "ℹ " : "  ") + l, dim: true }] }));
       return [...lines, ...body];
     }

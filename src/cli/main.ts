@@ -955,6 +955,7 @@ export function behaviorSettingsLines(
   sandboxOn: boolean,
   durableRoots: string[] = [],
   oneShotRoots: string[] = [],
+  skills: { name: string; description: string }[] = [],
 ): string[] {
   const approval =
     mode === "yes"
@@ -985,6 +986,14 @@ export function behaviorSettingsLines(
     lines.push(
       "  note: --extra-root is one-shot (this launch only) and is NOT written to tre.json — to make a root durable, add it to tre.json",
     );
+  }
+  if (skills.length > 0) {
+    lines.push(`  skills:   ${skills.length} available`);
+    for (const skill of skills) {
+      const desc =
+        skill.description.length > 60 ? skill.description.slice(0, 60) + "…" : skill.description;
+      lines.push(`    · ${skill.name} — ${desc}`);
+    }
   }
   lines.push(
     "  blocked:  system-level sensitive reads + destructive commands (across the board)",
@@ -1203,7 +1212,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // stderr (below). Durable (tre.json) and one-shot (--extra-root) roots are
   // passed separately so the summary labels each (one-shot is flagged as
   // this-launch-only + not written to tre.json).
-  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots);
+  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots, skills);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the

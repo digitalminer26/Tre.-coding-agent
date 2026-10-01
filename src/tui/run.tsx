@@ -49,6 +49,7 @@ import {
   scrollToBottom,
   scrollToTop,
   setApproval,
+  startupInfoItem,
   steerInput,
   submitInput,
   submitSlashBusy,
@@ -198,7 +199,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // current approval/sandbox behavior and the optional flags before the
   // first prompt. It scrolls away with the rest of the history.
   if (opts.startupInfo !== undefined && opts.startupInfo !== "") {
-    state = { ...state, items: [{ kind: "info", text: opts.startupInfo }] };
+    state = { ...state, items: [startupInfoItem(opts.startupInfo)] };
   }
   let context: AgentMessage[] = opts.context;
   // A1: session-lifetime calibrated chars-per-token (runTurn refines it

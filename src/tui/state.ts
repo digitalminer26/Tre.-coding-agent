@@ -67,8 +67,12 @@ export type TuiItem =
     }
   | { kind: "compaction"; tokensBefore: number; messagesKept: number; summaryChars: number }
   | { kind: "error"; text: string }
-  /** Slash-command feedback (dim line in the output area). */
-  | { kind: "info"; text: string };
+  /**
+   * Slash-command feedback (dim line in the output area). `startup` marks
+   * the startup behavior block — it renders in COLOR (cyan header, green
+   * labels) instead of all-dim; see `itemLines` in lines.ts.
+   */
+  | { kind: "info"; text: string; startup?: boolean };
 
 export interface TuiState {
   items: TuiItem[];
@@ -1616,6 +1620,27 @@ export function modelPickerMenu(state: TuiState, width: number): { line: string;
     return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i === sel };
   });
 }
+
+/**
+ * A plain info item (dim in the output area). Returns the `info` VARIANT
+ * (a `TuiItem`) so callers can read `startup` directly (undefined here).
+ */
+export const infoItem = (text: string): { kind: "info"; text: string; startup?: boolean } => ({
+  kind: "info",
+  text,
+});
+
+/**
+ * A startup info item — the startup behavior block. Carries `startup: true`
+ * so `itemLines` (lines.ts) colors it (cyan "Behavior:" header, green
+ * labels) instead of the all-dim plain-info rendering. Returns the `info`
+ * VARIANT (a `TuiItem`) so callers can read `startup` directly.
+ */
+export const startupInfoItem = (text: string): { kind: "info"; text: string; startup?: boolean } => ({
+  kind: "info",
+  text,
+  startup: true,
+});
 
 /**
  * Handle a submitted `/…` line. Commands:

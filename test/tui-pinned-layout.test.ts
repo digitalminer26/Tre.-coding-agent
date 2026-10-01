@@ -42,6 +42,8 @@ import {
   SLASH_COMMANDS,
   makeInitialState,
   setApproval,
+  infoItem,
+  startupInfoItem,
 } from "../src/tui/state.js";
 import { itemLines } from "../src/tui/lines.js";
 import type { TuiItem, TuiState } from "../src/tui/state.js";
@@ -1034,6 +1036,17 @@ test("C28: the rendered lines of a slice are EXACTLY the counted lines (the lock
       assert.equal(itemLines(item, width).length, itemHeight(item, width), `${JSON.stringify(item.kind)} w=${width}`);
     }
   }
+});
+
+test("startup info item: colored but lockstep (itemHeight === itemLines.length)", () => {
+  const text = "Behavior:\n  approval: auto-approve (default)\n  sandbox:  on (bash confined to the workspace)\n  blocked:  system-level sensitive reads\n  optional: --ask · --no-sandbox";
+  const it = startupInfoItem(text);
+  for (const w of [40, 80, 120]) {
+    assert.equal(itemHeight(it, w), itemLines(it, w).length, `lockstep at width ${w}`);
+  }
+  // the startup flag is present; a plain info item is not
+  assert.equal(it.startup, true);
+  assert.equal(infoItem("x").startup, undefined);
 });
 
 test("C31: itemLines shapes — icons, hanging indents, separators", () => {
