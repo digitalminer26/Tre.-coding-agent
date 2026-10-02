@@ -27,8 +27,8 @@ import { resolveTelegramHelper } from "./paths.js";
 const pExecFile = promisify(execFile);
 
 /** The poll's long-poll window (seconds) — the driver blocks up to this per
- *  poll, so the loop self-paces (no hot loop). 30s is the default. */
-export const TELEGRAM_LONG_POLL_SEC = 30;
+ *  poll, so the loop self-paces (no hot loop). 15s is the default. */
+export const TELEGRAM_LONG_POLL_SEC = 15;
 /** Hard cap per helper call. The helper's own HTTP read is
  *  `60 + pollTimeoutSec`; this spawn timeout is a BACKSTOP above that (a hung
  *  python process must not wedge the driver). */

@@ -94,7 +94,7 @@ import {
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
-import { makeTelegramBridge, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
+import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
 import { TelegramDriver } from "../telegram/driver.js";
 
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
@@ -1272,7 +1272,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
 
   // ── Telegram background driver (plain CLI: one-shot + REPL) ─────────────
   // Long-polls the bot in the background (one getUpdates per cycle, blocking
-  // up to 30s). A message STEERS the in-flight turn (if any) or runs a turn
+  // up to 15s). A message STEERS the in-flight turn (if any) or runs a turn
   // + replies (when idle, REPL only). LOOP PREVENTION lives in the driver
   // (long-poll self-pacing + min-interval guard + capped backoff) — see
   // src/telegram/driver.ts. Inert when the bridge is not enabled (no
@@ -1457,7 +1457,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       telegramDriverOpts,
     );
     if (telegramBridge.enabled) {
-      telegramInfo(`polling every ${30}s (long-poll; reply via bot)`);
+      telegramInfo(`polling every ${TELEGRAM_LONG_POLL_SEC}s (long-poll; reply via bot)`);
       void td.start();
     }
     telegramDriver = td;

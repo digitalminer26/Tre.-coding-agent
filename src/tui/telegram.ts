@@ -1,5 +1,5 @@
 /**
- * Telegram bridge for the TUI driver — a 30-second poller that turns
+ * Telegram bridge for the TUI driver — a 15-second poller that turns
  * incoming bot messages into agent prompts and routes the agent's replies
  * back to the bot.
  *
@@ -24,8 +24,8 @@ import { resolveTelegramHelper } from "../telegram/paths.js";
 
 const pExecFile = promisify(execFile);
 
-/** Poll cadence: every 30 seconds while the TUI is open. */
-export const TELEGRAM_POLL_MS = 30_000;
+/** Poll cadence: every 15 seconds while the TUI is open. */
+export const TELEGRAM_POLL_MS = 15_000;
 /** Hard cap per helper call — a hung network call must not wedge the poller. */
 const TELEGRAM_TIMEOUT_MS = 15_000;
 

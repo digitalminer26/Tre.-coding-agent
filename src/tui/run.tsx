@@ -214,8 +214,8 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // so leftovers from an aborted run are discarded (never delivered later).
   let steerQueue: SteeringQueue = { push: () => {}, drain: () => [] };
 
-  // ── Telegram (30s poller) ────────────────────────────────────────────────
-  // While the TUI is open, poll the bot every 30s. A poll is a non-blocking
+  // ── Telegram (15s poller) ────────────────────────────────────────────────
+  // While the TUI is open, poll the bot every 15s. A poll is a non-blocking
   // HTTPS GET to the Telegram Bot API (the LLM endpoint is NOT involved);
   // the LLM is only spent when a real message arrives and a turn runs to
   // answer it. Incoming messages become prompts (idle → new run, busy →

@@ -129,15 +129,15 @@ Rules:
   the plain CLI did not (the user's messages were only seen after the
   workstream finished). C37 adds a background driver
   (`src/telegram/driver.ts` + `src/telegram/bridge.ts`) that LONG-POLLS the
-  bot (one `getUpdates` per cycle, blocking up to 30s via the helper's new
+  bot (one `getUpdates` per cycle, blocking up to 15s via the helper's new
   `poll --timeout N`) and routes each message: a turn in flight → **steer** it
   into the running loop (the existing `SteeringQueue`); idle → run a turn and
   reply via the bot (REPL only — one-shot is a single turn). **Loop
   prevention is the contract's core** — a naive `while (true) { poll(); }`
   hot-spins (hundreds of process spawns/sec) when a poll fails FAST (network
   down, bad token). Three independent mechanisms make that impossible:
-  (1) **long-poll self-pacing** — each poll blocks up to 30s, so a no-message
-  cycle takes ~30s; (2) **min-interval guard** — a hard cap keeps ≥30s between
+  (1) **long-poll self-pacing** — each poll blocks up to 15s, so a no-message
+  cycle takes ~15s; (2) **min-interval guard** — a hard cap keeps ≥15s between
   poll STARTS even if a poll returns instantly (a helper that ignores
   `--timeout`, or a fast failure); (3) **capped exponential backoff on
   failure** — a fast-failing poll backs off `min(base·2ⁿ, cap)` (default

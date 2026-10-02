@@ -13,12 +13,12 @@
  * ── LOOP PREVENTION (the core requirement) ────────────────────────────────
  * A naive `while (true) { poll(); }` has a hot-spin hazard: if a poll FAILS
  * FAST (network down, sandbox blocks the connection, a bad token → 401), it
- * returns in milliseconds instead of blocking 30s, and the loop then spawns
+ * returns in milliseconds instead of blocking 15s, and the loop then spawns
  * hundreds of processes/second, hammering the network and tripping Telegram
  * rate limits. This driver makes that impossible with THREE independent
  * mechanisms:
- *   1. LONG-POLL SELF-PACING — each poll blocks up to 30s, so a no-message
- *      cycle takes ~30s. The loop cannot run faster than ~1 poll/30s.
+ *   1. LONG-POLL SELF-PACING — each poll blocks up to 15s, so a no-message
+ *      cycle takes ~15s. The loop cannot run faster than ~1 poll/15s.
  *   2. MIN-INTERVAL GUARD — a hard backstop: even if a poll returns INSTANTLY
  *      (a helper that ignores --timeout, or a fast failure), the loop sleeps
  *      to keep ≥ `minIntervalMs` between poll STARTS. This is what kills the
@@ -66,7 +66,7 @@ export interface TelegramDriverOptions {
    *  settles to one poll per minute — never a hot loop). */
   failCapMs?: number;
   /** Minimum interval between poll STARTS (ms) — the loop-prevention hard
-   *  cap. Default: TELEGRAM_LONG_POLL_SEC × 1000 (30s). */
+   *  cap. Default: TELEGRAM_LONG_POLL_SEC × 1000 (15s). */
   minIntervalMs?: number;
   /** When false (one-shot), a message that arrives with no turn in flight is
    *  NOT turned into a new run (one-shot is a single turn; it only steers).
