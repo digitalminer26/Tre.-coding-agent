@@ -5,10 +5,13 @@
  *
  * The LLM endpoint is NOT involved in polling: a poll is one non-blocking
  * HTTPS GET to the Telegram Bot API (`getUpdates`, `timeout: 0`) via the
- * skill's stdlib-`python3` helper (`.tre/skills/telegram/telegram.py`).
- * The LLM is only spent when a real message arrives and a turn runs to
- * answer it. `python3` is the sandbox-safe network path (curl/git TLS is
- * broken under the kernel sandbox; node is not on the sandboxed PATH).
+ * skill's stdlib-`python3` helper. The helper is resolved across the
+ * canonical skill roots (`<cwd>/.tre/skills` then `~/.tre/agent/skills`) —
+ * see `src/telegram/paths.ts` — so a deployment that installs it in the user
+ * agent-skills dir still enables the poller (the 2026-10-02 fix). The LLM is
+ * only spent when a real message arrives and a turn runs to answer it.
+ * `python3` is the sandbox-safe network path (curl/git TLS is broken under
+ * the kernel sandbox; node is not on the sandboxed PATH).
  *
  * The driver owns the timer; this module keeps the pure/async helpers so
  * the driver's lifecycle code stays readable.
@@ -17,6 +20,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { resolveTelegramHelper } from "../telegram/paths.js";
 
 const pExecFile = promisify(execFile);
 
@@ -45,10 +49,20 @@ export interface TelegramBridge {
  * spawn pins cwd to the workspace.
  */
 export function makeTelegramBridge(cwd: string): TelegramBridge {
-  const script = join(cwd, ".tre", "skills", "telegram", "telegram.py");
+  // Resolve the helper across the canonical skill roots (project then user
+  // agent-skills) — see src/telegram/paths.ts. The config + state stay
+  // cwd-relative (per-workspace deployment state).
+  const script = resolveTelegramHelper(cwd);
   const outDir = join(cwd, ".tre", "telegram");
-  const enabled = existsSync(join(cwd, ".tre", "telegram.json")) && existsSync(script);
+  const enabled =
+    existsSync(join(cwd, ".tre", "telegram.json")) && script !== null;
   const run = async (args: string[]): Promise<string> => {
+    if (script === null) {
+      throw new Error(
+        "telegram: helper not found in any skill root " +
+          "(<cwd>/.tre/skills or ~/.tre/agent/skills) — the bridge is disabled",
+      );
+    }
     const { stdout } = await pExecFile("python3", [script, ...args], {
       cwd,
       timeout: TELEGRAM_TIMEOUT_MS,

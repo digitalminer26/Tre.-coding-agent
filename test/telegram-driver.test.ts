@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { TelegramDriver } from "../src/telegram/driver.js";
+import { makeTelegramBridge } from "../src/telegram/bridge.js";
 import type { TelegramBridge, TelegramMessage } from "../src/telegram/bridge.js";
 import { main, finalAssistantText } from "../src/cli/main.js";
 import { fakeStream } from "./fake-stream.js";
@@ -234,6 +235,59 @@ test("mutex: two turns run SERIALLY, never concurrently", async () => {
   });
   await Promise.all([a, b]);
   assert.equal(overlap, false, "two turns must not run concurrently on the shared context");
+});
+
+// ── BRIDGE ENABLEMENT (helper resolution across skill roots) ────────────────
+
+test("bridge: enabled when the helper is in the USER agent-skills root (the 2026-10-02 case)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  try {
+    // Config present in the workspace …
+    fs.mkdirSync(path.join(cwd, ".tre"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
+    // … and the helper lives ONLY in the user agent-skills root.
+    const helper = path.join(home, ".tre", "agent", "skills", "telegram");
+    fs.mkdirSync(helper, { recursive: true });
+    fs.writeFileSync(path.join(helper, "telegram.py"), "# helper\n");
+
+    const bridge = makeTelegramBridge(cwd, home);
+    assert.equal(bridge.enabled, true, "helper in ~/.tre/agent/skills must enable the bridge");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge: disabled when the config is missing (even if the helper exists)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  try {
+    const helper = path.join(home, ".tre", "agent", "skills", "telegram");
+    fs.mkdirSync(helper, { recursive: true });
+    fs.writeFileSync(path.join(helper, "telegram.py"), "# helper\n");
+    // No .tre/telegram.json in the workspace.
+    const bridge = makeTelegramBridge(cwd, home);
+    assert.equal(bridge.enabled, false, "no config → disabled");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("bridge: disabled when the helper is in NO root (config present)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  try {
+    fs.mkdirSync(path.join(cwd, ".tre"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
+    // No helper anywhere.
+    const bridge = makeTelegramBridge(cwd, home);
+    assert.equal(bridge.enabled, false, "no helper in any root → disabled");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ── main.ts wiring (regression + pure helper) ───────────────────────────────

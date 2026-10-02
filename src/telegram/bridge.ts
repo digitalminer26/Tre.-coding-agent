@@ -1,7 +1,8 @@
 /**
  * Telegram bridge for the PLAIN CLI (one-shot + REPL) — the same stdlib-
- * `python3` helper the TUI uses (`.tre/skills/telegram/telegram.py`), but
- * with a LONG-POLL seam (`pollLong`) for the background driver.
+ * `python3` helper the TUI uses, resolved across the canonical skill roots
+ * (`<cwd>/.tre/skills` then `~/.tre/agent/skills`; see ./paths.ts), but with
+ * a LONG-POLL seam (`pollLong`) for the background driver.
  *
  * Why python3 (not node/curl): under the tre. kernel sandbox, curl and git
  * fail TLS and node is not on the sandboxed PATH; python3 (/usr/bin/python3)
@@ -21,6 +22,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { resolveTelegramHelper } from "./paths.js";
 
 const pExecFile = promisify(execFile);
 
@@ -56,11 +58,21 @@ export interface TelegramBridge {
  * The helper resolves its config/state against its OWN cwd, so the spawn pins
  * cwd to the workspace.
  */
-export function makeTelegramBridge(cwd: string): TelegramBridge {
-  const script = join(cwd, ".tre", "skills", "telegram", "telegram.py");
+export function makeTelegramBridge(cwd: string, home?: string): TelegramBridge {
+  // Resolve the helper across the canonical skill roots (project then user
+  // agent-skills) — see ./paths.ts. The config + state stay cwd-relative
+  // (per-workspace deployment state). `home` is injectable for tests.
+  const script = resolveTelegramHelper(cwd, home);
   const outDir = join(cwd, ".tre", "telegram");
-  const enabled = existsSync(join(cwd, ".tre", "telegram.json")) && existsSync(script);
+  const enabled =
+    existsSync(join(cwd, ".tre", "telegram.json")) && script !== null;
   const run = async (args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> => {
+    if (script === null) {
+      throw new Error(
+        "telegram: helper not found in any skill root " +
+          "(<cwd>/.tre/skills or ~/.tre/agent/skills) — the bridge is disabled",
+      );
+    }
     const { stdout } = await pExecFile("python3", [script, ...args], {
       cwd,
       timeout: timeoutMs,
