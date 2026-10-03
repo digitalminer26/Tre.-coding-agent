@@ -44,6 +44,7 @@
  *     after agent_end. Resume = WS5 replaySession.
  *   - I3: run failures are data (exit codes), never uncaught throws.
  */
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
@@ -78,6 +79,7 @@ import {
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
 import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
+import { isDirectInvocation, restartCommand } from "../tui/restart.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
@@ -792,6 +794,8 @@ Usage:
 Steering (TUI): while a run is in flight, typing a line and pressing enter
 injects it as a user message mid-run — the model reacts to it on its next
 turn instead of waiting for a new prompt. /quit (or /exit) still aborts.
+/restart relaunches tre. in place (same session + settings) without
+quitting — the new process resumes the session automatically.
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")
@@ -1260,6 +1264,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // the optional flags before the first prompt.
       startupInfo: behavior.join("\n"),
       deps: { askApproval: deps.askApproval },
+      // /restart: re-exec this exact argv (the child resumes the session
+      // file automatically). Pass the FULL process.argv — restartCommand
+      // strips argv[0] (the node binary); passing a pre-sliced array would
+      // drop the entry script (double-slice).
+      restartArgs: process.argv,
     });
     if (session) await session.close();
     return code;
@@ -1499,6 +1508,33 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
           } else {
             context = newCtx;
           }
+        }
+        continue;
+      }
+      // /restart — re-exec the same argv as a child that inherits the
+      // terminal, BLOCKING until it exits (spawnSync, no `detached` — same
+      // reason as the TUI driver: a detached grandchild is NOT the tty's
+      // foreground process group, so once the shell reclaims the terminal
+      // the child can't read keyboard input). The child resumes the session
+      // file automatically; when it exits, the REPL exits with the child's
+      // status (the finally-block cleanup still runs). Only when launched
+      // directly as the entry file (a module import has no re-executable
+      // argv).
+      if (prompt === "/restart") {
+        const spec = restartCommand(process.argv, process.env);
+        if (spec === null || !isDirectInvocation(process.argv[1], entryPath)) {
+          sinks.err.write("restart: not available in this launch — quit and run tre. again\n");
+        } else {
+          // The child owns the terminal and handles its own SIGINT; drop the
+          // REPL's handler for the duration so a Ctrl+C during the child's
+          // run isn't acted on by the REPL too (after spawnSync returns).
+          process.off("SIGINT", onSigint);
+          const result = spawnSync(spec.execPath, spec.args, {
+            stdio: "inherit",
+            env: spec.env,
+          });
+          await flushSinks(sinks);
+          return result.error ? 1 : (result.status ?? 0);
         }
         continue;
       }

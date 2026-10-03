@@ -24,9 +24,11 @@
  * feedback lands as an info item, and the run continues untouched).
  */
 import React from "react";
+import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { render } from "ink";
 import { App } from "./app.js";
+import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
@@ -155,6 +157,10 @@ export interface TuiRunOptions {
     /** Injected approver (tests): bypasses the TUI's y/n prompt. */
     askApproval?: AskApproval;
   };
+  /** The argv to re-exec for /restart (main.ts passes the FULL
+   *  process.argv — restartCommand strips argv[0], the node binary);
+   *  absent → /restart reports it is unavailable. */
+  restartArgs?: string[];
 }
 
 export async function runTui(opts: TuiRunOptions): Promise<number> {
@@ -317,6 +323,46 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     app.unmount();
   };
 
+  /**
+   * /restart — re-exec the same argv as a child that inherits the TTY,
+   * BLOCKING until that child exits (spawnSync, no `detached`). The child
+   * resumes the session file automatically (append-only log; resume =
+   * replay) — nothing is re-sent.
+   *
+   * Why blocking + no detached (the earlier `detached:true` + `unref` +
+   * immediate-exit version was broken): `detached` calls setsid(), so the
+   * child becomes the leader of a NEW session — a grandchild of the shell
+   * that is NOT the terminal's foreground process group. The moment the
+   * parent exited, the shell (the tty's session leader) reclaimed the
+   * terminal as its own foreground group, and the child could no longer read
+   * keyboard input (SIGTTIN): the TUI came up but looked dead. By keeping
+   * the parent ALIVE while the child runs (spawnSync blocks), the child stays
+   * in the parent's process group — the tty's foreground group — for its
+   * whole lifetime, and the shell never reclaims the tty. When the child
+   * exits, the parent unmounts + exits with the child's status, and the shell
+   * shows its prompt — indistinguishable from the user having typed `tre.`
+   * again. The parent's Ink app stays mounted during the block, but its event
+   * loop is frozen (spawnSync), so it neither re-renders nor steals input.
+   */
+  const restartTui = (): void => {
+    const spec = restartCommand(opts.restartArgs ?? [], process.env);
+    if (spec === null) {
+      setState({ ...state, items: [...state.items, { kind: "info", text: "restart: no relaunch argv available — quit and run tre. again" }] });
+      return;
+    }
+    // The child (the new tre.) owns the terminal and handles its own SIGINT,
+    // so drop the parent's handler for the duration — otherwise a Ctrl+C
+    // during the child's run would be acted on by the parent too (after
+    // spawnSync returns) and clobber the child's exit code.
+    process.off("SIGINT", onSigint);
+    const result = spawnSync(spec.execPath, spec.args, {
+      stdio: "inherit",
+      env: spec.env,
+    });
+    // Unmount + let the main flow exit with the child's status.
+    quit(result.error ? 1 : (result.status ?? 0));
+  };
+
   const runPrompt = async (prompt: string): Promise<AgentMessage[] | null> => {
     controller = new AbortController();
     // One steering queue per run — a closure over a plain array (the
@@ -446,6 +492,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           controller.abort();
           quit(0);
         }
+        // /restart while busy: abort the in-flight run (the session log
+        // already holds every completed message — a torn tail is dropped
+        // on replay by design), then re-exec.
+        if (trimmed === "/restart" && state.busy) {
+          controller.abort();
+          restartTui();
+          return;
+        }
         // C32: slash commands are UI commands — they are handled while a run
         // is in flight too (e.g. /display-bottom reconfigures the bottom
         // lines mid-task). submitSlashBusy clears the line (never a steer —
@@ -503,6 +557,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const prompt = r.prompt;
       if (prompt === "/quit" || prompt === "/exit") {
         quit(0);
+        return;
+      }
+      if (prompt === "/restart") {
+        restartTui();
         return;
       }
       // A6: manual compaction — the driver runs the silent summarizer call

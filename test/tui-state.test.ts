@@ -41,6 +41,8 @@ import {
   scrollToBottom,
   scrollToTop,
   setApproval,
+  SLASH_COMMANDS,
+  slashCandidates,
   statsLine,
   steerInput,
   submitInput,
@@ -1265,4 +1267,58 @@ test("handleSlashCommand: /stats appends one info line and touches nothing else"
   assert.equal(r.state.input, "left alone");
   assert.deepEqual(r.state.bottom, []);
   assert.equal(r.state.toolCalls, 4);
+});
+
+// ── /restart: in-place relaunch (feedback here; the re-exec is the driver's) ──
+
+test("SLASH_COMMANDS: /restart is registered with a summary", () => {
+  const restart = SLASH_COMMANDS.find((c) => c.name === "restart");
+  assert.ok(restart !== undefined, "restart is in the registry");
+  assert.ok(restart!.summary.length > 0, "the menu shows a summary");
+});
+
+test("handleSlashCommand: /restart is handled and appends the relaunching feedback", () => {
+  const s = makeInitialState("m");
+  const r = handleSlashCommand(s, "/restart");
+  assert.equal(r.handled, true);
+  assert.equal(r.state.items.length, s.items.length + 1, "exactly one item appended");
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  const text = (info as { text: string }).text;
+  assert.ok(text.includes("restart:"), `expected "restart:" in ${text}`);
+  assert.ok(text.includes("relaunching"), `expected "relaunching" in ${text}`);
+});
+
+test("handleSlashCommand: /restart with a trailing space (menu completion) is still handled", () => {
+  const s = makeInitialState("m");
+  const r = handleSlashCommand(s, "/restart ");
+  assert.equal(r.handled, true, "the handler trims — menu completion leaves a trailing space");
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.ok((info as { text: string }).text.includes("relaunching"));
+});
+
+test("slashCandidates: /re offers /restart", () => {
+  assert.ok(slashCandidates("/re").includes("/restart"), "the prefix /re matches restart");
+});
+
+test("handleSlashCommand: /restartX is NOT a command (unhandled)", () => {
+  const s = makeInitialState("m");
+  const r = handleSlashCommand(s, "/restartX");
+  assert.equal(r.handled, false);
+  assert.equal(r.state, s, "unhandled: the state is returned untouched");
+});
+
+test("handleSlashCommand: /restart touches no bottom/modelLabel/busy (pure feedback)", () => {
+  const s = {
+    ...makeInitialState("m", { session: "/tmp/s.jsonl" }, 131072, 32768, ["model", "context"]),
+    busy: true,
+    input: "left alone",
+  };
+  const r = handleSlashCommand(s, "/restart");
+  assert.equal(r.handled, true);
+  assert.deepEqual(r.state.bottom, ["model", "context"], "bottom unchanged");
+  assert.equal(r.state.modelLabel, "m", "modelLabel unchanged");
+  assert.equal(r.state.busy, true, "busy unchanged — the driver owns the re-exec");
+  assert.equal(r.state.input, "left alone", "input unchanged");
 });

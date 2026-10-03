@@ -29,3 +29,6 @@ tre.json
 # editor swap files
 .*.swp
 *.swp
+
+# tre-deploy skill build output (offline tarballs) — never in git.
+.tre/deploy-out/

@@ -1142,6 +1142,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "models", summary: "pick the active model (↑/↓ + enter) / /models <id> switches" },
   { name: "quit", summary: "end the session" },
+  { name: "restart", summary: "restart tre. in place (same session + settings; no quit/re-invoke)" },
   { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
 ];
 
@@ -1661,8 +1662,10 @@ export const startupInfoItem = (text: string): { kind: "info"; text: string; sta
  *   /stats                     one info line: turns, tokens, tool calls,
  *                              session file (path + size in bytes)
  * Feedback lands as an `info` item in the output area. `/quit` and `/exit`
- * are NOT handled here — the driver owns them (it must unmount). Returns
- * `handled: false` for every other line. `sessionBytes` is the session
+ * are NOT handled here — the driver owns them (it must unmount). `/restart`
+ * IS handled here (it appends the "relaunching" feedback info item); the
+ * re-exec itself is performed by the driver. Returns `handled: false` for
+ * every other line. `sessionBytes` is the session
  * file size in bytes, measured by the CALLER (the driver does the I/O —
  * this stays pure); undefined → the size renders as "?" (unknown).
  */
@@ -1699,6 +1702,9 @@ export function handleSlashCommand(
       return { state: withInfo(s, `models: unknown model '${arg}' — known: ${known}`), handled: true };
     }
     return { state: withInfo(next, `models: switched to ${arg} (window ${fmtTokens(next.contextWindow)})`), handled: true };
+  }
+  if (line.trim() === "/restart") {
+    return { state: withInfo(s, "restart: relaunching tre. — the session resumes in the new process"), handled: true };
   }
   const m = /^\/display-bottom(?:\s+(.*))?$/.exec(line.trim());
   if (m === null) return { state: s, handled: false };

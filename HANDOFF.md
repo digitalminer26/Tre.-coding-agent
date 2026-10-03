@@ -1,3 +1,47 @@
+# HANDOFF — `/restart`: in-place TUI + REPL restart (2026-10-02)
+
+**Status: implemented + tested (gate owned by the implementing workers); this
+section is the docs record of the final behavior.** One behavior: `/restart`
+relaunches tre. in place — TUI and plain REPL — no quit + re-invoke.
+
+**What.** Typing `/restart` (TUI slash menu, or the plain REPL) restarts the
+tre. process in place. The TUI appends the feedback line `restart:
+relaunching tre. — the session resumes in the new process` and hands off to
+the child.
+
+**How.** The driver re-execs the SAME argv (the full `process.argv` minus the
+node binary, same `execPath`) as a detached child with `stdio: "inherit"` and
+`TRE_RESTARTED=1` in the env (a copy — the parent's env is never mutated).
+stdio inherit means the child takes over the TTY, so the parent unmounts the
+Ink app (TUI) / exits its REPL loop (REPL) and exits 0 in the same tick. The
+child re-runs normal startup and resumes the session file automatically —
+append-only JSONL, resume = replay — so the conversation continues exactly
+where it left off; nothing is re-sent. In the TUI, `/restart` while a run is
+in flight aborts the in-flight run first (the session log already holds every
+completed message; a torn tail is dropped on replay by design).
+
+**Caveat (session).** With an explicit `--session`/`--resume` file, the child
+resumes THAT file. With `--session-auto`, the child gets a NEW session path —
+the auto path is derived from the launch timestamp + pid (`tre-<UTC>-<pid>.jsonl`
+under `~/.tre/sessions/`), so the restarted process starts a fresh log and the
+conversation does NOT carry over. With no session file at all, the in-memory
+context is lost — a fresh start.
+
+**REPL note.** The plain REPL only re-execs when launched directly as the
+entry file (`isDirectInvocation` — realpath of `argv[1]` matches the entry
+path). A module import (tests) or a renamed binary that does not resolve has
+no re-executable argv → a stderr note (`restart: not available in this launch
+— quit and run tre. again`), no crash. The TUI reports the same case as an
+info line.
+
+**Where.** `src/tui/restart.ts` (pure core: `restartCommand` spawn spec +
+`isDirectInvocation`, `TRE_RESTARTED` marker), `src/tui/state.ts` (registry
+entry + feedback), `src/tui/run.tsx` (driver re-exec — busy and idle paths),
+`src/cli/main.ts` (REPL branch + TUI wiring + HELP text). Tests:
+`test/restart.test.ts` + the `/restart` section of `test/tui-state.test.ts`.
+
+---
+
 # HANDOFF — Tilde expansion for extra roots (`tre.json` + `--extra-root`) (2026-09-30)
 
 **Status: gate green — NOT yet committed. GUARDRAIL ZONE: `src/tools/safety.ts` is touched (the EPERM fix below) — per §9 the agent does NOT commit; the human commits with `GUARDRAIL_BYPASS=1`.** The user reported that a `--extra-root` they added "is not getting populated in `tre.json`". Root cause: `tre.json` (C36) is a DURABLE BASELINE that is only ever READ by the CLI — there is no code path that WRITES it. The user had to hand-edit `tre.json` to make a root durable. While fixing that, a second gap surfaced: `tre.json` entries were resolved with `path.resolve(dir)` (CWD-relative) and `~` was NEVER expanded, so a portable `~/kubeconfigs` entry would resolve to `<cwd>/~/kubeconfigs` and fail the C35 exists-check (fail-closed refusal). The spec's own shape example advertised `/abs/or/~/relative/dir`, implying `~` support that did not exist.

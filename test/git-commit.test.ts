@@ -1,5 +1,6 @@
 /**
- * git-commit skill — scripts/git-commit.sh is the gated commit action:
+ * git-commit skill — the gated commit action lives in the user-level skill
+ * dir (~/.tre/agent/skills/git-commit/git-commit.sh):
  * clean-tree no-op (10), gate failure (11, nothing staged/committed),
  * a clean commit (0, verified), guardrail-zone rejection (1, no commit),
  * and usage errors (2). Fixtures are throwaway git repos with a trivial
@@ -15,7 +16,10 @@ import { spawnSync } from "node:child_process";
 
 // This file compiles to dist/test/, so two levels up is the repository root.
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const COMMIT_SCRIPT = path.join(repoRoot, "scripts", "git-commit.sh");
+// The script moved to the user-level skill dir (global skill).
+const COMMIT_SCRIPT = path.join(
+  os.homedir(), ".tre", "agent", "skills", "git-commit", "git-commit.sh"
+);
 
 function sh(cmd: string, args: string[], opts: { cwd: string; env?: Record<string, string> } = { cwd: repoRoot }): { status: number; out: string } {
   const r = spawnSync(cmd, args, {

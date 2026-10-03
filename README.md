@@ -22,7 +22,8 @@ All planned workstreams are complete; the project is in ongoing hardening.
 - [x] Phase D — WS9 compaction · WS10 TUI (Ink) · WS11 bash kernel sandbox (macOS Seatbelt)
 
 Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
-opt-in mouse tracking, `/models` switching, a context/compaction readout, an
+opt-in mouse tracking, `/models` switching, in-place `/restart` (same session,
+same settings), a context/compaction readout, an
 approval-mode matrix (`--yes` default · `--ask` · `--no-approve`, with
 systemic sensitive/destructive ops blocked in every mode), deployability
 (`npm i -g .` builds `dist/` on install), and loop/stall guards that stop
