@@ -100,6 +100,7 @@ import {
 } from "../session/session.js";
 import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
 import { TelegramDriver } from "../telegram/driver.js";
+import { removeWorkerStatus, workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
 import type {
@@ -113,7 +114,43 @@ import type {
   TextBlock,
   Tool,
   UserMessage,
+  WorkerStatus,
 } from "../types.js";
+
+export function buildWorkerStatus(
+  id: string,
+  model: ModelConfig,
+  cwd: string,
+  prompt: string,
+  now: number = Date.now(),
+): WorkerStatus {
+  const task = prompt.replace(/\\s+/g, " ").trim().slice(0, 120);
+  return {
+    id, model: model.id, endpoint: model.baseUrl, status: "running", turn: 0,
+    activity: "starting", updatedAt: now, startedAt: now, cwd, task,
+  };
+}
+
+export function makeWorkerTap(status: WorkerStatus, dir: string): (ev: AgentEvent) => void {
+  return (ev) => {
+    try {
+      if (ev.type === "turn_start") {
+        status.turn = ev.turn;
+        status.activity = "working";
+      } else if (ev.type === "tool_execution_start") {
+        status.activity = ev.toolCall.name;
+      }
+      status.updatedAt = Date.now();
+      writeWorkerStatus(dir, status);
+    } catch {
+      // Registry visibility must never interfere with a worker run.
+    }
+  };
+}
+
+export function workerOutcomeStatus(reason: StopReason): "done" | "failed" {
+  return reason === "stop" ? "done" : "failed";
+}
 
 // ─────────────────────────────── options / parsing ───────────────────────────────
 
@@ -1007,6 +1044,9 @@ export function behaviorSettingsLines(
       : "on (bash confined to the workspace)"
     : "off (--no-sandbox)";
   const lines = [
+    "Getting started:",
+    "  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)",
+    "  tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.",
     "Behavior:",
     `  approval: ${approval}`,
     `  sandbox:  ${sandbox}`,
@@ -1413,18 +1453,32 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         { ...telegramDriverOpts, allowIdleTurns: false },
       );
       void driver.start();
-      const { outcome } = await driver.withTurn(() =>
-        runTurn({
-          model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-          prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
-          executeToolCall: executor,
-          entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
-          steeringQueue: steerQueue,
-        }),
-      );
-      driver.stop();
-      await flushSinks(sinks);
-      return exitCodeFor(outcome.stopReason);
+      const workerIdValue = workerId();
+      const worker = buildWorkerStatus(workerIdValue, model, root, args.prompt!);
+      const dir = workerDir();
+      try {
+        try { writeWorkerStatus(dir, worker); } catch { /* Visibility is best-effort. */ }
+        const { outcome } = await driver.withTurn(() =>
+          runTurn({
+            model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+            prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+            executeToolCall: executor,
+            entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+            steeringQueue: steerQueue,
+            tap: makeWorkerTap(worker, dir),
+          }),
+        );
+        driver.stop();
+        worker.status = workerOutcomeStatus(outcome.stopReason);
+        worker.activity = worker.status === "done" ? "done" : outcome.stopReason;
+        worker.updatedAt = Date.now();
+        try { writeWorkerStatus(dir, worker); } catch { /* Visibility is best-effort. */ }
+        await flushSinks(sinks);
+        return exitCodeFor(outcome.stopReason);
+      } finally {
+        try { removeWorkerStatus(dir, workerIdValue); } catch { /* Visibility is best-effort. */ }
+        driver.stop();
+      }
     }
 
     // REPL

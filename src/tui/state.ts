@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type Usage } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type Usage, type WorkerStatus } from "../types.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
@@ -203,6 +203,14 @@ export interface TuiState {
    * output appends). Clamped to the scrollable range at render time.
    */
   viewTop: number | null;
+  /**
+   * Endpoint visibility: the LIVE worker set from the shared on-disk
+   * registry (~/.tre/workers/, src/cli/workers.ts) — one entry per
+   * concurrent `tre. run` process on another endpoint. The driver's 5s
+   * poller (run.tsx) fills it; the state machine only CARRIES it (it never
+   * reads the disk — the TUI stays pure). Feeds the `workers` bottom field.
+   */
+  workers: WorkerStatus[];
 }
 
 export function makeInitialState(
@@ -248,6 +256,10 @@ export function makeInitialState(
     info,
     viewTop: null,
     models,
+    // Endpoint visibility: the driver's workers poller (run.tsx) fills this
+    // after mount — it is never a makeInitialState argument (the state
+    // machine does no I/O; the poller owns the registry read).
+    workers: [],
   };
 }
 
@@ -1244,7 +1256,7 @@ export function menuComplete(s: TuiState): TuiState | null {
 // ---------------------------------------------------------------------------
 
 /** Fields the user may pin into the bottom lines, in menu order. */
-export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cache", "cwd", "session"] as const;
+export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cache", "cwd", "session", "workers"] as const;
 export type BottomField = (typeof BOTTOM_FIELDS)[number];
 
 /** Compact token count: 0 → "0", 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
@@ -1471,7 +1483,38 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       return state.info.cwd ?? "—";
     case "session":
       return state.info.session ?? "—";
+    case "workers":
+      // Endpoint visibility: the live worker set (state.workers, filled by
+      // the driver's poller). Compact one-liner: `<count>: <model> t<turn>
+      // <activity>` per worker, joined with " · "; done/failed workers get a
+      // ✓/✗ mark so a finished endpoint stays visible until it is pruned.
+      // More than 3 workers → the first 3 + a `+N` suffix (this is ONE
+      // bottom line; bottomLines truncates it to the terminal width).
+      return workersBottomValue(state.workers);
   }
+}
+
+/**
+ * The `workers` field's one-liner, split out of bottomValue's switch to
+ * keep the case readable (same pure contract: state in, string out).
+ * See the `workers` case for the format.
+ */
+function workersBottomValue(workers: WorkerStatus[]): string {
+  if (workers.length === 0) return "none";
+  const seg = (w: WorkerStatus): string => {
+    const mark = w.status === "done" ? " ✓" : w.status === "failed" ? " ✗" : "";
+    // An empty activity (before a worker's first tool) is omitted — no
+    // dangling space in the segment.
+    const act = w.activity !== "" ? ` ${w.activity}` : "";
+    return `${w.model} t${w.turn}${act}${mark}`;
+  };
+  const shown = workers.slice(0, 3).map(seg);
+  const extra = workers.length - 3;
+  const base = shown.join(" · ");
+  // The overflow suffix is a count, not a worker — it is appended with a
+  // plain space (not the " · " worker separator) so it reads as a summary
+  // tail: `a t0 · b t0 · c t0 +1`.
+  return extra > 0 ? `${workers.length}: ${base} +${extra}` : `${workers.length}: ${base}`;
 }
 
 /**
@@ -1496,20 +1539,37 @@ export function bottomLines(state: TuiState, width: number): string[] {
 }
 
 /**
+ * The tint for the `workers` bottom field, by how many workers are RUNNING
+ * (endpoint visibility): any running → "green" (endpoints are actively
+ * working), workers present but none running (all done/failed) → "yellow"
+ * (the fan-out has settled — worth a look), none at all → undefined (dim —
+ * the field shows "none", which is not news).
+ */
+export function workersUrgencyColor(state: TuiState): string | undefined {
+  const w = state.workers;
+  if (w.length === 0) return undefined;
+  return w.some((x) => x.status === "running") ? "green" : "yellow";
+}
+
+/**
  * The colors for the RESERVED_BOTTOM_LINES, aligned one-for-one with
  * `bottomLines(state, width)`: the `context` field is tinted by compaction
  * urgency (green → yellow → red as the context nears the trigger; undefined
- * = dim when unknown), every other field is undefined (the renderer dims it).
- * It mirrors bottomLines' iteration EXACTLY (same skip of unknown keys, same
- * RESERVED_BOTTOM_LINES cap, same padding) so line i's color pairs with
- * line i's text — including when an unknown key would shift indices.
+ * = dim when unknown), the `workers` field by how many workers are running
+ * (green/yellow/undefined — see workersUrgencyColor), every other field is
+ * undefined (the renderer dims it). It mirrors bottomLines' iteration
+ * EXACTLY (same skip of unknown keys, same RESERVED_BOTTOM_LINES cap, same
+ * padding) so line i's color pairs with line i's text — including when an
+ * unknown key would shift indices.
  */
 export function bottomLineColors(state: TuiState): (string | undefined)[] {
   const colors: (string | undefined)[] = [];
   for (const key of state.bottom) {
     if (colors.length >= RESERVED_BOTTOM_LINES) break;
     if (!(BOTTOM_FIELDS as readonly string[]).includes(key)) continue;
-    colors.push(key === "context" ? contextUrgencyColor(state) : undefined);
+    if (key === "context") colors.push(contextUrgencyColor(state));
+    else if (key === "workers") colors.push(workersUrgencyColor(state));
+    else colors.push(undefined);
   }
   while (colors.length < RESERVED_BOTTOM_LINES) colors.push(undefined);
   return colors;

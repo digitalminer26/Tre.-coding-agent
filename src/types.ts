@@ -378,3 +378,38 @@ export interface ModelConfig {
    */
   auth?: "chatgpt-oauth";
 }
+
+// ──────────────────── 4. Worker registry (endpoint visibility) ──────────
+
+/**
+ * The status of one `tre. run` worker, as the other tre. processes (the
+ * TUI's `workers` bottom field) see it. A worker writes one of these to its
+ * own file in the shared worker dir (`~/.tre/workers/`, see
+ * `src/cli/workers.ts`) on startup, refreshes it as it works, and marks it
+ * done/failed on exit. The TUI polls the dir and renders the live set —
+ * this is the CONTRACT between the writer (cli/main.ts) and the reader
+ * (tui/state.ts + tui/run.tsx); it lives here so neither side imports the
+ * other.
+ */
+export interface WorkerStatus {
+  /** Stable worker id (the filename stem in the worker dir). */
+  id: string;
+  /** The model id the worker runs on (from models.json). */
+  model: string;
+  /** The endpoint's baseUrl (the "which endpoint" the user asked about). */
+  endpoint: string;
+  /** "running" while the worker works; "done"/"failed" on exit. */
+  status: "running" | "done" | "failed";
+  /** The worker's current turn number (0 before the first turn). */
+  turn: number;
+  /** The worker's most recent activity label (tool name, "thinking", …). */
+  activity: string;
+  /** Epoch ms of the last status write (the TUI prunes stale entries). */
+  updatedAt: number;
+  /** Epoch ms the worker started (for elapsed time). */
+  startedAt: number;
+  /** The worker's working directory (so the user sees WHAT it works on). */
+  cwd: string;
+  /** The worker's prompt (truncated) — what it was asked to do. */
+  task: string;
+}

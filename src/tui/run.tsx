@@ -58,6 +58,7 @@ import {
   type TuiState,
 } from "./state.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
 import { resolveModel, type ModelsFile } from "../config/models.js";
 import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
@@ -69,6 +70,7 @@ import type {
   StreamFn,
   TextBlock,
   Tool,
+  WorkerStatus,
 } from "../types.js";
 import { aggregateSessionUsage, type ModelTokenTotals, type Session } from "../session/session.js";
 import type { ModelOption } from "./state.js";
@@ -640,6 +642,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         const now = Date.now();
         if (now - lastInt < SIGINT_GRACE_MS) {
           stopTelegram();
+          stopWorkersPoller();
           restoreMouseMode();
           process.exit(130);
         }
@@ -760,6 +763,62 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     telegramArm();
   }
 
+  // ── Workers (5s poller) — endpoint visibility ───────────────────────────
+  // While the TUI is open, poll the shared on-disk worker registry
+  // (~/.tre/workers/, src/cli/workers.ts) every 5s. Each concurrent `tre. run`
+  // process on another endpoint writes its WorkerStatus there (the WRITER
+  // half of the feature); this poller reads the live set and, when it CHANGES
+  // since the last tick, updates state.workers so the `workers` bottom field
+  // re-renders. The read is the frozen contract (readWorkerStatuses — never
+  // throws; stale entries already dropped); pruneWorkerDir opportunistically
+  // deletes stale files so a crashed worker's file does not accumulate.
+  //
+  // Mirrors the Telegram poller's shape: a self-rescheduling, unref'd
+  // setTimeout (never keeps the process alive on its own), started after the
+  // Ink app is mounted, and cleared on every exit path (stopWorkersPoller in
+  // the finally + the SIGINT force-exit paths). The tick body is wrapped in
+  // try/catch (I3): a read/prune failure just means "no update this tick".
+  const WORKERS_POLL_MS = 5000;
+  let workersTimer: NodeJS.Timeout | undefined;
+  let workersStopped = false;
+  // The last rendered set's signature — a cheap change detector so an
+  // unchanged set does not trigger a re-render (avoid churn every 5s).
+  let workersSig = "";
+  const stopWorkersPoller = (): void => {
+    workersStopped = true;
+    if (workersTimer !== undefined) {
+      clearTimeout(workersTimer);
+      workersTimer = undefined;
+    }
+  };
+  const workersTick = (): void => {
+    try {
+      const workers: WorkerStatus[] = readWorkerStatuses();
+      pruneWorkerDir(); // best-effort cleanup of stale files (I3: no-op on failure)
+      const sig = JSON.stringify(workers);
+      if (sig !== workersSig) {
+        // The set CHANGED (a worker started/finished/updated, or one went
+        // stale and dropped) — push it into state and re-render. setState
+        // guards the rerender on `mounted`, so a tick racing an unmount is
+        // harmless (it updates the state var but never repaints a dead app).
+        workersSig = sig;
+        setState({ ...state, workers });
+      }
+    } catch {
+      // I3: the poller must NEVER throw — a read/prune failure is swallowed
+      // and the next tick retries.
+    }
+  };
+  const workersArm = (): void => {
+    if (workersStopped) return; // a tick in flight at stop time must not re-arm
+    workersTimer = setTimeout(() => {
+      workersTick();
+      workersArm();
+    }, WORKERS_POLL_MS);
+    workersTimer.unref?.();
+  };
+  workersArm();
+
   // ── approval + executor ──────────────────────────────────────────────────
   const ask: AskApproval =
     opts.deps?.askApproval ??
@@ -778,6 +837,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const now = Date.now();
       if (now - lastInt < SIGINT_GRACE_MS) {
         stopTelegram();
+        stopWorkersPoller();
         restoreMouseMode();
         process.exit(130);
       }
@@ -785,6 +845,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       lastInt = now;
     } else {
       stopTelegram(); // process.exit skips the finally below
+      stopWorkersPoller();
       restoreMouseMode();
       process.exit(130);
     }
@@ -794,6 +855,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     await app.waitUntilExit();
   } finally {
     stopTelegram();
+    stopWorkersPoller();
     restoreMouseMode();
     stopPerfSweep();
     process.off("SIGINT", onSigint);
