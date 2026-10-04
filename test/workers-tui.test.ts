@@ -14,6 +14,8 @@ import {
   bottomValue,
   BOTTOM_FIELDS,
   makeInitialState,
+  workersBottomSpans,
+  workersLineAnsi,
   type TuiState,
 } from "../src/tui/state.js";
 
@@ -148,4 +150,136 @@ test("bottomLines: the workers field renders 'workers: <one-liner>'", () => {
     bottom: ["workers"],
   };
   assert.equal(bottomLines(s, 80)[0], "workers: 1: gpt-6-luna t3 bash");
+});
+
+// ── workersBottomSpans: the per-worker colored segments ─────────────────────
+// The new per-worker color contract: running → green (the active endpoint for
+// the current workstream), done/failed → gray (a model that already ran keeps
+// its name + turn count visible, dimmed). The segment TEXT is byte-identical
+// to the old one-liner (pinned above); only the color is new.
+
+test("workersBottomSpans: running → green, done/failed → gray, text unchanged", () => {
+  const spans = workersBottomSpans([
+    worker({ id: "a", model: "gpt-6-luna", turn: 3, activity: "bash" }), // running
+    worker({ id: "b", model: "qwen", turn: 5, activity: "working", status: "done" }),
+    worker({ id: "c", model: "r", turn: 2, activity: "bash", status: "failed" }),
+  ]);
+  assert.equal(spans.count, 3);
+  assert.equal(spans.extra, 0);
+  assert.deepEqual(spans.spans, [
+    { text: "gpt-6-luna t3 bash", color: "green" },
+    { text: "qwen t5 working ✓", color: "gray" },
+    { text: "r t2 bash ✗", color: "gray" },
+  ]);
+});
+
+test("workersBottomSpans: first 3 shown, overflow → extra (count preserved)", () => {
+  const spans = workersBottomSpans([
+    worker({ id: "a", model: "a", turn: 0, activity: "" }),
+    worker({ id: "b", model: "b", turn: 0, activity: "" }),
+    worker({ id: "c", model: "c", turn: 0, activity: "" }),
+    worker({ id: "d", model: "d", turn: 0, activity: "", status: "done" }),
+  ]);
+  assert.equal(spans.count, 4);
+  assert.equal(spans.extra, 1);
+  assert.equal(spans.spans.length, 3, "only the first 3 become spans");
+  assert.deepEqual(
+    spans.spans.map((s) => s.text),
+    ["a t0", "b t0", "c t0"],
+  );
+});
+
+test("workersBottomSpans: empty set → no spans, count 0, extra 0", () => {
+  const spans = workersBottomSpans([]);
+  assert.deepEqual(spans, { spans: [], extra: 0, count: 0 });
+});
+
+test("workersBottomSpans: exactly 3 → extra 0 (no overflow)", () => {
+  const spans = workersBottomSpans([
+    worker({ id: "a", model: "a", turn: 0, activity: "" }),
+    worker({ id: "b", model: "b", turn: 0, activity: "" }),
+    worker({ id: "c", model: "c", turn: 0, activity: "" }),
+  ]);
+  assert.equal(spans.count, 3);
+  assert.equal(spans.extra, 0);
+  assert.equal(spans.spans.length, 3);
+});
+
+// ── workersLineAnsi: the per-worker colored line (one row) ──────────────────
+// The SGR codes match Ink's palette: dim \x1b[2m, green \x1b[32m, gray \x1b[90m.
+// The whole line is truncated to one row at `width` (cli-truncate is ANSI-aware).
+
+const DIM = "\u001b[2m";
+const RESET = "\u001b[0m";
+const GREEN = "\u001b[32m";
+const GRAY = "\u001b[90m";
+
+test("workersLineAnsi: one running worker → dim prefix + count + green segment", () => {
+  const s = withWorkers([worker({ model: "gpt-6-luna", turn: 3, activity: "bash" })]);
+  assert.equal(
+    workersLineAnsi(s, 80),
+    `${DIM}workers: ${RESET}${DIM}1: ${RESET}${GREEN}gpt-6-luna t3 bash${RESET}`,
+  );
+});
+
+test("workersLineAnsi: running + done → green then gray, joined by a dim ' · '", () => {
+  const s = withWorkers([
+    worker({ id: "a", model: "gpt-6-luna", turn: 3, activity: "bash" }),
+    worker({ id: "b", model: "qwen", turn: 5, activity: "working", status: "done" }),
+  ]);
+  assert.equal(
+    workersLineAnsi(s, 80),
+    `${DIM}workers: ${RESET}${DIM}2: ${RESET}` +
+      `${GREEN}gpt-6-luna t3 bash${RESET}${DIM} · ${RESET}${GRAY}qwen t5 working ✓${RESET}`,
+  );
+});
+
+test("workersLineAnsi: empty set → dim 'workers: none' (no count, no spans)", () => {
+  assert.equal(workersLineAnsi(withWorkers([]), 80), `${DIM}workers: none${RESET}`);
+});
+
+test("workersLineAnsi: 4 workers → 3 spans + a dim ' +1' suffix", () => {
+  const s = withWorkers([
+    worker({ id: "a", model: "a", turn: 0, activity: "" }),
+    worker({ id: "b", model: "b", turn: 0, activity: "", status: "done" }),
+    worker({ id: "c", model: "c", turn: 0, activity: "", status: "failed" }),
+    worker({ id: "d", model: "d", turn: 0, activity: "" }),
+  ]);
+  assert.equal(
+    workersLineAnsi(s, 80),
+    `${DIM}workers: ${RESET}${DIM}4: ${RESET}` +
+      `${GREEN}a t0${RESET}${DIM} · ${RESET}${GRAY}b t0 ✓${RESET}` +
+      `${DIM} · ${RESET}${GRAY}c t0 ✗${RESET}${DIM} +1${RESET}`,
+  );
+});
+
+test("workersLineAnsi: a long line truncates to ONE row at width (ANSI-aware)", () => {
+  const s = withWorkers([
+    worker({ model: "a-very-long-model-name", turn: 3, activity: "bash" }),
+  ]);
+  const line = workersLineAnsi(s, 40);
+  // cli-truncate is ANSI-aware: no trailing newline, and the SGR codes survive.
+  assert.ok(!line.includes("\n"), "single row");
+  assert.ok(line.includes(GREEN), "green span survives truncation");
+  // The VISIBLE (code-stripped) text ends with the ellipsis and is at most
+  // `width` columns (the SGR codes do not count toward the visible width).
+  const visible = line.replace(/\u001b\[[0-9;]*m/g, "");
+  assert.ok(visible.endsWith("…"), "truncated with an ellipsis");
+  assert.ok(visible.length <= 40, `visible width ${visible.length} <= 40`);
+});
+
+test("workersLineAnsi: the code-stripped text equals the old one-liner", () => {
+  // The per-worker coloring must not change the VISIBLE text — stripping the
+  // SGR codes yields exactly what the plain one-liner (bottomValue) produced.
+  const workers = [
+    worker({ id: "a", model: "gpt-6-luna", turn: 3, activity: "bash" }),
+    worker({ id: "b", model: "qwen", turn: 5, activity: "working", status: "done" }),
+  ];
+  const s = withWorkers(workers);
+  // Drop the SGR codes AND the "workers: " field prefix (bottomValue returns
+  // the value only) — the remainder must equal the old one-liner exactly.
+  const stripped = workersLineAnsi(s, 80)
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/^workers: /, "");
+  assert.equal(stripped, bottomValue(s, "workers"));
 });

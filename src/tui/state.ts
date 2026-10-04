@@ -1495,26 +1495,92 @@ export function bottomValue(state: TuiState, field: BottomField): string {
 }
 
 /**
+ * One worker's segment string: `<model> t<turn>` + optional ` <activity>` +
+ * optional done/failed mark. Shared by `workersBottomValue` (the plain
+ * one-liner) and `workersBottomSpans` (the per-worker colored spans) so the
+ * two can never drift. An empty activity (before a worker's first tool) is
+ * omitted — no dangling space in the segment.
+ */
+function workerSegment(w: WorkerStatus): string {
+  const mark = w.status === "done" ? " ✓" : w.status === "failed" ? " ✗" : "";
+  const act = w.activity !== "" ? ` ${w.activity}` : "";
+  return `${w.model} t${w.turn}${act}${mark}`;
+}
+
+/**
  * The `workers` field's one-liner, split out of bottomValue's switch to
  * keep the case readable (same pure contract: state in, string out).
  * See the `workers` case for the format.
  */
 function workersBottomValue(workers: WorkerStatus[]): string {
   if (workers.length === 0) return "none";
-  const seg = (w: WorkerStatus): string => {
-    const mark = w.status === "done" ? " ✓" : w.status === "failed" ? " ✗" : "";
-    // An empty activity (before a worker's first tool) is omitted — no
-    // dangling space in the segment.
-    const act = w.activity !== "" ? ` ${w.activity}` : "";
-    return `${w.model} t${w.turn}${act}${mark}`;
-  };
-  const shown = workers.slice(0, 3).map(seg);
+  const shown = workers.slice(0, 3).map(workerSegment);
   const extra = workers.length - 3;
   const base = shown.join(" · ");
   // The overflow suffix is a count, not a worker — it is appended with a
   // plain space (not the " · " worker separator) so it reads as a summary
   // tail: `a t0 · b t0 · c t0 +1`.
   return extra > 0 ? `${workers.length}: ${base} +${extra}` : `${workers.length}: ${base}`;
+}
+
+/**
+ * One segment of the `workers` bottom line: the plain text (byte-identical to
+ * `workerSegment`) plus the per-worker color. `running` → "green" (the active
+ * endpoint for the current workstream); `done`/`failed` → "gray" (a model that
+ * already ran — its name + turn count stay visible, dimmed).
+ */
+export interface WorkerSpan {
+  text: string;
+  color: "green" | "gray";
+}
+
+/**
+ * The per-worker segments of the `workers` bottom line, in display order
+ * (same order as `workersBottomValue`: oldest-start first, first 3 shown,
+ * overflow collapsed into the `+N` suffix). Pure: `state.workers` in, spans
+ * out. The renderer (app.tsx) draws a dim `workers: ` prefix, these spans
+ * joined by a dim " · ", and a dim ` +N` suffix when `extra > 0`.
+ */
+export function workersBottomSpans(
+  workers: WorkerStatus[],
+): { spans: WorkerSpan[]; extra: number; count: number } {
+  const count = workers.length;
+  const spans = workers.slice(0, 3).map(
+    (w): WorkerSpan => ({
+      text: workerSegment(w),
+      color: w.status === "running" ? "green" : "gray",
+    }),
+  );
+  const extra = Math.max(0, count - 3);
+  return { spans, extra, count };
+}
+
+/**
+ * The `workers` reserved line as an ANSI string, exactly ONE row: a dim
+ * `workers: ` prefix + dim `<count>: ` (the same count the plain one-liner
+ * carries), the per-worker spans from `workersBottomSpans` (running → green,
+ * done/failed → gray — a model that already ran keeps its name + turn count
+ * visible, dimmed), joined by a dim " · ", and a dim ` +N` overflow suffix.
+ * The SGR codes match Ink's palette (green = \x1b[32m,
+ * gray = \x1b[90m, dim = \x1b[2m — chalk's named colors), so the line renders
+ * identically to the JSX the rest of the chrome uses. The whole line is
+ * truncated to one row at `width` (cli-truncate is ANSI-aware — SGR codes
+ * survive, so the frame stays exactly `rows` tall).
+ */
+export function workersLineAnsi(state: TuiState, width: number): string {
+  const { spans, extra, count } = workersBottomSpans(state.workers);
+  const dim = (s: string): string => `\u001b[2m${s}\u001b[0m`;
+  // No workers → the plain "workers: none" (dim), matching the old one-liner.
+  if (count === 0) return cliTruncate(dim("workers: none"), Math.max(1, width), { position: "end" });
+  // The dim `workers: ` prefix + dim `<count>: ` (the same count the plain
+  // one-liner carries) + the per-worker spans (green/gray) + dim ` +N`.
+  const parts: string[] = [dim("workers: "), dim(`${count}: `)];
+  spans.forEach((s, i) => {
+    if (i > 0) parts.push(dim(" · "));
+    parts.push(s.color === "green" ? `\u001b[32m${s.text}\u001b[0m` : `\u001b[90m${s.text}\u001b[0m`);
+  });
+  if (extra > 0) parts.push(dim(` +${extra}`));
+  return cliTruncate(parts.join(""), Math.max(1, width), { position: "end" });
 }
 
 /**

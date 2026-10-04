@@ -10,7 +10,9 @@ import cliTruncate from "cli-truncate";
 import type { TuiItem, TuiState, VisibleSlice } from "./state.js";
 import { itemLines } from "./lines.js";
 import {
+  BOTTOM_FIELDS,
   FIXED_NON_ITEM_LINES,
+  RESERVED_BOTTOM_LINES,
   approvalLine,
   bottomLineColors,
   bottomLines,
@@ -18,6 +20,7 @@ import {
   inputWrap,
   modelPickerMenu,
   suggestMenu,
+  workersLineAnsi,
 } from "./state.js";
 
 /** Truncate a line to at most `w` display columns (ellipsis at the end). */
@@ -312,15 +315,43 @@ export function App(props: AppProps): React.ReactElement {
       {/* D15: the reserved lines are the user-configurable bottom display
           (/display-bottom) — blank when nothing is selected. The `context`
           line is tinted by compaction urgency (green → yellow → red); the
-          rest stay dim (the resting chrome). */}
+          `workers` line is colored PER WORKER (running → green, a model that
+          already ran → gray — see workersLineAnsi); the rest stay dim. The
+          `keys` array mirrors bottomLines' iteration EXACTLY (same skip of
+          unknown keys, same RESERVED_BOTTOM_LINES cap, same padding) so line
+          i's key pairs with line i's text — including when an unknown key
+          would shift indices. */}
       {(() => {
         const lines = bottomLines(state, width);
         const colors = bottomLineColors(state);
-        return lines.map((line, i) => (
-          <Text key={`reserved-${i}`} dimColor={colors[i] === undefined} color={colors[i]}>
-            {line || " "}
-          </Text>
-        ));
+        const keys: (string | undefined)[] = [];
+        for (const key of state.bottom) {
+          if (keys.length >= RESERVED_BOTTOM_LINES) break;
+          if (!(BOTTOM_FIELDS as readonly string[]).includes(key)) continue;
+          keys.push(key);
+        }
+        while (keys.length < RESERVED_BOTTOM_LINES) keys.push(undefined);
+        return lines.map((line, i) => {
+          const isWorkers = keys[i] === "workers";
+          // The workers line is an ANSI string that ALREADY carries its own
+          // per-worker SGR codes (green/gray/dim), so it must NOT be wrapped
+          // in dimColor (that would dim the bright-green running worker).
+          // Every other line keeps the single-color behavior (dim when the
+          // tint is undefined, else that tint).
+          if (isWorkers) {
+            return (
+              <Text key={`reserved-${i}`}>
+                {workersLineAnsi(state, width)}
+              </Text>
+            );
+          }
+          const color = colors[i];
+          return (
+            <Text key={`reserved-${i}`} dimColor={color === undefined} color={color}>
+              {line || " "}
+            </Text>
+          );
+        });
       })()}
     </Box>
   );
