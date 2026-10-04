@@ -196,7 +196,7 @@ test("stall guard: same tool, permission failure 3× → 3rd replaced with STALL
   assert.equal(r2.isError, true, "2nd failure passes through (legit retry)");
   const r3 = await executor(tool, call("3", "t", { p: "x" }), sig);
   assert.equal(r3.isError, true, "3rd failure is an in-band error result (I3)");
-  assert.match(resultText(r3), /NOT executed/);
+  assert.match(resultText(r3), /WAS executed.*REPLACED/);
   assert.equal(r3.details?.stall, true, "the loop maps details.stall onto stopReason");
   assert.equal(calls.length, 3, "all three executed (a denial is a harmless no-op)");
 });

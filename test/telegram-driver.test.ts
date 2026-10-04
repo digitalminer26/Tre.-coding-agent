@@ -180,6 +180,64 @@ test("routing: allowIdleTurns=false (one-shot) never starts an idle turn", async
   assert.equal(idleCalled, false, "one-shot must not turn a message into a new run");
 });
 
+// ── ERROR CONTAINMENT ───────────────────────────────────────────────────────
+
+test("containment: a THROWING onSteer does not reject start() and does not stop the loop", async () => {
+  const bridge = new FakeBridge(() => MSG("boom"));
+  const boom = new Error("onSteer exploded");
+  let steerCount = 0;
+  const handlerErrors: unknown[] = [];
+  const driver = new TelegramDriver(
+    bridge,
+    {
+      onSteer: () => {
+        steerCount += 1;
+        throw boom; // throws EVERY steer — the loop must survive and keep polling
+      },
+      onIdle: async () => {},
+    },
+    { minIntervalMs: 10, onHandlerError: (err) => handlerErrors.push(err) },
+  );
+  const p = driver.start();
+  // Hold a turn so the messages route to onSteer (not onIdle).
+  const turn = driver.withTurn(async () => sleep(120));
+  await sleep(10);
+  // The loop must keep steering across iterations (the throw must not kill it).
+  await waitUntil(() => steerCount >= 3, 3000, "onSteer called repeatedly");
+  assert.equal(handlerErrors.length, steerCount, "onHandlerError fires per throwing steer");
+  assert.equal(handlerErrors[0], boom, "onHandlerError gets the thrown error");
+  driver.stop();
+  await turn;
+  await p; // RESOLVES — a throwing onSteer must never reject start()'s promise
+});
+
+test("containment: an unexpected loop error is contained — start() resolves, loop stops", async () => {
+  // A throw from `onPollError` (called inside the poll's catch block) escapes
+  // the poll's own try/catch and hits the loop boundary — the unguarded
+  // code path the boundary must contain.
+  const bridge = new FakeBridge(() => {
+    throw new Error("network down (fast fail)");
+  });
+  const boom = new Error("unexpected loop error");
+  const handlerErrors: unknown[] = [];
+  const driver = new TelegramDriver(bridge, noopHandlers, {
+    failBaseMs: 10,
+    minIntervalMs: 10,
+    onPollError: () => {
+      throw boom; // unguarded: escapes the poll's try/catch
+    },
+    onHandlerError: (err) => handlerErrors.push(err),
+  });
+  const p = driver.start();
+  await waitUntil(() => handlerErrors.length >= 1, 2000, "onHandlerError called");
+  assert.equal(handlerErrors[0], boom, "onHandlerError gets the unexpected error");
+  await p; // RESOLVES — the loop boundary must never let start() reject
+  const countAtEnd = bridge.times.length;
+  assert.ok(countAtEnd >= 1, "at least one poll ran before the error");
+  await sleep(40);
+  assert.equal(bridge.times.length, countAtEnd, "the loop is stopped after the unexpected error");
+});
+
 // ── LIFECYCLE ────────────────────────────────────────────────────────────────
 
 test("lifecycle: stop() ends the loop promptly and no further polls run", async () => {

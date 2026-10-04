@@ -42,7 +42,22 @@ export interface HttpOpts {
   backoffMs?: number;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    const onAbort = (): void => {
+      clearTimeout(t);
+      reject(new AbortError());
+    };
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(t);
+        reject(new AbortError());
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 
 /** Retryable: network failure, 429, or 5xx. */
 function retryable(err: unknown): boolean {
@@ -92,14 +107,23 @@ export async function httpJson(opts: HttpOpts): Promise<unknown> {
         if (!retryable(err) || i === retries - 1) throw err;
         lastErr = err;
       } else {
-        return await res.json();
+        const body = await res.text().catch(() => "");
+        try {
+          return JSON.parse(body);
+        } catch {
+          throw new HttpError(
+            `malformed JSON in successful response from ${opts.url}`,
+            res.status,
+            body,
+          );
+        }
       }
     } catch (err) {
       if (err instanceof AbortError) throw err;
       if (!retryable(err) || i === retries - 1) throw err;
       lastErr = err;
     }
-    await sleep(Math.min(backoff * 2 ** i, 4000));
+    await sleep(Math.min(backoff * 2 ** i, 4000), opts.signal);
   }
   throw lastErr;
 }
@@ -133,11 +157,11 @@ export async function* sseStream(opts: HttpOpts): AsyncGenerator<SseFrame> {
         body,
       );
       if (!retryable(err) || i === retries - 1) throw err;
-      await sleep(Math.min(backoff * 2 ** i, 4000));
+      await sleep(Math.min(backoff * 2 ** i, 4000), opts.signal);
     } catch (err) {
       if (err instanceof AbortError) throw err;
       if (!retryable(err) || i === retries - 1) throw err;
-      await sleep(Math.min(backoff * 2 ** i, 4000));
+      await sleep(Math.min(backoff * 2 ** i, 4000), opts.signal);
     }
   }
   if (!res || !res.ok || !res.body) {

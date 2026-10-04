@@ -6,6 +6,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startMockSse } from "./mock-sse.js";
+import { httpJson, HttpError } from "../src/wire/http.js";
+import { AbortError } from "../src/wire/abort.js";
 import {
   buildParams,
   collectStream,
@@ -344,4 +346,58 @@ test("sanitizeCallId: charset + length + fallback", () => {
 test("completionsUrl: joins baseUrl without double slash", () => {
   assert.equal(completionsUrl("http://h:1/v1"), "http://h:1/v1/chat/completions");
   assert.equal(completionsUrl("http://h:1/v1/"), "http://h:1/v1/chat/completions");
+});
+
+/** Stub globalThis.fetch with a canned Response; counts calls, restores on cleanup. */
+function stubFetch(res: Response): { calls: () => number; restore: () => void } {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return res;
+  }) as typeof fetch;
+  return {
+    calls: () => calls,
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+}
+
+test("httpJson: 200 with malformed JSON body is NOT retried (M2)", async () => {
+  const mock = stubFetch(new Response("not-json", { status: 200 }));
+  try {
+    await assert.rejects(
+      httpJson({ url: "http://x/v1", signal: new AbortController().signal }),
+      (err: unknown) =>
+        err instanceof HttpError &&
+        err.status === 200 &&
+        /malformed JSON/.test(err.message),
+    );
+    assert.equal(mock.calls(), 1); // server already succeeded — no re-POST
+  } finally {
+    mock.restore();
+  }
+});
+
+test("httpJson: abort during backoff rejects promptly with AbortError (M1)", async () => {
+  const mock = stubFetch(new Response("boom", { status: 500 }));
+  const controller = new AbortController();
+  const started = Date.now();
+  const p = httpJson({
+    url: "http://x/v1",
+    signal: controller.signal,
+    backoffMs: 1000, // first backoff sleep is 1000ms
+  });
+  // Let the first 500 attempt land, then abort mid-backoff.
+  await new Promise((r) => setTimeout(r, 100));
+  controller.abort();
+  await assert.rejects(p, (err: unknown) => err instanceof AbortError);
+  // An abort-aware sleep wakes immediately; the old one would wait ~1000ms.
+  assert.ok(
+    Date.now() - started < 500,
+    `abort should wake the backoff sleep promptly (took ${Date.now() - started}ms)`,
+  );
+  assert.equal(mock.calls(), 1);
+  mock.restore();
 });

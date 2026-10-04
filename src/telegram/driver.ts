@@ -135,44 +135,64 @@ export class TelegramDriver {
     const failBase = this.opts.failBaseMs ?? 1000;
     const failCap = this.opts.failCapMs ?? 60_000;
     let consecutiveFails = 0;
-    while (!this.stopped) {
-      const iterStart = Date.now();
-      let msgs: TelegramMessage[] | null | undefined;
-      try {
-        msgs = await this.bridge.pollLong(TELEGRAM_LONG_POLL_SEC, this.abort.signal);
-        consecutiveFails = 0; // a successful poll (even "no message") resets backoff
-      } catch (err) {
-        msgs = undefined; // sentinel: the poll FAILED (fast-fail)
-        consecutiveFails += 1;
-        // Capped exponential backoff — a persistent fast-failure settles to
-        // one poll per failCap, NEVER a hot spin (loop-prevention #3).
-        const delay = Math.min(failBase * 2 ** (consecutiveFails - 1), failCap);
-        this.opts.onPollError?.(err, delay);
-        await sleep(delay, this.abort.signal);
-      }
-      if (this.stopped) break;
-      if (msgs !== undefined && msgs !== null) {
-        // A message arrived. Steer if a turn is in flight; otherwise run an
-        // idle turn (in the background, so the poll loop keeps steering).
-        if (this.turnInFlight) {
-          for (const m of msgs) this.handlers.onSteer(m);
-        } else if (this.opts.allowIdleTurns !== false && this.handlers.onIdle) {
-          void this.withTurn(async () => {
-            try {
-              await this.handlers.onIdle!(msgs);
-            } catch (err) {
-              this.opts.onHandlerError?.(err);
+    // The loop boundary contains ALL errors: `start()`'s promise must never
+    // reject unhandled (callers discard it with `void driver.start()`, and an
+    // unhandled rejection can terminate the host CLI/TUI process). An
+    // unexpected error is reported and the loop stops gracefully.
+    try {
+      while (!this.stopped) {
+        const iterStart = Date.now();
+        let msgs: TelegramMessage[] | null | undefined;
+        try {
+          msgs = await this.bridge.pollLong(TELEGRAM_LONG_POLL_SEC, this.abort.signal);
+          consecutiveFails = 0; // a successful poll (even "no message") resets backoff
+        } catch (err) {
+          msgs = undefined; // sentinel: the poll FAILED (fast-fail)
+          consecutiveFails += 1;
+          // Capped exponential backoff — a persistent fast-failure settles to
+          // one poll per failCap, NEVER a hot spin (loop-prevention #3).
+          const delay = Math.min(failBase * 2 ** (consecutiveFails - 1), failCap);
+          this.opts.onPollError?.(err, delay);
+          await sleep(delay, this.abort.signal);
+        }
+        if (this.stopped) break;
+        if (msgs !== undefined && msgs !== null) {
+          // A message arrived. Steer if a turn is in flight; otherwise run an
+          // idle turn (in the background, so the poll loop keeps steering).
+          if (this.turnInFlight) {
+            // Guard PER MESSAGE (mirrors the idle path): a throwing handler
+            // must not lose the remaining messages or reject the loop.
+            for (const m of msgs) {
+              try {
+                this.handlers.onSteer(m);
+              } catch (err) {
+                this.opts.onHandlerError?.(err);
+              }
             }
-          });
+          } else if (this.opts.allowIdleTurns !== false && this.handlers.onIdle) {
+            void this.withTurn(async () => {
+              try {
+                await this.handlers.onIdle!(msgs);
+              } catch (err) {
+                this.opts.onHandlerError?.(err);
+              }
+            });
+          }
+        }
+        // Loop-prevention #2 — the hard cap: enforce a minimum interval between
+        // poll STARTS so a fast-returning poll can never hot-spin. The long-poll
+        // normally provides the pacing; this is the backstop.
+        const elapsed = Date.now() - iterStart;
+        if (elapsed < minInterval) {
+          await sleep(minInterval - elapsed, this.abort.signal);
         }
       }
-      // Loop-prevention #2 — the hard cap: enforce a minimum interval between
-      // poll STARTS so a fast-returning poll can never hot-spin. The long-poll
-      // normally provides the pacing; this is the backstop.
-      const elapsed = Date.now() - iterStart;
-      if (elapsed < minInterval) {
-        await sleep(minInterval - elapsed, this.abort.signal);
-      }
+    } catch (err) {
+      // Unexpected error outside the poll's own try/catch (e.g. a throw from
+      // an unguarded code path): report it and STOP the loop gracefully —
+      // never let it reject `start()`'s promise.
+      this.opts.onHandlerError?.(err);
+      this.stopped = true;
     }
   }
 }

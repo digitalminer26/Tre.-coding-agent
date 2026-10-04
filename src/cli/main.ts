@@ -1157,11 +1157,12 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     durableRoots.push(path.resolve(dir));
   }
   const oneShotRoots: string[] = [];
-  for (const dir of args.extraRoots) {
+  for (let i = 0; i < args.extraRoots.length; i++) {
+    const dir = args.extraRoots[i]!;
     const resolved = expandTilde(dir);
     const reason = validateExtraRoot(path.resolve(resolved));
     if (reason !== undefined) {
-      sinks.err.write(`error: --extra-root ${reason}\n`);
+      sinks.err.write(`error: --extra-root ${dir} (${reason})\n`);
       return 2;
     }
     oneShotRoots.push(path.resolve(resolved));
@@ -1374,9 +1375,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // SIGINT: first aborts the active run, second exits (plain CLI only).
   let controller = new AbortController();
   let active = false;
+  let lastInt = 0;
   const onSigint = (): void => {
-    if (active) controller.abort();
-    else process.exit(130);
+    if (active) {
+      const now = Date.now();
+      if (now - lastInt < 2000) {
+        telegramDriver?.stop();
+        process.exit(130);
+      }
+      controller.abort();
+      lastInt = now;
+    } else process.exit(130);
   };
   process.on("SIGINT", onSigint);
 
@@ -1518,6 +1527,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
             telegramInfo("replied via the bot");
           } finally {
             active = false;
+            lastInt = 0;
             activeSteer = null;
           }
         },
@@ -1644,6 +1654,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         cpt = result.charsPerToken;
       } finally {
         active = false;
+        lastInt = 0;
         activeSteer = null;
       }
     }

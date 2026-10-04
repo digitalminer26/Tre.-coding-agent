@@ -369,7 +369,7 @@ export async function* runLoop(
           content: LENGTH_NUDGE_TEXT,
           timestamp: Date.now(),
         });
-        continue; // consumes a turn like any other (maxTurns still caps)
+        continue; // the nudge consumes no turn (it is not an LLM call); bounded by the cycle guard (turn - cycleStart < maxTurns) and once per cycle (lengthNudged)
       }
       // Steering keep-alive: the model finished with a text-only reply, but
       // the user typed guidance while it ran — deliver it and keep going.

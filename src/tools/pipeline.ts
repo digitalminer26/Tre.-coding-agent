@@ -123,26 +123,26 @@ export function isPermissionStallText(texts: string[]): boolean {
 }
 
 /**
- * The stall guard's in-band answer: the tool has now failed 3 times in a
- * row with a permission denial, so this call is NOT executed and the run
- * stops with stopReason "stall" (the loop maps the `stall` detail onto it).
+ * The stall guard's in-band answer: the tool has now failed 3 times with a
+ * permission denial within its last 8 calls, so the (already-executed)
+ * result of the failing call is REPLACED by this notice and the run stops
+ * with stopReason "stall" (the loop maps the `stall` detail onto it).
  * The model is told the failure is deterministic, what to do instead, and
  * how the user can lift the boundary (--no-sandbox for system-maintenance
  * work).
  */
 export function stallText(toolName: string): string {
   return (
-    `This call was NOT executed: the "${toolName}" tool has now failed 3 ` +
-    "times with a permission denial (Operation not permitted / permission " +
-    "denied) within its last 8 calls. That failure is deterministic — the " +
-    "sandbox " +
-    "boundary will not move, so rephrasing or retrying the same operation " +
-    "will not help, and the run stops here (stopReason 'stall'). Change " +
-    "approach: use a different tool or a target INSIDE the workspace (a " +
-    "path the sandbox allows), or finish with a text-only reply explaining " +
-    "the blocked step. If the task genuinely requires system-level access " +
-    "(e.g. git push over ssh, which needs ~/.ssh), tell the user to re-run " +
-    "with --no-sandbox."
+    `This call WAS executed, but its result was REPLACED by this notice: ` +
+    `the "${toolName}" tool has now failed 3 times with a permission denial ` +
+    "(Operation not permitted / permission denied) within its last 8 calls. " +
+    "That failure is deterministic — the sandbox boundary will not move, so " +
+    "rephrasing or retrying the same operation will not help, and the run " +
+    "stops here (stopReason 'stall'). Change approach: use a different tool " +
+    "or a target INSIDE the workspace (a path the sandbox allows), or finish " +
+    "with a text-only reply explaining the blocked step. If the task " +
+    "genuinely requires system-level access (e.g. git push over ssh, which " +
+    "needs ~/.ssh), tell the user to re-run with --no-sandbox."
   );
 }
 

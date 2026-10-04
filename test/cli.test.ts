@@ -1211,6 +1211,41 @@ test("C35 main: --extra-root pointing at a nonexistent dir → exit 2 + refusal"
 });
 
 test(
+  "C35 main: repeated --extra-root — the error names the offending dir",
+  {
+    // The valid first value is the repo root (exists, under home, non-sensitive)
+    // — same convention as the valid --extra-root test below. Skip when the repo
+    // is not under home (e.g. a CI checkout elsewhere).
+    skip:
+      !process.env.HOME ||
+      !process.cwd().startsWith(process.env.HOME + "/")
+        ? "repo is not under $HOME — no valid in-home extra root to point at"
+        : false,
+  },
+  async (t) => {
+    const { dir, models } = await workspace(t);
+    const S = mkSinks();
+    const good = process.cwd(); // valid: exists, under home, non-sensitive
+    const bad = join(dir, "does-not-exist"); // invalid: ENOENT
+    const code = await main(
+      [
+        "run", "x", "--models", models, "--cwd", dir,
+        "--extra-root", good,
+        "--extra-root", bad,
+      ],
+      { streamFn: fakeStream([{ type: "text", text: "x" }]), sinks: S.sinks },
+    );
+    assert.equal(code, 2);
+    // With MULTIPLE --extra-root values the diagnostic must identify WHICH
+    // one failed: it names the offending (second) dir, not the valid first.
+    const errLine = S.err().split("\n").find((l) => l.includes("--extra-root"));
+    assert.ok(errLine, "an --extra-root error line is printed");
+    assert.ok(errLine.includes(bad), "the error names the offending directory");
+    assert.ok(!errLine.includes(good), "the valid first value is not blamed");
+  },
+);
+
+test(
   "C35 main: --extra-root (valid dir under home) → exit 0, summary lists it",
   {
     // The valid e2e needs an EXISTING dir under home to point at. The repo
