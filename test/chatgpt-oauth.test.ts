@@ -40,6 +40,20 @@ const tokenEndpoint = (calls: { body: URLSearchParams }[]) =>
     );
   }) as unknown as typeof fetch;
 
+/** Fire the loopback callback on a FRESH connection (a real browser redirect
+ *  does exactly this). The global `fetch` pools keep-alive sockets per
+ *  origin, and these tests bind a fresh server on the SAME registered port
+ *  (1455) per `runLogin`; a pooled socket to a previous (closed) server would
+ *  steal the next callback and starve the live server until the 300s login
+ *  timeout — the intermittent `npm test` hang (2026-10-04). `http.get` with
+ *  `Connection: close` opens a new socket each time and never reuses the pool. */
+function fireCallback(url: string): void {
+  const req = http.get(url, { headers: { connection: "close" } }, (res) => {
+    res.resume();
+  });
+  req.on("error", () => undefined); // server already closed — the flow rejects
+}
+
 test("generatePkce: challenge = base64url(sha256(verifier))", () => {
   const { verifier, challenge } = generatePkce();
   assert.ok(verifier.length >= 43 && verifier.length <= 128);
@@ -77,9 +91,7 @@ test("runLogin: binds the registered callback port + path (1455 /auth/callback)"
     const redirectUri = u.searchParams.get("redirect_uri")!;
     const state = u.searchParams.get("state")!;
     setTimeout(() => {
-      void fetch(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`).catch(
-        () => undefined,
-      );
+      fireCallback(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`);
     }, 0);
   };
   await runLogin({ file, now: () => NOW, fetchImpl: tokenEndpoint([]), openBrowser });
@@ -106,9 +118,7 @@ test("runLogin: 1455 in use → falls back to 1457", async (t) => {
     const redirectUri = u.searchParams.get("redirect_uri")!;
     const state = u.searchParams.get("state")!;
     setTimeout(() => {
-      void fetch(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`).catch(
-        () => undefined,
-      );
+      fireCallback(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`);
     }, 0);
   };
   await runLogin({ file, now: () => NOW, fetchImpl: tokenEndpoint([]), openBrowser });
@@ -149,9 +159,7 @@ test("runLogin: loopback callback → code exchange (form) → tokens stored", a
     const redirectUri = u.searchParams.get("redirect_uri")!;
     const state = u.searchParams.get("state")!;
     setTimeout(() => {
-      void fetch(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`).catch(
-        () => undefined,
-      );
+      fireCallback(`${redirectUri}?code=TESTCODE&state=${encodeURIComponent(state)}`);
     }, 0);
   };
   const tokens = await runLogin({
@@ -204,7 +212,7 @@ test("runLogin: callback state mismatch → AuthError", async (t) => {
     const u = new URL(url);
     const redirectUri = u.searchParams.get("redirect_uri")!;
     setTimeout(() => {
-      void fetch(`${redirectUri}?code=X&state=WRONG`).catch(() => undefined);
+      fireCallback(`${redirectUri}?code=X&state=WRONG`);
     }, 0);
   };
   await assert.rejects(
@@ -228,9 +236,7 @@ test("runLogin: token endpoint 400 → AuthError (exchange failed)", async (t) =
     const redirectUri = u.searchParams.get("redirect_uri")!;
     const state = u.searchParams.get("state")!;
     setTimeout(() => {
-      void fetch(`${redirectUri}?code=X&state=${encodeURIComponent(state)}`).catch(
-        () => undefined,
-      );
+      fireCallback(`${redirectUri}?code=X&state=${encodeURIComponent(state)}`);
     }, 0);
   };
   const fetchImpl = (async () =>
@@ -258,9 +264,7 @@ test("runLogin: callback with matching state but EMPTY code → rejected at call
     const state = u.searchParams.get("state")!;
     setTimeout(() => {
       // Matching state, empty code.
-      void fetch(`${redirectUri}?code=&state=${encodeURIComponent(state)}`).catch(
-        () => undefined,
-      );
+      fireCallback(`${redirectUri}?code=&state=${encodeURIComponent(state)}`);
     }, 0);
   };
   await assert.rejects(

@@ -168,6 +168,62 @@ test("pipeline: tool that throws (I3 violation) → isError result, never throws
   assert.match(resultText(r), /threw: kaboom/);
 });
 
+test("H2: identical non-permission failure for same tool and args stalls on third within window", async () => {
+  const { tool, calls } = makeTool("repeat", async () => ({
+    content: [{ type: "text" as const, text: "test failed: expected 1, got 2" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const a = await executor(tool, call("1", "repeat", { test: "x" }), sig);
+  const b = await executor(tool, call("2", "repeat", { test: "x" }), sig);
+  assert.equal(a.details?.repeatFailure, undefined);
+  assert.equal(b.details?.repeatFailure, undefined);
+  const c = await executor(tool, call("3", "repeat", { test: "x" }), sig);
+  assert.equal(c.details?.repeatFailure, true);
+  assert.equal(c.details?.stall, true);
+  assert.equal(calls.length, 3, "triggering call executed before its result is replaced");
+});
+
+test("H2: changed args or error diagnostics do not combine; permission failures stay on H1", async () => {
+  const { tool } = makeTool("repeat", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.n === 2 ? "failure 2" : "failure 1" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  for (let n = 1; n <= 6; n++) {
+    const r = await executor(tool, call(String(n), "repeat", { n }), sig);
+    assert.equal(r.details?.repeatFailure, undefined);
+  }
+});
+
+test("H2: same args and error must recur within eight calls of the tool", async () => {
+  const { tool } = makeTool("repeat", async () => ({
+    content: [{ type: "text" as const, text: "same error" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "repeat", { x: 1 }), sig);
+  for (let n = 2; n <= 9; n++) await executor(tool, call(String(n), "repeat", { x: n }), sig);
+  const third = await executor(tool, call("10", "repeat", { x: 1 }), sig);
+  assert.equal(third.details?.repeatFailure, undefined, "first signature occurrence is outside the window");
+});
+
+test("H2: repeat window expires and whitespace-only error differences normalize", async () => {
+  const { tool } = makeTool("repeat", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.n === 2 ? "same\\n  error" : "same error" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "repeat", { n: 1 }), sig);
+  await executor(tool, call("2", "repeat", { n: 1 }), sig);
+  const r = await executor(tool, call("3", "repeat", { n: 1 }), sig);
+  assert.equal(r.details?.repeatFailure, true);
+});
+
 // ─────────────────────────── stall guard (sandbox wall) ───────────────────────
 //
 // The kernel sandbox makes permission denials DETERMINISTIC: the same
@@ -282,8 +338,9 @@ test("stall guard (H1): a NON-permission failure does not reset the count", asyn
 });
 
 test("stall guard: NON-permission failures never trip it (transient retries allowed)", async () => {
+  let attempt = 0;
   const { tool, calls } = makeTool("t", async () => ({
-    content: [{ type: "text" as const, text: "bash: exit code 127\ncommand not found" }],
+    content: [{ type: "text" as const, text: `bash: exit code 127\ncommand not found (${++attempt})` }],
     isError: true,
   }));
   const executor = makeToolExecutor();

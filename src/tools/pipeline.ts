@@ -16,7 +16,8 @@
  *      Simplified: no prepareArguments step.
  *      Added: the stall guard (permission-denial failures of one tool
  *      within its recent window stop the run; 2026-09-27, windowed per
- *      docs/08 H1 2026-09-30).
+ *      docs/08 H1 2026-09-30; H2 identical non-permission failures are
+ *      also stopped by strict tool/args/error matching).
  *
  * I3: this never throws. Every failure path returns a ToolResult with
  * `isError: true` whose text the model reads (D7).
@@ -106,6 +107,26 @@ export const STALL_WINDOW = 8;
  *  within its window. 3 (two identical retries remain legitimate). */
 export const STALL_THRESHOLD = 3;
 
+/** H2 — identical non-permission failures are tracked over each tool's
+ * last eight calls, with the same conservative threshold as H1. */
+export const REPEAT_FAILURE_WINDOW = 8;
+export const REPEAT_FAILURE_THRESHOLD = 3;
+
+function stableArgs(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableArgs).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableArgs(obj[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+/** Normalize only inconsequential whitespace; do not erase error details
+ * such as paths, codes, or changing network diagnostics. */
+function normalizeFailure(texts: string[]): string {
+  return texts.map((text) => text.trim().replace(/\s+/g, " ")).join("\n");
+}
+
 /** Permission-denial signatures in tool error text (case-insensitive).
  *  Covers the kernel-sandbox EPERM spellings (bash + file tools) and the
  *  classic EACCES/EPERM messages. Exported for tests. */
@@ -162,6 +183,8 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
   // non-permission failure does NOT reset the count (the probe loop) — it
   // occupies a slot in the window. Each tool is counted independently.
   const stallByTool = new Map<string, { window: boolean[]; count: number }>();
+  const repeatFailures = new Map<string, { calls: number[] }>();
+  const callsByTool = new Map<string, number>();
   return async (tool, call, signal, onUpdate) => {
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
@@ -229,7 +252,32 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       }
     }
 
-    // 5. stall guard (docs/08 H1) — permission failures of one tool within
+    // 5. H2 same-failure guard — strict same tool + canonical args +
+    // normalized non-permission error text. The bounded call-index history
+    // prevents stale repeats from accumulating; changing diagnostics do not match.
+    const repeatCallIndex = (callsByTool.get(tool.name) ?? 0) + 1;
+    callsByTool.set(tool.name, repeatCallIndex);
+    if (result.isError === true) {
+      const errorText = normalizeFailure(result.content.map((c) => c.text));
+      if (errorText && !isPermissionStallText([errorText])) {
+        const signatureKey = `${tool.name}\u0000${stableArgs(args)}\u0000${errorText}`;
+        const entry = repeatFailures.get(signatureKey) ?? { calls: [] };
+        entry.calls = entry.calls.filter((n) => repeatCallIndex - n < REPEAT_FAILURE_WINDOW);
+        entry.calls.push(repeatCallIndex);
+        repeatFailures.set(signatureKey, entry);
+        if (entry.calls.length >= REPEAT_FAILURE_THRESHOLD) {
+          return {
+            content: text(
+              `Repeated identical failure detected: the "${tool.name}" tool returned the same error for the same arguments ${REPEAT_FAILURE_THRESHOLD} times within ${REPEAT_FAILURE_WINDOW} calls of that tool. The call WAS executed; its result is replaced and the run stops here (stopReason 'stall'). Change the operation or explain the unresolved failure.`,
+            ),
+            isError: true,
+            details: { stall: true, repeatFailure: true },
+          };
+        }
+      }
+    }
+
+    // 6. stall guard (docs/08 H1) — permission failures of one tool within
     //    its last STALL_WINDOW calls are a model banging on the sandbox
     //    boundary (arguments may vary — rephrasing is exactly the stall
     //    pattern; interleaved successes must NOT reset — the probe loop).

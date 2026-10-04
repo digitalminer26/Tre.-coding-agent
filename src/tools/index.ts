@@ -18,6 +18,8 @@ export {
   isPermissionStallText,
   stallText,
   STALL_PERMISSION_PATTERNS,
+  REPEAT_FAILURE_WINDOW,
+  REPEAT_FAILURE_THRESHOLD,
   type ToolPipelineHooks,
   type BeforeToolCall,
   type AfterToolCall,

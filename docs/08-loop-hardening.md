@@ -1,6 +1,6 @@
 # Spec — Loop hardening: windowed stall guard (H1) + follow-ups (H2–H4)
 
-Status: **H1 approved 2026-09-30 (this session); H2–H4 logged, not yet
+Status: **H1 approved 2026-09-30; H2 implemented. H3–H4 logged, not yet
 implemented.** All new logic is L3 (independent); no pi prior art (see
 `docs/03-citation-policy.md`).
 
@@ -114,15 +114,19 @@ still true; the 3 need not be consecutive). `docs/02-contracts.md` stall
 bullet updated: "consecutive" → "within the last 8 calls of that tool",
 reset rules restated.
 
-### H2 — Same-failure repetition guard (logged, not designed)
+### H2 — Same-failure repetition guard (implemented)
 
-Same tool + same args + same normalized error text (non-permission) 3×
-within a window → stop (new stopReason or reuse `stall` with a distinct
-text — decide in the design pass). Catches "the same test fails
-identically" and "the same command errors identically" churn — the
-rephrased-variant of the loop guard. Needs care: transient-but-identical
-failures (a flaky network) are legitimate retries, so the normalized-text
-match must be strict and the threshold conservative.
+After execution and `afterToolCall`, count failures where the same tool,
+canonical arguments, and normalized error text recur at least 3 times
+within the last 8 calls of that tool. Normalization trims and collapses
+whitespace only; error codes, paths, and changing diagnostics remain
+significant. Permission-signature errors are excluded (H1 owns those).
+On threshold, replace the triggering result in-band with a distinct
+repeated-failure message and `details.stall` + `details.repeatFailure`,
+then stop with the existing `stopReason "stall"`. As in H1, the triggering
+action has already executed. Changed args or diagnostics do not combine.
+This strict matching limits false positives from transient failures whose
+diagnostics change, while bounding identical churn.
 
 ### H3 — Loop visibility (logged, not designed)
 
