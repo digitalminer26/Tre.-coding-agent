@@ -358,12 +358,23 @@ export interface ModelConfig {
   provider: string;
   /** e.g. "http://172.30.70.11:8080/v1" */
   baseUrl: string;
-  /** Only "openai-completions" for the MVP; the union grows later. */
-  api: "openai-completions";
+  /**
+   * "openai-completions" — /chat/completions (local llama.cpp, etc.).
+   * "openai-responses" — /responses (OpenAI Responses API; the ChatGPT
+   *   subscription backend, D15). The CLI picks the matching StreamFn.
+   */
+  api: "openai-completions" | "openai-responses";
   contextWindow: number;
   /** Default output cap (max_tokens) for this model. */
   maxTokens: number;
   temperature?: number;
   apiKey?: string;
   compat?: ModelCompat;
+  /**
+   * D15 — how the wire authenticates. "chatgpt-oauth": the access token is
+   * resolved from the local ChatGPT OAuth token store (refreshed on expiry)
+   * instead of a static `apiKey`. Only meaningful with
+   * `api: "openai-responses"`.
+   */
+  auth?: "chatgpt-oauth";
 }

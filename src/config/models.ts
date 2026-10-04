@@ -39,16 +39,23 @@ function normalizeModel(m: unknown, i: number): ModelConfig {
     }
     return o[k];
   };
+  const apiRaw = need("api") as string;
+  if (apiRaw !== "openai-completions" && apiRaw !== "openai-responses") {
+    throw new Error(
+      `models.json: models[${i}].api must be "openai-completions" or "openai-responses" (got "${apiRaw}")`,
+    );
+  }
   const model: ModelConfig = {
     id: need("id") as string,
     provider: need("provider") as string,
     baseUrl: need("baseUrl") as string,
-    api: (need("api") as string) as ModelConfig["api"],
+    api: apiRaw as ModelConfig["api"],
     contextWindow: need("contextWindow") as number,
     maxTokens: need("maxTokens") as number,
   };
   if (typeof o.apiKey === "string") model.apiKey = o.apiKey;
   if (typeof o.temperature === "number") model.temperature = o.temperature;
+  if (o.auth === "chatgpt-oauth") model.auth = "chatgpt-oauth";
   if (o.compat && typeof o.compat === "object") {
     model.compat = o.compat as ModelConfig["compat"];
   }
@@ -125,7 +132,7 @@ const REQUIRED_FIELDS: (keyof ModelConfig)[] = [
 ];
 
 /** Optional model fields (the guide lists them, but they never block start). */
-const OPTIONAL_FIELDS: (keyof ModelConfig)[] = ["apiKey", "temperature", "compat"];
+const OPTIONAL_FIELDS: (keyof ModelConfig)[] = ["apiKey", "auth", "temperature", "compat"];
 
 function isPopulated(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -153,6 +160,8 @@ function placeholder(f: keyof ModelConfig): string | number | object {
       return 0;
     case "apiKey":
       return "<api-key>";
+    case "auth":
+      return "chatgpt-oauth";
     case "temperature":
       return 0.6;
     case "compat":

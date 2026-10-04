@@ -1,3 +1,167 @@
+# HANDOFF — ChatGPT login: `invalid_authorize_request` (root cause + fix) (2026-10-02)
+
+**Status: IMPLEMENTED + gate green (2026-10-02, same day) — NOT committed;
+live smoke test still needs the user's one-time browser login.** The user ran
+`tre. login chatgpt` and the browser landed on:
+```json
+{ "error": { "message": "Invalid authorize request",
+             "type": "invalid_request_error", "param": null,
+             "code": "invalid_authorize_request" } }
+```
+This section records the root cause (with evidence) and a precise spec for the
+fix, so the next session can implement it without re-investigating.
+
+**Context — D15 is uncommitted.** The entire ChatGPT feature (D15:
+`src/auth/*`, `src/wire/openai-responses.ts`, `src/wire/dispatcher.ts`,
+`src/cli/auth-commands.ts`, `test/{chatgpt-oauth,openai-responses,
+token-store,dispatcher}.test.ts`) is in the WORKING TREE, untracked/uncommitted
+(delegation doc `.tre/delegation/chatgpt-oauth-responses.md` subtask 8 "docs +
+commit" was still `todo`). The user built it (`tsc` → `dist`) and ran the login
+from there. This fix lands ON TOP of that uncommitted D15 work. The 3
+pre-existing WIP files (`src/tui/run.tsx`, `src/tui/telegram.ts`,
+`test/tui-telegram.test.ts`) are still in the tree and must stay OUT of any
+commit of this workstream.
+
+## Root cause
+
+The public OAuth client `app_EMoamEEZ73f0CkXaXp7hrann` (shared with the Codex
+CLI) has a **fixed set of registered loopback redirect URIs**. OpenAI's
+authorize endpoint rejects any `redirect_uri` outside that set with exactly
+`invalid_authorize_request`. tre.'s login uses a **random port** + path
+**`/callback`** (`src/auth/chatgpt-oauth.ts:145,155`, `server.listen(0, …)` at
+`:141`) — neither of which is registered — so the request is rejected before
+the user even logs in.
+
+The registered shape (from the reference implementations, all using this same
+client id):
+- **host:** `127.0.0.1` (codex, nib) — some tools use `localhost` (clodex);
+  treat `127.0.0.1` as primary, `localhost` as fallback if still rejected.
+- **port:** `1455` (default) or `1457` (fallback) — NOT random.
+- **path:** `/auth/callback` — NOT `/callback`.
+
+## Evidence (fetched 2026-10-02; live handshake NOT possible — see caveat)
+
+- **openai/codex `codex-rs/login/src/server.rs` (main):** `DEFAULT_PORT: 1455`,
+  `FALLBACK_PORT: 1457`; `redirect_uri = http://127.0.0.1:{port}/auth/callback`.
+  `build_authorize_url` also sends `id_token_add_organizations=true`,
+  `codex_cli_simplified_flow=true`, `originator=<codex_cli_rs>`, and scope
+  `openid profile email offline_access api.connectors.read api.connectors.invoke`.
+- **bman654/clodex PR #141 (2026-08-22):** comment in `src/oauth/openai.ts` —
+  *"The only redirect URIs registered for this client id (shared with the Codex
+  CLI): `http://localhost:{1455|1457}/auth/callback`. Any other port is rejected
+  by auth.openai.com, so the callback server must win one of these two."* Their
+  working authorize URL omits `originator`.
+- **karthink/gptel issue #1514 (2026-08-16):** same error. Their URL was
+  double-encoded (`redirect_uri=http%253A%252F…`) — a SEPARATE bug — but it also
+  carried `id_token_add_organizations` + `codex_cli_simplified_flow` +
+  `originator` and used `localhost:1455/auth/callback`.
+- **mudler/nib PR #127 (2026-09-27):** sets `CallbackHost: "127.0.0.1"`,
+  `CallbackPath: "/auth/callback"`, `CallbackPort: 1455` for this client.
+
+**Caveat (could not confirm live):** `auth.openai.com/oauth/authorize` returns
+HTTP 403 (Cloudflare) to non-browser probes from this sandbox, so the exact
+registered set is taken from the reference implementations, not a live
+handshake (the same wall gptel's reporter hit). The port+path is the consistent
+shape across every working tool; that is the fix.
+
+## What is NOT the cause (do not re-investigate)
+
+- `client_id` is correct (matches codex exactly).
+- PKCE S256 + `state` generation are correct.
+- The authorize URL is single-encoded (tre. uses `URLSearchParams`) — it does
+  NOT have gptel's double-encoding bug.
+- The token endpoint + exchange encoding are already correct (form-encoded for
+  the authorization-code grant; JSON for refresh — matches codex,
+  `src/auth/token-store.ts`). The failure is at the AUTHORIZE step, before any
+  token exchange.
+
+## The fix (spec for the implementer)
+
+**1. `src/auth/constants.ts`** — add:
+```ts
+/** Registered loopback callback ports for the shared Codex client id (1455
+ *  default, 1457 fallback) — a random port is unregistered and rejected. */
+export const CHATGPT_CALLBACK_PORTS = [1455, 1457] as const;
+/** Registered callback path (NOT `/callback`). */
+export const CHATGPT_CALLBACK_PATH = "/auth/callback";
+```
+
+**2. `src/auth/chatgpt-oauth.ts` `runLogin`** — replace the random-port bind:
+- Try to bind `127.0.0.1:1455`; on `EADDRINUSE` try `127.0.0.1:1457`; if BOTH
+  are in use, **reject** with a clear message (e.g. "callback ports 1455 and
+  1457 are in use — close the other OpenAI sign-in (e.g. `codex login`) and
+  retry"). Do **NOT** fall back to a random port (that reproduces the bug).
+- `redirectUri = http://127.0.0.1:{port}${CHATGPT_CALLBACK_PATH}`.
+- Callback handler path check: `url.pathname !== CHATGPT_CALLBACK_PATH`.
+- Keep the manual-paste (headless) fallback; its hint text should show the
+  registered path (`…/auth/callback?code=…&state=…`).
+- `buildAuthorizeUrl` signature is unchanged (it already takes `redirectUri`).
+
+**3. Codex extra params (optional polish — NOT the fix).** The rejection is
+about `redirect_uri`, not these. Recommendation: add
+`id_token_add_organizations=true` + `codex_cli_simplified_flow=true` (harmless,
+matches codex, the intended UX for this public client) and **omit** `originator`
+(codex-internal telemetry; we are not codex). Flag as optional so the
+implementer doesn't over-engineer — the MINIMAL fix is port+path only.
+
+**4. Tests (`test/chatgpt-oauth.test.ts`):**
+- Loopback test: assert the `redirect_uri` uses a registered port (1455/1457)
+  and path `/auth/callback` (currently asserts `:4321/callback`).
+- `buildAuthorizeUrl` unit test: use a registered shape.
+- NEW: with 1455 pre-bound (dummy server), `runLogin` falls back to 1457.
+- NEW: with BOTH 1455+1457 pre-bound, `runLogin` rejects with the "close the
+  other sign-in" message (does NOT fall back to random).
+- Manual-paste test: the pasted URL uses the registered path.
+
+**5. Docs:** README "ChatGPT Plus" section + `models.json.example` — note the
+login uses the fixed Codex loopback ports (1455/1457); if one is busy (e.g.
+`codex login` running), close it. User-facing.
+
+## Implementation (2026-10-02 — spec executed as written)
+
+- `src/auth/constants.ts` — `CHATGPT_CALLBACK_PORTS = [1455, 1457]` +
+  `CHATGPT_CALLBACK_PATH = "/auth/callback"` (exactly per spec item 1).
+- `src/auth/chatgpt-oauth.ts` — the random-port bind (`server.listen(0, …)` +
+  `AddressInfo`) is replaced by a `bindPort()` helper that tries 1455 then
+  1457; non-`EADDRINUSE` errors rethrow as `AuthError` (so a real bind
+  failure is not silently swallowed); both ports busy → `AuthError`
+  "callback ports 1455 and 1457 are in use — close the other OpenAI sign-in
+  (e.g. `codex login`) and retry". `redirectUri` now
+  `http://127.0.0.1:{port}/auth/callback`; the handler's path check and the
+  manual-paste hint use the constant. The `AddressInfo` import is gone.
+- Codex extras (spec item 3, the "optional" one): `buildAuthorizeUrl` adds
+  `id_token_add_organizations=true` + `codex_cli_simplified_flow=true`;
+  `originator` deliberately omitted.
+- `test/chatgpt-oauth.test.ts` — spec item 4, all of it: the
+  `buildAuthorizeUrl` test uses the registered shape + asserts the two extras
+  (and no `originator`); new `runLogin: binds the registered callback port +
+  path` (asserts port ∈ {1455,1457} + path); new `1455 in use → falls back to
+  1457` (real blocker server on 1455); new `1455 AND 1457 in use → rejects`
+  (asserts the user-facing message, no random fallback). The manual-paste and
+  loopback tests were already path-agnostic (they parse the redirect_uri out
+  of the opened URL), so they needed no change.
+- Docs (spec item 5): README gains a "ChatGPT Plus (no API key)" section
+  (login/status/logout, the responses-API model entry, and the fixed-ports
+  note — 1455/1457, close `codex login` if busy, headless paste fallback).
+  `models.json.example` left untouched (strict JSON, no comments — the note
+  lives in the README).
+
+**Gate (run 2026-10-02).** `tsc` clean; `node --test dist/test/*.test.js` →
+**604 tests, 594 pass, 0 fail, 10 skipped** (the 10 are the pre-existing
+live-network/TTY skips; +3 new tests vs the 601-test D15 baseline).
+`quality-check.sh` OK (43 files scanned, no violations; deps 4/4). No
+guardrail-zone file touched (`src/auth/*` is not in the zone).
+
+**Still open (user action required).** The live smoke test: `tre. login
+chatgpt` in a real browser — the one thing this sandbox cannot do (Cloudflare
+403s non-browser probes at auth.openai.com, so the registered port/path set
+is proven by the reference implementations, not a live handshake). If the
+browser STILL rejects after this fix, the next suspect per the evidence is
+host: try `localhost` instead of `127.0.0.1` (clodex's working shape) —
+everything else in the URL matches a known-good tool.
+
+---
+
 # HANDOFF — `/restart`: in-place TUI + REPL restart (2026-10-02)
 
 **Status: implemented + tested (gate owned by the implementing workers); this

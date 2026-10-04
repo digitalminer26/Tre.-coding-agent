@@ -60,3 +60,27 @@ Fill in `baseUrl` (your OpenAI-compatible endpoint, e.g.
 by walking up from the launch dir, then `~/.tre/models.json`. With **no**
 `models.json` (or a blank `baseUrl`), `tre.` prints a step-by-step setup
 guide — REQUIRED vs OPTIONAL fields — and exits.
+
+### ChatGPT Plus (no API key)
+
+`tre.` can also drive a model through your ChatGPT subscription — the same
+Codex-style OAuth (authorization-code + PKCE) that the Codex CLI uses, then
+the Responses API. No API key; rate limits are your subscription's.
+
+```bash
+tre. login            # opens the browser; tokens → ~/.tre/chatgpt-auth.json (0600)
+tre. auth status      # show the stored login (email, plan, expiry)
+tre. auth logout      # delete the stored tokens
+```
+
+Then add a model with `"api": "openai-responses"` + `"auth": "chatgpt-oauth"`
+to `models.json` (see `models.json.example`). The access token is refreshed
+automatically from the stored refresh token when it expires.
+
+**Login uses fixed local ports.** The OAuth client is the one Codex ships,
+and `auth.openai.com` only accepts its loopback redirect on the registered
+ports — `127.0.0.1:1455` (default) or `:1457` (fallback). If a login fails
+with "callback ports 1455 and 1457 are in use", another OpenAI sign-in
+(e.g. `codex login`) is holding them — close it and retry. Headless/SSH:
+the login also accepts a pasted redirect URL (from the address bar after
+logging in on another machine).

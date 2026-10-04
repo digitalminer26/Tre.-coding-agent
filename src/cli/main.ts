@@ -78,6 +78,8 @@ import {
   SUMMARY_MARKER,
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
+import { openAiResponsesStream } from "../wire/openai-responses.js";
+import { makeStreamDispatcher } from "../wire/dispatcher.js";
 import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { isDirectInvocation, restartCommand } from "../tui/restart.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
@@ -120,6 +122,11 @@ export interface CliOptions {
   /** Interactive UI: "auto" (default — TUI on a TTY, plain REPL when stdin
    *  is piped), "tui" (the `tui` subcommand), or "plain" (--plain). */
   ui: "auto" | "plain" | "tui";
+  /**
+   * D15: a one-shot auth subcommand — `login [chatgpt]` or
+   * `auth status|logout`. Dispatched BEFORE any model loading.
+   */
+  command?: { name: "login" | "auth"; target?: string };
   prompt?: string;
   modelId?: string;
   /** D19: undefined = auto-locate (nearest models.json above cwd, then ~/.tre/). */
@@ -204,6 +211,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (a === "tui") {
       opts.ui = "tui";
       i++;
+    } else if (a === "login") {
+      // D15: `tre. login [chatgpt]` — the only provider for now.
+      opts.command = { name: "login" };
+      if (argv[i + 1] === "chatgpt") i++;
+      i++;
+    } else if (a === "auth") {
+      // D15: `tre. auth [status|logout]` (default: status).
+      const target = argv[i + 1];
+      if (target === "status" || target === "logout") {
+        opts.command = { name: "auth", target };
+        i += 2;
+      } else {
+        opts.command = { name: "auth", target: "status" };
+        i++;
+      }
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
                a === "--max-continuations" || a === "--compact-keep" || a === "--extra-root") {
@@ -791,6 +813,17 @@ Usage:
                                 ↑/↓ history, ctrl+c abort/quit)
   tre. --plain                  interactive plain REPL (even on a TTY)
 
+ChatGPT Plus (no API key — D15):
+  tre. login [chatgpt]          log in with your ChatGPT account (opens the
+                                browser; waits for the local callback or a
+                                pasted redirect URL). Stores tokens in
+                                ~/.tre/chatgpt-auth.json.
+  tre. auth status              show the stored login (email, plan, expiry)
+  tre. auth logout              delete the stored tokens
+  Then point a models.json entry at the Responses API:
+    { "api": "openai-responses", "auth": "chatgpt-oauth",
+      "baseUrl": "https://api.openai.com/v1", "id": "<model>" }
+
 Steering (TUI): while a run is in flight, typing a line and pressing enter
 injects it as a user message mid-run — the model reacts to it on its next
 turn instead of waiting for a new prompt. /quit (or /exit) still aborts.
@@ -1023,6 +1056,24 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 2;
   }
 
+  // D15: one-shot auth subcommands run BEFORE any model loading — they do
+  // not need a models.json. `login` reads stdin for the manual paste
+  // fallback (headless/SSH); `auth status|logout` are pure file ops.
+  if (args.command) {
+    const { authLogoutCommand, authStatusCommand, makeStdinPrompt, runLoginCommand } =
+      await import("./auth-commands.js");
+    if (args.command.name === "login") {
+      return await runLoginCommand(
+        { out: sinks.out, err: sinks.err },
+        process.stdin.isTTY ? makeStdinPrompt() : undefined,
+      );
+    }
+    if (args.command.target === "logout") {
+      return authLogoutCommand({ out: sinks.out, err: sinks.err });
+    }
+    return authStatusCommand({ out: sinks.out, err: sinks.err });
+  }
+
   // models (D19: --models wins; otherwise locate — nearest models.json above
   // the launch directory, then the permanent ~/.tre/models.json).
   //
@@ -1132,7 +1183,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const skills = await loadSkills(skillDirs);
 
   // system prompt
-  const systemPrompt = buildSystemPrompt({
+  let systemPrompt = buildSystemPrompt({
     cwd: root,
     tools: wiredTools,
     model: model.id,
@@ -1195,7 +1246,15 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
   }
 
-  const streamFn = deps.streamFn ?? openAiStream;
+  // D15: route each LLM call to the wire matching the CURRENT model's `api`
+  // — chat/completions (local llama.cpp, etc.) vs the OpenAI Responses API
+  // (ChatGPT subscription backend). This is what makes mid-session `/models`
+  // switches work ACROSS backends: the TUI/REPL re-resolves the active
+  // ModelConfig on a switch and passes it to runTurn, and the dispatcher
+  // picks the wire per call. Nothing is pinned at startup. `deps.streamFn`
+  // (tests) wins.
+  const streamFn: StreamFn =
+    deps.streamFn ?? makeStreamDispatcher(openAiStream, openAiResponsesStream);
 
   // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
   // tool pipeline. The DEFAULT mode is "yes" (auto-approve): the kernel
@@ -1535,6 +1594,28 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
           });
           await flushSinks(sinks);
           return result.error ? 1 : (result.status ?? 0);
+        }
+        continue;
+      }
+      // /models — switch the active model mid-session (plain REPL). With no
+      // argument, list the catalog. The wire follows the new model per call
+      // (the dispatcher above picks by `model.api`), so switching between a
+      // local chat/completions model and a ChatGPT Responses model works.
+      if (prompt === "/models") {
+        const lines = modelsFile.models.map((m) =>
+          `${m.id === model.id ? "* " : "  "}${m.id}  [${m.api}]`,
+        );
+        sinks.err.write(`models (active: ${model.id}):\n${lines.join("\n")}\n`);
+        continue;
+      }
+      if (prompt.startsWith("/models ")) {
+        const id = prompt.slice("/models ".length).trim();
+        try {
+          model = resolveModel(modelsFile, id);
+          systemPrompt = buildSystemPrompt({ cwd: root, tools: wiredTools, model: model.id, skills, extraRoots });
+          sinks.err.write(`model: ${model.id} [${model.api}]\n`);
+        } catch (err) {
+          sinks.err.write(`model: ${err instanceof Error ? err.message : String(err)}\n`);
         }
         continue;
       }

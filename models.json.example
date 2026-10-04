@@ -10,6 +10,16 @@
       "contextWindow": 131072,
       "maxTokens": 32768,
       "temperature": 0.6
+    },
+    {
+      "id": "<chatgpt-model-id>",
+      "provider": "chatgpt",
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "auth": "chatgpt-oauth",
+      "contextWindow": 200000,
+      "maxTokens": 32768,
+      "temperature": 0.6
     }
   ]
 }
