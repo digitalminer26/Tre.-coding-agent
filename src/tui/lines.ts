@@ -30,6 +30,8 @@ import type { TuiItem } from "./state.js";
 /** One styled run inside a line (a line = one rendered terminal row). */
 export interface RSpan {
   text: string;
+  /** Ink bold styling for this run. */
+  bold?: boolean;
   /** Ink `color` for this run (undefined = default foreground). */
   color?: string;
   /** Ink `dimColor` for this run. */
@@ -46,6 +48,56 @@ const WRAP = { trim: false, hard: true };
 
 function wrapRows(text: string, width: number): string[] {
   return wrapAnsi(text, Math.max(1, width), WRAP).split("\n");
+}
+
+/** Align Markdown table columns and preserve table rows as indivisible lines. */
+function formatMarkdownTables(text: string, width: number): string[] {
+  const source = text.split("\n");
+  const result: string[] = [];
+  for (let i = 0; i < source.length;) {
+    if (!source[i]!.includes("|") || i + 1 >= source.length || !/^\s*\|?\s*:?-{3,}/.test(source[i + 1]!)) {
+      result.push(...wrapRows(source[i]!, width));
+      i++;
+      continue;
+    }
+    const rows: string[][] = [];
+    let end = i;
+    while (end < source.length && source[end]!.includes("|")) {
+      rows.push(source[end]!.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim()));
+      end++;
+    }
+    const count = Math.max(...rows.map((row) => row.length));
+    // Treat the first row as the header and the next as Markdown's alignment
+    // rule, not data. Bound each column to a fair share of the available width
+    // so one long cell can't push the whole table off-screen.
+    const separators = /^:?-{3,}:?$/;
+    const header = rows[0]!;
+    const data = rows.slice(2).filter((row) => !row.every((cell) => separators.test(cell)));
+    const cellWidth = Math.max(3, Math.floor((width - (count * 3 + 1)) / count));
+    const widths = Array.from({ length: count }, (_, col) =>
+      Math.min(cellWidth, Math.max(3, header[col]?.length ?? 0, ...data.map((row) => (row[col] ?? "").length))),
+    );
+    const pad = (value: string, col: number): string => {
+      const w = widths[col]!;
+      const clipped = value.length > w ? value.slice(0, Math.max(1, w - 1)) + "…" : value;
+      return clipped.padEnd(w);
+    };
+    const aligned = rows.map((row, rowIndex) => {
+      if (rowIndex === 1 && row.every((cell) => separators.test(cell))) return null;
+      return `| ${Array.from({ length: count }, (_, col) => pad(row[col] ?? "", col)).join(" | ")} |`;
+    }).filter((row): row is string => row !== null);
+    aligned.forEach((row, rowIndex) => {
+      const columns = row.split("|").slice(1, -1);
+      const text = `${rowIndex === 0 ? "◆ " : "  "}|${columns.join("|")}|`;
+      if (rowIndex === 0) {
+        result.push(text);
+      } else {
+        for (const wrapped of wrapRows(text, width)) result.push(wrapped);
+      }
+    });
+    i = end;
+  }
+  return result;
 }
 
 /**
@@ -116,8 +168,12 @@ export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[]
       // and the dim reasoning.
       const text = item.text + (item.streaming ? "▍" : "");
       if (text !== "") {
-        const rows = wrapRows(text, Math.max(1, width - 2));
-        rows.forEach((l, i) => body.push({ spans: [{ text: (i === 0 ? "◆ " : "  ") + l }] }));
+        // Markdown table rows contain explicit column separators, so wrapping
+        // them at the terminal width destroys the relationship between each
+        // header and its cells. Render tables as aligned plain-text columns;
+        // ordinary prose retains the existing hard-wrap behavior.
+        const tableRows = formatMarkdownTables(text, Math.max(1, width - 2));
+        tableRows.forEach((row, i) => body.push({ spans: [{ text: (i === 0 ? "◆ " : "  ") + row }] }));
       }
       return [...lines, ...body];
     }

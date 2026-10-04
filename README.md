@@ -24,7 +24,7 @@ All planned workstreams are complete; the project is in ongoing hardening.
 Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
 opt-in mouse tracking, `/models` switching, in-place `/restart` (same session,
 same settings), a context/compaction readout, an
-approval-mode matrix (`--yes` default · `--ask` · `--no-approve`, with
+approval-mode matrix (default `--yes` · `--ask` · `--no-approve`, with
 systemic sensitive/destructive ops blocked in every mode), deployability
 (`npm i -g .` builds `dist/` on install), and loop/stall guards that stop
 runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
@@ -32,12 +32,15 @@ runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 ## Docs
 
 - `docs/01-walkthrough-harness-llm.md` — how a coding-agent harness talks to an LLM endpoint (reference behavior, source-traceable; frozen record of the v0.85.1 reference)
-- `docs/02-contracts.md` — the three WS0 contracts (the gate for parallel work)
+- `docs/02-contracts.md` — WS0 contracts and subsequent contract increments (current types are authoritative)
 - `docs/03-citation-policy.md` — the L1/L2/L3 borrowing rules for the pi reference (mandatory citations)
 - `docs/04-skill-authoring.md` — skill constraints (load paths, write boundary, sandbox network, secrets)
 - `docs/05-extra-roots-spec.md` — `--extra-root` + durable `tre.json` `extraRoots` (C35/C36)
 - `docs/06-compaction-cheap-wins.md` — compaction cheap wins + failure escalation (A1–A6, D)
-- `PLAN.md` — workstreams, locked decisions (D1–D23), build order
+- `docs/07-context-display-fidelity.md` — context display fidelity changes and remaining items
+- `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups
+- `HANDOFF.md` — dated implementation history (historical statuses may be superseded)
+- `PLAN.md` — original workstreams and decisions (historical; see status note there and HANDOFF for later increments)
 
 ## Quickstart
 

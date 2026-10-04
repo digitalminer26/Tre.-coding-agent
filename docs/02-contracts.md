@@ -1,5 +1,12 @@
 # WS0 — The Three Contracts
 
+> **Status note:** This document began as the WS0 parallel-work contract and
+> now also records later contract increments. The original descriptions below
+> are historical where labeled (for example, MVP-era producers or behavior);
+> current types and runtime behavior in `src/types.ts` and `src/` take
+> precedence. For project status, see `README.md`; dated changes are in
+> `HANDOFF.md`.
+
 The gate for parallel work. Every Wave B workstream codes against the types
 in `src/types.ts` and nothing else. A contract change is a *broadcast*: all
 active workstreams re-check against the new shape before continuing.

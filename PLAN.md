@@ -1,5 +1,14 @@
 # Coding Agent — Build Plan & Workstreams
 
+> **Status note (2026-10-03):** This is the original build plan and its
+> decision log is historical through D25 (2026-10-02); it is not a complete
+> inventory of later hardening. The foundational workstreams are complete.
+> For current project status, see `README.md` and the top of `HANDOFF.md`;
+> later contract increments are recorded in `docs/02-contracts.md` and the
+> dated handoff log. Historical decision descriptions below are preserved as
+> written and should not be treated as current defaults without checking
+> `src/`.
+
 Goal: build a working coding agent (harness ↔ LLM, like pi) in TypeScript, first endpoint =
 the local llama.cpp server (OpenAI-compatible chat-completions + tool calling). This plan
 divides the work into **independent, contract-first workstreams** that can be run in

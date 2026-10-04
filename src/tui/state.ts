@@ -803,9 +803,9 @@ export function itemHeight(item: TuiItem, width: number, prev?: TuiItem): number
         item.thinkingText !== ""
           ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + 1
           : 0;
-      // C31: the reply text hangs under a ◆ icon (2 columns) — wrapped at
-      // width−2.
-      return blank + think + wrapLineCount(text, Math.max(1, width - 2));
+      // The renderer expands Markdown table blocks into aligned rows (and
+      // retains the assistant gutter), so count those exact rendered rows.
+      return blank + itemLines(item, width).length;
     }
     case "tool": {
       if (item.hidden) return 0; // D19: quiet tool mid-flight — renders nothing

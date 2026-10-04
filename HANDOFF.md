@@ -1,17 +1,41 @@
+# Current project status (2026-10-03)
+
+The dated entries below are an append-only implementation history, not a
+single up-to-date status report. Their test counts, “uncommitted” labels,
+open-task lists, and proposed next steps describe the date shown and may have
+been superseded. For current behavior, trust `src/` and the current tests;
+README.md is the user-facing overview. No pending ChatGPT OAuth implementation
+is implied by the historical incident entry below. The most recent work is
+listed first; this log does not replace a fresh quality-gate run.
+
 # HANDOFF — ChatGPT login: `invalid_authorize_request` (root cause + fix) (2026-10-02)
 
-**Status: IMPLEMENTED + gate green (2026-10-02, same day) — NOT committed;
-live smoke test still needs the user's one-time browser login.** The user ran
+**Historical status (2026-10-02; superseded by the implementation note below).**
+At the time this entry was opened, implementation and live verification were
+still pending. The fix was subsequently implemented; see “Implementation”
+below. This is a dated incident record, not the current project status.
+
+> **Current-status note (2026-10-03):** Read this entry as a historical
+> investigation. The implementation is recorded below; current source and
+> tests are authoritative. The live browser-login smoke test was a one-time
+> verification item and is not a pending implementation task.
+
+The user ran
 `tre. login chatgpt` and the browser landed on:
 ```json
 { "error": { "message": "Invalid authorize request",
              "type": "invalid_request_error", "param": null,
              "code": "invalid_authorize_request" } }
 ```
-This section records the root cause (with evidence) and a precise spec for the
-fix, so the next session can implement it without re-investigating.
+This section preserves the root cause, evidence, original proposed fix, and
+implementation record as historical documentation.
 
-**Context — D15 is uncommitted.** The entire ChatGPT feature (D15:
+> **Historical context only:** The following “D15 is uncommitted” and
+> “spec for the implementer” statements describe the working tree on
+> 2026-10-02 before the fix was applied. They are retained for provenance;
+> do not treat them as current status or instructions.
+
+**Historical context — D15 was uncommitted at the time of this incident.** The entire ChatGPT feature (D15:
 `src/auth/*`, `src/wire/openai-responses.ts`, `src/wire/dispatcher.ts`,
 `src/cli/auth-commands.ts`, `test/{chatgpt-oauth,openai-responses,
 token-store,dispatcher}.test.ts`) is in the WORKING TREE, untracked/uncommitted
@@ -75,7 +99,11 @@ shape across every working tool; that is the fix.
   `src/auth/token-store.ts`). The failure is at the AUTHORIZE step, before any
   token exchange.
 
-## The fix (spec for the implementer)
+## Historical proposed fix (written before implementation)
+
+> This section records the original implementation spec. It was executed as
+> written and is retained for the investigation trail; it is not an open task.
+> See “Implementation” below for what landed.
 
 **1. `src/auth/constants.ts`** — add:
 ```ts
@@ -208,7 +236,7 @@ entry + feedback), `src/tui/run.tsx` (driver re-exec — busy and idle paths),
 
 # HANDOFF — Tilde expansion for extra roots (`tre.json` + `--extra-root`) (2026-09-30)
 
-**Status: gate green — NOT yet committed. GUARDRAIL ZONE: `src/tools/safety.ts` is touched (the EPERM fix below) — per §9 the agent does NOT commit; the human commits with `GUARDRAIL_BYPASS=1`.** The user reported that a `--extra-root` they added "is not getting populated in `tre.json`". Root cause: `tre.json` (C36) is a DURABLE BASELINE that is only ever READ by the CLI — there is no code path that WRITES it. The user had to hand-edit `tre.json` to make a root durable. While fixing that, a second gap surfaced: `tre.json` entries were resolved with `path.resolve(dir)` (CWD-relative) and `~` was NEVER expanded, so a portable `~/kubeconfigs` entry would resolve to `<cwd>/~/kubeconfigs` and fail the C35 exists-check (fail-closed refusal). The spec's own shape example advertised `/abs/or/~/relative/dir`, implying `~` support that did not exist.
+**Historical status (2026-09-30; preserved for provenance, not current guidance):** At the time this entry was written, the change was awaiting a human commit in the guardrail zone. The durable-root behavior remains: `tre.json` is read as a baseline; `--extra-root` is a per-launch addition and does not write back to the file. The incident diagnosis and gate details below describe the state at that time. The user reported that a `--extra-root` they added "is not getting populated in `tre.json`." Root cause: `tre.json` (C36) is a DURABLE BASELINE that is only ever READ by the CLI — there is no code path that WRITES it. The user had to hand-edit `tre.json` to make a root durable. While fixing that, a second gap surfaced: `tre.json` entries were resolved with `path.resolve(dir)` (CWD-relative) and `~` was NEVER expanded, so a portable `~/kubeconfigs` entry would resolve to `<cwd>/~/kubeconfigs` and fail the C35 exists-check (fail-closed refusal). The spec's own shape example advertised `/abs/or/~/relative/dir`, implying `~` support that did not exist.
 
 **Change (one behavior: `~`/`~/` expansion before C35 validation):**
 - `src/config/tre-config.ts`: new exported `expandTilde(p, home=homedir())` — `~` alone → home; `~/x` → `home/x`; anything else (absolute, cwd-relative, or a bare `~name`) returned UNCHANGED (no user-lookup — a bare `~name` resolves to the literal `~name` path and fails the exists check, fail-closed). Module doc updated to state the `~`/`~/` convention and the `~name` non-expansion rule.
@@ -222,7 +250,10 @@ entry + feedback), `src/tui/run.tsx` (driver re-exec — busy and idle paths),
 
 **Verification (direct, against the user's real `tre.json`).** `~/kubeconfigs` → expands to `/Users/xilcilus/kubeconfigs` → `validateExtraRoot` returns `undefined` (accepted). The other two entries (`/Users/xilcilus/projects`, `/Users/xilcilus/.nvm`) are unchanged absolute paths and pass as before.
 
-**Note for the user.** To make a root durable, EDIT `tre.json` by hand (it is gitignored, per-machine) — e.g. add `"/Users/xilcilus/kubeconfigs"` (absolute) or `"~/kubeconfigs"` (portable) to `extraRoots`. The `--extra-root` flag is a per-launch ADDITION on top of the `tre.json` baseline; it does not write back to `tre.json`. `tre.json` is the only durable surface.
+> **Historical user note (2026-09-30):** This was written for the then-current
+> behavior. The durable model described here remains valid: `tre.json` is
+> edited directly for persistence; `--extra-root` is one-launch-only and is
+> never written back. Examples and machine-specific paths are historical.
 
 **Also this session — expressive one-shot/durable messages (usability, no contract change).** The user noted that `--extra-root` is one-shot but the startup summary gave no signal of that, and asked that confusing commands/args be "as expressive as it can be." The contract is UNCHANGED (tre.json = durable baseline; `--extra-root` = per-launch addition, never written to tre.json) — only the OUTPUT is more explicit. `behaviorSettingsLines` now takes `durableRoots` + `oneShotRoots` (was a single `extraRoots`) and renders them on SEPARATE labeled lines: `extra roots (durable, from tre.json): …` and `extra roots (THIS LAUNCH ONLY, --extra-root): …`, plus a `note:` line stating `--extra-root` is one-shot and NOT written to tre.json (pointing to tre.json for durability). `main()` now tracks `durableRoots`/`oneShotRoots` separately (combined `extraRoots` = durable + one-shot is what's wired into the bash policy / write-edit sandbox / prompt — unchanged). The `--extra-root` HELP text and the Safety section now both say "ONE-SHOT (this launch only, never written to tre.json); the durable baseline is tre.json." Tests updated: `test/cli.test.ts` `behaviorSettingsLines` (separate labeled lines + note), `test/tre-config.test.ts` (durable vs one-shot lines), `test/cli.test.ts` C35 `--extra-root` (asserts the "THIS LAUNCH ONLY" line).
 

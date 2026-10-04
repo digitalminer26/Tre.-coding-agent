@@ -342,7 +342,7 @@ function Item({ slice, prev, width }: { slice: VisibleSlice; prev: TuiItem | und
       {lines.map((line, i) => (
         <Text key={i}>
           {line.spans.map((sp, j) => (
-            <Text key={j} color={sp.color} dimColor={sp.dim}>
+            <Text key={j} color={sp.color} dimColor={sp.dim} bold={sp.bold}>
               {sp.text}
             </Text>
           ))}
