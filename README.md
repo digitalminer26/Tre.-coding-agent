@@ -87,3 +87,37 @@ with "callback ports 1455 and 1457 are in use", another OpenAI sign-in
 (e.g. `codex login`) is holding them — close it and retry. Headless/SSH:
 the login also accepts a pasted redirect URL (from the address bar after
 logging in on another machine).
+
+## Releasing
+
+`tre.` ships as a self-contained **offline tarball** (pre-built `dist/` + the
+full prod-only `node_modules`, pure JS + WASM, no native addons) that a target
+machine installs with **only a Node runtime** — no network, no npm, no GitHub,
+no build step. The tarball is a build artifact (`.tre/deploy-out/`,
+gitignored) and is distributed as a **GitHub Release** on this repo.
+
+One command does the whole release (bump → test → commit → push → build →
+publish):
+
+```bash
+scripts/release.sh X.Y.Z          # e.g. scripts/release.sh 0.2.0
+```
+
+`release.sh` runs `npm test` first (the bump is only committed if the gate
+passes), commits `package.json`, pushes `main`, builds
+`tre-coding-agent-X.Y.Z-offline.tgz`, and publishes tag `vX.Y.Z` with the
+tarball as the release asset (`scripts/release-publish.py`, stdlib-only
+Python; token from `$GITHUB_TOKEN` or the macOS keychain `github.com`
+credential). `TRE_PUSH=0` / `TRE_PUBLISH=0` skip those steps.
+
+Installing on a target machine (Node ≥ 20; ≥ 22 recommended):
+
+```bash
+curl -LO <release-download-url>
+tar xzf tre-coding-agent-X.Y.Z-offline.tgz -C ~/.tre/tre --strip-components=1
+~/.tre/tre/install-tre.sh install    # deploy + ~/.local/bin/tre. symlink + smoke test
+tre. --help
+```
+
+Uninstall: `rm -rf ~/.tre/tre ~/.local/bin/tre.` (plus `~/.tre/` config/data
+if you want the machine fully clean — see `install-tre.sh`'s `show` output).
