@@ -100,7 +100,7 @@ import {
 } from "../session/session.js";
 import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
 import { TelegramDriver } from "../telegram/driver.js";
-import { removeWorkerStatus, workerDir, workerId, writeWorkerStatus } from "./workers.js";
+import { workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
 import type {
@@ -960,6 +960,8 @@ export interface MainDeps {
    *  spawn-based bridge (enabled only when .tre/telegram.json + the helper
    *  exist). */
   telegramBridge?: TelegramBridge;
+  /** Worker registry dir override (tests); undefined uses the shared home registry. */
+  workerDir?: string;
 }
 
 /**
@@ -1455,7 +1457,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       void driver.start();
       const workerIdValue = workerId();
       const worker = buildWorkerStatus(workerIdValue, model, root, args.prompt!);
-      const dir = workerDir();
+      const dir = deps.workerDir ?? workerDir();
       try {
         try { writeWorkerStatus(dir, worker); } catch { /* Visibility is best-effort. */ }
         const { outcome } = await driver.withTurn(() =>
@@ -1476,7 +1478,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         await flushSinks(sinks);
         return exitCodeFor(outcome.stopReason);
       } finally {
-        try { removeWorkerStatus(dir, workerIdValue); } catch { /* Visibility is best-effort. */ }
+        // Leave the done/failed status for the TUI to show until its stale-TTL prune.
         driver.stop();
       }
     }

@@ -17,7 +17,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, mkdir, readdir } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
@@ -35,6 +35,7 @@ import {
   type PrintSinks,
 } from "../src/cli/main.js";
 import { Session, replaySession } from "../src/session/session.js";
+import { readWorkerStatuses } from "../src/cli/workers.js";
 import { deriveMaxTurns } from "../src/loop/agent-loop.js";
 import type {
   AgentEvent,
@@ -457,16 +458,25 @@ test("printEvent: D19 — read/write/edit silent on success, denial shown, bash 
 
 // ─────────────────────────── one-shot + session ───────────────────────────
 
-test("main one-shot: prompt → streamed text → exit 0, session persisted", async (t) => {
+test("main one-shot: prompt → streamed text → exit 0, session persisted, final worker status retained", async (t) => {
   const { dir, models } = await workspace(t);
+  const workerRegistry = join(dir, "workers");
   const session = join(dir, "s.jsonl");
   const S = mkSinks();
   const code = await main(["run", "say hello", "--tools", "none", "--models", models, "--session", session], {
     streamFn: fakeStream([{ type: "text", text: "Hello there" }]),
     sinks: S.sinks,
+    workerDir: workerRegistry,
   });
   assert.equal(code, 0);
   assert.match(S.out(), /Hello there/);
+  const workerFiles = (await readdir(workerRegistry)).filter((name) => name.endsWith(".json"));
+  assert.equal(workerFiles.length, 1, "one-shot leaves its final worker status in the isolated registry");
+  const workers = readWorkerStatuses(workerRegistry);
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0]?.status, "done");
+  assert.equal(workers[0]?.turn, 1);
+  assert.equal(workers[0]?.activity, "done");
 
   const replayed = await replaySession(session);
   assert.equal(replayed.context.length, 2);
@@ -559,15 +569,21 @@ test("main --resume on a missing file: exit 2, no crash", async (t) => {
   assert.match(S.err(), /session/);
 });
 
-test("main: provider error is data — exit 1, error printed", async (t) => {
+test("main: provider error is data — exit 1, error printed, failed worker status retained", async (t) => {
   const { dir, models } = await workspace(t);
+  const workerRegistry = join(dir, "workers");
   const S = mkSinks();
   const code = await main(["run", "x", "--tools", "none", "--models", models], {
     streamFn: fakeStream([{ type: "error", message: "boom" }]),
     sinks: S.sinks,
+    workerDir: workerRegistry,
   });
   assert.equal(code, 1);
   assert.match(S.err(), /error: boom/);
+  const workers = readWorkerStatuses(workerRegistry);
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0]?.status, "failed");
+  assert.equal(workers[0]?.activity, "error");
 });
 
 test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
