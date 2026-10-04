@@ -70,7 +70,7 @@ import type {
   TextBlock,
   Tool,
 } from "../types.js";
-import type { Session } from "../session/session.js";
+import { aggregateSessionUsage, type ModelTokenTotals, type Session } from "../session/session.js";
 import type { ModelOption } from "./state.js";
 
 const NULL_SINKS: PrintSinks = {
@@ -131,6 +131,8 @@ export interface TuiRunOptions {
   /** D15: static labels for the `/display-bottom` fields. */
   cwd?: string;
   sessionPath?: string;
+  /** Historical model totals loaded from all local session logs. */
+  historicalModelUsage?: ModelTokenTotals;
   /**
    * The startup behavior-settings summary (approval mode, sandbox, what is
    * blocked, the optional flags). Seeded as a single multi-line INFO item so
@@ -200,6 +202,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     systemPromptTokens,
     catalog,
   );
+  state = { ...state, modelUsage: opts.historicalModelUsage ?? {} };
   // The startup behavior-settings summary — a single multi-line INFO item
   // (the ℹ gutter + dim text, wrapped at width−2) so the user sees the
   // current approval/sandbox behavior and the optional flags before the

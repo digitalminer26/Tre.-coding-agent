@@ -23,7 +23,9 @@ import { fakeStream } from "./fake-stream.js";
 import { runLoop } from "../src/loop/agent-loop.js";
 import {
   Session,
+  aggregateSessionUsage,
   defaultSessionPath,
+  defaultUsageDirs,
   loadSession,
   replayContext,
   replaySession,
@@ -357,6 +359,97 @@ test("appends after close() throw (I3: failure is a rejection, not a crash)", as
   const s = await Session.create(path);
   await s.close();
   await assert.rejects(s.appendMessage(userMsg("late", 9)), /closed/);
+});
+
+test("aggregateSessionUsage: sums assistant usage by model across .jsonl and .session files", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-agg-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const header = JSON.stringify({
+    type: "header",
+    version: SESSION_FORMAT_VERSION,
+    id: "h",
+    createdAt: 0,
+  });
+  // A realistic JSONL session: real newlines between entries, user +
+  // toolResult entries mixed in (they carry no usage and must not count).
+  const a1 = JSON.stringify({
+    type: "message", id: "a1",
+    message: { role: "assistant", model: "model-a", provider: "p", stopReason: "toolUse",
+      content: [{ type: "text", text: "x" }],
+      usage: { input: 100, output: 40, cacheRead: 60, totalTokens: 140 }, timestamp: 1 },
+  });
+  const u1 = JSON.stringify({ type: "message", id: "u1", message: userMsg("hi", 2) });
+  const a2 = JSON.stringify({
+    type: "message", id: "a2",
+    message: { role: "assistant", model: "model-a", provider: "p", stopReason: "stop",
+      content: [{ type: "text", text: "done" }],
+      usage: { input: 140, output: 10, totalTokens: 150 }, timestamp: 3 },
+  });
+  await writeFile(join(dir, "one.jsonl"), [header, a1, u1, a2].join("\n") + "\n");
+
+  // A second session in the .session spelling (delegation fanout logs) for
+  // a different model, with a torn trailing line that must be ignored.
+  const b1 = JSON.stringify({
+    type: "message", id: "b1",
+    message: { role: "assistant", model: "model-b", provider: "p", stopReason: "stop",
+      content: [{ type: "text", text: "y" }],
+      usage: { input: 50, output: 20, totalTokens: 70 }, timestamp: 4 },
+  });
+  await writeFile(join(dir, "two.session"), header + "\n" + b1 + "\n" + '{"type":"message","id":"b2","mess');
+
+  const totals = await aggregateSessionUsage(dir);
+  // model-a: 140 + 150 = 290 total; promptNew = (100-60) + 140 = 180;
+  // promptCached = 60 + 0 = 60; generated = 40 + 10 = 50.
+  assert.deepEqual(totals["model-a"], { total: 290, promptNew: 180, promptCached: 60, generated: 50 });
+  // model-b: the torn tail is dropped, the valid entry counts.
+  assert.deepEqual(totals["model-b"], { total: 70, promptNew: 50, promptCached: 0, generated: 20 });
+  // No other buckets (user/toolResult/header entries must not create one).
+  assert.equal(Object.keys(totals).length, 2);
+});
+
+test("aggregateSessionUsage: missing/empty directory and non-session files yield empty totals", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-agg-empty-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // A file with the wrong extension must be ignored.
+  await writeFile(join(dir, "notes.txt"), '{"type":"message","id":"x","message":{"role":"assistant","model":"m","usage":{"input":1,"output":1,"totalTokens":2}}}');
+  assert.deepEqual(await aggregateSessionUsage(dir), {});
+  // A missing directory is data, not an error.
+  assert.deepEqual(await aggregateSessionUsage(join(dir, "nope")), {});
+});
+
+test("aggregateSessionUsage: recursive scan, multiple dirs, node_modules pruned, overlap de-duplicated", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-agg-rec-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const entry = (id: string, model: string, total: number): string =>
+    JSON.stringify({ type: "message", id, message: { role: "assistant", model, provider: "p", stopReason: "stop", content: [{ type: "text", text: "x" }], usage: { input: total, output: 0, totalTokens: total }, timestamp: 1 } });
+
+  // Nested layout, like the delegation fanout: <task>/logs/<id>.session.
+  await mkdir(join(dir, "task-a", "logs"), { recursive: true });
+  await writeFile(join(dir, "task-a", "logs", "w1.session"), entry("w1", "m-nested", 100));
+  // node_modules must be pruned even when it contains a session-shaped file.
+  await mkdir(join(dir, "node_modules", "x"), { recursive: true });
+  await writeFile(join(dir, "node_modules", "x", "y.session"), entry("nm", "m-nested", 999999));
+  // A second, separate directory contributes its own bucket.
+  const dir2 = join(dir, "elsewhere");
+  await mkdir(dir2, { recursive: true });
+  await writeFile(join(dir2, "s.jsonl"), entry("e1", "m-other", 50));
+
+  const totals = await aggregateSessionUsage([dir, dir2, dir2]); // dir2 listed twice
+  assert.deepEqual(totals["m-nested"], { total: 100, promptNew: 100, promptCached: 0, generated: 0 });
+  assert.deepEqual(totals["m-other"], { total: 50, promptNew: 50, promptCached: 0, generated: 0 });
+  assert.equal(Object.keys(totals).length, 2); // node_modules entry excluded, no double count
+});
+
+test("defaultUsageDirs: flat session dirs + delegation trees, home and root", () => {
+  const root = "/work/proj";
+  assert.deepEqual(defaultUsageDirs(root), [
+    join(homedir(), ".tre", "sessions"),
+    join(root, ".tre", "sessions"),
+    join(root, ".tre", "delegation"),
+    join(homedir(), ".tre", "delegation"),
+  ]);
 });
 
 test("defaultSessionPath (D20): deterministic UTC name under ~/.tre/sessions/, outside any repo", () => {

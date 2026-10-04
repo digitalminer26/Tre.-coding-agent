@@ -22,12 +22,12 @@
  *    not an exception; structural corruption is.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { makeSummaryMessage } from "../context/compact.js";
-import type { AgentMessage, UserMessage } from "../types.js";
+import type { AgentMessage, UserMessage, Usage } from "../types.js";
 
 /** Bump when the on-disk entry shape changes; replay rejects other versions. */
 export const SESSION_FORMAT_VERSION = 1;
@@ -48,6 +48,97 @@ export function defaultSessionPath(now?: Date, pid?: number): string {
   const date = `${d.getUTCFullYear()}${pad2(d.getUTCMonth() + 1)}${pad2(d.getUTCDate())}`;
   const time = `${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}${pad2(d.getUTCSeconds())}`;
   return join(homedir(), ".tre", "sessions", `tre-${date}-${time}-${p}.jsonl`);
+}
+
+/** Per-model totals aggregated from every readable session JSONL file. */
+export type ModelTokenTotals = Record<string, { total: number; promptNew: number; promptCached: number; generated: number }>;
+
+/**
+ * The directories `/usage` scans by default, given the launch root. Sessions
+ * live in TWO places the agent actually writes to:
+ *   - `~/.tre/sessions/` and `<root>/.tre/sessions/` — the `--session-auto`
+ *     convention (`defaultSessionPath`), flat `.jsonl` files.
+ *   - `~/.tre/delegation/` and `<root>/.tre/delegation/` — the
+ *     parallel-delegation fanout writes each worker's log as
+ *     `<task>/logs/<id>.session` (nested, not flat).
+ * A bare `tre.` (no session flag) writes NEITHER, so both are included for
+ * completeness; the delegation tree is where most real usage actually lands.
+ */
+export function defaultUsageDirs(root: string): string[] {
+  return [
+    join(homedir(), ".tre", "sessions"),
+    join(root, ".tre", "sessions"),
+    join(root, ".tre", "delegation"),
+    join(homedir(), ".tre", "delegation"),
+  ];
+}
+
+/**
+ * Recursively collect session files (`.jsonl` / `.session`) under `dir`.
+ * `node_modules` and `.git` subtrees are pruned (they are never session
+ * stores and can be huge). A missing/unreadable directory yields nothing —
+ * absence is data, not an error.
+ */
+async function collectSessionFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      if (e.name === "node_modules" || e.name === ".git") continue;
+      out.push(...await collectSessionFiles(join(dir, e.name)));
+    } else if (e.isFile() && (e.name.endsWith(".jsonl") || e.name.endsWith(".session"))) {
+      out.push(join(dir, e.name));
+    }
+  }
+  return out;
+}
+
+/**
+ * Sum the token usage reported by assistant messages across every session log
+ * under the given directory (or directories), bucketed by model id. Sessions
+ * are JSONL — one entry per line — so each file is split on real NEWLINES.
+ * Both on-disk spellings are accepted: `.jsonl` (the `--session-auto` /
+ * `defaultSessionPath` convention) and `.session` (the parallel-delegation
+ * fanout). Files that cannot be read, or any line that is not a well-formed
+ * assistant entry with usage (torn tails, legacy shapes, other entry kinds),
+ * are skipped — a partial log must never poison the totals. Overlapping
+ * directories are de-duplicated so a file is counted once.
+ */
+export async function aggregateSessionUsage(
+  directories: string | string[] = join(homedir(), ".tre", "sessions"),
+): Promise<ModelTokenTotals> {
+  const dirs = Array.isArray(directories) ? directories : [directories];
+  const totals: ModelTokenTotals = {};
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    for (const file of await collectSessionFiles(dir)) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      let lines: string[];
+      try { lines = (await readFile(file, "utf8")).split("\n"); }
+      catch { continue; }
+      for (const line of lines) {
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as SessionEntry;
+          if (entry.type !== "message" || entry.message.role !== "assistant" || !entry.message.usage) continue;
+          const usage: Usage = entry.message.usage;
+          const bucket = totals[entry.message.model] ??= { total: 0, promptNew: 0, promptCached: 0, generated: 0 };
+          const cached = Math.min(usage.input, usage.cacheRead ?? 0);
+          bucket.total += usage.totalTokens;
+          bucket.promptNew += usage.input - cached;
+          bucket.promptCached += cached;
+          bucket.generated += usage.output;
+        } catch { /* Ignore torn tails and malformed/legacy entries. */ }
+      }
+    }
+  }
+  return totals;
 }
 
 // ─────────────────────────── entry types (wire format) ───────────────────────────

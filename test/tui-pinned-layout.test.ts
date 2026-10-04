@@ -579,7 +579,8 @@ test("slashCandidates: bare command words only, alphabetical prefix filter", () 
   assert.deepEqual(slashCandidates(""), []); // no slash
   assert.deepEqual(slashCandidates("quit"), []); // no leading slash
   assert.deepEqual(slashCandidates("/quit"), ["/quit"]);
-  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/models", "/quit", "/restart", "/stats"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/models", "/quit", "/restart", "/stats", "/usage"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/u"), ["/usage"]); // usage remains discoverable by prefix
   assert.deepEqual(slashCandidates("/d"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/di"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/display-bottom"), ["/display-bottom"]); // exact
@@ -596,9 +597,8 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // no menu for a plain prompt
   assert.deepEqual(suggestMenu({ ...s, input: "hi" }, 80), []);
 
-  // "/" → all commands (8), but the menu caps at MENU_MAX_LINES (5) — the
-  // 6th (/quit), 7th (/restart) and 8th (/stats) are hidden; the first 5 are
-  // alphabetical, first selected.
+  // "/" → all commands (9), but the menu caps at MENU_MAX_LINES (5) —
+  // later commands, including /usage, are hidden; type /u to find it.
   const all = suggestMenu({ ...s, input: "/" }, 80);
   assert.equal(all.length, 5);
   assert.deepEqual(all.map((m) => m.selected), [true, false, false, false, false]);

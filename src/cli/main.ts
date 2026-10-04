@@ -1192,15 +1192,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     extraRoots,
   });
 
-  // D20 boundary (--session-auto): resolve a fresh session path OUTSIDE any
-  // repository (~/.tre/sessions/) so the agent under test can never read or
-  // edit its own history. The parent dir is created up front (the first write
-  // must not fail on a missing directory) and `session: <path>` goes to stderr
-  // ONCE at startup — an orchestrator captures it to build its --resume
-  // command. Without the flag there is still no session file; combining
-  // --session-auto with --session/--resume was rejected in parseArgs.
+  // Every interactive TUI run gets a durable session by default. Sessions
+  // stay outside repositories (~/.tre/sessions/) so the agent cannot read or
+  // edit its own history. Explicit --session/--resume always take precedence;
+  // --session-auto retains its existing behavior for non-TUI invocations too.
+  const ui: "plain" | "tui" =
+    args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";
   let autoSessionPath: string | undefined;
-  if (args.sessionAuto) {
+  if (args.sessionAuto || (ui === "tui" && !args.sessionPath && !args.resumePath)) {
     autoSessionPath = defaultSessionPath();
     mkdirSync(path.dirname(autoSessionPath), { recursive: true });
     sinks.err.write(`session: ${autoSessionPath}\n`);
@@ -1281,9 +1280,6 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the
   // non-interactive fallback). Explicit `tui` / `--plain` skip this.
-  const ui: "plain" | "tui" =
-    args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";
-
   // WS10: the Ink TUI — same setup as the REPL, different presentation.
   // It installs its own SIGINT handling (abort while busy / exit 130 idle).
   if (ui === "tui") {
@@ -1298,7 +1294,13 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     // C23: dynamic — see the terminal-size-fix import above. Loading ink
     // after the resolve hook is registered is what makes the fix apply.
     const { runTui } = await import("../tui/run.js");
+    const { aggregateSessionUsage, defaultUsageDirs } = await import("../session/session.js");
+    // Scan where sessions actually live (~/.tre/sessions, <root>/.tre/sessions,
+    // and the delegation worker-log trees in both) — a bare `tre.` writes
+    // neither of the flat dirs, so the delegation tree is the real source.
+    const historicalModelUsage = await aggregateSessionUsage(defaultUsageDirs(root));
     const code = await runTui({
+      historicalModelUsage,
       model,
       systemPrompt,
       tools: wiredTools,
@@ -1328,7 +1330,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // file automatically). Pass the FULL process.argv — restartCommand
       // strips argv[0] (the node binary); passing a pre-sliced array would
       // drop the entry script (double-slice).
-      restartArgs: process.argv,
+      restartArgs: autoSessionPath && !args.sessionPath && !args.resumePath
+        ? [process.argv[0]!, process.argv[1]!, ...process.argv.slice(2).filter((a) => a !== "--session-auto"), "--resume", autoSessionPath]
+        : process.argv,
     });
     if (session) await session.close();
     return code;

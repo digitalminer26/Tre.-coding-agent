@@ -122,6 +122,8 @@ export interface TuiState {
   modelPicker: number | null;
   /** Cumulative Usage.totalTokens across assistant `done` events. */
   totalTokens: number;
+  /** Session token usage, accumulated separately by provider/model id. */
+  modelUsage: Record<string, { total: number; promptNew: number; promptCached: number; generated: number }>;
   /** Count of tool executions started (tool_execution_start events). */
   toolCalls: number;
   /**
@@ -229,6 +231,7 @@ export function makeInitialState(
     suggestIdx: null,
     modelPicker: null,
     totalTokens: 0,
+    modelUsage: {},
     toolCalls: 0,
     contextWindow: window,
     maxTokens,
@@ -376,7 +379,21 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       return {
         ...state,
         totalTokens: state.totalTokens + used,
-        // The last call's usage (prompt + completion) is a close proxy for
+        modelUsage: (() => {
+          const id = ev.message.model;
+          const prior = state.modelUsage[id] ?? { total: 0, promptNew: 0, promptCached: 0, generated: 0 };
+          const usage = ev.message.usage;
+          if (!usage) return state.modelUsage;
+          const promptCached = Math.min(usage.input, usage.cacheRead ?? 0);
+          const next = {
+            total: prior.total + usage.totalTokens,
+            promptNew: prior.promptNew + usage.input - promptCached,
+            promptCached: prior.promptCached + promptCached,
+            generated: prior.generated + usage.output,
+          };
+          return { ...state.modelUsage, [id]: next };
+        })(),
+        // The last call (prompt + completion) is a close proxy for
         // the context size the NEXT prompt starts from — the same number
         // the compaction trigger (shouldCompact) compares against the
         // window. No usage (some endpoints) → keep the previous estimate.
@@ -1141,6 +1158,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "display-bottom", summary: "set/clear the bottom display fields" },
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "models", summary: "pick the active model (↑/↓ + enter) / /models <id> switches" },
+  { name: "usage", summary: "historical token totals by model across local sessions" },
   { name: "quit", summary: "end the session" },
   { name: "restart", summary: "restart tre. in place (same session + settings; no quit/re-invoke)" },
   { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
@@ -1683,6 +1701,13 @@ export function handleSlashCommand(
   }
   if (line.trim() === "/context") {
     return { state: withInfo(s, contextReport(s)), handled: true };
+  }
+  if (line.trim() === "/usage") {
+    const rows = Object.entries(s.modelUsage).sort(([a], [b]) => a.localeCompare(b));
+    const report = rows.length === 0
+      ? "usage: no reported token usage in local sessions"
+      : "usage — all local sessions by model (total / new prompt / cached prompt / generated):\n" + rows.map(([id, u]) => `  ${id}: ${fmtTokens(u.total)} / ${fmtTokens(u.promptNew)} / ${fmtTokens(u.promptCached)} / ${fmtTokens(u.generated)}`).join("\n");
+    return { state: withInfo(s, report), handled: true };
   }
   const mm = /^\/models(?:\s+(.*))?$/.exec(line.trim());
   if (mm !== null) {
