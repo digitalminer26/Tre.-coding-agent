@@ -1766,7 +1766,7 @@ export function handleSlashCommand(
     const rows = Object.entries(s.modelUsage).sort(([a], [b]) => a.localeCompare(b));
     const report = rows.length === 0
       ? "usage: no reported token usage in local sessions"
-      : "usage — all local sessions by model (total / new prompt / cached prompt / generated):\n" + rows.map(([id, u]) => `  ${id}: ${fmtTokens(u.total)} / ${fmtTokens(u.promptNew)} / ${fmtTokens(u.promptCached)} / ${fmtTokens(u.generated)}`).join("\n");
+      : "usage — all local sessions by model (total prompts / new prompt / cached prompt / generated):\n" + rows.map(([id, u]) => `  ${id}: ${fmtTokens(u.promptNew + u.promptCached)} / ${fmtTokens(u.promptNew)} / ${fmtTokens(u.promptCached)} / ${fmtTokens(u.generated)}`).join("\n");
     return { state: withInfo(s, report), handled: true };
   }
   const mm = /^\/models(?:\s+(.*))?$/.exec(line.trim());
