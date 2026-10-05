@@ -1,11 +1,17 @@
 # Current project status (2026-10-05)
 
-**C41 (post-v0.1.3) — ChatGPT login model-discovery 400 fixed.** The
-`codex/models` endpoint now requires a `client_version` query param (and
-version-gates the list); `discoverChatGptModel` sends `client_version=1.0.0`.
-The published v0.1.3 bundle predates this fix — fresh-endpoint logins from
-v0.1.3 will still fail at discovery until a v0.1.4 (or patched) bundle is
-deployed. See the C41 entry below.
+**Release v0.1.4 — published (the C41 fix).** The `codex/models` endpoint
+now requires a `client_version` query param (and version-gates the list);
+`discoverChatGptModel` sends `client_version=1.0.0` (C41). Fresh-endpoint
+logins from the v0.1.3 bundle still fail at discovery — deploy v0.1.4:
+  curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/download/v0.1.4/install-tre-0.1.4.sh | sh
+Bundle sha256:
+`4823d249cc6f4c2749f11762e5b3ca512d6bcfb9159d2141a4a3668cd73736d9`.
+The release build also hit a CORRUPTED user npm cache (root-owned
+`~/.npm/_cacache` files → EPERM in both offline and network `npm ci`), so
+`scripts/build-offline-tarball.sh` gained a third fallback: a fresh private
+cache under the staging temp dir (commit `877ef5f`). This bundle IS a fresh
+`npm ci` prod install (40 packages) — full provenance.
 
 **Release v0.1.3 — published.** The config-consistency changes are committed,
 pushed, and now included in the new v0.1.3 offline bundle + installer release.
@@ -67,6 +73,29 @@ README.md is the user-facing overview. No pending ChatGPT OAuth implementation
 is implied by the historical incident entry below. The most recent work is
 listed first; this log does not replace a fresh quality-gate run.
 
+# HANDOFF — v0.1.4 release: npm-cache corruption fallback in the bundle build (2026-10-05)
+
+**Problem.** The v0.1.4 release run (bump + gate + push all green) died in
+`scripts/build-offline-tarball.sh` step 3: `npm ci` failed BOTH offline and
+with network. Root cause: the user npm cache (`~/.npm/_cacache`) contains
+root-owned files (an npm bug on some machines) — npm EPERM's on `stat` of a
+cache file before fetching anything. Both existing fallbacks share the same
+corrupt cache, so both die.
+
+**Fix.** `scripts/build-offline-tarball.sh` — third fallback:
+`npm ci --cache "$STAGE/npm-cache"` (a private cache under the staging temp
+dir, immune to the corruption; the network fetch still happens, only the
+cache location moves). The first two attempts are unchanged (offline warm
+cache, then network).
+
+**Verification.** Rebuilt the v0.1.4 bundle: the fresh-cache path produced
+the full prod `node_modules` (40 packages) — so the published
+`tre-coding-agent-0.1.4-offline.tgz` (sha256
+`4823d249cc6f4c2749f11762e5b3ca512d6bcfb9159d2141a4a3668cd73736d9`) is a
+clean `npm ci` install, not a reused node_modules. Release v0.1.4 published
+with the one-command installer `install-tre-0.1.4.sh`; both assets verified
+downloadable, bundle verified to contain the C41 `client_version` fix.
+
 # HANDOFF — C41: ChatGPT model discovery 400 → `client_version` (2026-10-05)
 
 **Problem.** `tre. login` on a fresh endpoint failed AFTER a successful OAuth
@@ -101,9 +130,10 @@ catalog, so the first slug is a real, streamable model.
 skipped. Live: `discoverChatGptModel(storedToken)` (built `dist/`) →
 `gpt-6.1-sol` (200, full catalog). No guardrail-zone file touched.
 
-**For the user's fresh endpoint:** re-run `tre. login` with a build that
-includes C41 (commit `3561fe6`). The OAuth step already succeeded there, so a
-re-login is just the browser step again; discovery will now write the catalog.
+**For the user's fresh endpoint:** deploy v0.1.4 (released with this fix —
+see the v0.1.4 entry above), then re-run `tre. login`. The OAuth step already
+succeeded there, so a re-login is just the browser step again; discovery will
+now write the catalog.
 
 # HANDOFF — W2: release tooling GitHub-token lookup → `~/.tre/github-token` (2026-10-05)
 
