@@ -65,13 +65,23 @@ cp package.json package-lock.json "$STAGE/staging/"
 cp -R dist "$STAGE/staging/dist"
 
 # --- 3. prod-only node_modules: try offline first (warm cache), fall back to
-#        network. --ignore-scripts skips dep prepare hooks (no tsc needed). ---
+#        network, then to a FRESH cache dir. --ignore-scripts skips dep
+#        prepare hooks (no tsc needed).
+#        The fresh-cache retry covers a CORRUPTED user npm cache — e.g.
+#        root-owned files in ~/.npm/_cacache (an npm bug on some machines),
+#        which makes BOTH --offline and network installs fail with EPERM
+#        before any package is fetched (observed 2026-10-05: the v0.1.4
+#        release build died here). A private cache under the staging temp
+#        dir is untouched by that corruption; the network fetch still
+#        happens, the cache just lives elsewhere. ---
 echo "==> installing prod-only node_modules (offline-first)"
 if (cd "$STAGE/staging" && npm ci --omit=dev --offline --ignore-scripts --no-audit --no-fund >/dev/null 2>&1); then
   echo "    installed from local npm cache (no network)"
+elif (cd "$STAGE/staging" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null 2>&1); then
+  echo "    installed with network"
 else
-  echo "    offline install failed — retrying with network"
-  (cd "$STAGE/staging" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null 2>&1)
+  echo "    default npm cache failed — retrying with a fresh cache under the staging dir"
+  (cd "$STAGE/staging" && npm ci --cache "$STAGE/npm-cache" --omit=dev --ignore-scripts --no-audit --no-fund)
 fi
 NP=$(ls "$STAGE/staging/node_modules" | grep -cv '^@' )
 NS=$(find "$STAGE/staging/node_modules" -maxdepth 1 -type d -name '@*' | wc -l | tr -d ' ')
