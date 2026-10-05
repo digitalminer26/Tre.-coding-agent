@@ -56,6 +56,13 @@ const MODEL: ModelConfig = {
   maxTokens: 4096,
 };
 
+async function fakeHome(t: test.TestContext): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), "om-home-"));
+  t.after(() => import("node:fs/promises").then((fs) => fs.rm(home, { recursive: true, force: true })));
+  await mkdir(join(home, ".tre"), { recursive: true });
+  return home;
+}
+
 async function makeModelsFile(dir: string): Promise<string> {
   const p = join(dir, "models.json");
   await writeFile(p, JSON.stringify({ default: MODEL.id, models: [MODEL] }));
@@ -1057,6 +1064,34 @@ test("WS7: --no-approve allows read-only bash but blocks mutating (no prompts)",
   assert.match(S.out(), new RegExp(dir), "the read-only call ran (pwd printed the root)");
 });
 
+test("C38: implicit ~/.tre root is writable; a sibling is still refused", async (t) => {
+  const { dir, models } = await workspace(t);
+  const home = await fakeHome(t);
+  const treConfig = join(dir, "tre.json");
+  await writeFile(treConfig, JSON.stringify({ extraRoots: [] }));
+  const session = join(dir, "s.jsonl");
+  const inside = join(home, ".tre", "probe.txt");
+  const outside = join(dirname(home), `c37-out-${basename(home)}.txt`);
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "write", args: { path: inside, content: "ok" } }] },
+    { type: "toolcall", calls: [{ name: "write", args: { path: outside, content: "x" } }] },
+    { type: "text", text: "done" },
+  ]);
+  const S = mkSinks();
+  const code = await main(
+    ["run", "write", "--tools", "write", "--yes", "--models", models, "--cwd", dir, "--session", session],
+    { streamFn, sinks: S.sinks, treConfigPath: treConfig, home },
+  );
+  assert.equal(code, 0);
+  assert.equal(await readFile(inside, "utf8"), "ok", "the implicit ~/.tre root is writable");
+  await assert.rejects(readFile(outside, "utf8"), "a sibling of the fake home must NOT be created");
+});
+
+test("C38: behaviorSettingsLines renders the implicit root", () => {
+  const lines = behaviorSettingsLines("yes", true, [], [], [], "/home/u/.tre");
+  assert.ok(lines.some((l) => l.includes("implicit root: /home/u/.tre")), "implicit root line present");
+});
+
 test("WS7: sandbox — absolute path outside root is refused even with --yes", async (t) => {
   const { dir, models } = await workspace(t);
   // Hermetic: pin an EMPTY tre.json (no durable extra roots) so the refusal
@@ -1083,7 +1118,7 @@ test("WS7: sandbox — absolute path outside root is refused even with --yes", a
   const replayed = await replaySession(session);
   const tr = replayed.context.find((m) => m.role === "toolResult");
   assert.ok(tr && tr.role === "toolResult");
-  assert.match(tr.content.map((c) => c.text).join(" "), /outside the project root/);
+  assert.match(tr.content.map((c) => c.text).join(" "), /outside the working directory/);
   await assert.rejects(readFile(target, "utf8"), "the file must not be created");
 });
 
@@ -1112,7 +1147,7 @@ test("WS7: sandbox — ../ escape is refused even with --yes", async (t) => {
   const replayed = await replaySession(session);
   const tr = replayed.context.find((m) => m.role === "toolResult");
   assert.ok(tr && tr.role === "toolResult");
-  assert.match(tr.content.map((c) => c.text).join(" "), /outside the project root/);
+  assert.match(tr.content.map((c) => c.text).join(" "), /outside the working directory/);
   await assert.rejects(readFile(join(dir, "escape.txt"), "utf8"));
 });
 

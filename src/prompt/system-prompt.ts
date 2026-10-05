@@ -35,8 +35,10 @@ export interface SystemPromptOptions {
   skills?: SkillIndexEntry[];
   /** Caller-supplied extra guidelines, appended after the derived ones. */
   extraGuidelines?: string[];
-  /** C35: explicitly assigned additional read/write roots (in addition to
-   *  the working directory) — rendered in the Working-directory section. */
+  /** C35: additional read/write roots (in addition to the working directory)
+   *  — rendered in the Working-directory section. C38: this also includes the
+   *  implicit, always-on `~/.tre` root (tre.'s own state dir), which the CLI
+   *  prepends by construction — it is not user-assigned and not validated. */
   extraRoots?: string[];
 }
 
@@ -159,7 +161,10 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
     sections.push(parts.join("\n"));
   }
 
-  // 6. working directory (+ C35 extra roots, when assigned)
+  // 6. working directory (+ C35 extra roots, when assigned). C38: extraRoots
+  //    always includes the implicit `~/.tre` root (prepended by the CLI), so
+  //    this section renders it as an additional read/write root too — the
+  //    rendered wording is unchanged by that.
   const wdLines = ["# Working directory", "", `All relative paths resolve against:`, `\`${cwd}\``];
   if (extraRoots.length > 0) {
     wdLines.push(

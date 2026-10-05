@@ -35,7 +35,7 @@ runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 - `docs/02-contracts.md` — WS0 contracts and subsequent contract increments (current types are authoritative)
 - `docs/03-citation-policy.md` — the L1/L2/L3 borrowing rules for the pi reference (mandatory citations)
 - `docs/04-skill-authoring.md` — skill constraints (load paths, write boundary, sandbox network, secrets)
-- `docs/05-extra-roots-spec.md` — `--extra-root` + durable `tre.json` `extraRoots` (C35/C36)
+- `docs/05-extra-roots-spec.md` — `--extra-root` + durable `tre.json` `extraRoots` (C35/C36) + the implicit, always-on `~/.tre` root (C38)
 - `docs/06-compaction-cheap-wins.md` — compaction cheap wins + failure escalation (A1–A6, D)
 - `docs/07-context-display-fidelity.md` — context display fidelity changes and remaining items
 - `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups

@@ -258,6 +258,22 @@ test("prompt: C35 extra roots render in the Working-directory section; absent â†
   assert.ok(withRoots.indexOf("`/some/cwd`") < withRoots.indexOf("`/home/u/projects/other`"));
 });
 
+test("prompt: C38 implicit ~/.tre root renders in the Working-directory section", () => {
+  // C38: the CLI prepends the implicit ~/.tre root to extraRoots (always on,
+  // not user-assigned, not validated) â€” it renders as an additional
+  // read/write root exactly like any C35 extra root.
+  const p = buildSystemPrompt({
+    cwd: "/some/cwd",
+    tools: [READ],
+    extraRoots: ["/home/u/.tre", "/home/u/scratch"],
+  });
+  assert.ok(p.includes("Additional read/write roots"));
+  assert.ok(p.includes("`/home/u/.tre`"), "implicit ~/.tre root is listed");
+  assert.ok(p.includes("`/home/u/scratch`"), "user-assigned root still listed");
+  // The workspace line is still present and first.
+  assert.ok(p.indexOf("`/some/cwd`") < p.indexOf("`/home/u/.tre`"));
+});
+
 test("prompt: no sections for empty optional inputs", () => {
   const p = buildSystemPrompt({ cwd: dir, tools: [] });
   assert.ok(!p.includes("# Tools"));

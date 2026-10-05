@@ -1,11 +1,21 @@
-# Current project status (2026-10-03)
+# Current project status (2026-10-05)
 
-ChatGPT login now discovers a model ID from the authenticated Codex model
-catalog before writing `~/.tre/tre/models.json`; discovery failures are
-reported without creating a guessed model entry. Unit coverage exercises
-successful lookup and failure/empty responses. Build passes; the full test run
-currently has 8 unrelated environment-dependent failures (session path
-permission and git-commit integration tests; `git` unavailable in sandbox).
+`~/.tre` — tre.'s own state dir (sessions, `chatgpt-auth.json`, the model
+catalog) — is now an **implicit, always-on root** (C38). At startup `main()`
+prepends it to the boundary (`extraRoots = [implicitRoot, ...durableRoots,
+...oneShotRoots]`), so the bash kernel sandbox and the write/edit path sandbox
+reach tre.'s own state by construction, on every machine, with no config. It
+flows through the existing C35 `extraRoots` mechanism, so **no guardrail-zone
+file is touched** (`sandbox.ts` / `safety.ts` / `bash.ts` are unchanged). A
+sibling of `~/.tre` (e.g. `~/other`) is still outside the boundary. The startup
+banner shows it on its own `implicit root:` line; the system prompt's
+Working-directory section lists it as an additional read/write root.
+
+ChatGPT login still discovers a model ID from the authenticated Codex model
+catalog before writing `~/.tre/tre/models.json` (see the 2026-10-03 entry).
+Build passes; the full test run has 8 unrelated environment-dependent failures
+(session-path-permission and git-commit integration tests; `git` and `~/.tre`
+are EPERM-denied under the inherited kernel sandbox).
 
 The dated entries below are an append-only implementation history, not a
 single up-to-date status report. Their test counts, “uncommitted” labels,
@@ -14,6 +24,50 @@ been superseded. For current behavior, trust `src/` and the current tests;
 README.md is the user-facing overview. No pending ChatGPT OAuth implementation
 is implied by the historical incident entry below. The most recent work is
 listed first; this log does not replace a fresh quality-gate run.
+
+# HANDOFF — C38: implicit `~/.tre` root (2026-10-05)
+
+**Problem.** The bash kernel sandbox and the write/edit path sandbox confine
+tools to the workspace plus any user-assigned extra roots (C35 `--extra-root`,
+C36 durable `tre.json`). But `~/.tre` — tre.'s OWN state dir — was NOT
+reachable by those tools unless the user manually added it as an extra root.
+So a sandboxed bash child could not read `~/.tre` (sessions, the model
+catalog, the ChatGPT auth token) and the write/edit tools refused paths there.
+
+**Fix (C38).** `~/.tre` is an implicit, always-on root, by construction:
+- `src/cli/main.ts` — `main()` computes
+  `implicitRoot = path.join(deps.home ?? homedir(), ".tre")` and prepends it:
+  `extraRoots = [implicitRoot, ...durableRoots, ...oneShotRoots]`. A new
+  injectable `MainDeps.home` (default `os.homedir()`) keeps the test hermetic.
+  `behaviorSettingsLines` gains an `implicitRoot` param and renders
+  `  implicit root: <path>  (tre.'s own state dir — always read+write)`.
+- It rides the EXISTING C35 mechanism (kernel policy re-allow + `checkPathWithinRoots`
+  + prompt Working-directory section) — **no new code in the guardrail zone**.
+- It is NOT validated (`validateExtraRoot` applies to user-supplied roots only)
+  and NOT persisted (never written to `tre.json`).
+- A sibling of `~/.tre` is still OUTSIDE the boundary (kernel + file-tool hook).
+
+**Files.** `src/cli/main.ts`, `test/cli.test.ts` (2 new C38 tests + the two
+WS7 outside-boundary assertions updated to the multi-root refusal text),
+`src/prompt/system-prompt.ts` (comment-only — rendered output unchanged),
+`test/prompt.test.ts` (1 new C38 test), `docs/02-contracts.md` (C38 bullet),
+`docs/05-extra-roots-spec.md` (§6 + renumbered §7–§10), `README.md`.
+
+**Verification.** `tsc` clean; full suite green except the 8 pre-existing
+environment-dependent failures (confirmed identical at HEAD via `git stash`).
+New C38 tests pass (cli: implicit root writable + sibling refused; banner line;
+prompt: implicit root renders). No guardrail-zone file touched.
+
+**Note (numbering).** The implicit root was first documented as “C37” in the
+parallel-delegation wave, but C37 is already the background Telegram driver.
+It is **C38**; the docs were renumbered accordingly (the Telegram C37 bullet is
+untouched).
+
+**Follow-up (not in this increment).** The stored ChatGPT **access** token in
+`~/.tre/chatgpt-auth.json` can be invalidated server-side while still
+nominally unexpired; the token store only refreshes within 60s of `expiresAt`,
+so a dead-but-unexpired access token yields a 401 with no auto-retry-refresh.
+A 401 on the wire should trigger a refresh-and-retry. (Out of scope for C38.)
 
 # HANDOFF — ChatGPT login: `invalid_authorize_request` (root cause + fix) (2026-10-02)
 

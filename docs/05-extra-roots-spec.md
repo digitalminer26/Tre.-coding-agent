@@ -1,9 +1,10 @@
 # Spec — `--extra-root`: explicitly assigned directories outside the workspace
 
-**Status: IMPLEMENTED (C35 / D21); persistence added in C36 / D22 (`tre.json`).**
+**Status: IMPLEMENTED (C35 / D21); persistence added in C36 / D22 (`tre.json`); the
+implicit `~/.tre` root added in C38 (see §6).**
 This is a **guardrail-zone** change (touches
 `sandbox.ts`, `safety.ts`, `bash.ts`) — the agent does all the work, the
-**human commits** it with `GUARDRAIL_BYPASS=1`. See §9.
+**human commits** it with `GUARDRAIL_BYPASS=1`. See §10.
 
 > **Numbering correction (2026-09-27):** this spec was filed as "C27/D14" (commit
 > `40fabfb`) and its header said "next decision = D17". Both were stale: the
@@ -228,7 +229,49 @@ boundary + the sensitive-root guard + the inherited-sandbox limitation. Record
 sibling via the `write` tool **and** via `bash` — both succeed; a write to a
 non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
 
-## 6. Out of scope (v1)
+## 6. The implicit `~/.tre` root (C38)
+
+**What it is.** `~/.tre` — tre.'s OWN state dir (sessions,
+`chatgpt-auth.json`, the model catalog) — is an **implicit, always-on** extra
+root. At startup `main()` computes it
+(`implicitRoot = path.join(deps.home ?? homedir(), ".tre")`) and PREPENDS it to
+the boundary: `extraRoots = [implicitRoot, ...durableRoots, ...oneShotRoots]`.
+The startup banner shows it on its own line:
+`  implicit root: <path>  (tre.'s own state dir — always read+write)` (separate
+from the `extra roots (durable …)` / `extra roots (one-shot …)` lines, which
+still list only user-assigned roots).
+
+**Why.** tre.'s own state dir must be reachable by the bash child and the
+`write`/`edit` tools **without manual config** — on every machine, by
+construction. Before C38 the boundary was workspace + user-assigned roots only,
+so a sandboxed bash child could not read `~/.tre` (sessions, the model catalog,
+the ChatGPT auth token) and the `write`/`edit` tools refused paths there.
+
+**Always-on, not validated.** C38 is part of the boundary **by construction**
+(every machine, no config) — it is NOT a user-assigned extra root. It is:
+
+- **not validated** — `validateExtraRoot` (exists / non-sensitive / under home,
+  §3) applies to USER-supplied roots only; the implicit root is built from the
+  home dir by construction and is never checked or refused;
+- **not persisted** — it is never written to `tre.json` (C36) and never
+  re-passed as a flag;
+- **always present** — even with no `tre.json` and no `--extra-root`, the
+  boundary is workspace + `~/.tre`.
+
+**Flows through the C35 mechanism.** Because it is in `extraRoots`, the implicit
+root rides the EXISTING C35 plumbing — the kernel policy
+(`generateBashSandboxPolicy(root, extraRoots)` re-allows its subpath, read and
+write, with its ancestor-metadata chain), the write/edit path sandbox
+(`checkPathWithinRoots(roots, p)`), and the prompt's "Working directory"
+section (rendered as an additional read/write root) — with **no new code paths**
+in the guardrail zone.
+
+**Enumeration still holds.** As with every extra root (§2), the implicit root
+re-allows **its own subpath only** — a SIBLING of `~/.tre` (e.g. `~/other`) is
+still OUTSIDE the boundary: denied by the kernel and refused by the file-tool
+hook.
+
+## 7. Out of scope (v1)
 - Extra roots outside the home dir (external mounts, `/opt`) — §3.
 - Per-root read-only vs read-write (all extra roots are read+write).
 - ~~Config-file persistence of extra roots~~ — **DONE in C36 (D22):** a
@@ -240,20 +283,28 @@ non-assigned sibling is refused. (Skipped under an inherited sandbox, like s10.)
   portable across machines). See `docs/02-contracts.md` C36.
 - Changing the `read` tool (it stays unrestricted).
 
-## 7. Definition of done
+## 8. Definition of done
 1. `tsc` clean; **full suite green** (no new failures).
 2. Kernel canary (§5) passes on this machine.
 3. e2e extra-root scenario passes (or is correctly skipped under inheritance).
 4. `docs/02-contracts.md` C35 + the decision log (HANDOFF.md) D21 recorded.
 5. `HANDOFF.md` top section updated.
-6. Committed **by the human** (§9).
+6. Committed **by the human** (§10).
+7. **C38 (the implicit `~/.tre` root, §6):** `~/.tre` is implicit — always on
+   the boundary by construction, NOT a user-assigned extra root (never
+   validated, never written to `tre.json`); the banner shows it on its own
+   `implicit root:` line; a sibling of `~/.tre` is still refused (kernel +
+   file-tool hook).
 
-## 8. Sequencing
+## 9. Sequencing
 The stall guard (C26) is done and green (commit `f393fb2`). This is the **next**
 increment. It must land as **one** increment — the bash kernel boundary and the
 file-tool root set move together (§2). Estimated ~200 lines across 6 files.
+C38 (§6) is a follow-up increment: it reuses the C35 plumbing end-to-end, so it
+touches only `src/cli/main.ts` (+ the prompt/test/docs touch points) — no
+guardrail-zone files.
 
-## 9. Commit strategy (guardrail zone)
+## 10. Commit strategy (guardrail zone)
 This change touches `sandbox.ts`, `safety.ts`, and `bash.ts` — **all guardrail
 zone**. The pre-commit hook will **reject** an agent commit. Per protocol the
 agent does all the work (code + tests + docs, gate green, canary passed), then

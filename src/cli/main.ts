@@ -960,6 +960,8 @@ export interface MainDeps {
   telegramBridge?: TelegramBridge;
   /** Worker registry dir override (tests); undefined uses the shared home registry. */
   workerDir?: string;
+  /** Injectable home dir (tests); default: os.homedir(). */
+  home?: string;
 }
 
 /**
@@ -1030,6 +1032,7 @@ export function behaviorSettingsLines(
   durableRoots: string[] = [],
   oneShotRoots: string[] = [],
   skills: { name: string; description: string }[] = [],
+  implicitRoot?: string,
 ): string[] {
   const approval =
     mode === "yes"
@@ -1051,6 +1054,9 @@ export function behaviorSettingsLines(
     `  approval: ${approval}`,
     `  sandbox:  ${sandbox}`,
   ];
+  if (implicitRoot) {
+    lines.push(`  implicit root: ${implicitRoot}  (tre.'s own state dir — always read+write)`);
+  }
   if (durableRoots.length > 0) {
     lines.push(
       `  extra roots (durable, from tre.json): ${durableRoots.join(", ")}  (read+write, in addition to the workspace)`,
@@ -1207,7 +1213,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
     oneShotRoots.push(path.resolve(resolved));
   }
-  const extraRoots: string[] = [...durableRoots, ...oneShotRoots];
+  // Implicit root: ~/.tre is tre.'s own state dir (sessions, chatgpt-auth.json,
+  // the model catalog). It is part of the boundary BY CONSTRUCTION — every
+  // machine, no config — so the bash child and the write/edit tools can reach
+  // tre.'s own state without the user manually assigning it as an extra root.
+  // It flows through the same C35 extraRoots mechanism (kernel policy + path
+  // sandbox + prompt) and is never validated (it is not a user-supplied root).
+  const implicitRoot = path.join(deps.home ?? homedir(), ".tre");
+  const extraRoots = [implicitRoot, ...durableRoots, ...oneShotRoots];
   // bash runs in the project root, so its relative paths mean the same
   // thing as the file tools' (the safety hook resolves those against it);
   // on darwin the child is kernel-sandboxed to the same boundary (WS11).
@@ -1315,7 +1328,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // stderr (below). Durable (tre.json) and one-shot (--extra-root) roots are
   // passed separately so the summary labels each (one-shot is flagged as
   // this-launch-only + not written to tre.json).
-  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots, skills);
+  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots, skills, implicitRoot);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the

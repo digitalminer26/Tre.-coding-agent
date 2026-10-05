@@ -157,6 +157,27 @@ Rules:
   — the no-telegram path is byte-for-byte the old behavior. The LLM endpoint
   is NOT involved in polling (a poll is one HTTPS GET); the LLM is only spent
   when a real message arrives and a turn runs.
+- **C38 — implicit `~/.tre` root: tre.'s own state dir is an always-on,
+  by-construction extra root (C35/C36 follow-through).** `~/.tre` —
+  tre.'s own state dir (sessions, `chatgpt-auth.json`, the model catalog) —
+  is an **implicit, always-on** root: at startup `main()` computes
+  `implicitRoot = path.join(deps.home ?? homedir(), ".tre")` and PREPENDS it —
+  `extraRoots = [implicitRoot, ...durableRoots, ...oneShotRoots]` — so the
+  boundary is workspace + `~/.tre` + user-assigned roots on **every** machine,
+  **by construction** (no config, no flag). It is **NOT validated**: the C35
+  sensitive-root guard (`validateExtraRoot` — exists, non-sensitive, under
+  home) applies to USER-supplied roots only; the implicit root is built from
+  the home dir and is never checked or refused. It is **NOT persisted**: never
+  written to `tre.json` (C36). It **flows through the existing C35 mechanism**
+  — the kernel policy re-allows its subpath (read and write, with its
+  ancestor-metadata chain), the write/edit path sandbox
+  (`checkPathWithinRoots`) allows paths under it, and the prompt's "Working
+  directory" section lists it as an additional read/write root — with no new
+  code paths in the guardrail zone. The startup banner shows it on its own
+  line: `  implicit root: <path>  (tre.'s own state dir — always read+write)`.
+  Enumeration still holds: a **sibling** of `~/.tre` (e.g. `~/other`) is still
+  OUTSIDE the boundary — denied by the kernel and refused by the file-tool
+  hook. Full spec: `docs/05-extra-roots-spec.md` §6.
 
 ## Contract 2 — Events
 
