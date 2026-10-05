@@ -14,8 +14,9 @@
 #   TRE_RELEASE_REPO  GitHub owner/name (default: digitalminer26/Tre.-coding-agent)
 #   TRE_PUSH=0        skip the git push (everything else still runs)
 #   TRE_PUBLISH=0     skip the GitHub release (tarball is still built)
-#   GITHUB_TOKEN      token for the release API (fallback: the github.com
-#                     credential in the macOS keychain — the one git push uses)
+#   GITHUB_TOKEN      token for the release API (fallbacks: the machine-level
+#                     ~/.tre/github-token file, then the github.com credential
+#                     in the macOS keychain — the one git push uses)
 #
 # Steps: 1 bump  2 npm test  3 commit  4 push  5 build tarball  6 publish.
 # The tarball is a build artifact (.tre/deploy-out/, gitignored) — only the
@@ -73,10 +74,22 @@ echo "==> committing: $MSG"
 git add package.json
 git commit -m "$MSG"
 
-# --- 4. push (plain push first; on macOS the keychain helper is the fallback) ---
+# --- 4. push (plain push first; then the token file; then the keychain) ---
+# Push using a token file via a ONE-SHOT credential helper — the token is
+# never printed and never written to the git config.
+push_with_token_file() {
+  git -c credential.helper="!f() { echo username=git; echo \"password=\$(cat '$1')\"; }; f" push origin main
+}
+
 if [ "${TRE_PUSH:-1}" = "1" ]; then
   echo "==> pushing to origin main"
-  if ! git push origin main; then
+  if git push origin main; then
+    :
+  elif [ -f "$HOME/.tre/github-token" ] && push_with_token_file "$HOME/.tre/github-token"; then
+    echo "    (pushed via the machine-level token file ~/.tre/github-token)"
+  elif [ -f ".tre/github-token" ] && push_with_token_file ".tre/github-token"; then
+    echo "    (pushed via the legacy repo-local token file .tre/github-token)"
+  else
     echo "    push failed — retrying with the macOS keychain credential helper"
     git -c credential.helper=osxkeychain push origin main
   fi

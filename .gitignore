@@ -21,7 +21,9 @@ tre.json
 # Parallel-delegation skill state (plan files, prompts, logs, sessions) —
 # local orchestration artifacts, never in git.
 .tre/delegation/
-# Per-machine GitHub push token (transient — deleted after the push).
+# GitHub push token. The machine-level home is ~/.tre/github-token (outside
+# the repo, never in git). This entry is a legacy safety net for the old
+# repo-local location, still honored by the release tooling as a fallback.
 .tre/github-token
 # Skills are deployment-specific — never in git by default. The two
 # exceptions are the repo's own development protocol (force-added):

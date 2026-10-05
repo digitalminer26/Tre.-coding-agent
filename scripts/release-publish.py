@@ -7,7 +7,10 @@ with the same name, and uploads the tarball. Stdlib only (urllib) — no deps.
 
 Auth: a GitHub token, in this order:
   1. $GITHUB_TOKEN
-  2. the macOS keychain entry for github.com, read via
+  2. ~/.tre/github-token (the machine-level token file — where tre.'s
+     release tooling keeps it; the repo-local .tre/github-token is a
+     legacy location, still honored as a fallback)
+  3. the macOS keychain entry for github.com, read via
      `git credential-osxkeychain get` (the same credential `git push` uses)
 The token is never printed.
 
@@ -42,6 +45,21 @@ def get_token():
     tok = os.environ.get("GITHUB_TOKEN")
     if tok:
         return tok
+    # Machine-level token file (the 2026-10-05 config-consistency cleanup):
+    # ~/.tre/github-token is where the release tooling keeps the token. The
+    # repo-local .tre/github-token is a LEGACY location, still honored as a
+    # fallback for machines that have not migrated yet.
+    for p in (
+        os.path.join(os.path.expanduser("~"), ".tre", "github-token"),
+        os.path.join(os.getcwd(), ".tre", "github-token"),
+    ):
+        try:
+            with open(p) as f:
+                tok = f.read().strip()
+        except OSError:
+            continue
+        if tok:
+            return tok
     try:
         proc = subprocess.run(
             ["git", "credential-osxkeychain", "get"],
@@ -173,8 +191,9 @@ tar xzf "$TMP/$ASSET" -C "$DEST" --strip-components=1
 
     token = get_token()
     if not token:
-        die("no GitHub token: set $GITHUB_TOKEN or store the github.com "
-            "credential in the macOS keychain (git push uses the same one)")
+        die("no GitHub token: set $GITHUB_TOKEN, write ~/.tre/github-token "
+            "(legacy: .tre/github-token), or store the github.com credential "
+            "in the macOS keychain (git push uses the same one)")
 
     print(f"release-publish: repo={repo} tag={tag} asset={asset_name} ({version})")
     print(f"release-publish: sha256 {sha}")

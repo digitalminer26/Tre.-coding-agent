@@ -106,7 +106,8 @@ scripts/release.sh X.Y.Z          # e.g. scripts/release.sh 0.2.0
 passes), commits `package.json`, pushes `main`, builds
 `tre-coding-agent-X.Y.Z-offline.tgz`, and publishes tag `vX.Y.Z` with the
 tarball as the release asset (`scripts/release-publish.py`, stdlib-only
-Python; token from `$GITHUB_TOKEN` or the macOS keychain `github.com`
+Python; token from `$GITHUB_TOKEN`, then the machine-level
+`~/.tre/github-token` file, then the macOS keychain `github.com`
 credential). `TRE_PUSH=0` / `TRE_PUBLISH=0` skip those steps.
 
 Installing on a target machine (Node ≥ 20; ≥ 22 recommended) is one command —

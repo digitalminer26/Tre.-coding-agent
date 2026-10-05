@@ -1,13 +1,13 @@
 # Current project status (2026-10-05)
 
-The "config consistency" workstream is underway: machine-wide config/secrets
-are moving from project-local `.tre/` to `~/.tre`. **C40** landed first —
-the Telegram bot's config + poll state now live at `~/.tre/telegram.json` +
-`~/.tre/telegram/` (machine-level, works from any launch dir); the live
-machine was migrated (offsets merged to the max, stale repo-local copies
-removed) and the bridge verifies enabled from an empty cwd. The remaining
-increment (W2) moves the release tooling's GitHub-token lookup to
-`~/.tre/github-token`.
+The "config consistency" workstream is COMPLETE: machine-wide config/secrets
+now live under `~/.tre`, not project-local `.tre/`. **C40** moved the
+Telegram bot's config + poll state to `~/.tre/telegram.json` +
+`~/.tre/telegram/` (machine-level, works from any launch dir; live machine
+migrated, bridge verified enabled from an empty cwd). **W2** moved the
+release tooling's GitHub-token lookup to `~/.tre/github-token` (with the
+legacy repo-local `.tre/github-token` still honored as a fallback; live
+machine migrated).
 
 Release packaging now publishes both the offline `.tgz` and a versioned
 `install-tre-X.Y.Z.sh` one-command installer. The installer validates Node >=20,
@@ -45,6 +45,40 @@ been superseded. For current behavior, trust `src/` and the current tests;
 README.md is the user-facing overview. No pending ChatGPT OAuth implementation
 is implied by the historical incident entry below. The most recent work is
 listed first; this log does not replace a fresh quality-gate run.
+
+# HANDOFF — W2: release tooling GitHub-token lookup → `~/.tre/github-token` (2026-10-05)
+
+**Problem.** The release tooling looked for the GitHub token only in
+`$GITHUB_TOKEN` and the macOS keychain — but this machine keeps it in the
+repo-local `.tre/github-token` (gitignored), which neither path consulted.
+That mismatch is exactly what broke the 2026-10-05 release push (the token
+was present, but not where the tooling looked). Second increment of the
+config-consistency workstream: the machine-level home for the token is
+`~/.tre/github-token`.
+
+**Fix (W2).**
+- `scripts/release-publish.py` — `get_token()` now checks, in order:
+  `$GITHUB_TOKEN` → `~/.tre/github-token` → the LEGACY repo-local
+  `.tre/github-token` (still honored so unmigrated machines keep working) →
+  the macOS keychain. The no-token error names all four sources.
+- `scripts/release.sh` — the push step is now a fallback chain: plain
+  `git push` → one-shot credential helper fed from `~/.tre/github-token` →
+  the legacy `.tre/github-token` → the keychain helper. The token file is
+  read by a `!f(){…}` helper (never printed, never written to git config).
+- `README.md` — release section lists the token order.
+- `.gitignore` — the `.tre/github-token` entry is now a legacy safety net
+  (the machine-level file lives outside the repo).
+
+**Migration (live machine).** `.tre/github-token` (41 bytes) copied to
+`~/.tre/github-token` (chmod 600). The repo-local file is LEFT IN PLACE:
+the tooling still honors it as a fallback, and deleting it is a user
+decision (it is the credential that pushes this repo).
+
+**Verification.** `sh -n` clean; `compile()` clean; functional checks:
+`get_token()` returns the machine-level token, `$GITHUB_TOKEN` still takes
+precedence, and the legacy repo-local file is honored when `~/.tre/
+github-token` is absent (temp-HOME test). Full suite 665 pass / 0 fail /
+10 skipped. No guardrail-zone file touched.
 
 # HANDOFF — C40: machine-level Telegram config + state (2026-10-05)
 
@@ -106,10 +140,11 @@ home; +1 "enabled from any cwd with no workspace .tre" test), `.gitignore`,
 helper + always-active SKILL.md are gitignored (deployment-specific) and were
 updated in place.
 
-**Follow-up (W2, next increment).** The release tooling still looks for the
+**Follow-up (RESOLVED by W2).** The release tooling still looked for the
 GitHub token only in `$GITHUB_TOKEN` + the macOS keychain — the repo-local
-`.tre/github-token` (where this machine actually keeps it) is not consulted.
-Move the lookup to `~/.tre/github-token` (with the existing fallbacks) + docs.
+`.tre/github-token` (where this machine actually keeps it) was not
+consulted. W2 (above) adds the `~/.tre/github-token` lookup (with the
+legacy repo-local file as a fallback) + docs.
 
 # HANDOFF — C38: implicit `~/.tre` root (2026-10-05)
 
