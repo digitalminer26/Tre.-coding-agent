@@ -1,5 +1,19 @@
 # Current project status (2026-10-05)
 
+**Release v0.1.3 — published.** The config-consistency changes are committed,
+pushed, and now included in the new v0.1.3 offline bundle + installer release.
+The normal `npm ci --omit=dev` bundle build failed (npm cache inaccessible;
+network fallback failed), so the v0.1.2 bundle's production `node_modules`
+were reused with the current freshly built v0.1.3 `dist/`, package metadata,
+and installer. SHA-256:
+`e87e71b9f0e7cb64450bd2a671ae8b766b17d8b98fab6e870f97f003d709f062`.
+The assembled bundle passed a cleanroom CLI `--help` smoke test, resolved all
+four declared direct dependencies, and passed the embedded installer smoke
+test. This is a validated package, but NOT a fresh clean dependency install;
+rebuild with `npm ci` in a network/cache-capable environment if that stronger
+provenance is required. Release assets: `tre-coding-agent-0.1.3-offline.tgz`
+and `install-tre-0.1.3.sh` at GitHub release v0.1.3.
+
 The "config consistency" workstream is COMPLETE: machine-wide config/secrets
 now live under `~/.tre`, not project-local `.tre/`. **C40** moved the
 Telegram bot's config + poll state to `~/.tre/telegram.json` +
