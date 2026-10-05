@@ -112,6 +112,28 @@ test("resolveAccessToken: unexpired → returns stored, no refresh call", async 
   assert.equal(calls, 0);
 });
 
+test("resolveAccessToken: force → refresh even when unexpired (401 recovery)", async (t) => {
+  const file = mkfile(t);
+  writeTokens(okTokens(), file); // unexpired (NOW + 1h)
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({ access_token: "AT-forced", expires_in: 3600 }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  // Without force: the unexpired token is returned, no refresh.
+  const stored = await resolveAccessToken({ file, now: () => NOW, fetchImpl });
+  assert.equal(stored, "AT");
+  assert.equal(calls, 0);
+  // With force: the refresh fires despite the unexpired token.
+  const forced = await resolveAccessToken({ file, now: () => NOW, fetchImpl, force: true });
+  assert.equal(forced, "AT-forced");
+  assert.equal(calls, 1);
+  assert.equal(readTokens(file)!.accessToken, "AT-forced"); // persisted
+});
+
 test("resolveAccessToken: expired → refresh (json), rotation persisted", async (t) => {
   const file = mkfile(t);
   writeTokens(okTokens({ expiresAt: NOW - 1000 }), file);

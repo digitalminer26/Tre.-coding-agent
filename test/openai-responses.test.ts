@@ -18,7 +18,12 @@ import {
   openAiResponsesStream,
   responsesUrl,
 } from "../src/wire/openai-responses.js";
-import { writeTokens } from "../src/auth/token-store.js";
+import {
+  __resetTokenRefreshForTests,
+  __setTokenRefreshForTests,
+  readTokens,
+  writeTokens,
+} from "../src/auth/token-store.js";
 import type {
   AgentMessage,
   AssistantStreamEvent,
@@ -269,5 +274,129 @@ test("auth: no login on record → clean done(error) naming the fix", async (t) 
   } finally {
     if (prev === undefined) delete process.env.TRE_CHATGPT_AUTH;
     else process.env.TRE_CHATGPT_AUTH = prev;
+  }
+});
+
+// ─────────────── 401 → force-refresh → retry (stale unexpired token) ───────────────
+
+/**
+ * Point the token store at a temp file and the wire's forced refresh at a
+ * mock endpoint (no network). Returns the file + cleanup.
+ */
+function authFixture(t: { after(fn: () => void): void }): { file: string; prev: string | undefined } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-resp-401-"));
+  const file = path.join(dir, "auth.json");
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    __resetTokenRefreshForTests();
+  });
+  const prev = process.env.TRE_CHATGPT_AUTH;
+  process.env.TRE_CHATGPT_AUTH = file;
+  return { file, prev };
+}
+
+test("auth: 401 on a stale unexpired token → force-refresh + retry once, success", async (t) => {
+  const { file, prev } = authFixture(t);
+  t.after(() => {
+    if (prev === undefined) delete process.env.TRE_CHATGPT_AUTH;
+    else process.env.TRE_CHATGPT_AUTH = prev;
+  });
+  // Stored token is NOMINALLY unexpired (the 401 means the server rejected
+  // it anyway) — the bug this fixes.
+  writeTokens(
+    { accessToken: "AT-stale", refreshToken: "RT", expiresAt: Date.now() + 3_600_000, savedAt: Date.now() },
+    file,
+  );
+  // Mock the token endpoint the wire's forced refresh will hit.
+  let refreshCalls = 0;
+  const mockFetch = (async () => {
+    refreshCalls++;
+    return new Response(
+      JSON.stringify({ access_token: "AT-fresh", refresh_token: "RT2", expires_in: 3600 }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  __setTokenRefreshForTests({ tokenUrl: "http://127.0.0.1:1/token", fetchImpl: mockFetch });
+
+  const mock = await startMockResponses("401-then-ok");
+  try {
+    const model: ModelConfig = { ...MODEL, baseUrl: mock.baseUrl, auth: "chatgpt-oauth" };
+    const events = await collectResponsesStream(
+      openAiResponsesStream,
+      model,
+      noToolsCtx(),
+      { signal: new AbortController().signal },
+    );
+    const done = events[events.length - 1]!;
+    assert.equal(done.type, "done");
+    if (done.type !== "done") return;
+    assert.equal(done.message.stopReason, "stop");
+    // Exactly two requests: the 401, then the retry with the fresh token.
+    assert.equal(mock.requestCount, 2);
+    assert.deepEqual(mock.authHistory, ["Bearer AT-stale", "Bearer AT-fresh"]);
+    // The forced refresh fired exactly once and rotated the stored token.
+    assert.equal(refreshCalls, 1);
+    assert.equal(readTokens(file)!.accessToken, "AT-fresh");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("auth: 401 with a dead refresh token → clean done(error), no infinite loop", async (t) => {
+  const { file, prev } = authFixture(t);
+  t.after(() => {
+    if (prev === undefined) delete process.env.TRE_CHATGPT_AUTH;
+    else process.env.TRE_CHATGPT_AUTH = prev;
+  });
+  writeTokens(
+    { accessToken: "AT-stale", refreshToken: "RT", expiresAt: Date.now() + 3_600_000, savedAt: Date.now() },
+    file,
+  );
+  // The refresh is rejected (4xx) → AuthRequiredError (re-login needed).
+  const mockFetch = (async () => new Response("nope", { status: 400 })) as unknown as typeof fetch;
+  __setTokenRefreshForTests({ tokenUrl: "http://127.0.0.1:1/token", fetchImpl: mockFetch });
+
+  const mock = await startMockResponses("401-always");
+  try {
+    const model: ModelConfig = { ...MODEL, baseUrl: mock.baseUrl, auth: "chatgpt-oauth" };
+    const events = await collectResponsesStream(
+      openAiResponsesStream,
+      model,
+      noToolsCtx(),
+      { signal: new AbortController().signal },
+    );
+    const done = events[events.length - 1]!;
+    assert.equal(done.type, "done");
+    if (done.type !== "done") return;
+    assert.equal(done.message.stopReason, "error");
+    // The refresh was attempted (and rejected) — the error names the fix.
+    assert.match(done.message.errorMessage ?? "", /tre\. login chatgpt/);
+    // No infinite retry: the 401 was hit, a refresh was attempted, then it
+    // gave up (no third request to the model).
+    assert.equal(mock.requestCount, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("auth: 401 on a static-key model is NOT retried (no token store)", async (t) => {
+  const mock = await startMockResponses("401-always");
+  try {
+    // No `auth: "chatgpt-oauth"` → static key path → a 401 is a plain error.
+    const model: ModelConfig = { ...MODEL, baseUrl: mock.baseUrl, apiKey: "static-key" };
+    const events = await collectResponsesStream(
+      openAiResponsesStream,
+      model,
+      noToolsCtx(),
+      { signal: new AbortController().signal },
+    );
+    const done = events[events.length - 1]!;
+    assert.equal(done.type, "done");
+    if (done.type !== "done") return;
+    assert.equal(done.message.stopReason, "error");
+    // sseStream retries 401? No — 401 is not retryable, so exactly one request.
+    assert.equal(mock.requestCount, 1);
+  } finally {
+    await mock.close();
   }
 });

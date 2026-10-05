@@ -178,6 +178,22 @@ Rules:
   Enumeration still holds: a **sibling** of `~/.tre` (e.g. `~/other`) is still
   OUTSIDE the boundary — denied by the kernel and refused by the file-tool
   hook. Full spec: `docs/05-extra-roots-spec.md` §6.
+- **C39 — ChatGPT 401 recovery: a wire 401 forces a token refresh + one
+  retry (stale-but-unexpired token).** The ChatGPT backend resolves its
+  Bearer token from the local store (`resolveAccessToken`), which refreshes
+  only when the access token is within 60s of expiry. A token can be rejected
+  by the server (401) while still nominally unexpired — the expiry check then
+  never fires and every request keeps failing. C39 closes that: when the
+  Responses stream gets a **pre-stream 401** and `model.auth ===
+  "chatgpt-oauth"`, the wire layer calls `resolveAccessToken({ force: true })`
+  (the new `force` flag bypasses the unexpired early-return) and retries the
+  stream **once** with the refreshed token. A second 401, a non-401 error, or
+  a rejected refresh (4xx → `AuthRequiredError`) is a clean `done(error)` —
+  **no infinite retry loop**. Static-key models (no `chatgpt-oauth`) are
+  unaffected: their 401 is a plain error, never retried. The forced refresh
+  uses the same refresh-token grant + rotation + persistence as the expiry
+  path. Test seam: `__setTokenRefreshForTests` / `__resetTokenRefreshForTests`
+  point the default-endpoint refresh at a mock (no network).
 
 ## Contract 2 — Events
 

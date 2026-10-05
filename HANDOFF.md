@@ -1,15 +1,22 @@
 # Current project status (2026-10-05)
 
+The ChatGPT backend now recovers from a **stale-but-unexpired access token**
+(C39). A token rejected by the server (401) while still nominally valid used
+to fail every request forever — the token store only refreshes within 60s of
+`expiresAt`, so the expiry check never fired. Now, when the Responses stream
+gets a **pre-stream 401** on a `chatgpt-oauth` model, the wire layer forces a
+refresh (`resolveAccessToken({ force: true })`) and retries the stream **once**;
+a second 401, a non-401 error, or a rejected refresh is a clean `done(error)`
+(no infinite loop). Static-key models are unaffected. This closes the follow-up
+logged in the C38 entry.
+
 `~/.tre` — tre.'s own state dir (sessions, `chatgpt-auth.json`, the model
-catalog) — is now an **implicit, always-on root** (C38). At startup `main()`
-prepends it to the boundary (`extraRoots = [implicitRoot, ...durableRoots,
-...oneShotRoots]`), so the bash kernel sandbox and the write/edit path sandbox
-reach tre.'s own state by construction, on every machine, with no config. It
-flows through the existing C35 `extraRoots` mechanism, so **no guardrail-zone
-file is touched** (`sandbox.ts` / `safety.ts` / `bash.ts` are unchanged). A
-sibling of `~/.tre` (e.g. `~/other`) is still outside the boundary. The startup
-banner shows it on its own `implicit root:` line; the system prompt's
-Working-directory section lists it as an additional read/write root.
+catalog) — is an **implicit, always-on root** (C38): at startup `main()`
+prepends it to the boundary, so the bash kernel sandbox and the write/edit path
+sandbox reach tre.'s own state by construction, on every machine, with no
+config. It flows through the existing C35 `extraRoots` mechanism, so **no
+guardrail-zone file is touched**. A sibling of `~/.tre` (e.g. `~/other`) is
+still outside the boundary.
 
 ChatGPT login still discovers a model ID from the authenticated Codex model
 catalog before writing `~/.tre/tre/models.json` (see the 2026-10-03 entry).
@@ -63,11 +70,51 @@ parallel-delegation wave, but C37 is already the background Telegram driver.
 It is **C38**; the docs were renumbered accordingly (the Telegram C37 bullet is
 untouched).
 
-**Follow-up (not in this increment).** The stored ChatGPT **access** token in
+**Follow-up (RESOLVED by C39).** The stored ChatGPT **access** token in
 `~/.tre/chatgpt-auth.json` can be invalidated server-side while still
 nominally unexpired; the token store only refreshes within 60s of `expiresAt`,
 so a dead-but-unexpired access token yields a 401 with no auto-retry-refresh.
-A 401 on the wire should trigger a refresh-and-retry. (Out of scope for C38.)
+C39 (below) adds the 401 → force-refresh → one-retry path.
+
+# HANDOFF — C39: ChatGPT 401 recovery (force-refresh + one retry) (2026-10-05)
+
+**Problem.** The ChatGPT backend resolves its Bearer token from the local store
+(`resolveAccessToken`), which refreshes only when the access token is within
+60s of `expiresAt`. A token can be rejected by the server (HTTP 401) while
+still nominally unexpired — then the expiry check never fires and EVERY request
+keeps failing with the same dead token (the exact symptom seen in the C38
+session: `~/.tre/chatgpt-auth.json` held a stale access token that OpenAI
+rejected with 401 while it was still within its nominal window).
+
+**Fix (C39).**
+- `src/auth/token-store.ts` — `resolveAccessToken` gains a `force` option that
+  bypasses the unexpired early-return (a 401 means the server rejected a
+  nominally-valid token). Same refresh grant, rotation, and persistence as the
+  expiry path. Test seam `__setTokenRefreshForTests` /
+  `__resetTokenRefreshForTests` override the default token endpoint + transport
+  so the wire's forced refresh (which passes no endpoint/fetch) can be pointed
+  at a mock — no network in tests.
+- `src/wire/openai-responses.ts` — the stream consumption is extracted into an
+  inner `consume(bearer)` async generator (the SSE switch is unchanged). The
+  outer loop attempts the stream; on a **pre-stream `HttpError` 401** with
+  `model.auth === "chatgpt-oauth"` it calls `resolveAccessToken({ force: true })`
+  and retries **once**. A second 401, a non-401 error, or a rejected refresh
+  (4xx → `AuthRequiredError` → "run `tre. login chatgpt` again") is a clean
+  `done(error)` — **no infinite retry**. Static-key models (no `chatgpt-oauth`)
+  are unaffected: their 401 is a plain, non-retried error.
+
+**Files.** `src/auth/token-store.ts` (`force` + test seam),
+`src/wire/openai-responses.ts` (401 retry loop + header note),
+`test/token-store.test.ts` (1 new `force` test), `test/openai-responses.test.ts`
+(3 new 401-retry tests), `test/mock-responses.ts` (`401-then-ok` + `401-always`
+scenarios, `authHistory`/`requestCount`), `docs/02-contracts.md` (C39 bullet).
+
+**Verification.** `tsc` clean; full suite green except the 8 pre-existing
+environment-dependent failures (confirmed identical at HEAD). New tests: the
+401-retry success path (two requests — `Bearer AT-stale` then `Bearer
+AT-fresh`, exactly one forced refresh, token rotated + persisted), the dead-
+refresh path (one 401, refresh rejected, clean `done(error)`, no third request),
+and the static-key 401 (not retried). No guardrail-zone file touched.
 
 # HANDOFF — ChatGPT login: `invalid_authorize_request` (root cause + fix) (2026-10-02)
 

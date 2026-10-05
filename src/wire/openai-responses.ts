@@ -25,6 +25,10 @@
  *     expiry) INSIDE the async generator before the first yield — the
  *     "expiring OAuth token" seam reserved in PLAN.md §8. A static
  *     `apiKey`/`opts.apiKey` also works (tests, non-subscription keys).
+ *     C39: a pre-stream 401 (a token the server rejected while it is still
+ *     nominally unexpired) forces a refresh (`resolveAccessToken({ force:
+ *     true })`) and retries the stream ONCE; a second 401 / failed refresh is
+ *     a clean done(error).
  *
  * L3: original implementation (the chat/completions wire is the structural
  * reference; the Responses event vocabulary is from the OpenAI API docs +
@@ -334,7 +338,9 @@ export const openAiResponsesStream: StreamFn = (model, ctx, opts) => {
 
     // Resolve the Bearer token BEFORE the first network call (a refresh may
     // take a round-trip). A failed resolution is a clean done(error) — I3.
-    const { token, error: tokenError } = await resolveBearer(model, opts);
+    const resolved = await resolveBearer(model, opts);
+    let token = resolved.token;
+    const tokenError = resolved.error;
     if (tokenError !== undefined) {
       finish =
         tokenError === "aborted"
@@ -343,11 +349,14 @@ export const openAiResponsesStream: StreamFn = (model, ctx, opts) => {
     }
 
     if (finish === undefined) {
-      try {
+      // Consume one Responses SSE stream into `message`/`finish`/`usage`,
+      // yielding its events. `bearer` is the Bearer for this attempt; the
+      // caller retries with a refreshed token after a pre-stream 401.
+      const consume = async function* (bearer: string): AsyncGenerator<AssistantStreamEvent> {
         const frames = sseStream({
           url: responsesUrl(model.baseUrl || CHATGPT_API_BASE),
           body: JSON.stringify(buildResponsesParams(model, ctx)),
-          apiKey: token,
+          apiKey: bearer,
           signal: opts.signal,
         });
         for await (const frame of frames) {
@@ -471,11 +480,53 @@ export const openAiResponsesStream: StreamFn = (model, ctx, opts) => {
             ? { reason: "stop" }
             : { reason: "error", message: "stream ended without a terminal event" };
         }
+    };
+
+    // Stream attempt. A pre-stream 401 on the ChatGPT backend means the
+    // server rejected a token that is still nominally unexpired: force a
+    // refresh and retry ONCE (the refresh token may still be valid). A second
+    // 401, a non-401 error, or a failed refresh is a clean done(error).
+    for (let attempt = 0; ; attempt++) {
+      try {
+        for await (const ev of consume(token)) yield ev;
+        break;
       } catch (err) {
+        if (
+          attempt === 0 &&
+          model.auth === "chatgpt-oauth" &&
+          err instanceof HttpError &&
+          err.status === 401
+        ) {
+          try {
+            token = await resolveAccessToken({ signal: opts.signal, force: true });
+            continue; // retry once with the refreshed token
+          } catch (refreshErr) {
+            finish = isAbort(refreshErr)
+              ? { reason: "aborted" }
+              : {
+                  reason: "error",
+                  message:
+                    refreshErr instanceof AuthRequiredError
+                      ? refreshErr.message
+                      : `ChatGPT auth refresh failed: ${
+                          refreshErr instanceof Error ? refreshErr.message : String(refreshErr)
+                        }`,
+                };
+            break;
+          }
+        }
         finish = isAbort(err)
           ? { reason: "aborted" }
           : { reason: "error", message: describeError(err) };
+        break;
       }
+    }
+    }
+    // TS can't narrow `finish` across the `continue` above; it is always set
+    // by the time the loop exits (every path either breaks with `finish` set
+    // or `continue`s to a retry, which re-enters and sets it).
+    if (finish === undefined) {
+      finish = { reason: "error", message: "stream ended without a terminal event" };
     }
 
     // Authoritative parse of tool-call args (the partials were best-effort).

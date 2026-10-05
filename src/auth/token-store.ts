@@ -160,6 +160,12 @@ export interface RefreshOpts {
   file?: string;
   /** Abort signal. */
   signal?: AbortSignal;
+  /**
+   * Force a refresh even when the stored access token is unexpired. Used by
+   * the wire layer after a 401: the server rejected a token that is still
+   * nominally valid, so the expiry check must be bypassed.
+   */
+  force?: boolean;
 }
 
 interface TokenResponse {
@@ -168,6 +174,22 @@ interface TokenResponse {
   id_token?: string;
   expires_in?: number;
   token_type?: string;
+}
+
+/**
+ * Test seam: override the default token endpoint + transport so a caller
+ * that resolves with the DEFAULTS (the wire layer's forced 401-refresh calls
+ * `resolveAccessToken({ signal, force })` with no endpoint/fetch) can be
+ * pointed at a mock. Explicit opts always win. Reset between tests.
+ */
+let refreshOverrides: { tokenUrl?: string; fetchImpl?: typeof fetch } = {};
+export function __setTokenRefreshForTests(
+  o: { tokenUrl?: string; fetchImpl?: typeof fetch } = {},
+): void {
+  refreshOverrides = { ...o };
+}
+export function __resetTokenRefreshForTests(): void {
+  refreshOverrides = {};
 }
 
 /** Decode the `https://api.openai.com/profile` / `.../auth` JWT claims (email, plan). */
@@ -196,17 +218,19 @@ export function idTokenClaims(idToken: string): { email?: string; planType?: str
 
 /**
  * Resolve a usable access token: return the stored one when unexpired, else
- * refresh it (and persist the rotation). Throws `AuthRequiredError` when
- * there is no login or the refresh is rejected (re-login needed);
- * `AuthError` on transport failure.
+ * refresh it (and persist the rotation). `force` bypasses the unexpired
+ * early-return (a 401 means the server rejected a nominally-valid token).
+ * Throws `AuthRequiredError` when there is no login or the refresh is
+ * rejected (re-login needed); `AuthError` on transport failure.
  */
 export async function resolveAccessToken(opts: RefreshOpts = {}): Promise<string> {
   const file = opts.file ?? tokenFilePath();
   const now = opts.now ?? Date.now;
   const stored = readTokens(file);
   if (stored === null) throw new AuthRequiredError();
-  // 60s skew: never send a token that expires mid-request.
-  if (stored.expiresAt - 60_000 > now()) return stored.accessToken;
+  // 60s skew: never send a token that expires mid-request. Skipped when the
+  // caller forces a refresh (the token was rejected despite being unexpired).
+  if (!opts.force && stored.expiresAt - 60_000 > now()) return stored.accessToken;
 
   const refresh = await refreshTokens(stored.refreshToken, opts);
   const rotated: StoredTokens = {
@@ -232,10 +256,10 @@ async function refreshTokens(
   email?: string;
   planType?: string;
 }> {
-  const tokenUrl = opts.tokenUrl ?? CHATGPT_TOKEN_URL;
+  const tokenUrl = opts.tokenUrl ?? refreshOverrides.tokenUrl ?? CHATGPT_TOKEN_URL;
   const clientId = opts.clientId ?? CHATGPT_CLIENT_ID;
   const encoding = opts.encoding ?? "json";
-  const fetchImpl = opts.fetchImpl ?? fetch;
+  const fetchImpl = opts.fetchImpl ?? refreshOverrides.fetchImpl ?? fetch;
   const now = opts.now ?? Date.now;
 
   const params: Record<string, string> = {

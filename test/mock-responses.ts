@@ -27,7 +27,9 @@ export type MockResponsesScenario =
   | "multi-tool"
   | "length"
   | "failed"
-  | "http-error";
+  | "http-error"
+  | "401-then-ok"
+  | "401-always";
 
 export interface MockResponses {
   /** e.g. http://127.0.0.1:PORT — use as baseUrl (the wire appends /responses). */
@@ -36,6 +38,10 @@ export interface MockResponses {
   lastRequest: Record<string, unknown> | null;
   /** The Authorization header of the most recent request, or null. */
   lastAuth: string | null;
+  /** Every Authorization header seen, in order (401-retry assertions). */
+  authHistory: string[];
+  /** Total requests received. */
+  requestCount: number;
   close(): Promise<void>;
 }
 
@@ -146,6 +152,16 @@ function framesFor(
         status: 500,
         body: JSON.stringify({ error: { message: "upstream exploded", code: "server_error" } }),
       };
+    case "401-then-ok":
+      // The server rejects the FIRST request with 401 (stale token); every
+      // subsequent request (the retry, with the refreshed token) gets the
+      // normal text frames.
+      return framesFor("text");
+    case "401-always":
+      return {
+        status: 401,
+        body: JSON.stringify({ error: { message: "invalid token", code: "invalid_request_error" } }),
+      };
   }
 }
 
@@ -156,17 +172,28 @@ export async function startMockResponses(
     body: null,
     auth: null,
   };
+  const authHistory: string[] = [];
+  let requestCount = 0;
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
+      requestCount++;
       try {
         lastRequest.body = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
       } catch {
         lastRequest.body = null;
       }
       lastRequest.auth = req.headers.authorization ?? null;
+      authHistory.push(lastRequest.auth ?? "");
 
+      // 401-then-ok: the first request is rejected (stale token), the retry
+      // (with the refreshed token) succeeds with the normal text frames.
+      if (scenario === "401-then-ok" && requestCount === 1) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "invalid token", code: "invalid_request_error" } }));
+        return;
+      }
       const frames = framesFor(scenario);
       if (typeof frames === "object" && !Array.isArray(frames)) {
         res.writeHead(frames.status, { "content-type": "application/json" });
@@ -190,6 +217,12 @@ export async function startMockResponses(
     },
     get lastAuth() {
       return lastRequest.auth;
+    },
+    get authHistory() {
+      return authHistory;
+    },
+    get requestCount() {
+      return requestCount;
     },
     close: () =>
       new Promise<void>((resolve) => {
