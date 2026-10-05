@@ -130,16 +130,24 @@ install() {
   case ":$PATH:" in
     *":$BINDIR:"*) : ;;
     *)
-      # ~/.local/bin is not on PATH — add it to the shell rc so every future
-      # shell finds tre., and export it for this shell right now.
+      # Pick the user's interactive shell rc. $SHELL (the login shell) is
+      # inherited even when this script is launched via `sh`, so it beats
+      # the ZSH_VERSION/BASH_VERSION check — those are empty under `sh`,
+      # which would misfile the line into ~/.profile (unread by zsh).
       RC=""
-      if [ -n "${ZSH_VERSION:-}" ]; then
-        RC="$HOME/.zshrc"
-      elif [ -n "${BASH_VERSION:-}" ]; then
-        RC="$HOME/.bashrc"
-      else
-        RC="$HOME/.profile"
-      fi
+      case "${SHELL:-}" in
+        *zsh*)  RC="$HOME/.zshrc" ;;
+        *bash*) RC="$HOME/.bashrc" ;;
+        *)
+          if [ -n "${ZSH_VERSION:-}" ]; then
+            RC="$HOME/.zshrc"
+          elif [ -n "${BASH_VERSION:-}" ]; then
+            RC="$HOME/.bashrc"
+          else
+            RC="$HOME/.profile"
+          fi
+          ;;
+      esac
       if [ -f "$RC" ] && grep -F "$BINDIR" "$RC" >/dev/null 2>&1; then
         echo "note: $RC already mentions $BINDIR — if 'tre.' is still not"
         echo "      found, check that line reads: export PATH=\"$BINDIR:\$PATH\""
