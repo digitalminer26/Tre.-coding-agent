@@ -102,8 +102,15 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def release_body(repo, tag, asset_name, sha):
+def release_body(repo, tag, asset_name, installer_name, sha):
     return f"""Self-contained offline bundle of tre. ({tag}).
+
+One-command install (requires Node.js >= 20):
+  curl -fsSL https://github.com/{repo}/releases/download/{tag}/{installer_name} | sh
+
+The installer downloads this release's bundle and performs the deployment.
+
+Manual bundle install:
 
 Contents: pre-built dist/ + full prod-only node_modules (pure JS/WASM, no
 native addons) + install-tre.sh (target-side deploy script).
@@ -137,8 +144,32 @@ def main():
     tag = args[2] if len(args) > 2 else "v" + version
     name = args[3] if len(args) > 3 else f"tre. {tag} — offline bundle"
     asset_name = os.path.basename(tarball)
+    installer_name = f"install-tre-{version}.sh"
     sha = sha256_of(tarball)
-    body = release_body(repo, tag, asset_name, sha)
+    body = release_body(repo, tag, asset_name, installer_name, sha)
+    installer_path = os.path.join(os.path.dirname(os.path.abspath(tarball)), installer_name)
+    with open(installer_path, "w", encoding="utf-8") as installer:
+        installer.write(f'''#!/bin/sh
+# One-command installer for tre. {tag}. Requires Node.js >= 20.
+set -eu
+REPO={repo!r}
+TAG={tag!r}
+ASSET={asset_name!r}
+BASE="https://github.com/$REPO/releases/download/$TAG"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+command -v node >/dev/null 2>&1 || {{ echo "ERROR: Node.js >= 20 is required" >&2; exit 1; }}
+MAJOR=$(node -p 'process.versions.node.split(".")[0]')
+[ "$MAJOR" -ge 20 ] || {{ echo "ERROR: Node.js >= 20 is required (found $(node --version))" >&2; exit 1; }}
+if command -v curl >/dev/null 2>&1; then curl -fL "$BASE/$ASSET" -o "$TMP/$ASSET"
+elif command -v wget >/dev/null 2>&1; then wget -O "$TMP/$ASSET" "$BASE/$ASSET"
+else echo "ERROR: curl or wget is required to download the bundle" >&2; exit 1; fi
+DEST="$HOME/.tre/tre"
+mkdir -p "$DEST"
+tar xzf "$TMP/$ASSET" -C "$DEST" --strip-components=1
+"$DEST/install-tre.sh" install
+''')
+    os.chmod(installer_path, 0o755)
 
     token = get_token()
     if not token:
@@ -174,9 +205,9 @@ def main():
     else:
         die(f"release lookup (HTTP {status}): {rel}")
 
-    # Replace any existing asset with the same name, then upload.
+    # Replace any existing assets with the same names, then upload.
     for a in rel.get("assets", []):
-        if a.get("name") == asset_name:
+        if a.get("name") in (asset_name, installer_name):
             api_call(token, "DELETE", f"{API}/repos/{repo}/releases/assets/{a['id']}")
             print(f"release-publish: removed old asset {a['name']}")
 
@@ -191,6 +222,17 @@ def main():
     )
     if status not in (200, 201):
         die(f"asset upload (HTTP {status}): {up}")
+    print(f"release-publish: OK — {up['browser_download_url']} ({up['size']} bytes)")
+
+    with open(installer_path, "rb") as f:
+        installer_data = f.read()
+    upload_url = rel["upload_url"].replace("{?name,label}", "?name=" + installer_name)
+    status, up = api_call(
+        token, "POST", upload_url, body=installer_data,
+        headers={"Content-Type": "application/x-sh"},
+    )
+    if status not in (200, 201):
+        die(f"installer upload (HTTP {status}): {up}")
     print(f"release-publish: OK — {up['browser_download_url']} ({up['size']} bytes)")
 
 

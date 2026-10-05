@@ -1,5 +1,10 @@
 # Current project status (2026-10-05)
 
+Release packaging now publishes both the offline `.tgz` and a versioned
+`install-tre-X.Y.Z.sh` one-command installer. The installer validates Node >=20,
+downloads the release bundle, extracts it, and invokes the embedded deployment
+script. README release instructions updated accordingly.
+
 The ChatGPT backend now recovers from a **stale-but-unexpired access token**
 (C39). A token rejected by the server (401) while still nominally valid used
 to fail every request forever — the token store only refreshes within 60s of

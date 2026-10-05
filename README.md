@@ -109,14 +109,18 @@ tarball as the release asset (`scripts/release-publish.py`, stdlib-only
 Python; token from `$GITHUB_TOKEN` or the macOS keychain `github.com`
 credential). `TRE_PUSH=0` / `TRE_PUBLISH=0` skip those steps.
 
-Installing on a target machine (Node ≥ 20; ≥ 22 recommended):
+Installing on a target machine (Node ≥ 20; ≥ 22 recommended) is one command —
+download and execute the versioned installer script from the release:
 
 ```bash
-curl -LO <release-download-url>
-mkdir -p ~/.tre/tre
-tar xzf tre-coding-agent-X.Y.Z-offline.tgz -C ~/.tre/tre --strip-components=1
-~/.tre/tre/install-tre.sh install    # deploy + symlink + PATH setup + smoke test
+curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/latest/download/install-tre-X.Y.Z.sh | sh
 ```
+
+Replace `X.Y.Z` with the release version. The script downloads the matching
+offline bundle, installs it under `~/.tre/tre`, creates the `tre.` symlink,
+updates the shell PATH configuration if needed, and smoke-tests the install.
+Alternatively, download the `.tgz` asset and run its embedded
+`install-tre.sh install` if you prefer a manual/offline transfer.
 
 `install-tre.sh install` also adds `~/.local/bin` to your shell rc
 (`.zshrc`/`.bashrc`/`.profile`) and tells you the one-line `export PATH`
