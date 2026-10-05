@@ -114,10 +114,14 @@ Installing on a target machine (Node ≥ 20; ≥ 22 recommended):
 
 ```bash
 curl -LO <release-download-url>
+mkdir -p ~/.tre/tre
 tar xzf tre-coding-agent-X.Y.Z-offline.tgz -C ~/.tre/tre --strip-components=1
-~/.tre/tre/install-tre.sh install    # deploy + ~/.local/bin/tre. symlink + smoke test
-tre. --help
+~/.tre/tre/install-tre.sh install    # deploy + symlink + PATH setup + smoke test
 ```
+
+`install-tre.sh install` also adds `~/.local/bin` to your shell rc
+(`.zshrc`/`.bashrc`/`.profile`) and tells you the one-line `export PATH`
+for the current shell. In a new terminal, `tre. --help` just works.
 
 Uninstall: `rm -rf ~/.tre/tre ~/.local/bin/tre.` (plus `~/.tre/` config/data
 if you want the machine fully clean — see `install-tre.sh`'s `show` output).

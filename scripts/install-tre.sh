@@ -32,7 +32,8 @@ show() {
    tar xzf <this-tarball> -C <dest> --strip-components=1
 
    Example (dest = ~/.tre/tre):
-     tar xzf tre-coding-agent-0.1.0-offline.tgz -C ~/.tre/tre \
+     mkdir -p ~/.tre/tre          # tar does not create parent dirs
+     tar xzf tre-coding-agent-X.Y.Z-offline.tgz -C ~/.tre/tre \
          --strip-components=1
 
    --strip-components=1 drops the leading "package/" directory so the
@@ -46,8 +47,11 @@ show() {
  ------------------------------------------------------------------------
      mkdir -p ~/.local/bin
      ln -sf <dest>/dist/src/cli/main.js ~/.local/bin/tre.
-     # make sure ~/.local/bin is on PATH:
-     echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile   # or ~/.zshrc
+     # make sure ~/.local/bin is on PATH (the install command does this
+     # automatically for your shell rc; if you did the steps by hand):
+     echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc     # or ~/.profile
+     # then in THIS shell (a new terminal picks it up on its own):
+     export PATH="$HOME/.local/bin:$PATH"
 
  STEP 4 — point it at an LLM endpoint (per-machine config)
  ------------------------------------------------------------------------
@@ -125,7 +129,26 @@ install() {
   echo "==> symlink: $BINDIR/tre. -> $DEST/dist/src/cli/main.js"
   case ":$PATH:" in
     *":$BINDIR:"*) : ;;
-    *) echo "note: $BINDIR is not on PATH. Add: export PATH=\"$BINDIR:\$PATH\"" ;;
+    *)
+      # ~/.local/bin is not on PATH — add it to the shell rc so every future
+      # shell finds tre., and export it for this shell right now.
+      RC=""
+      if [ -n "${ZSH_VERSION:-}" ]; then
+        RC="$HOME/.zshrc"
+      elif [ -n "${BASH_VERSION:-}" ]; then
+        RC="$HOME/.bashrc"
+      else
+        RC="$HOME/.profile"
+      fi
+      if [ -f "$RC" ] && grep -F "$BINDIR" "$RC" >/dev/null 2>&1; then
+        echo "note: $RC already mentions $BINDIR — if 'tre.' is still not"
+        echo "      found, check that line reads: export PATH=\"$BINDIR:\$PATH\""
+      else
+        printf '\nexport PATH="%s:$PATH"\n' "$BINDIR" >> "$RC"
+        echo "==> added: export PATH=\"$BINDIR:\$PATH\"  (to $RC)"
+      fi
+      echo "==> for THIS shell:  export PATH=\"$BINDIR:\$PATH\""
+      ;;
   esac
 
   # --- smoke test ---

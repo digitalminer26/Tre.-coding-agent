@@ -21,6 +21,7 @@ Usage:
 Exit: 0 on success, 1 on any failure. Idempotent: re-running for the same
 tag reuses the release and replaces the asset.
 """
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,34 @@ def tarball_version(tarball):
     return json.loads(out.stdout)["version"]
 
 
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def release_body(repo, tag, asset_name, sha):
+    return f"""Self-contained offline bundle of tre. ({tag}).
+
+Contents: pre-built dist/ + full prod-only node_modules (pure JS/WASM, no
+native addons) + install-tre.sh (target-side deploy script).
+
+Target machine needs ONLY Node.js >= 20 (>= 22 recommended). No network, no
+npm, no GitHub, no build step.
+
+Install:
+  curl -LO https://github.com/{repo}/releases/download/{tag}/{asset_name}
+  mkdir -p ~/.tre/tre
+  tar xzf {asset_name} -C ~/.tre/tre --strip-components=1
+  ~/.tre/tre/install-tre.sh install
+  tre. --help
+
+sha256: {sha}
+"""
+
+
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
@@ -108,6 +137,8 @@ def main():
     tag = args[2] if len(args) > 2 else "v" + version
     name = args[3] if len(args) > 3 else f"tre. {tag} — offline bundle"
     asset_name = os.path.basename(tarball)
+    sha = sha256_of(tarball)
+    body = release_body(repo, tag, asset_name, sha)
 
     token = get_token()
     if not token:
@@ -115,26 +146,31 @@ def main():
             "credential in the macOS keychain (git push uses the same one)")
 
     print(f"release-publish: repo={repo} tag={tag} asset={asset_name} ({version})")
+    print(f"release-publish: sha256 {sha}")
 
     status, rel = api_call(token, "GET", f"{API}/repos/{repo}/releases/tags/{tag}")
     if status == 404:
-        body = {
-            "tag_name": tag,
-            "target_commitish": "main",
-            "name": name,
-            "draft": False,
-            "prerelease": False,
-        }
         status, rel = api_call(
             token, "POST", f"{API}/repos/{repo}/releases",
-            body=json.dumps(body).encode(),
+            body=json.dumps({
+                "tag_name": tag,
+                "target_commitish": "main",
+                "name": name,
+                "body": body,
+                "draft": False,
+                "prerelease": False,
+            }).encode(),
             headers={"Content-Type": "application/json"},
         )
         if status not in (200, 201):
             die(f"create release (HTTP {status}): {rel}")
         print(f"release-publish: created {rel['html_url']}")
     elif status == 200:
-        print(f"release-publish: reusing existing {rel['html_url']}")
+        # Keep the release body current (sha256 + install steps) on re-publish.
+        api_call(token, "PATCH", f"{API}/repos/{repo}/releases/{rel['id']}",
+                 body=json.dumps({"body": body}).encode(),
+                 headers={"Content-Type": "application/json"})
+        print(f"release-publish: reusing existing {rel['html_url']} (body refreshed)")
     else:
         die(f"release lookup (HTTP {status}): {rel}")
 
