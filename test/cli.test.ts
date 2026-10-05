@@ -1234,6 +1234,16 @@ test("C35 behaviorSettingsLines: extra roots render; empty → no extra line", (
   // sandbox off still reports off (extra roots don't change that line's state).
   const off = behaviorSettingsLines("yes", false, ["/home/u/d"], ["/home/u/o"]);
   assert.ok(off.some((l) => l.includes("sandbox:  off (--no-sandbox)")));
+  // non-darwin: the kernel sandbox is unavailable — the banner must say the
+  // truth (UNSANDBOXED), not "on" (the flag state) and not "--no-sandbox".
+  const unsupported = behaviorSettingsLines("yes", "unsupported");
+  assert.ok(
+    unsupported.some((l) =>
+      l.includes(
+        "sandbox:  off (no kernel sandbox on this platform — bash runs UNSANDBOXED; the approval gate is the only boundary)",
+      ),
+    ),
+  );
   // skills: empty/undefined → NO skills lines (block unchanged).
   assert.ok(!behaviorSettingsLines("yes", true, [], [], []).some((l) => l.includes("skills:")));
   // non-empty → count line + one line per skill, description truncated to 60 chars.

@@ -84,6 +84,7 @@ import { isDirectInvocation, restartCommand } from "../tui/restart.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
+import { bashSandboxAvailable } from "../tools/sandbox.js";
 import {
   makeSafetyHooks,
   makeAskQueue,
@@ -1028,7 +1029,10 @@ export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): 
  */
 export function behaviorSettingsLines(
   mode: ApprovalMode,
-  sandboxOn: boolean,
+  /** `true` = kernel sandbox active; `false` = user opted out (--no-sandbox);
+   *  `"unsupported"` = the platform has no kernel sandbox (non-darwin) —
+   *  bash runs UNSANDBOXED and the approval gate is the only boundary. */
+  sandboxOn: boolean | "unsupported",
   durableRoots: string[] = [],
   oneShotRoots: string[] = [],
   skills: { name: string; description: string }[] = [],
@@ -1041,11 +1045,14 @@ export function behaviorSettingsLines(
         ? "ask — prompt for SENSITIVE + DESTRUCTIVE + mutating bash"
         : "no-approve (fail-closed) — only read-only, non-sensitive bash runs";
   const totalRoots = durableRoots.length + oneShotRoots.length;
-  const sandbox = sandboxOn
-    ? totalRoots > 0
-      ? `on (bash confined to the workspace + extra roots)`
-      : "on (bash confined to the workspace)"
-    : "off (--no-sandbox)";
+  const sandbox =
+    sandboxOn === "unsupported"
+      ? "off (no kernel sandbox on this platform — bash runs UNSANDBOXED; the approval gate is the only boundary)"
+      : sandboxOn
+        ? totalRoots > 0
+          ? `on (bash confined to the workspace + extra roots)`
+          : "on (bash confined to the workspace)"
+        : "off (--no-sandbox)";
   const lines = [
     "Getting started:",
     "  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)",
@@ -1328,7 +1335,15 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // stderr (below). Durable (tre.json) and one-shot (--extra-root) roots are
   // passed separately so the summary labels each (one-shot is flagged as
   // this-launch-only + not written to tre.json).
-  const behavior = behaviorSettingsLines(mode, !args.noSandbox, durableRoots, oneShotRoots, skills, implicitRoot);
+  // The actual sandbox state, not the flag: on non-darwin the kernel
+  // sandbox is unavailable, so bash runs UNSANDBOXED even though
+  // --no-sandbox was not passed. The banner must show the reality —
+  // claiming "on" there is a false sense of containment (verified on
+  // Ubuntu 24.04, 2026-10-05).
+  const sandboxOn = !args.noSandbox
+    ? (bashSandboxAvailable() ? true : "unsupported")
+    : false;
+  const behavior = behaviorSettingsLines(mode, sandboxOn, durableRoots, oneShotRoots, skills, implicitRoot);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the
