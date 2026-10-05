@@ -9,7 +9,7 @@ test("discoverChatGptModel selects first model slug from Codex model list", asyn
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fake-token");
     return new Response(JSON.stringify({ models: [{ slug: "gpt-valid" }, { slug: "gpt-next" }] }), { status: 200 });
   });
-  assert.equal(requested, "https://chatgpt.com/backend-api/codex/models");
+  assert.equal(requested, "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0");
   assert.equal(id, "gpt-valid");
 });
 

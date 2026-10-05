@@ -61,15 +61,27 @@ export async function runLoginCommand(
   }
 }
 
+/**
+ * The `client_version` the Codex model-list endpoint requires in the query
+ * string (verified live 2026-10-05: without it the endpoint answers
+ * `400 … 'loc': ('query', 'client_version'), 'msg': 'Field required'`).
+ * The list is version-gated: recent Codex versions get the full catalog,
+ * older ones a reduced set (some get NONE — an empty list is a valid 200).
+ * We send a current 1.x version so discovery sees the full catalog; the
+ * `/responses` endpoint itself does not require the param.
+ */
+const CODEX_CLIENT_VERSION = "1.0.0";
+
 /** Create/update the per-install model catalog without discarding existing
  * entries. ChatGPT OAuth login is useful immediately with the Responses API. */
 export async function discoverChatGptModel(
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
-  const response = await fetchImpl("https://chatgpt.com/backend-api/codex/models", {
-    headers: { authorization: `Bearer ${accessToken}` },
-  });
+  const response = await fetchImpl(
+    `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
+    { headers: { authorization: `Bearer ${accessToken}` } },
+  );
   if (!response.ok) {
     throw new Error(`ChatGPT model discovery failed (HTTP ${response.status}); model catalog was not written`);
   }
