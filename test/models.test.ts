@@ -1,6 +1,6 @@
 /**
- * D19 — models.json lookup (findModelsFile): --models wins; otherwise walk
- * up from the launch directory, then fall back to ~/.tre/models.json.
+ * D19 — models.json lookup: --models wins; otherwise use ~/.tre/tre/models.json
+ * and never discover generic project-local models.json files.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,38 +19,24 @@ test("findModelsFile: explicit path wins even if it does not exist", () => {
   assert.equal(findModelsFile("/nonexistent/nope.json", "/tmp", "/nonhome"), "/nonexistent/nope.json");
 });
 
-test("findModelsFile: walks up from the launch directory", (t) => {
+test("findModelsFile: ignores cwd and ancestors; uses ~/.tre/tre/models.json", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const nested = path.join(dir, "a", "b");
   fs.mkdirSync(nested, { recursive: true });
-  const found = path.join(dir, "models.json");
-  fs.writeFileSync(found, "{}");
-  assert.equal(findModelsFile(undefined, nested, "/nonhome"), found);
-});
-
-test("findModelsFile: launch dir itself counts", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const found = path.join(dir, "models.json");
-  fs.writeFileSync(found, "{}");
-  assert.equal(findModelsFile(undefined, dir, "/nonhome"), found);
-});
-
-test("findModelsFile: home fallback when nothing above the launch dir", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, "models.json"), "{}");
   const home = path.join(dir, "home");
-  fs.mkdirSync(path.join(home, ".tre"), { recursive: true });
-  const homeFile = path.join(home, ".tre", "models.json");
+  fs.mkdirSync(path.join(home, ".tre", "tre"), { recursive: true });
+  const homeFile = path.join(home, ".tre", "tre", "models.json");
   fs.writeFileSync(homeFile, "{}");
-  assert.equal(findModelsFile(undefined, dir, home), homeFile);
+  assert.equal(findModelsFile(undefined, nested, home), homeFile);
 });
 
 test("findModelsFile: null when neither walk nor home has one", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  // dir is an empty leaf under /var (macOS) or /tmp — no models.json above it.
+  // Even a cwd models.json is ignored; no configured ~/.tre/tre/models.json.
+  fs.writeFileSync(path.join(dir, "models.json"), "{}");
   assert.equal(findModelsFile(undefined, dir, path.join(dir, "nohome")), null);
 });
 
@@ -72,7 +58,7 @@ test("hasEndpoint: baseUrl present → true; blank/absent → false", () => {
 });
 
 test("buildModelsSetupGuide: empty model → every REQUIRED field NEEDED, optional unset", () => {
-  const g = buildModelsSetupGuide({}, "~/.tre/models.json");
+  const g = buildModelsSetupGuide({}, "~/.tre/tre/models.json");
   assert.match(g, /none is configured yet/);
   // Every required field is listed as NEEDED with a placeholder.
   for (const f of ["id", "provider", "baseUrl", "api", "contextWindow", "maxTokens"]) {

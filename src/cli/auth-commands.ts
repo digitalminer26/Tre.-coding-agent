@@ -12,6 +12,9 @@
  * them before any model loading.
  */
 import { createInterface, type Interface } from "node:readline";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { runLogin } from "../auth/chatgpt-oauth.js";
 import {
   AuthError,
@@ -38,13 +41,14 @@ export async function runLoginCommand(
   );
   try {
     const tokens = await runLogin({ prompt });
+    ensureChatGptModelCatalog();
     const who = [tokens.email, tokens.planType ? `plan: ${tokens.planType}` : null]
       .filter(Boolean)
       .join(", ");
     sinks.out.write(
       `✓ Logged in${who ? ` (${who})` : ""} — tokens saved to ${tokenFilePath()}\n`,
     );
-    sinks.out.write("Now run tre. with a model whose api is \"openai-responses\".\n");
+    sinks.out.write("ChatGPT model added to ~/.tre/tre/models.json. Run tre. to start using it.\n");
     return 0;
   } catch (err) {
     if (err instanceof AuthError) {
@@ -54,6 +58,41 @@ export async function runLoginCommand(
     }
     return 2;
   }
+}
+
+/** Create/update the per-install model catalog without discarding existing
+ * entries. ChatGPT OAuth login is useful immediately with the Responses API. */
+function ensureChatGptModelCatalog(): void {
+  const file = join(homedir(), ".tre", "tre", "models.json");
+  mkdirSync(join(homedir(), ".tre", "tre"), { recursive: true });
+  let catalog: { default?: string; models?: Array<Record<string, unknown>> } = {};
+  if (existsSync(file)) {
+    try {
+      catalog = JSON.parse(readFileSync(file, "utf8")) as typeof catalog;
+    } catch {
+      throw new Error(`existing ${file} is invalid; refusing to overwrite it`);
+    }
+    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
+      throw new Error(`existing ${file} is invalid; refusing to overwrite it`);
+    }
+  }
+  if (!Array.isArray(catalog.models)) catalog.models = [];
+  const id = "chatgpt-codex";
+  const current = catalog.models.find((model) => model.id === id);
+  const entry = {
+    id,
+    provider: "chatgpt",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    api: "openai-responses",
+    auth: "chatgpt-oauth",
+    contextWindow: 200000,
+    maxTokens: 32768,
+    compat: { extraParams: { store: false } },
+  };
+  if (current) Object.assign(current, entry);
+  else catalog.models.push(entry);
+  catalog.default ??= id;
+  writeFileSync(file, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
 }
 
 /** Show the stored login status. */

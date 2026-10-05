@@ -16,8 +16,7 @@
  *
  * Options:
  *   --model <id>       model id from models.json (default: the file's "default")
- *   --models <file>    models.json path (default: nearest models.json above the
- *                      launch dir, then ~/.tre/models.json)
+ *   --models <file>    models.json path (default: ~/.tre/tre/models.json)
  *   --tools <list>     comma list of read,write,edit,bash; "all" (default) or "none"
  *   --cwd <dir>        working directory the agent operates in (default: process.cwd())
  *   --session <file>   session file: created if absent, resumed if present
@@ -166,7 +165,7 @@ export interface CliOptions {
   command?: { name: "login" | "auth"; target?: string };
   prompt?: string;
   modelId?: string;
-  /** D19: undefined = auto-locate (nearest models.json above cwd, then ~/.tre/). */
+  /** D19: undefined = auto-locate ~/.tre/tre/models.json. */
   modelsPath?: string;
   tools: string;
   cwd: string;
@@ -869,8 +868,7 @@ quitting — the new process resumes the session automatically.
 
 Options:
   --model <id>       model id from models.json (default: the file's "default")
-  --models <file>    models.json path (default: nearest models.json above the
-                     launch dir, then ~/.tre/models.json)
+  --models <file>    models.json path (default: ~/.tre/tre/models.json)
   --tools <list>     read,write,edit,bash — or "all" (default) / "none"
   --cwd <dir>        project root: the agent's working directory and the
                      sandbox boundary for file tools (default: process cwd)
@@ -1116,8 +1114,8 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return authStatusCommand({ out: sinks.out, err: sinks.err });
   }
 
-  // models (D19: --models wins; otherwise locate — nearest models.json above
-  // the launch directory, then the permanent ~/.tre/models.json).
+  // models (D19: --models wins; otherwise use the installation catalog at
+  // ~/.tre/tre/models.json, never a generic models.json from cwd).
   //
   // Deployability: a fresh checkout / first run on a new machine has no
   // endpoint wired up yet. Rather than a bare "not found" error, the startup
@@ -1133,7 +1131,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   let modelsFile: ReturnType<typeof loadModelsFile>;
   if (modelsPath === null) {
     sinks.err.write(
-      buildModelsSetupGuide({}, "~/.tre/models.json (or pass --models <file>)") + "\n",
+      buildModelsSetupGuide({}, "~/.tre/tre/models.json (or pass --models <file>)") + "\n",
     );
     return 2;
   }

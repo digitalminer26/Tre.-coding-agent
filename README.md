@@ -59,8 +59,7 @@ cp models.json.example models.json   # then edit models.json
 ```
 
 Fill in `baseUrl` (your OpenAI-compatible endpoint, e.g.
-`http://<host>:<port>/v1`) and the model's `id`. `tre.` finds `models.json`
-by walking up from the launch dir, then `~/.tre/models.json`. With **no**
+`http://<host>:<port>/v1`) and the model's `id`. `tre.` reads its endpoint catalog from `~/.tre/tre/models.json` (or an explicit `--models <file>`); it never picks up a generic `models.json` from your working directory. With **no**
 `models.json` (or a blank `baseUrl`), `tre.` prints a step-by-step setup
 guide — REQUIRED vs OPTIONAL fields — and exits.
 

@@ -70,10 +70,9 @@ export function loadModelsFile(path: string): ModelsFile {
 /**
  * D19 — models.json lookup. `explicit` (from `--models`) wins and is
  * returned as-is, even if missing — the caller reports the error. Otherwise
- * walk UP from `start` (the launch directory, resolved) looking for a
- * `models.json` — the same convention as a `.git` directory — then fall
- * back to the permanent home location `~/.tre/models.json`. Returns null
- * when nothing is found.
+ * `~/.tre/tre/models.json`. The catalog is deliberately not discovered from
+ * cwd: `models.json` is generic and project-local files must not shadow the
+ * user's endpoint configuration. Returns null when nothing is found.
  */
 export function findModelsFile(
   explicit: string | undefined,
@@ -81,15 +80,10 @@ export function findModelsFile(
   home: string = homedir(),
 ): string | null {
   if (explicit !== undefined) return explicit;
-  let dir = start;
-  for (;;) {
-    const candidate = join(dir, "models.json");
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) break; // reached the filesystem root
-    dir = parent;
-  }
-  const homeFile = join(home, ".tre", "models.json");
+  // `start` remains in the signature for compatibility with callers/tests;
+  // never inspect it because a generic cwd `models.json` can be unrelated.
+  void start;
+  const homeFile = join(home, ".tre", "tre", "models.json");
   return existsSync(homeFile) ? homeFile : null;
 }
 
