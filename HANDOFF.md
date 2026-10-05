@@ -1,5 +1,12 @@
 # Current project status (2026-10-05)
 
+**C41 (post-v0.1.3) — ChatGPT login model-discovery 400 fixed.** The
+`codex/models` endpoint now requires a `client_version` query param (and
+version-gates the list); `discoverChatGptModel` sends `client_version=1.0.0`.
+The published v0.1.3 bundle predates this fix — fresh-endpoint logins from
+v0.1.3 will still fail at discovery until a v0.1.4 (or patched) bundle is
+deployed. See the C41 entry below.
+
 **Release v0.1.3 — published.** The config-consistency changes are committed,
 pushed, and now included in the new v0.1.3 offline bundle + installer release.
 The normal `npm ci --omit=dev` bundle build failed (npm cache inaccessible;
@@ -59,6 +66,44 @@ been superseded. For current behavior, trust `src/` and the current tests;
 README.md is the user-facing overview. No pending ChatGPT OAuth implementation
 is implied by the historical incident entry below. The most recent work is
 listed first; this log does not replace a fresh quality-gate run.
+
+# HANDOFF — C41: ChatGPT model discovery 400 → `client_version` (2026-10-05)
+
+**Problem.** `tre. login` on a fresh endpoint failed AFTER a successful OAuth
+login with `login failed: ChatGPT model discovery failed (HTTP 400); model
+catalog was not written`. The post-login discovery call
+(`GET https://chatgpt.com/backend-api/codex/models`) now REQUIRES a
+`client_version` query param — without it the endpoint answers
+`400 {"error":{"message":"…'loc': ('query', 'client_version'), 'msg': 'Field
+required'…"}}`. The OAuth token exchange itself is unaffected (tokens were
+saved); only the model-list fetch 400'd, so the catalog write was skipped.
+
+**Diagnosis (live, against this machine's stored token).** Reproduced the
+exact 400, then probed the endpoint:
+- `client_version` is a REQUIRED query param (Pydantic-style validation).
+- The model list is VERSION-GATED: `1.0.0` → full catalog
+  (`gpt-6.1-sol`, `gpt-6-astra`, …, `gpt-5.5`, `codex-auto-review`);
+  `0.130.0` → only `gpt-5.5` + `codex-auto-review`; `0.50.0`/`0.40.0`/`0.1.0`
+  → EMPTY list (a valid 200 with no models, which would trip the "no usable
+  models" path). So the version value matters, not just its presence.
+- The `/responses` endpoint does NOT require the param (a `store:false`
+  stream to `gpt-6.1-sol` returned a normal SSE stream). Fix is scoped to the
+  discovery call only.
+
+**Fix (C41).** `src/cli/auth-commands.ts` — `discoverChatGptModel` now sends
+`?client_version=1.0.0` (new `CODEX_CLIENT_VERSION` constant, documented with
+the live-verification note). Picking `1.0.0` (a current 1.x) sees the full
+catalog, so the first slug is a real, streamable model.
+`test/chatgpt-model-discovery.test.ts` — the URL assertion now pins the
+`?client_version=1.0.0` query.
+
+**Verification.** `npm run build` clean; `npm test` 665 pass / 0 fail / 10
+skipped. Live: `discoverChatGptModel(storedToken)` (built `dist/`) →
+`gpt-6.1-sol` (200, full catalog). No guardrail-zone file touched.
+
+**For the user's fresh endpoint:** re-run `tre. login` with a build that
+includes C41 (commit `3561fe6`). The OAuth step already succeeded there, so a
+re-login is just the browser step again; discovery will now write the catalog.
 
 # HANDOFF — W2: release tooling GitHub-token lookup → `~/.tre/github-token` (2026-10-05)
 
