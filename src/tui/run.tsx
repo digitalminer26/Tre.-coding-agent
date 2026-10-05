@@ -26,6 +26,7 @@
 import React from "react";
 import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
+import { homedir } from "node:os";
 import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
@@ -236,8 +237,8 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // the LLM is only spent when a real message arrives and a turn runs to
   // answer it. Incoming messages become prompts (idle → new run, busy →
   // steer into the running loop); the run's final text is replied via the
-  // bot. The poller is inert until setup is done (.tre/telegram.json).
-  const telegram = makeTelegramBridge(opts.cwd ?? process.cwd());
+  // bot. The poller is inert until setup is done (~/.tre/telegram.json).
+  const telegram = makeTelegramBridge(opts.cwd ?? process.cwd(), homedir());
   let telegramTimer: NodeJS.Timeout | undefined;
   // A poll that outlives the 15s cadence (slow Telegram, a 429 sleep) must
   // not overlap the next tick — overlapping polls can both read the same

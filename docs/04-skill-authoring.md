@@ -87,9 +87,11 @@ sessions live outside the repo for a different reason: D20.)
 
 ## Secrets
 
-- Per-machine credentials belong in a gitignored file INSIDE the workspace
-  (e.g. `.tre/telegram.json`) — the agent can write AND read it, it never
-  enters git.
+- Per-machine credentials belong in a gitignored file under the MACHINE
+  config root `~/.tre` (e.g. `~/.tre/telegram.json`) — the agent can write
+  AND read it (C38 makes `~/.tre` an implicit root), it never enters git,
+  and it works from any launch dir. (Pre-C40 these lived in the workspace
+  `.tre/` — moved to `~/.tre` for the config-consistency cleanup.)
 - Name it plainly (`.json`). Sensitive-path patterns (`~/.ssh`, `*.key`,
   `*.pem`, `.env*`, …) BLOCK reads in EVERY mode — a secret file whose name
   matches them would be unreadable by the agent's own `read` tool.
@@ -108,10 +110,11 @@ to be read-only — usually not worth it.
 ## State
 
 Keep per-machine state (offsets, cursors) in a small file the helper manages
-(e.g. `.tre/telegram/last_update_id`), gitignored. When the remote API
-CONSUMES what you read (Telegram `getUpdates` with a positive offset deletes
-the updates): **print first, then persist the offset** — duplicates are the
-safer failure mode, loss is not.
+(e.g. `~/.tre/telegram/last_update_id`), under the machine config root —
+gitignored where the repo is involved, and reachable from any launch dir.
+When the remote API CONSUMES what you read (Telegram `getUpdates` with a
+positive offset deletes the updates): **print first, then persist the
+offset** — duplicates are the safer failure mode, loss is not.
 
 ## Verification without credentials
 

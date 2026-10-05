@@ -28,17 +28,24 @@ import {
   TELEGRAM_POLL_MS,
 } from "../src/tui/telegram.js";
 
-function setup(): { cwd: string; cleanup: () => void } {
+function setup(): { cwd: string; home: string; cleanup: () => void } {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-tui-"));
-  // Config (enables the bridge) + fake helper in the project skill root.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-tui-home-"));
+  // Config (enables the bridge) is MACHINE-LEVEL (~/.tre/telegram.json) —
+  // written to the fake home, not the workspace. The fake helper lives in
+  // the PROJECT skill root.
   fs.mkdirSync(path.join(cwd, ".tre", "skills", "telegram"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".tre"), { recursive: true });
   fs.writeFileSync(
-    path.join(cwd, ".tre", "telegram.json"),
+    path.join(home, ".tre", "telegram.json"),
     JSON.stringify({ token: "test-token", chatId: "0" }),
   );
   const helper = path.join(cwd, ".tre", "skills", "telegram", "telegram.py");
-  const cleanup = (): void => fs.rmSync(cwd, { recursive: true, force: true });
-  return { cwd, cleanup };
+  const cleanup = (): void => {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  };
+  return { cwd, home, cleanup };
 }
 
 test("default cap clears the helper's worst case (60s HTTP + 60s 429 sleep)", () => {
@@ -54,7 +61,7 @@ test("default cap clears the helper's worst case (60s HTTP + 60s 429 sleep)", ()
 });
 
 test("helper failure surfaces its stderr in the error (no bare Command failed)", async () => {
-  const { cwd, cleanup } = setup();
+  const { cwd, home, cleanup } = setup();
   try {
     // A helper that fails the way the real one does: die() → stderr + exit 1.
     fs.writeFileSync(
@@ -63,7 +70,7 @@ test("helper failure surfaces its stderr in the error (no bare Command failed)",
         "print('telegram: HTTP Error 429: Too Many Requests', file=sys.stderr)\n" +
         "sys.exit(1)\n",
     );
-    const bridge = makeTelegramBridge(cwd);
+    const bridge = makeTelegramBridge(cwd, home);
     assert.equal(bridge.enabled, true);
     let err: unknown;
     try {
@@ -81,14 +88,14 @@ test("helper failure surfaces its stderr in the error (no bare Command failed)",
 });
 
 test("a timeout-kill is named in the error (cap + likely cause)", async () => {
-  const { cwd, cleanup } = setup();
+  const { cwd, home, cleanup } = setup();
   try {
     // A helper that outlives the (injected, short) cap.
     fs.writeFileSync(
       path.join(cwd, ".tre", "skills", "telegram", "telegram.py"),
       "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n",
     );
-    const bridge = makeTelegramBridge(cwd, 500); // 0.5s cap for the test
+    const bridge = makeTelegramBridge(cwd, home, 500); // 0.5s cap for the test
     let err: unknown;
     try {
       await bridge.poll();
@@ -105,13 +112,13 @@ test("a timeout-kill is named in the error (cap + likely cause)", async () => {
 });
 
 test("a clean poll still returns null (no regression on the happy path)", async () => {
-  const { cwd, cleanup } = setup();
+  const { cwd, home, cleanup } = setup();
   try {
     fs.writeFileSync(
       path.join(cwd, ".tre", "skills", "telegram", "telegram.py"),
       "#!/usr/bin/env python3\nprint('telegram: no new messages')\n",
     );
-    const bridge = makeTelegramBridge(cwd);
+    const bridge = makeTelegramBridge(cwd, home);
     assert.equal(await bridge.poll(), null);
   } finally {
     cleanup();

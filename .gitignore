@@ -12,7 +12,10 @@ models.json
 # git. Copy the shape from docs/05-extra-roots-spec.md:
 #   { "extraRoots": [ "/abs/or/~/relative/dir", ... ] }
 tre.json
-# Per-machine Telegram bot credentials (token) + poll state — never in git.
+# Telegram bot credentials (token) + poll state. C40 moved these to the
+# MACHINE level (~/.tre/telegram.json + ~/.tre/telegram/) — outside the repo,
+# so they never enter git. The entries below are a legacy safety net for any
+# stale workspace-local copy.
 .tre/telegram.json
 .tre/telegram/
 # Parallel-delegation skill state (plan files, prompts, logs, sessions) —

@@ -1,5 +1,5 @@
 /**
- * Telegram helper-path resolution — shared by the TUI bridge
+ * Telegram path resolution — shared by the TUI bridge
  * (`src/tui/telegram.ts`) and the plain-CLI bridge (`src/telegram/bridge.ts`).
  *
  * WHY THIS EXISTS (the 2026-10-02 "message sat undelivered" fix):
@@ -13,9 +13,14 @@
  * until a manual poll. Resolving the helper across BOTH roots (and fixing the
  * code, not the deployment) is the durable repair.
  *
- * Only the HELPER (code) is resolved across roots. The CONFIG
- * (`<cwd>/.tre/telegram.json`) and STATE (`<cwd>/.tre/telegram/`) stay
- * cwd-relative — they are per-workspace deployment state, not code.
+ * CONFIG + STATE are MACHINE-LEVEL (the 2026-10-05 "config consistency"
+ * cleanup): the bot token + poll offset live under `~/.tre` —
+ * `~/.tre/telegram.json` (config) and `~/.tre/telegram/` (state) — NOT in the
+ * workspace. tre. is launched from arbitrary directories, so a per-machine
+ * credential must not depend on the launch dir; a bot configured once must
+ * work from any cwd. Only the HELPER (code) is resolved across skill roots
+ * (project shadows user); the config + state are always the machine-level
+ * `~/.tre` paths below.
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -40,4 +45,22 @@ export function resolveTelegramHelper(
     if (existsSync(p)) return p;
   }
   return null;
+}
+
+/**
+ * The machine-level telegram CONFIG path: `~/.tre/telegram.json`.
+ * Machine-wide (not workspace-relative) so the bot works from any launch
+ * dir. `home` is injectable for tests.
+ */
+export function telegramConfigPath(home: string = homedir()): string {
+  return join(home, ".tre", "telegram.json");
+}
+
+/**
+ * The machine-level telegram STATE dir: `~/.tre/telegram/` (holds
+ * `last_update_id` + `out.txt`). Machine-wide (not workspace-relative).
+ * `home` is injectable for tests.
+ */
+export function telegramStateDir(home: string = homedir()): string {
+  return join(home, ".tre", "telegram");
 }

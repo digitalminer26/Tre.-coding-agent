@@ -153,7 +153,8 @@ Rules:
   **interruptible** (`stop()` kills the in-flight poll child and wakes any
   sleep) and **single-flight** (a turn mutex serializes user + telegram turns
   so two turns never run concurrently on the shared context). The driver is
-  **inert** when the bridge is not enabled (no `.tre/telegram.json` + helper)
+  **inert** when the bridge is not enabled (no `~/.tre/telegram.json` +
+  helper)
   — the no-telegram path is byte-for-byte the old behavior. The LLM endpoint
   is NOT involved in polling (a poll is one HTTPS GET); the LLM is only spent
   when a real message arrives and a turn runs.
@@ -194,6 +195,23 @@ Rules:
   uses the same refresh-token grant + rotation + persistence as the expiry
   path. Test seam: `__setTokenRefreshForTests` / `__resetTokenRefreshForTests`
   point the default-endpoint refresh at a mock (no network).
+- **C40 — machine-level Telegram config + state: `~/.tre/telegram.json` +
+  `~/.tre/telegram/` (config consistency).** The Telegram bot bridge
+  (C37) read its config from `<cwd>/.tre/telegram.json` and its poll state
+  from `<cwd>/.tre/telegram/` — workspace-relative, so a bot configured in
+  one project was invisible from every other launch dir, breaking the
+  "launch tre. from any directory" deployment model. C40 moves both to the
+  machine level: the config is `~/.tre/telegram.json` and the state dir is
+  `~/.tre/telegram/` (`last_update_id` + `out.txt`), resolved by new
+  `src/telegram/paths.ts` helpers (`telegramConfigPath(home)`,
+  `telegramStateDir(home)`; `home` injectable, default `os.homedir()`).
+  BOTH bridges (`src/telegram/bridge.ts`, `src/tui/telegram.ts`) take
+  `home` as the second `makeTelegramBridge(cwd, home)` parameter and gate
+  `enabled` on the machine-level config; the helper (`telegram.py`) reads
+  config/state from `~/.tre` too (never the CWD). The HELPER (code) is
+  still resolved across skill roots — project shadows user — unchanged.
+  Only the config + state moved; the poll cadence, loop prevention, and
+  stderr-surfacing behavior are byte-for-byte the old behavior.
 
 ## Contract 2 — Events
 

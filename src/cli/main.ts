@@ -955,7 +955,7 @@ export interface MainDeps {
    *  lookup (nearest tre.json above the launch dir, then ~/.tre/tre.json). */
   treConfigPath?: string;
   /** Telegram driver bridge (tests inject a fake). undefined = the real
-   *  spawn-based bridge (enabled only when .tre/telegram.json + the helper
+   *  spawn-based bridge (enabled only when ~/.tre/telegram.json + the helper
    *  exist). */
   telegramBridge?: TelegramBridge;
   /** Worker registry dir override (tests); undefined uses the shared home registry. */
@@ -1402,9 +1402,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // + replies (when idle, REPL only). LOOP PREVENTION lives in the driver
   // (long-poll self-pacing + min-interval guard + capped backoff) — see
   // src/telegram/driver.ts. Inert when the bridge is not enabled (no
-  // .tre/telegram.json + helper). The driver is created per branch below
+  // ~/.tre/telegram.json + helper). The driver is created per branch below
   // (one-shot vs REPL) because the executor + turn bookkeeping differ.
-  const telegramBridge = deps.telegramBridge ?? makeTelegramBridge(root);
+  const telegramBridge =
+    deps.telegramBridge ?? makeTelegramBridge(root, deps.home ?? homedir());
   // The in-flight run's steer sink (the driver's onSteer pushes into it).
   let activeSteer: SteeringQueue | null = null;
   // One steering queue per run — a closure over a plain array (the contract

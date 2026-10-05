@@ -1,5 +1,14 @@
 # Current project status (2026-10-05)
 
+The "config consistency" workstream is underway: machine-wide config/secrets
+are moving from project-local `.tre/` to `~/.tre`. **C40** landed first —
+the Telegram bot's config + poll state now live at `~/.tre/telegram.json` +
+`~/.tre/telegram/` (machine-level, works from any launch dir); the live
+machine was migrated (offsets merged to the max, stale repo-local copies
+removed) and the bridge verifies enabled from an empty cwd. The remaining
+increment (W2) moves the release tooling's GitHub-token lookup to
+`~/.tre/github-token`.
+
 Release packaging now publishes both the offline `.tgz` and a versioned
 `install-tre-X.Y.Z.sh` one-command installer. The installer validates Node >=20,
 downloads the release bundle, extracts it, and invokes the embedded deployment
@@ -36,6 +45,71 @@ been superseded. For current behavior, trust `src/` and the current tests;
 README.md is the user-facing overview. No pending ChatGPT OAuth implementation
 is implied by the historical incident entry below. The most recent work is
 listed first; this log does not replace a fresh quality-gate run.
+
+# HANDOFF — C40: machine-level Telegram config + state (2026-10-05)
+
+**Problem.** The Telegram bot bridge (C37) read its config from
+`<cwd>/.tre/telegram.json` and its poll state from `<cwd>/.tre/telegram/` —
+workspace-relative. tre. is launched from arbitrary directories, so a bot
+configured in one project was invisible from every other launch dir, breaking
+the "launch tre. from any directory" deployment model. This was the first
+increment of the "config consistency" workstream (machine-wide config/secrets
+belong under `~/.tre`; the second increment, W2, moves the release tooling's
+GitHub-token lookup to `~/.tre/github-token`).
+
+**Fix (C40).**
+- `src/telegram/paths.ts` — new exported helpers: `telegramConfigPath(home)`
+  → `~/.tre/telegram.json` and `telegramStateDir(home)` → `~/.tre/telegram/`
+  (`home` injectable, default `os.homedir()`); module header rewritten (the
+  "CONFIG + STATE stay cwd-relative" paragraph is now the machine-level
+  story). `resolveTelegramHelper` (code) is unchanged — still project-shadows-
+  user across skill roots.
+- `src/telegram/bridge.ts` — `makeTelegramBridge(cwd, home = homedir())`:
+  `enabled` gates on `existsSync(telegramConfigPath(home))`; `send()` writes
+  `out.txt` to `telegramStateDir(home)`.
+- `src/tui/telegram.ts` — `makeTelegramBridge(cwd, home = homedir(),
+  timeoutMs = TELEGRAM_TIMEOUT_MS)`: same enabled/outDir change; the
+  stderr-surfacing + cap-naming behavior is byte-for-byte unchanged.
+- `src/tui/run.tsx` — call site passes `homedir()`.
+- `src/cli/main.ts` — call site passes `deps.home ?? homedir()` (the
+  injectable home already in the deps type); comments updated.
+- `telegram.py` (deployment helper, both copies) — config/state now resolve
+  against `os.path.expanduser("~")`, NEVER the CWD (the driver pins the
+  spawn's cwd to the workspace, but the bot is machine-level).
+- `.gitignore` — the repo-local `.tre/telegram*` entries are now a legacy
+  safety net (the real files live outside the repo).
+- Docs: `docs/02-contracts.md` (C40 bullet + the C37 inert-condition line),
+  `docs/04-skill-authoring.md` (Secrets + State sections now point at
+  `~/.tre`), the always-active `~/.tre/agent/skills/telegram/SKILL.md`
+  (setup/send/receiving paths).
+
+**Migration (live machine).** `~/.tre/telegram.json` already existed and was
+identical to the repo-local copy (same token + chatId). The poll offsets had
+diverged (repo-local 52182712, machine 52182711) — merged to the MAX
+(52182712) in `~/.tre/telegram/last_update_id`, then the repo-local
+`.tre/telegram.json` + `.tre/telegram/` were deleted. A non-blocking
+`telegram.py poll` from an empty cwd returned `no new messages` (exit 0) —
+config + state resolve from `~/.tre`; the built bridge reports
+`enabled: true` from an empty cwd.
+
+**Files.** `src/telegram/paths.ts`, `src/telegram/bridge.ts`,
+`src/tui/telegram.ts`, `src/tui/run.tsx`, `src/cli/main.ts`,
+`test/telegram-paths.test.ts` (+3 machine-level path tests),
+`test/tui-telegram.test.ts` (setup writes config to a fake HOME; the
+timeout-call signature is now `(cwd, home, 500)`),
+`test/telegram-driver.test.ts` (BRIDGE ENABLEMENT writes config to the fake
+home; +1 "enabled from any cwd with no workspace .tre" test), `.gitignore`,
+`docs/02-contracts.md`, `docs/04-skill-authoring.md`, `HANDOFF.md`.
+
+**Verification.** `tsc` clean; full suite **665 pass / 0 fail / 10 skipped**
+(baseline 661; +4 new tests). No guardrail-zone file touched. The deployment
+helper + always-active SKILL.md are gitignored (deployment-specific) and were
+updated in place.
+
+**Follow-up (W2, next increment).** The release tooling still looks for the
+GitHub token only in `$GITHUB_TOKEN` + the macOS keychain — the repo-local
+`.tre/github-token` (where this machine actually keeps it) is not consulted.
+Move the lookup to `~/.tre/github-token` (with the existing fallbacks) + docs.
 
 # HANDOFF — C38: implicit `~/.tre` root (2026-10-05)
 

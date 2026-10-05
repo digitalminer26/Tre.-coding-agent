@@ -20,9 +20,14 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { resolveTelegramHelper } from "./paths.js";
+import {
+  resolveTelegramHelper,
+  telegramConfigPath,
+  telegramStateDir,
+} from "./paths.js";
 
 const pExecFile = promisify(execFile);
 
@@ -44,7 +49,7 @@ export interface TelegramMessage {
  *  (returning null on timeout) and MUST honor `signal` (the driver kills the
  *  in-flight poll on stop). Throws on a helper failure (the driver backs off). */
 export interface TelegramBridge {
-  /** True once a `.tre/telegram.json` config + the helper exist (setup done). */
+  /** True once the `~/.tre/telegram.json` config + the helper exist (setup done). */
   enabled: boolean;
   /** One long-poll: block up to `timeoutSec` seconds. Null when no message. */
   pollLong(timeoutSec: number, signal?: AbortSignal): Promise<TelegramMessage[] | null>;
@@ -53,19 +58,24 @@ export interface TelegramBridge {
 }
 
 /**
- * Build a bridge for the workspace `cwd`. `enabled` is false when the config
- * or the helper is missing (setup not done) — the driver then never starts.
- * The helper resolves its config/state against its OWN cwd, so the spawn pins
- * cwd to the workspace.
+ * Build a bridge for the workspace `cwd`. `enabled` is false when the
+ * machine-level config (`~/.tre/telegram.json`) or the helper is missing
+ * (setup not done) — the driver then never starts. The helper resolves its
+ * config/state against `~/.tre` (machine-level, see ./paths.ts), so the
+ * spawn's cwd does not affect the bot's paths. `home` is injectable for
+ * tests.
  */
-export function makeTelegramBridge(cwd: string, home?: string): TelegramBridge {
+export function makeTelegramBridge(
+  cwd: string,
+  home: string = homedir(),
+): TelegramBridge {
   // Resolve the helper across the canonical skill roots (project then user
-  // agent-skills) — see ./paths.ts. The config + state stay cwd-relative
-  // (per-workspace deployment state). `home` is injectable for tests.
+  // agent-skills) — see ./paths.ts. The config + state are MACHINE-LEVEL
+  // (~/.tre) — a bot configured once works from any launch dir.
   const script = resolveTelegramHelper(cwd, home);
-  const outDir = join(cwd, ".tre", "telegram");
+  const outDir = telegramStateDir(home);
   const enabled =
-    existsSync(join(cwd, ".tre", "telegram.json")) && script !== null;
+    existsSync(telegramConfigPath(home)) && script !== null;
   const run = async (args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> => {
     if (script === null) {
       throw new Error(

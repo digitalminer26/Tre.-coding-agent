@@ -301,9 +301,10 @@ test("bridge: enabled when the helper is in the USER agent-skills root (the 2026
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
   try {
-    // Config present in the workspace …
-    fs.mkdirSync(path.join(cwd, ".tre"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
+    // Config is MACHINE-LEVEL (~/.tre/telegram.json) — written to the fake
+    // home, not the workspace …
+    fs.mkdirSync(path.join(home, ".tre"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
     // … and the helper lives ONLY in the user agent-skills root.
     const helper = path.join(home, ".tre", "agent", "skills", "telegram");
     fs.mkdirSync(helper, { recursive: true });
@@ -317,6 +318,26 @@ test("bridge: enabled when the helper is in the USER agent-skills root (the 2026
   }
 });
 
+test("bridge: enabled when the config is in the HOME root even with NO workspace .tre (machine-level, any launch dir)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
+  try {
+    // The workspace has NO .tre at all — the bot is configured once at the
+    // machine level and must work from any launch dir.
+    fs.mkdirSync(path.join(home, ".tre"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
+    const helper = path.join(home, ".tre", "agent", "skills", "telegram");
+    fs.mkdirSync(helper, { recursive: true });
+    fs.writeFileSync(path.join(helper, "telegram.py"), "# helper\n");
+
+    const bridge = makeTelegramBridge(cwd, home);
+    assert.equal(bridge.enabled, true, "machine-level config + helper must enable the bridge from any cwd");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("bridge: disabled when the config is missing (even if the helper exists)", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
@@ -324,7 +345,7 @@ test("bridge: disabled when the config is missing (even if the helper exists)", 
     const helper = path.join(home, ".tre", "agent", "skills", "telegram");
     fs.mkdirSync(helper, { recursive: true });
     fs.writeFileSync(path.join(helper, "telegram.py"), "# helper\n");
-    // No .tre/telegram.json in the workspace.
+    // No ~/.tre/telegram.json in the fake home (and none in the workspace).
     const bridge = makeTelegramBridge(cwd, home);
     assert.equal(bridge.enabled, false, "no config → disabled");
   } finally {
@@ -337,8 +358,8 @@ test("bridge: disabled when the helper is in NO root (config present)", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-en-"));
   try {
-    fs.mkdirSync(path.join(cwd, ".tre"), { recursive: true });
-    fs.writeFileSync(path.join(cwd, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
+    fs.mkdirSync(path.join(home, ".tre"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".tre", "telegram.json"), JSON.stringify({ token: "t", chatId: "1" }));
     // No helper anywhere.
     const bridge = makeTelegramBridge(cwd, home);
     assert.equal(bridge.enabled, false, "no helper in any root → disabled");

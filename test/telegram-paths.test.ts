@@ -10,7 +10,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolveTelegramHelper } from "../src/telegram/paths.js";
+import {
+  resolveTelegramHelper,
+  telegramConfigPath,
+  telegramStateDir,
+} from "../src/telegram/paths.js";
 
 function tmpdir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-paths-"));
@@ -70,6 +74,41 @@ test("resolver: null when the helper is in NO root (bridge stays disabled)", () 
     assert.equal(resolveTelegramHelper(cwd, home), null);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── MACHINE-LEVEL config + state paths (2026-10-05 config consistency) ─────
+
+test("config path: machine-level ~/.tre/telegram.json (not workspace-relative)", () => {
+  const home = tmpdir();
+  try {
+    const p = telegramConfigPath(home);
+    assert.equal(p, path.join(home, ".tre", "telegram.json"));
+    // The workspace is NOT involved — the bot works from any launch dir.
+    assert.ok(p.startsWith(home), "config lives under the injected home");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("state dir: machine-level ~/.tre/telegram (not workspace-relative)", () => {
+  const home = tmpdir();
+  try {
+    assert.equal(telegramStateDir(home), path.join(home, ".tre", "telegram"));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config + state live under the SAME machine root (one bot, one home)", () => {
+  const home = tmpdir();
+  try {
+    const cfg = telegramConfigPath(home);
+    const state = telegramStateDir(home);
+    assert.equal(path.dirname(cfg), path.dirname(state), "both under ~/.tre");
+    assert.equal(path.basename(path.dirname(cfg)), ".tre");
+  } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
