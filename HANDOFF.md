@@ -1,5 +1,12 @@
 # Current project status (2026-10-03)
 
+ChatGPT login now discovers a model ID from the authenticated Codex model
+catalog before writing `~/.tre/tre/models.json`; discovery failures are
+reported without creating a guessed model entry. Unit coverage exercises
+successful lookup and failure/empty responses. Build passes; the full test run
+currently has 8 unrelated environment-dependent failures (session path
+permission and git-commit integration tests; `git` unavailable in sandbox).
+
 The dated entries below are an append-only implementation history, not a
 single up-to-date status report. Their test counts, “uncommitted” labels,
 open-task lists, and proposed next steps describe the date shown and may have

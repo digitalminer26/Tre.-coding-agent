@@ -41,7 +41,8 @@ export async function runLoginCommand(
   );
   try {
     const tokens = await runLogin({ prompt });
-    ensureChatGptModelCatalog();
+    const modelId = await discoverChatGptModel(tokens.accessToken);
+    ensureChatGptModelCatalog(modelId);
     const who = [tokens.email, tokens.planType ? `plan: ${tokens.planType}` : null]
       .filter(Boolean)
       .join(", ");
@@ -62,7 +63,38 @@ export async function runLoginCommand(
 
 /** Create/update the per-install model catalog without discarding existing
  * entries. ChatGPT OAuth login is useful immediately with the Responses API. */
-function ensureChatGptModelCatalog(): void {
+export async function discoverChatGptModel(
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const response = await fetchImpl("https://chatgpt.com/backend-api/codex/models", {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) {
+    throw new Error(`ChatGPT model discovery failed (HTTP ${response.status}); model catalog was not written`);
+  }
+  const payload: unknown = await response.json();
+  const ids = extractModelIds(payload);
+  if (ids.length === 0) {
+    throw new Error("ChatGPT model discovery returned no usable models; model catalog was not written");
+  }
+  return ids[0]!;
+}
+
+function extractModelIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const value = payload as Record<string, unknown>;
+  const list = Array.isArray(value.models) ? value.models : Array.isArray(value.data) ? value.data : [];
+  return list.flatMap((item) => {
+    if (typeof item === "string" && item.trim()) return [item.trim()];
+    if (!item || typeof item !== "object") return [];
+    const model = item as Record<string, unknown>;
+    const id = typeof model.slug === "string" ? model.slug : model.id;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  });
+}
+
+function ensureChatGptModelCatalog(id: string): void {
   const file = join(homedir(), ".tre", "tre", "models.json");
   mkdirSync(join(homedir(), ".tre", "tre"), { recursive: true });
   let catalog: { default?: string; models?: Array<Record<string, unknown>> } = {};
@@ -77,8 +109,8 @@ function ensureChatGptModelCatalog(): void {
     }
   }
   if (!Array.isArray(catalog.models)) catalog.models = [];
-  const id = "chatgpt-codex";
-  const current = catalog.models.find((model) => model.id === id);
+  const current = catalog.models.find((model) => model.provider === "chatgpt" && model.auth === "chatgpt-oauth");
+  const wasDefault = catalog.default === current?.id;
   const entry = {
     id,
     provider: "chatgpt",
@@ -91,6 +123,7 @@ function ensureChatGptModelCatalog(): void {
   };
   if (current) Object.assign(current, entry);
   else catalog.models.push(entry);
+  if (current && wasDefault) catalog.default = id;
   catalog.default ??= id;
   writeFileSync(file, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600 });
 }
