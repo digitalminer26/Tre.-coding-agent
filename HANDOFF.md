@@ -1,5 +1,27 @@
 # Current project status (2026-10-06)
 
+**ChatGPT login now works headless / over SSH (2026-10-06, `d605662`).**
+`tre. login chatgpt` on a machine with no browser (the lab VM, ssh sessions)
+was broken in a subtle way: the authorize URL was handed to the browser opener
+(`open`/`xdg-open`) and **never printed**. With no `xdg-open` present the URL
+went nowhere, so the user had nothing to copy and the manual-paste fallback
+(the `prompt` path that accepts a pasted redirect URL) was unreachable — the
+login could only ever wait out its 5-minute timeout. The fix: `runLogin` takes
+an `onAuthorizeUrl` callback, invoked with the built authorize URL **before**
+the browser opens; `runLoginCommand` wires it to print the URL. A headless user
+now copies the printed URL to another machine, signs in there, and pastes the
+redirect URL (`http://127.0.0.1:1455/auth/callback?code=…&state=…`) back into
+the `> ` prompt. The loopback server is still bound (127.0.0.1:1455/1457) so a
+local browser still works unchanged. Verified: new test
+`runLogin: onAuthorizeUrl is called with the authorize URL (headless print)`
+proves the printed URL is byte-identical to the opened one and is sufficient to
+complete a login via the paste path; full gate green (687 tests, 0 fail).
+**VM note:** outbound HTTPS to `auth.openai.com` + `chatgpt.com` is confirmed
+reached from the VM, and port 1455 is free, so the token exchange and the
+`client_version`-gated model discovery (the C41 fix) both work there.
+**Revert:** `git checkout d605662^ -- src/auth/chatgpt-oauth.ts
+src/cli/auth-commands.ts test/chatgpt-oauth.test.ts && npm run build`.
+
 **Linux bwrap sandbox — the mount-order bug is FIXED and verified on the VM (2026-10-06).**
 The bwrap backend from 2026-10-05 had a load-bearing bug: the empty root was
 mounted **last**, which made the host self-binds (`--ro-bind-try /usr /usr`,
