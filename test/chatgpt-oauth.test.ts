@@ -204,6 +204,45 @@ test("runLogin: manual paste path (headless) → tokens stored", async (t) => {
   assert.equal(calls[0]!.body.get("code"), "PASTED");
 });
 
+test("runLogin: onAuthorizeUrl is called with the authorize URL (headless print)", async (t) => {
+  const file = mkfile(t);
+  const calls: { body: URLSearchParams }[] = [];
+  let printedUrl = "";
+  let openedUrl = "";
+  const openBrowser = (url: string): void => {
+    openedUrl = url;
+  };
+  const onAuthorizeUrl = (url: string): void => {
+    printedUrl = url;
+  };
+  // Headless: the user reads the PRINTED url, signs in elsewhere, and pastes
+  // the redirect. The paste derives from the printed url — proving that the
+  // onAuthorizeUrl callback carries the exact URL a headless user needs.
+  const prompt = async (): Promise<string> => {
+    const u = new URL(printedUrl);
+    const redirectUri = u.searchParams.get("redirect_uri")!;
+    const state = u.searchParams.get("state")!;
+    return `${redirectUri}?code=PRINTED&state=${encodeURIComponent(state)}`;
+  };
+  const tokens = await runLogin({
+    file,
+    now: () => NOW,
+    fetchImpl: tokenEndpoint(calls),
+    openBrowser,
+    onAuthorizeUrl,
+    prompt,
+  });
+  // The callback fired, and it carried the real authorize URL.
+  assert.ok(printedUrl.startsWith("https://"), "printed URL should be the authorize URL");
+  assert.ok(printedUrl.includes("code_challenge="), "printed URL carries the PKCE challenge");
+  assert.ok(printedUrl.includes("state="), "printed URL carries the state");
+  // It is the SAME url the browser would have been opened with.
+  assert.equal(printedUrl, openedUrl);
+  // And it was enough to complete the login (code came from the printed URL).
+  assert.equal(tokens.accessToken, "AT-login");
+  assert.equal(calls[0]!.body.get("code"), "PRINTED");
+});
+
 test("runLogin: callback state mismatch → AuthError", async (t) => {
   const file = mkfile(t);
   let openedUrl = "";

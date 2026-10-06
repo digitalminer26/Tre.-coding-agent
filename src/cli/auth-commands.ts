@@ -40,7 +40,14 @@ export async function runLoginCommand(
     "ChatGPT login (Codex-style OAuth — uses your ChatGPT subscription, no API key)\n",
   );
   try {
-    const tokens = await runLogin({ prompt });
+    const tokens = await runLogin({
+      prompt,
+      // Print the authorize URL: on headless/SSH machines the browser open
+      // is a no-op, so the user must be able to copy it to another machine.
+      onAuthorizeUrl: (url) => {
+        sinks.out.write("\nOpen this URL in a browser (any machine):\n\n  " + url + "\n\n");
+      },
+    });
     const modelId = await discoverChatGptModel(tokens.accessToken);
     ensureChatGptModelCatalog(modelId);
     const who = [tokens.email, tokens.planType ? `plan: ${tokens.planType}` : null]

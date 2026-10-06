@@ -106,6 +106,10 @@ export interface LoginOpts {
   /** Open the browser at `url`. Default: `open` (darwin) / `xdg-open` (linux),
    *  best-effort (failure just means "copy the URL"). */
   openBrowser?: (url: string) => void;
+  /** Called with the authorize URL once built, BEFORE the browser is opened.
+   *  Lets the caller PRINT it — essential on headless/SSH machines where
+   *  `xdg-open` is absent and the URL would otherwise be invisible. */
+  onAuthorizeUrl?: (url: string) => void;
   /** Ask the user to paste the redirect URL (headless fallback). Omit to
    *  disable the manual path (loopback only). */
   prompt?: (text: string) => Promise<string>;
@@ -199,6 +203,11 @@ export async function runLogin(opts: LoginOpts = {}): Promise<StoredTokens> {
     challenge: pkce.challenge,
     clientId: opts.clientId,
   });
+  // Print the URL BEFORE opening the browser: on headless/SSH machines the
+  // browser open is a no-op, so the printed URL is the ONLY way the user
+  // reaches the sign-in page (they open it on another machine, then paste
+  // the redirect URL back). Without this, headless login is impossible.
+  opts.onAuthorizeUrl?.(authorizeUrl);
 
   server.on("request", (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
