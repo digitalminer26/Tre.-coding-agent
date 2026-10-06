@@ -4,14 +4,14 @@
 
 Linux uses Bubblewrap (`bwrap`) for the bash child; Darwin continues to use Seatbelt. The Linux backend creates user, pid, ipc and uts namespaces. It does **not** create a network namespace in v1, so networking is shared.
 
-The filesystem uses an empty-root model. The backend first self-binds host runtime paths, the workspace and any `--extra-root` paths; it then mounts the caller-created empty directory read-only over `/` as the last bind. This order is load-bearing: bwrap resolves each mount source against the current root as it applies mounts. Mounting the empty root earlier would hide the host source paths needed by the later binds. The argv order is pinned by `test/sandbox-linux.test.ts`.
+The filesystem uses an empty-root model. The backend mounts the caller-created empty directory read-only over `/` **first**, then self-binds the host runtime paths, then the private `/tmp`, `/dev` and `/proc`, then the workspace and any `--extra-root` paths as read-write binds. This order is load-bearing: bwrap resolves a bind **source** against the host root and its **destination** against the current (already-mounted) root, so the empty root must be in place first for the self-binds to overlay the host's real `/usr`, `/bin`, `/lib`, … content onto it. If the self-binds ran first they would hit the host's real paths (a no-op: source and dest resolve to the same host path) and the empty root mounted last would then cover everything — every exec fails with `execvp /bin/…: No such file or directory`. The empty root being read-only also means every bind destination must pre-exist inside it (the backend creates the skeleton); bwrap cannot `mkdir` a dest parent into a read-only mount. The argv order is pinned by `test/sandbox-linux.test.ts`.
 
 ## 2. The boundary (what the sandboxed bash can/cannot touch)
 
 | Surface | Access inside the sandbox |
 |---|---|
 | Workspace (`cwd`) | Read/write bind; child working directory. |
-| Extra roots (`--extra-root`) | Read/write binds, after the workspace and before the empty root. |
+| Extra roots (`--extra-root`) | Read/write binds, after the workspace (all rw binds come after the empty root). |
 | `/usr`, `/bin`, `/lib`, `/lib64`, `/sbin` | Read-only `--ro-bind-try`; absent paths are tolerated, including merged-usr layouts. |
 | `/etc/ssl`, `/etc/resolv.conf` | Read-only `--ro-bind-try`; TLS and resolver runtime configuration only. |
 | `/tmp` | Private tmpfs; the spawned child's `TMPDIR` is forced to `/tmp`. |
@@ -23,7 +23,7 @@ Not visible through the sandbox root: other homes, `/etc` except for the two mou
 
 ## 3. Availability + the probe
 
-`bashSandboxAvailable()` dispatches by platform: Darwin checks for `sandbox-exec`; Linux calls `linuxSandboxAvailable()`. On Linux, availability requires both a located bwrap executable and a successful real spawn probe. `bwrapPath()` checks `/usr/bin/bwrap`, `/bin/bwrap`, and `/usr/local/bin/bwrap`, then scans the caller's `PATH` (supporting no-root installs). The probe builds the sandbox mounts and runs `/bin/true` under bwrap with a 3,000 ms spawn timeout. A present binary is insufficient because kernel policy may reject creation or mapping of the user namespace.
+`bashSandboxAvailable()` dispatches by platform: Darwin checks for `sandbox-exec`; Linux calls `linuxSandboxAvailable()`. On Linux, availability requires both a located bwrap executable and a successful real spawn probe. `bwrapPath()` checks `/usr/bin/bwrap`, `/bin/bwrap`, and `/usr/local/bin/bwrap`, then scans the caller's `PATH` (supporting no-root installs). The probe builds the sandbox mounts and runs the shell with `true` under bwrap with a 3,000 ms spawn timeout. A present binary is insufficient because kernel policy may reject creation or mapping of the user namespace.
 
 The result is cached. `__resetLinuxSandboxAvailability()` clears both the availability and bwrap-path caches for tests.
 
@@ -53,7 +53,7 @@ Run on a Linux host with bwrap installed and usable. The OS tests in `test/sandb
 
 | Check | Command inside sandbox | Expected |
 |---|---|---|
-| Basic | `id -u; ls /; test -w .; touch ./.sandbox-write; test -e /tmp` | uid is `0` in the user namespace; root listing has no `home`; workspace is writable; `/tmp` is present as the private tmpfs. |
+| Basic | `id -u; ls /; test -w .; touch ./.sandbox-write; test -e /tmp` | uid is the caller's (bwrap's default identity map — `0` only when the caller is root); root listing has no `home`; workspace is writable; `/tmp` is present as the private tmpfs. |
 | Sibling canary | `cat "<sibling>/canary"`; `ls "<sibling>"`; then `cat ./workspace-marker` and `touch ./workspace-write` | Canary read fails and sibling listing does not show it; workspace read and write still succeed. |
 | Host `/tmp` privacy | `cat "<host-tmp-marker>"` | Fails: the host marker is not visible in the sandbox tmpfs. |
 

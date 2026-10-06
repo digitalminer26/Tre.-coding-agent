@@ -1,17 +1,59 @@
-# Current project status (2026-10-05)
+# Current project status (2026-10-06)
 
-**Linux bwrap sandbox backend — implemented, one step from done (2026-10-05).**
+**Linux bwrap sandbox — the mount-order bug is FIXED and verified on the VM (2026-10-06).**
+The bwrap backend from 2026-10-05 had a load-bearing bug: the empty root was
+mounted **last**, which made the host self-binds (`--ro-bind-try /usr /usr`,
+…) no-ops (bwrap resolves a bind **source** against the host root and its
+**destination** against the current root, so with the empty root not yet in
+place the self-binds hit the host's real paths and did nothing) — and the
+empty root mounted last then covered everything, so every exec failed with
+`execvp /bin/…: No such file or directory`. The probe therefore always failed
+and the banner stayed `unsupported`. (An earlier suspicion — that the
+skeleton must mirror the host's merged-usr symlink topology — was a red
+herring; the self-bind's source is the host path, so no symlink mirroring is
+needed.)
+
+The fix (one increment, `src/tools/sandbox-linux.ts` + its tests + docs/09):
+- **Mount order inverted:** `--ro-bind <emptyRoot> /` is now the **FIRST**
+  op (read-only → deny-by-default, matching the darwin policy), then the host
+  self-binds overlay real content onto the skeleton dirs, then
+  `--tmpfs /tmp` / `--dev /dev` / `--proc /proc`, then the workspace +
+  `--extra-root` rw `--bind`s LAST (so they win over the read-only root),
+  then `--chdir` + the user/pid/ipc/uts unshares.
+- **The empty root is read-only and every bind destination must pre-exist
+  inside it** (bwrap cannot `mkdir` a dest parent into a RO mount), so
+  `createEmptyRootSkeleton` creates all `bwrapDestDirs` as real empty dirs
+  (the symlink-mirroring `bwrapSkeletonPlan` from the buggy draft was removed).
+- The uid assertion in the OS probe was corrected: bwrap's default (no
+  `--uid-map`) is an **identity** map, so `id -u` is the caller's uid (0 only
+  when the caller is root) — workspace files stay user-owned, not root.
+
+**Verified on the lab VM (192.168.50.154, after the user ran the AppArmor
+userns unlock):** `linuxSandboxAvailable()` → `true`; the banner flips to
+`sandbox: on (bash confined to the workspace)`; the OS-guarded test suite runs
+on Linux and passes 11/11 (the sibling-canary escape + workspace-rw probes
+execute for real); and a live `tre. run` bash command confirmed the boundary —
+`cat /etc/hosts` fails (only /etc/ssl + /etc/resolv.conf mounted), `echo … >
+/etc/pwn` fails "Read-only file system", and a workspace write succeeds.
+macOS gate green: 686 tests, 673 pass, 13 skipped, 0 fail; the darwin path is
+untouched. **Revert:** `git checkout pre-bwrap-9cd5978 && npm run build`
+(everything) or just the module: `git checkout pre-bwrap-9cd5978 --
+src/tools/sandbox-linux.ts`; runtime kill-switch `--no-sandbox` always works.
+The userns unlock is NOT persistent across a VM reboot — re-run
+`echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns`
+(or add it to `/etc/sysctl.d/99-allow-userns.conf`).
+
+**Linux bwrap sandbox backend — implemented (2026-10-05).**
 The bash tool now has a Linux kernel sandbox (Bubblewrap), mirroring the
 darwin Seatbelt contract. Built via parallel delegation (gpt-6-luna + the
 .13 Qwen endpoint; plan at `.tre/delegation/linux-bwrap/plan.md`):
-- `src/tools/sandbox-linux.ts` — empty-root model: host runtime self-binds
-  first (/usr,/bin,/lib,/lib64,/sbin ro -try; /etc/ssl + /etc/resolv.conf
-  ro), private /tmp tmpfs, minimal /dev, fresh /proc, then an empty dir
-  ro-bound over / LAST (bwrap resolves each mount source against the
-  CURRENT root — the ordering is load-bearing and test-pinned).
-  user/pid/ipc/uts namespaces; network SHARED in v1. Availability = binary
-  (candidates + caller-PATH scan for no-root installs) AND a real spawn
-  probe (3s) — the binary existing is not enough.
+- `src/tools/sandbox-linux.ts` — empty-root model. **NOTE (2026-10-06): the
+  original draft mounted the empty root LAST, which broke every exec (the
+  self-binds were no-ops); the corrected order — empty root FIRST, see the
+  2026-10-06 section above — is what shipped.** user/pid/ipc/uts namespaces;
+  network SHARED in v1. Availability = binary (candidates + caller-PATH scan
+  for no-root installs) AND a real spawn probe (3s) — the binary existing is
+  not enough.
 - `test/sandbox-linux.test.ts` — 8 pure argv/dest tests (run on darwin) +
   3 linux-guarded kernel probes (uid=0, host root hidden, sibling-canary
   escape, workspace rw) that self-skip where bwrap is absent.
