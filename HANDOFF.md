@@ -1,5 +1,24 @@
 # Current project status (2026-10-05)
 
+**C42 — the sandbox banner tells the truth on non-darwin.** On Linux the
+startup banner used to claim `sandbox: on (bash confined to the workspace)`
+while the bash tool actually ran UNSANDBOXED (kernel sandbox unavailable) —
+a false sense of containment, verified live on the lab Ubuntu 24.04 VM
+(192.168.50.154). `behaviorSettingsLines` now takes `true | false |
+"unsupported"`; the call site computes the real state from
+`bashSandboxAvailable()`; the unsupported state renders `off (no kernel
+sandbox on this platform — bash runs UNSANDBOXED; the approval gate is the
+only boundary)`. macOS rendering is byte-identical (verified on this
+machine); all 665 tests pass.
+
+**Ubuntu deployment verified end-to-end (2026-10-05).** v0.1.4 was deployed
+on the lab VM (llmsandbox, Ubuntu 24.04.3 LTS, x86_64) — Node 22.23.3
+(user-local, checksum-verified), the offline installer ran clean, a real
+LLM turn against the lab llama.cpp endpoint (172.30.70.13:8080,
+Qwen3.8-27B-UD-Q4_K_S) succeeded, and the bash tool works (unsandboxed, as
+designed). The VM has unprivileged user namespaces enabled and Docker —
+a viable target for prototyping a bwrap-based Linux sandbox.
+
 **Release v0.1.4 — published (the C41 fix).** The `codex/models` endpoint
 now requires a `client_version` query param (and version-gates the list);
 `discoverChatGptModel` sends `client_version=1.0.0` (C41). Fresh-endpoint
