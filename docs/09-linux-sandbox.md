@@ -49,7 +49,7 @@ To persist it, put `kernel.apparmor_restrict_unprivileged_userns = 0` in `/etc/s
 
 ## 5. Kernel verification recipe
 
-Run on a Linux host with bwrap installed and usable. The OS tests in `test/sandbox-linux.test.ts` cover the generated argv, uid and root view, a sibling canary, and workspace read/write; they skip when bwrap is missing or the spawn is rejected. For a manual canary pass, create a workspace and sibling under one temporary parent, plus a marker in host `/tmp`, then run each command through the normal sandboxed bash spawn with `cwd` set to the workspace:
+Run on a Linux host with bwrap installed and usable. The OS tests in `test/sandbox-linux.test.ts` cover the generated argv, uid and root view, a sibling canary, workspace read/write, denied writes under `/etc`, `/usr`, `/var`, and `/run`, and writable private `/tmp`; they skip when bwrap is missing or the spawn is rejected. For a manual canary pass, create a workspace and sibling under one temporary parent, plus a marker in host `/tmp`, then run each command through the normal sandboxed bash spawn with `cwd` set to the workspace:
 
 | Check | Command inside sandbox | Expected |
 |---|---|---|
@@ -57,7 +57,9 @@ Run on a Linux host with bwrap installed and usable. The OS tests in `test/sandb
 | Sibling canary | `cat "<sibling>/canary"`; `ls "<sibling>"`; then `cat ./workspace-marker` and `touch ./workspace-write` | Canary read fails and sibling listing does not show it; workspace read and write still succeed. |
 | Host `/tmp` privacy | `cat "<host-tmp-marker>"` | Fails: the host marker is not visible in the sandbox tmpfs. |
 
-The automated sibling test specifically asserts failed `cat`, absent canary name from the sibling listing, and successful workspace read/write. The test suite does not currently assert host-`/tmp` marker invisibility; treat that row as a manual kernel canary.
+The automated sibling test specifically asserts failed `cat`, absent canary name from the sibling listing, successful workspace read/write, denied writes in `/etc`, `/usr`, `/var`, and `/run`, and a successful write to the private `/tmp`. The test suite does not currently assert host-`/tmp` marker invisibility; treat that row as a manual kernel canary.
+
+Verified on the lab VM (Ubuntu 24.04, bwrap 0.9.0, 2026-10-06): `node --test dist/test/sandbox-linux.test.js` completed 11/11 with zero skips. This includes the filesystem write canaries; they confirm on that kernel/runtime that the empty-root mount plus read-only runtime binds deny writes to the tested host paths while `/tmp` and the workspace remain writable. This is evidence for the tested VM, not a substitute for a required Linux CI job across supported distributions / bwrap versions.
 
 ## 6. Nesting + env
 

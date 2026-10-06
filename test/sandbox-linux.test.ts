@@ -323,6 +323,30 @@ test(
       const wsWrite = await run(`echo x > "${path.join(ws, "out.txt")}"`);
       assert.equal(wsWrite.code, 0, `writing in the workspace must succeed: out=${wsWrite.out} err=${wsWrite.err}`);
       assert.ok(existsSync(path.join(ws, "out.txt")), "the workspace file must exist");
+
+      // Non-workspace host surfaces must not be writable. /etc and /usr are
+      // present runtime mounts (read-only); /var and /run are not mounted in
+      // this empty-root view and may be absent altogether. In either case an
+      // attempted write must fail and must not leave a marker behind.
+      for (const dir of ["/etc", "/usr", "/var", "/run"]) {
+        const marker = `.tre-sandbox-write-${randomBytes(6).toString("hex")}`;
+        const attempt = await run(`printf x > "${dir}/${marker}"`);
+        assert.notEqual(
+          attempt.code,
+          0,
+          `write outside allowed roots must fail (${dir}): out=${attempt.out} err=${attempt.err}`,
+        );
+        const check = await run(`test ! -e "${dir}/${marker}"`);
+        assert.equal(
+          check.code,
+          0,
+          `write attempt must leave no file (${dir}): out=${check.out} err=${check.err}`,
+        );
+      }
+
+      // Private /tmp is intentionally writable, while workspace remains RW.
+      const tmpWrite = await run("touch /tmp/tre-sandbox-write-check && test -e /tmp/tre-sandbox-write-check");
+      assert.equal(tmpWrite.code, 0, `private /tmp should be writable: ${tmpWrite.err}`);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

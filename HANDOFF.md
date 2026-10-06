@@ -1,5 +1,7 @@
 # Current project status (2026-10-06)
 
+**Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. Child env still inherits most caller variables; consider an explicit allowlist separately. Host `/tmp` marker invisibility remains documented as a manual-only check.
+
 **ChatGPT login now works headless / over SSH (2026-10-06, `d605662`).**
 `tre. login chatgpt` on a machine with no browser (the lab VM, ssh sessions)
 was broken in a subtle way: the authorize URL was handed to the browser opener
