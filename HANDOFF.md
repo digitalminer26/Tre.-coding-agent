@@ -1,5 +1,18 @@
 # Current project status (2026-10-06)
 
+**Release v0.1.5 — published (2026-10-06).** The first release since v0.1.4.
+Ships the Linux bwrap sandbox (module + wiring + the mount-order fix +
+docs/09 + write-boundary verification), the headless/SSH ChatGPT login fix
+(print the authorize URL, `d605662`), and the C41 `client_version` fix from
+v0.1.4. Released via `sh scripts/release.sh 0.1.5` (bump commit `2ec253a`,
+gate green, pushed to origin main, tarball built, release published).
+Assets at GitHub release v0.1.5: `tre-coding-agent-0.1.5-offline.tgz`
+(sha256 `ec6b20747a4e7d5e7e75b61cfbfa3f3dfc982fb4d8b09a5231602ed73bf13ad3`,
+2,355,768 bytes) and `install-tre-0.1.5.sh`. One-command install:
+  curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/download/v0.1.5/install-tre-0.1.5.sh | sh
+The bundle does not touch user config (`~/.tre/tre/models.json`, auth
+files) — re-deploying to the VM keeps its llama.cpp model catalog.
+
 **Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. Child env still inherits most caller variables; consider an explicit allowlist separately. Host `/tmp` marker invisibility remains documented as a manual-only check.
 
 **ChatGPT login now works headless / over SSH (2026-10-06, `d605662`).**
