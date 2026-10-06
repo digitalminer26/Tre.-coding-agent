@@ -1,5 +1,42 @@
 # Current project status (2026-10-05)
 
+**Linux bwrap sandbox backend — implemented, one step from done (2026-10-05).**
+The bash tool now has a Linux kernel sandbox (Bubblewrap), mirroring the
+darwin Seatbelt contract. Built via parallel delegation (gpt-6-luna + the
+.13 Qwen endpoint; plan at `.tre/delegation/linux-bwrap/plan.md`):
+- `src/tools/sandbox-linux.ts` — empty-root model: host runtime self-binds
+  first (/usr,/bin,/lib,/lib64,/sbin ro -try; /etc/ssl + /etc/resolv.conf
+  ro), private /tmp tmpfs, minimal /dev, fresh /proc, then an empty dir
+  ro-bound over / LAST (bwrap resolves each mount source against the
+  CURRENT root — the ordering is load-bearing and test-pinned).
+  user/pid/ipc/uts namespaces; network SHARED in v1. Availability = binary
+  (candidates + caller-PATH scan for no-root installs) AND a real spawn
+  probe (3s) — the binary existing is not enough.
+- `test/sandbox-linux.test.ts` — 8 pure argv/dest tests (run on darwin) +
+  3 linux-guarded kernel probes (uid=0, host root hidden, sibling-canary
+  escape, workspace rw) that self-skip where bwrap is absent.
+- `docs/09-linux-sandbox.md` — the full boundary spec.
+- `src/tools/sandbox.ts` — the dispatch hunk (bashSandboxAvailable +
+  spawnSandboxedBash, linux → bwrap backend; darwin path UNTOUCHED).
+  GUARDRAIL FILE: the agent cannot commit it. The user commits with:
+  `git add src/tools/sandbox.ts && GUARDRAIL_BYPASS=1 git commit -m "..."`
+  (patch saved at `.tre/delegation/linux-bwrap/guardrail-hunk.patch`).
+**State:** the commits for the new files (module+tests, then docs) are in;
+the guardrail hunk is staged in the working tree (uncommitted). macOS gate
+green: 686 tests, 673 pass, 13 skipped, 0 fail; the darwin banner is
+byte-identical (verified live). The VM (192.168.50.154) runs the new build: bwrap 0.9.0
+installed no-root, but Ubuntu 24.04's AppArmor blocks unprivileged
+userns (`kernel.apparmor_restrict_unprivileged_userns = 1` — the
+uid_map write is denied; a bare `unshare -U true` passes and is NOT a
+valid probe), so the probe fails → honest C42 banner → unsandboxed
+fallback (verified: real LLM turn OK). **UNLOCK (needs the user's sudo
+password on the VM):** `echo 0 | sudo tee
+/proc/sys/kernel/apparmor_restrict_unprivileged_userns` — then re-run the
+kernel matrix on the VM (recipe in docs/09 §5) and the banner flips to
+`on`. **Revert:** `git checkout pre-bwrap-9cd5978 -- src/tools/sandbox.ts`
+(undoes the hunk) or `git checkout pre-bwrap-9cd5978 && npm run build`
+(everything); runtime kill-switch `--no-sandbox` always works.
+
 **C42 — the sandbox banner tells the truth on non-darwin.** On Linux the
 startup banner used to claim `sandbox: on (bash confined to the workspace)`
 while the bash tool actually ran UNSANDBOXED (kernel sandbox unavailable) —
