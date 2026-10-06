@@ -42,8 +42,10 @@
  *     noise when denied); re-allowed for quietness.
  *   - Profiles are inherited across fork/exec: the shell's children are
  *     confined too.
- *   - darwin only. Elsewhere the bash tool runs unsandboxed (the approval
- *     gate + destructive classifier still apply). Opt out: --no-sandbox.
+ *   - darwin: Seatbelt (this file). linux: Bubblewrap (sandbox-linux.ts —
+ *     empty-root model, user/mount/pid/ipc/uts namespaces, network shared
+ *     in v1). Elsewhere the bash tool runs unsandboxed (the approval gate
+ *     + destructive classifier still apply). Opt out: --no-sandbox.
  *
  * Known v1 boundary: per-user temp (/private/var/folders) and /opt are
  * readable and writable (tool runtimes need them); /usr, /bin, /sbin,
@@ -108,6 +110,10 @@ import { existsSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  linuxSandboxAvailable,
+  spawnLinuxSandboxedBash,
+} from "./sandbox-linux.js";
 
 // Stock macOS: /usr/sbin/sandbox-exec. Non-standard system trees (some lab
 // machines ship a split /usr) put it in /usr/bin — resolve, don't assume.
@@ -124,10 +130,20 @@ export function sandboxExecPath(): string | undefined {
 
 let availableCache: boolean | undefined;
 
-/** True when the kernel sandbox is usable on this platform. */
+/**
+ * True when a kernel sandbox is usable on this platform: darwin →
+ * sandbox-exec present; linux → bwrap present AND the real spawn probe
+ * passes (userns may be blocked even when the binary exists — see
+ * sandbox-linux.ts / docs/09-linux-sandbox.md).
+ */
 export function bashSandboxAvailable(): boolean {
   if (availableCache === undefined) {
-    availableCache = process.platform === "darwin" && sandboxExecPath() !== undefined;
+    availableCache =
+      process.platform === "darwin"
+        ? sandboxExecPath() !== undefined
+        : process.platform === "linux"
+          ? linuxSandboxAvailable()
+          : false;
   }
   return availableCache;
 }
@@ -318,6 +334,13 @@ export async function spawnSandboxedBash(
   command: string,
   opts: { cwd?: string; env: NodeJS.ProcessEnv; detached?: boolean; extraRoots?: string[] },
 ): Promise<SandboxSpawn> {
+  // linux: the Bubblewrap backend — same SandboxSpawn contract (child +
+  // dispose), same env/nesting semantics, empty-root boundary (see
+  // sandbox-linux.ts + docs/09-linux-sandbox.md). darwin falls through to
+  // the Seatbelt path below, UNCHANGED.
+  if (process.platform === "linux") {
+    return spawnLinuxSandboxedBash(command, opts);
+  }
   const dir = await mkdtemp(path.join(tmpdir(), "coding-agent-sb-"));
   const policyPath = path.join(dir, `policy-${randomBytes(8).toString("hex")}.sb`);
   await writeFile(
