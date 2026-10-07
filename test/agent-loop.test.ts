@@ -1181,3 +1181,181 @@ test("steering: an abort with a steer typed mid-stream discards it (queue is per
   assert.equal(q.length, 1, "the abort left the queue undrained — the driver discards it");
   assert.equal(end.messages.length, 2, "user + aborted assistant; no steer message");
 });
+
+// ─────────────────────────────── D27 (steering/loop audit) ───────────────────
+
+test("D27 F1: guidance arriving during the async prepareNextTurn hook is delivered on the same request", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const q: string[] = [];
+  const queue = {
+    push: (t: string) => q.push(t),
+    drain: () => {
+      const out = [...q];
+      q.length = 0;
+      return out;
+    },
+  };
+  const seen: LlmContext[] = [];
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, ctx, o) => {
+    call += 1;
+    seen.push({ ...ctx, messages: JSON.parse(JSON.stringify(ctx.messages)) });
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools: [tool],
+      streamFn,
+      signal: new AbortController().signal,
+      steeringQueue: queue,
+      prepareNextTurn: async (_ctx, turn) => {
+        if (turn === 2) {
+          // Simulate the async hook (auto-compaction) taking time; guidance
+          // arrives WHILE it runs (after the one-shot pre-hook drain).
+          await new Promise((r) => setTimeout(r, 10));
+          q.push("late guidance");
+        }
+        return undefined;
+      },
+    }),
+  );
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  // The late guidance was delivered on turn 2's request (seen[1]), NOT
+  // deferred to a turn 3 — the second drain (post-hook) caught it.
+  assert.equal(seen.length, 2, "exactly two LLM calls — the steer was not deferred");
+  const ctx2 = seen[1]!.messages;
+  const steerIdx = ctx2.findIndex((m) => m.role === "user" && m.content === "late guidance");
+  assert.notEqual(steerIdx, -1, "the late guidance is in turn 2's LLM context");
+  const steers = events.filter((e) => e.type === "steer");
+  assert.equal(steers.length, 1);
+  if (steers[0]!.type === "steer") assert.equal(steers[0]!.turn, 2);
+});
+
+test("D27 F2: fresh user guidance resets the identical-batch loop guard", async () => {
+  const { tool, calls } = makeTool("read");
+  const a = { id: "c1", name: "read", args: { path: "a" } };
+  // Two identical batches (chain builds to [S, S]), then a steer, then one
+  // more identical batch. Without the reset, the post-steer repeat (the 3rd
+  // S in a row) would trip the loop guard. With the reset, the steer clears
+  // sigHistory so the chain restarts and the repeat is legitimate.
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [a] },
+    { type: "toolcall", calls: [a] },
+    { type: "toolcall", calls: [a] },
+    { type: "text", text: "done" },
+  ];
+  // steerAtCall=2: the steer is pushed during turn 2's stream, so it is
+  // drained in turn 3's pre-hook drain — right before turn 3's batch is
+  // checked against sigHistory.
+  const { events, queue } = await drainSteered(
+    turns,
+    [tool],
+    2,
+    ["I changed a externally; read it again"],
+  );
+  const end = agentEnd(events);
+  assert.equal(queue.length, 0, "the steer was drained");
+  assert.equal(end.stopReason, "stop", "the post-steer repeat did NOT trip the loop guard");
+  assert.equal(calls.length, 3, "all three reads executed (the steer reset the batch history)");
+});
+
+test("D27 F3: an abort during the async prepareNextTurn hook stops the run without a stream call", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const controller = new AbortController();
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, ctx, o) => {
+    call += 1;
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools: [tool],
+      streamFn,
+      signal: controller.signal,
+      prepareNextTurn: async (_ctx, turn) => {
+        if (turn === 2) {
+          // Simulate an abort landing while the async hook (auto-compaction)
+          // is in flight.
+          await new Promise((r) => setTimeout(r, 10));
+          controller.abort();
+        }
+        return undefined;
+      },
+    }),
+  );
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the abort during the hook stops the run");
+  assert.equal(call, 1, "the stream was called only for turn 1 — turn 2's stream was skipped");
+  assert.equal(events.filter((e) => e.type === "steer").length, 0);
+});
+
+test("D27 coverage: a steer that becomes the first kept message keeps its identity for replay", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const summary: AssistantMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: "summary" }],
+    model: "fake-model",
+    provider: "fake",
+    stopReason: "stop",
+    timestamp: 0,
+  };
+  // A compaction that folds the context down to [summary, steer] makes the
+  // steer the FIRST kept message — the case the identity fix exists for.
+  const { events, queue } = await drainSteered(
+    turns,
+    [tool],
+    1,
+    ["early guidance"],
+    {
+      prepareNextTurn: (ctx, turn) => {
+        if (turn === 2) {
+          const steer = ctx.find(
+            (m) => m.role === "user" && m.content === "early guidance",
+          ) as UserMessage;
+          return [summary, steer];
+        }
+        return undefined;
+      },
+    },
+  );
+  assert.equal(queue.length, 0);
+  const steers = events.filter((e) => e.type === "steer") as Extract<AgentEvent, { type: "steer" }>[];
+  assert.equal(steers.length, 1);
+  const end = agentEnd(events);
+  // Final context: [summary, steer, assistant(done)]. The steer is the first
+  // KEPT message (right after the summary) — the case the identity fix exists
+  // for.
+  assert.equal(end.messages.length, 3, "summary + steer + final assistant");
+  assert.equal(end.messages[0]!.role, "assistant");
+  assert.equal(end.messages[1]!.role, "user");
+  if (end.messages[1]!.role === "user") assert.equal(end.messages[1]!.content, "early guidance");
+  // Message identity: the steer event carries the SAME object the compaction
+  // kept — the CLI keys its entry-id map by this identity, so a resumed
+  // session resolves the steer to the entry persisted on delivery.
+  assert.equal(
+    steers[0]!.message,
+    end.messages[1],
+    "the steer event's message is the same reference the compaction kept",
+  );
+});

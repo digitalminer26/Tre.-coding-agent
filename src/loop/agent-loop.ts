@@ -290,6 +290,36 @@ export async function* runLoop(
   // C26 — loop detection: signatures of the last two issued batches.
   let sigHistory: string[] = [];
 
+  /**
+   * Steering drain (D27). Delivers queued user guidance as user messages:
+   * each is pushed to the context and carried in a `steer` event (the driver
+   * persists the EXACT object — session entry ids are keyed by message
+   * identity). Returns true when at least one steer was delivered.
+   *
+   * D27 Finding 2: a delivery RESETS the identical-batch loop guard
+   * (`sigHistory`) — fresh user input can make a previously-repeated action
+   * legitimate ("I changed a externally; read it again"). The per-cycle turn
+   * budget is NOT reset (that counter is the runaway guard, not the loop
+   * detector).
+   */
+  async function drainSteers(turn: number): Promise<AgentEvent[]> {
+    const queue = options.steeringQueue;
+    if (!queue) return [];
+    const pending = queue.drain();
+    const events: AgentEvent[] = [];
+    for (const text of pending) {
+      const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+      context.push(message);
+      events.push({ type: "steer", turn, text, message });
+    }
+    if (pending.length > 0) {
+      // D27 Finding 2 — external guidance makes a repeated batch legitimate
+      // again; clear the consecutive-batch history (not the turn budget).
+      sigHistory = [];
+    }
+    return events;
+  }
+
   while (true) {
     if (turn - cycleStart >= maxTurns) {
       // Budget hit. C26: the cap is a CYCLE trigger, not a hard stop —
@@ -324,17 +354,28 @@ export async function* runLoop(
     // ONCE and carried in the event: the driver persists that same object
     // (session entry ids are keyed by message identity — a steer that
     // becomes the first kept message of a compaction must resolve its id).
-    if (options.steeringQueue) {
-      for (const text of options.steeringQueue.drain()) {
-        const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
-        context.push(message);
-        yield { type: "steer", turn, text, message };
-      }
-    }
+    for (const ev of await drainSteers(turn)) yield ev;
 
     if (options.prepareNextTurn) {
       const next = await options.prepareNextTurn(context, turn);
       if (next !== undefined) context.splice(0, context.length, ...next);
+    }
+
+    // D27 Finding 1: the hook is async (auto-compaction awaits an LLM call),
+    // so guidance can arrive WHILE it runs. The pre-hook drain above is one-
+    // shot; drain a SECOND time after the hook resolves and before the
+    // stream call so that late guidance is not deferred to the next request.
+    // Same helper → same `steer` event + message identity → the CLI persists
+    // it through the existing path (entry-id map stays consistent).
+    for (const ev of await drainSteers(turn)) yield ev;
+
+    // D27 Finding 3: the hook is async, so the run may be aborted while it
+    // runs. Check before starting work — do not invoke the streamFn after
+    // cancellation (the wire layer honors the signal too, but the guard is
+    // about not STARTING work after an abort).
+    if (signal.aborted) {
+      stopReason = "aborted";
+      break;
     }
 
     // ── stream one assistant response into a single context slot (I2) ──
@@ -383,16 +424,10 @@ export async function* runLoop(
       }
       // Steering keep-alive: the model finished with a text-only reply, but
       // the user typed guidance while it ran — deliver it and keep going.
-      if (options.steeringQueue) {
-        const pending = options.steeringQueue.drain();
-        if (pending.length > 0) {
-          for (const text of pending) {
-            const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
-            context.push(message);
-            yield { type: "steer", turn, text, message };
-          }
-          continue;
-        }
+      const keepAlive = await drainSteers(turn);
+      if (keepAlive.length > 0) {
+        for (const ev of keepAlive) yield ev;
+        continue;
       }
       break; // normal stop — or length with the nudge already spent
     }
