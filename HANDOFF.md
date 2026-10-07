@@ -19,6 +19,19 @@ The three steer-delivery sites (pre-hook, post-hook, keep-alive) now share one
 `drainSteers()` helper. +4 regression tests (F1/F2/F3 + the steer-becomes-first-kept-
 message identity coverage gap). Gate green: 696 pass / 0 fail / 13 skipped.
 
+**D27 audit (gpt-6.1-sol) + follow-up fix (2026-10-06, `b3a74d4`).** The D27
+implementation was audited with `gpt-6.1-sol` (read-only review of the diff +
+real source). Verdict: CORRECT-WITH-MINOR-ISSUES, one low-severity finding: the
+post-hook `drainSteers` ran BEFORE the abort check, so guidance that arrived
+during the async `prepareNextTurn` hook was drained (removed from the queue,
+appended to context, persisted by the CLI) even when the run was aborted before
+the next model request — contradicting the documented policy that abort breaks
+leave pending guidance undrained. Fix: an `if (signal.aborted)` check after
+applying the hook's returned context and BEFORE the post-hook drain; the existing
+F3 check (after emitting the steer events) is retained, since cancellation can
+also occur while the consumer persists the emitted steer events. +1 regression
+test. Gate green: 697 pass / 0 fail / 13 skipped.
+
 **Compaction hardening follow-up D26 — audit fixes applied, budget issue open (2026-10-06, uncommitted).** A prior “resolved” claim was premature. Audit found estimate-triggered compaction could degrade without an LLM call; abort during retry could still persist fallback; fallback could enlarge a tiny context; and file-op evidence could match a later reused ID. Fixes: pass the caller’s evaluated trigger into compaction attempts; check abort after retry; cap fallback notice and refuse non-shrinking results; match tool results only within the adjacent result unit. Added targeted regression tests. **Open:** fixed prompt overhead is counted in the trigger but is not fully reserved against kept context. A strict fit guard broke valid current tests and was removed; do not claim the complete next-request estimate is guaranteed to fit. Full gate: 684 passed / 0 failed / 13 skipped. Changes remain uncommitted.
 
 **Release v0.1.5 — published (2026-10-06).** The first release since v0.1.4.
