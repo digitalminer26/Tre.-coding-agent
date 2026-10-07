@@ -1051,6 +1051,109 @@ test("steering: no steer → normal stop, no steer events", async () => {
   assert.equal(events.filter((e) => e.type === "steer").length, 0);
 });
 
+test("steering ordering: a steer is drained BEFORE prepareNextTurn — the hook sees it in context", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const hookContexts: AgentMessage[][] = [];
+  const { events, seen, queue } = await drainSteered(
+    turns,
+    [tool],
+    1,
+    ["focus on the tests"],
+    {
+      prepareNextTurn: (ctx) => {
+        hookContexts.push(JSON.parse(JSON.stringify(ctx)));
+        return undefined;
+      },
+    },
+  );
+  assert.equal(queue.length, 0, "the queue was drained");
+  assert.equal(hookContexts.length, 2, "the hook ran once per turn");
+  // Turn 1: nothing queued yet.
+  assert.equal(hookContexts[0]!.length, 1, "turn 1 hook context is just the user message");
+  // Turn 2: the steer is ALREADY in the context the hook receives — a hook
+  // deciding here (e.g. auto-compaction) sees the queued user guidance.
+  const turn2 = hookContexts[1]!;
+  const steerIdx = turn2.findIndex(
+    (m) => m.role === "user" && m.content === "focus on the tests",
+  );
+  assert.notEqual(steerIdx, -1, "the steer is in the hook's context on turn 2");
+  // The steer event is emitted before turn 2's stream starts (delivery
+  // precedes the LLM call, and the hook runs in between).
+  const turnStartIdx = events.findIndex((e) => e.type === "turn_start" && e.turn === 2);
+  const steerEventIdx = events.findIndex((e) => e.type === "steer");
+  const streamStartIdx = events.findIndex((e) => e.type === "start" && events.indexOf(e) > turnStartIdx);
+  assert.ok(steerEventIdx > turnStartIdx, "the steer event follows turn 2's turn_start");
+  assert.ok(steerEventIdx < streamStartIdx, "the steer event precedes turn 2's stream start");
+  // The LLM context carries the steer too, after the tool result.
+  const ctx2 = seen[1]!.messages;
+  assert.equal(ctx2[3]!.role, "user");
+  if (ctx2[3]!.role === "user") assert.equal(ctx2[3]!.content, "focus on the tests");
+  // One push → exactly one steer event and one user message in the final
+  // context (no duplicate delivery through the hook path).
+  assert.equal(events.filter((e) => e.type === "steer").length, 1);
+  const end = agentEnd(events);
+  assert.equal(
+    end.messages.filter((m) => m.role === "user" && m.content === "focus on the tests").length,
+    1,
+    "the steer appears exactly once in the final context",
+  );
+});
+
+test("steering ordering: a compaction-style rewrite by prepareNextTurn keeps the steer", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const summary: AssistantMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: "summary" }],
+    model: "fake-model",
+    provider: "fake",
+    stopReason: "stop",
+    timestamp: 0,
+  };
+  // Turn 2: the hook folds the context down to [summary, …last 2 messages].
+  // Because the steer was drained BEFORE the hook, it is among the "recent"
+  // messages and survives the rewrite.
+  const { events, seen, queue } = await drainSteered(
+    turns,
+    [tool],
+    1,
+    ["fix the bug first"],
+    {
+      prepareNextTurn: (ctx, turn) =>
+        turn === 2 ? [summary, ...ctx.slice(-2)] : undefined,
+    },
+  );
+  assert.equal(queue.length, 0);
+  // The LLM context for turn 2 is the rewritten one — steer included.
+  assert.deepEqual(normalize(seen[1]!.messages), [
+    summary,
+    {
+      role: "toolResult",
+      toolCallId: "c1",
+      toolName: "read",
+      content: [{ type: "text", text: "read ran" }],
+      timestamp: 0,
+    },
+    userMsg("fix the bug first"),
+  ]);
+  // The steer was delivered exactly once and survives into the final
+  // context the session persists.
+  assert.equal(events.filter((e) => e.type === "steer").length, 1);
+  const end = agentEnd(events);
+  assert.equal(
+    end.messages.filter((m) => m.role === "user" && m.content === "fix the bug first").length,
+    1,
+    "the steer appears exactly once in the final context",
+  );
+});
+
 test("steering: an abort with a steer typed mid-stream discards it (queue is per-run)", async () => {
   const { q, queue } = makeQueue();
   const turns: FakeTurn[] = [{ type: "aborted" }];

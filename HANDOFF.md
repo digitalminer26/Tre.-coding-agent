@@ -1,5 +1,7 @@
 # Current project status (2026-10-06)
 
+**Compaction hardening follow-up D26 — audit fixes applied, budget issue open (2026-10-06, uncommitted).** A prior “resolved” claim was premature. Audit found estimate-triggered compaction could degrade without an LLM call; abort during retry could still persist fallback; fallback could enlarge a tiny context; and file-op evidence could match a later reused ID. Fixes: pass the caller’s evaluated trigger into compaction attempts; check abort after retry; cap fallback notice and refuse non-shrinking results; match tool results only within the adjacent result unit. Added targeted regression tests. **Open:** fixed prompt overhead is counted in the trigger but is not fully reserved against kept context. A strict fit guard broke valid current tests and was removed; do not claim the complete next-request estimate is guaranteed to fit. Full gate: 684 passed / 0 failed / 13 skipped. Changes remain uncommitted.
+
 **Release v0.1.5 — published (2026-10-06).** The first release since v0.1.4.
 Ships the Linux bwrap sandbox (module + wiring + the mount-order fix +
 docs/09 + write-boundary verification), the headless/SSH ChatGPT login fix

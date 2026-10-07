@@ -208,12 +208,17 @@ export type AgentEvent =
       /**
        * Steering: guidance the user typed while a run was in flight. The
        * driver queued it; the loop delivered it as a user message into the
-       * context just before this LLM call. Informational (the TUI already
-       * echoed the line at submit time — it is a NO-OP in applyEvent).
+       * context just before this LLM call. `message` is the EXACT object
+       * pushed into the context — the driver persists that object (WS9:
+       * session entry ids are keyed by message identity, so a compaction
+       * whose first kept message is a steer must find its id). Informational
+       * for the UI (it already echoed the line at submit time — a NO-OP in
+       * applyEvent).
        */
       type: "steer";
       turn: number;
       text: string;
+      message: UserMessage;
     }
   | { type: "tool_execution_start"; toolCall: ToolCallBlock }
   | { type: "tool_execution_update"; toolCallId: string; text: string }
@@ -231,6 +236,11 @@ export type AgentEvent =
       /** D (failure escalation): the summary call failed twice and the
        *  context was shrunk by the rule-based fallback (no LLM summary). */
       degraded?: boolean;
+      /** The compacted context is a strict reduction of the history but
+       *  still exceeds the model's input budget (the kept tail is atomic —
+       *  indivisible tool-call/result units can't be shrunk). It was kept
+       *  anyway: smaller than before, larger than the budget. */
+      overBudget?: boolean;
     }
   | AssistantStreamEvent;
 

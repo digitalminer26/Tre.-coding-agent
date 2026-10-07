@@ -1032,7 +1032,7 @@ test("steerInput: approving → null (input is locked)", () => {
 
 test("applyEvent: steer is a no-op (the user item was pushed at submit time)", () => {
   const s = { ...makeInitialState("m"), busy: true, items: [{ kind: "user" as const, text: "fix the bug" }] };
-  const r = applyEvent(s, { type: "steer", turn: 2, text: "fix the bug" });
+  const r = applyEvent(s, { type: "steer", turn: 2, text: "fix the bug", message: { role: "user", content: "fix the bug", timestamp: 1 } });
   assert.equal(r, s, "no new item — no double-add");
 });
 

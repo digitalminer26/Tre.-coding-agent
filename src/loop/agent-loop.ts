@@ -59,14 +59,17 @@
  *    reason.
  *  - Steering: guidance typed during a run is queued by the driver (a
  *    `SteeringQueue`) and delivered before the next LLM call — after the
- *    current turn's work completes. A pending steer also KEEPS THE RUN
- *    ALIVE when the model would otherwise stop with a text-only reply.
+ *    current turn's work completes, and BEFORE the `prepareNextTurn` hook
+ *    (so queued user messages are in context when a hook decides, e.g.
+ *    auto-compaction). A pending steer also KEEPS THE RUN ALIVE when the
+ *    model would otherwise stop with a text-only reply.
  *    Abort/error/budget/loop breaks do NOT drain — the queue is per-run and
  *    the driver discards leftovers (a new prompt starts a fresh queue).
  */
 import type {
   AgentEvent,
   AgentMessage,
+  UserMessage,
   AssistantMessage,
   ExecuteToolCall,
   ModelConfig,
@@ -313,18 +316,25 @@ export async function* runLoop(
     turn += 1;
     yield { type: "turn_start", turn };
 
+    // Steering: guidance typed during the run is queued by the driver and
+    // delivered here — after the previous turn's work, before this LLM call.
+    // It is drained BEFORE the prepareNextTurn hook so queued user messages
+    // are in context when the hook decides (e.g. auto-compaction): they are
+    // never dropped by a compaction decision. The message object is created
+    // ONCE and carried in the event: the driver persists that same object
+    // (session entry ids are keyed by message identity — a steer that
+    // becomes the first kept message of a compaction must resolve its id).
+    if (options.steeringQueue) {
+      for (const text of options.steeringQueue.drain()) {
+        const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+        context.push(message);
+        yield { type: "steer", turn, text, message };
+      }
+    }
+
     if (options.prepareNextTurn) {
       const next = await options.prepareNextTurn(context, turn);
       if (next !== undefined) context.splice(0, context.length, ...next);
-    }
-
-    // Steering: guidance typed during the run is queued by the driver and
-    // delivered here — after the previous turn's work, before this LLM call.
-    if (options.steeringQueue) {
-      for (const text of options.steeringQueue.drain()) {
-        context.push({ role: "user", content: text, timestamp: Date.now() });
-        yield { type: "steer", turn, text };
-      }
     }
 
     // ── stream one assistant response into a single context slot (I2) ──
@@ -377,8 +387,9 @@ export async function* runLoop(
         const pending = options.steeringQueue.drain();
         if (pending.length > 0) {
           for (const text of pending) {
-            context.push({ role: "user", content: text, timestamp: Date.now() });
-            yield { type: "steer", turn, text };
+            const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
+            context.push(message);
+            yield { type: "steer", turn, text, message };
           }
           continue;
         }

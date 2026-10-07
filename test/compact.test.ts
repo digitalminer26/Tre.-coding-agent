@@ -34,6 +34,7 @@ import {
   SUMMARY_MARKER,
   calibrateCharsPerToken,
   compactContext,
+  estimatePromptOverheadTokens,
   estimateTokens,
   extractFileOps,
   isSummaryMessage,
@@ -113,6 +114,21 @@ test("estimateTokens: ~chars/4, tool results count their text", () => {
 test("estimateTokens: honors a calibrated charsPerToken", () => {
   assert.equal(estimateTokens([user("a".repeat(4000))], 2), 2000);
   assert.equal(estimateTokens([user("a".repeat(4000))], 8), 500);
+});
+
+test("estimatePromptOverheadTokens: system prompt + tool schemas (name/description/parameters)", () => {
+  // No tools: just the system prompt, chars/cpt.
+  assert.equal(estimatePromptOverheadTokens(400, []), 100);
+  // One tool: name + description + JSON.stringify(parameters) chars, then
+  // ceil'd per part (system and tools are ceil'd SEPARATELY — the CLI's
+  // original expression). 10 + 20 + 50 = 80 chars → 20 tokens.
+  const tool = { name: "read", description: "d".repeat(20), parameters: { type: "object", properties: { path: { type: "string" } } } };
+  const toolChars = tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
+  assert.equal(estimatePromptOverheadTokens(400, [tool]), 100 + Math.ceil(toolChars / 4));
+  // Calibrated cpt scales both parts.
+  assert.equal(estimatePromptOverheadTokens(400, [tool], 2), 200 + Math.ceil(toolChars / 2));
+  // Zero system prompt: only the tools count.
+  assert.equal(estimatePromptOverheadTokens(0, [tool]), Math.ceil(toolChars / 4));
 });
 
 test("calibrateCharsPerToken: dense sample → below 4; sparse → clamps at 4", () => {
@@ -246,12 +262,12 @@ test("renderTranscript: user text, tool calls with args, results incl. (ERROR)",
 });
 
 test("renderTranscript: long messages are middle-truncated (head + tail survive)", () => {
-  // line = "[User] HHHHHHHHHHMIDTTTTTTTTTT" (30 chars); perMessageChars 27
-  // clips to head(13) + tail(13) — MID (indices 17-19) survives in the tail.
-  const t = renderTranscript([user("H".repeat(10) + "MID" + "T".repeat(10))], { perMessageChars: 27 });
+  // The rendered line includes the 7-character [User] prefix; preserve the
+  // head and tail around the middle-truncation marker.
+  const t = renderTranscript([user("H".repeat(20) + "X".repeat(20) + "T".repeat(20) + "MID")], { perMessageChars: 40 });
   assert.match(t, /MID/);
   assert.match(t, /truncated/);
-  assert.doesNotMatch(t, /H{10}/, "the middle was cut");
+  assert.doesNotMatch(t, /X{10}/, "the middle was cut");
 });
 
 test("extractFileOps: read → read, write/edit → modified; deduped, first-seen order", () => {
@@ -262,14 +278,37 @@ test("extractFileOps: read → read, write/edit → modified; deduped, first-see
     assistantToolCall("write", { path: "b.ts", content: "x" }),
     toolResult("ok"),
     assistantToolCall("read", { path: "a.ts" }), // deduped
+    toolResult("read ok"),
     assistantToolCall("edit", { path: "c.ts", oldText: "x", newText: "y" }),
+    toolResult("edit ok"),
     assistantToolCall("bash", { command: "cat a.ts" }), // not parsed
+    toolResult("bash ok"),
     assistantToolCall("read", { offset: 1 }), // no path arg — ignored
+    toolResult("read ok"),
     assistantToolCall("read", { path: "  " }), // whitespace path — ignored
+    toolResult("read ok"),
   ];
   const ops = extractFileOps(ctx);
   assert.deepEqual(ops.read, ["a.ts"]);
   assert.deepEqual(ops.modified, ["b.ts", "c.ts"]);
+});
+
+test("extractFileOps: a later reused call id cannot certify a call without an adjacent result", () => {
+  const mkCall = (path: string): AgentMessage => ({ role: "assistant", content: [{ type: "toolCall", id: "same", name: "edit", arguments: { path } }], model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 1 });
+  const result: AgentMessage = { role: "toolResult", toolCallId: "same", toolName: "edit", content: [{ type: "text", text: "ok" }], timestamp: 2 };
+  assert.deepEqual(extractFileOps([mkCall("unverified.ts"), mkCall("verified.ts"), result]), { read: [], modified: ["verified.ts"] });
+});
+
+test("extractFileOps: a path may be both read and modified; failed tools are excluded", () => {
+  const ctx: AgentMessage[] = [
+    assistantToolCall("read", { path: "a.ts" }),
+    toolResult("ok"),
+    assistantToolCall("edit", { path: "a.ts" }),
+    toolResult("denied", true),
+    assistantToolCall("write", { path: "b.ts" }),
+    toolResult("ok", true),
+  ];
+  assert.deepEqual(extractFileOps(ctx), { read: ["a.ts"], modified: [] });
 });
 
 test("extractFileOps: caps each list at 50, first-seen order", () => {
@@ -433,7 +472,9 @@ test("compactContext: usage under budget → undefined, no LLM call", async () =
 
 test("compactContext: over budget → silent summary call (no tools, summarizer prompt), returns kept", async () => {
   const ctx: AgentMessage[] = [
-    user("old question"),
+    // The folded prefix must be substantial: the candidate (marker +
+    // summary + kept) must be a STRICT reduction of the old context.
+    user("old question " + "y".repeat(3000)),
     assistantText("old answer"),
     user("second question"),
     assistantToolCall("bash", { command: "ls" }, usageOf(1900)),
@@ -488,6 +529,31 @@ test("compactContext: keep target is capped by the model's window (small-window 
   assert.ok(r, "compaction happened");
   assert.equal(r!.kept[0], ctx[2]!, "the keep window stops at the capped size (unit 2)");
   assert.deepEqual(r!.kept, ctx.slice(2), "kept is the suffix from unit 2");
+});
+
+test("compactContext: the keep budget is a planning target, not a hard guard", async () => {
+  // The kept suffix (atomic units can't be split) may exceed the keep
+  // budget; compaction is best-effort and returns the smaller context.
+  // Here the tail units are each larger than the tiny budget, so the kept
+  // suffix far exceeds it — the result is still produced (the folded
+  // prefix is large enough that the candidate is a strict reduction).
+  const ctx: AgentMessage[] = [
+    user("old " + "o".repeat(4000)),
+    assistantText("old " + "a".repeat(4000)),
+    user("current".repeat(500)),
+    assistantText("tail".repeat(500)),
+  ];
+  const r = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: "a deliberately long summary" }]),
+    model: MODEL,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    force: true,
+  });
+  assert.ok(r, "the compacted context is returned even over the keep budget");
+  assert.ok(estimateTokens(r!.kept) > 5, "the kept suffix exceeds the tiny budget");
+  assert.ok(r!.estimatedTokensAfter > 5, "the estimate exceeds the target");
 });
 
 test("compactContext: calibrated charsPerToken shrinks the keep window for dense content", async () => {
@@ -580,10 +646,14 @@ test("summarizePrompt: transcriptOpts shrink the prompt (D retry)", () => {
 });
 
 test("compactContext: transcriptOpts pass through to the summarizer prompt", async () => {
-  const long = "x".repeat(5000);
+  // A large window: the first prompt's transcript budget is window-derived
+  // (huge), so the FULL ~16k-char transcript goes in; the retry's explicit
+  // totalChars (12000) is the smaller hard cap and visibly shrinks it.
+  const big: ModelConfig = { ...MODEL, contextWindow: 131072 };
+  const long = "x".repeat(8000);
   const ctx: AgentMessage[] = [
     user(long),
-    assistantText("a".repeat(5000)),
+    assistantText("a".repeat(8000)),
     user("q2"),
     assistantToolCall("bash", { command: "ls" }, usageOf(1900)),
     toolResult("ok"),
@@ -592,13 +662,14 @@ test("compactContext: transcriptOpts pass through to the summarizer prompt", asy
     fakeStream([{ type: "text", text: "SUMMARY." }, { type: "text", text: "SUMMARY2." }]),
   );
   const sig = new AbortController().signal;
-  await compactContext({ streamFn: fn, model: MODEL, signal: sig, context: ctx });
+  await compactContext({ streamFn: fn, model: big, signal: sig, context: ctx, force: true });
   await compactContext({
     streamFn: fn,
-    model: MODEL,
+    model: big,
     signal: sig,
     context: ctx,
     transcriptOpts: { perMessageChars: 750, totalChars: 12000 },
+    force: true,
   });
   assert.equal(ctxs.length, 2);
   const first = ctxs[0]!.messages[0]!;
@@ -609,6 +680,239 @@ test("compactContext: transcriptOpts pass through to the summarizer prompt", asy
     (second.content.length < first.content.length),
     "the retry prompt is smaller than the first",
   );
+  assert.match(second.content, /truncated/, "the retry clipped the transcript to its totalChars");
+});
+
+test("compactContext: calibrated dense transcripts are clipped to fit before the request guard", async () => {
+  const denseModel: ModelConfig = { ...MODEL, contextWindow: 12000, maxTokens: 100 };
+  const ctx: AgentMessage[] = [
+    user("old goal"),
+    ...Array.from({ length: 10 }, () => assistantText("x".repeat(12000))),
+  ];
+  let calls = 0;
+  let promptChars = 0;
+  const fn: StreamFn = (model, context, options) => {
+    calls++;
+    const first = context.messages[0];
+    if (first?.role === "user") promptChars = first.content.length;
+    return fakeStream([{ type: "text", text: "SUMMARY." }])(model, context, options);
+  };
+  const r = await compactContext({
+    streamFn: fn,
+    model: denseModel,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 1,
+    charsPerToken: 1,
+    force: true,
+    transcriptOpts: { perMessageChars: 12000, totalChars: 12000, toolResultChars: 12000 },
+  });
+  assert.equal(calls, 1, "the request fits after calibrated clipping rather than being rejected");
+  assert.ok(promptChars > 0 && promptChars < 12000, `prompt was clipped (${promptChars} chars)`);
+  assert.ok(r, "the successful summary is accepted");
+});
+
+test("compactContext: truncated summary with partial text is rejected", async () => {
+  const ctx: AgentMessage[] = [
+    user("old goal " + "g".repeat(3000)), assistantText("old answer"), user("current"), assistantText("tail"),
+  ];
+  const partial = assistantText("partial GOAL only");
+  const fn: StreamFn = async function* () {
+    yield { type: "text_delta", delta: "partial GOAL only", partial };
+    yield { type: "done", message: { ...partial, stopReason: "length" } };
+  };
+  const r = await compactContext({
+    streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
+  });
+  assert.equal(r, undefined, "an incomplete summary must not replace history");
+});
+
+test("renderTranscript: zero and tiny clip limits never exceed their limit", () => {
+  const source = "secret-content-".repeat(100);
+  for (const limit of [0, 1, 2, 3, 32]) {
+    const rendered = renderTranscript([user(source)], { totalChars: limit, perMessageChars: limit });
+    assert.ok(rendered.length <= limit, `limit ${limit}: got ${rendered.length} chars`);
+  }
+});
+
+test("summarizePrompt: zero FILES budget omits paths even when fixed instructions do not fit", () => {
+  const call: AgentMessage = {
+    role: "assistant", content: [{ type: "toolCall", id: "c", name: "read", arguments: { path: "p".repeat(12000) } }],
+    model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 1,
+  };
+  const result = toolResult("ok");
+  if (result.role === "toolResult") result.toolCallId = "c";
+  const plan = { keepFrom: 2, toSummarize: [call, result], kept: [], isIterative: false };
+  const prompt = summarizePrompt(plan, undefined, 512);
+  // The fixed instructions alone exceed this toy 512-token window, so the
+  // complete request cannot fit; compactContext refuses to send it (tested
+  // below). Even so, the path list must not bypass a zero FILES budget.
+  assert.ok(!prompt.includes("\nread: "), "the oversized deterministic FILES list is omitted");
+});
+
+test("summarizePrompt: FILES separator is included in the request token budget", () => {
+  const call: AgentMessage = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "c", name: "read", arguments: { path: "src/verified-file.ts" } }],
+    model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 1,
+  };
+  const result = toolResult("ok");
+  if (result.role === "toolResult") result.toolCallId = "c";
+  const plan = {
+    keepFrom: 2,
+    toSummarize: [call, result, user("transcript " + "x".repeat(10000))],
+    kept: [],
+    isIterative: false,
+  };
+  const contextWindow = 2500;
+  const charsPerToken = 1;
+  const outputTokens = 100;
+  const prompt = summarizePrompt(
+    plan,
+    { perMessageChars: 10000, totalChars: 10000, toolResultChars: 10000 },
+    contextWindow,
+    { charsPerToken, outputTokens },
+  );
+  const completeRequestTokens = Math.ceil((SUMMARIZER_SYSTEM.length + prompt.length) / charsPerToken) + outputTokens;
+  assert.ok(prompt.includes("FILES (extracted"), "the verified FILES section is retained");
+  assert.ok(completeRequestTokens <= contextWindow, `${completeRequestTokens} tokens must fit in ${contextWindow}`);
+});
+
+test("summarizePrompt: a long FILES list cannot starve the transcript (goal survives)", () => {
+  // MANY verified paths whose TOTAL length exceeds the available budget.
+  // If FILES were allowed to fill the whole budget (uncapped), the transcript
+  // allowance would collapse to a sliver and the user's goal/constraints —
+  // the tail of the first message — would be clipped out of the summarizer
+  // request. The cap (FILES ≤ half the available budget) must bound the path
+  // list so the transcript keeps enough room for the goal.
+  //
+  // The discriminator is a marker at the TAIL of the goal message: under an
+  // uncapped FILES list the per-message clip for the transcript shrinks to a
+  // handful of chars and the marker is cut; with the cap the goal line is kept
+  // whole and the marker survives. A single oversized path would NOT
+  // discriminate — it simply cannot fit and is dropped, freeing the budget.
+  const N = 40;
+  const plen = 40; // each path ~40 chars → ~1600 total, over half the budget
+  const calls: AgentMessage[] = [];
+  for (let i = 0; i < N; i++) {
+    calls.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `c${i}`, name: "read", arguments: { path: `p${i}${".".repeat(plen)}` } }],
+      model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 1,
+    });
+    const r = toolResult("ok");
+    if (r.role === "toolResult") r.toolCallId = `c${i}`;
+    calls.push(r);
+  }
+  const goal = "goal " + "x".repeat(30) + "CONSTRAINT-TAIL"; // marker at the tail
+  const charsPerToken = 1;
+  const outputTokens = 100;
+  for (const isIterative of [false, true]) {
+    const plan = {
+      keepFrom: 1,
+      toSummarize: [user(goal), ...calls],
+      kept: [],
+      isIterative,
+    };
+    const contextWindow = 2000;
+    const prompt = summarizePrompt(
+      plan,
+      { perMessageChars: 10000, totalChars: 10000, toolResultChars: 10000 },
+      contextWindow,
+      { charsPerToken, outputTokens },
+    );
+    assert.ok(prompt.includes("FILES (extracted"), `iterative=${isIterative}: the FILES section is retained`);
+    assert.ok(prompt.includes("goal"), `iterative=${isIterative}: the goal head survives`);
+    assert.ok(
+      prompt.includes("CONSTRAINT-TAIL"),
+      `iterative=${isIterative}: the goal's tail marker survives (transcript not starved by FILES)`,
+    );
+    const completeRequestTokens = Math.ceil((SUMMARIZER_SYSTEM.length + prompt.length) / charsPerToken) + outputTokens;
+    assert.ok(completeRequestTokens <= contextWindow, `${completeRequestTokens} tokens must fit in ${contextWindow}`);
+  }
+});
+
+test("summarizePrompt: a FILES section that fills the budget still fits the window (boundary sweep)", () => {
+  const call: AgentMessage = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "c", name: "read", arguments: { path: "p".repeat(100) } }],
+    model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 1,
+  };
+  const result = toolResult("evidence".repeat(10000));
+  if (result.role === "toolResult") result.toolCallId = "c";
+  const charsPerToken = 1;
+  const outputTokens = 100;
+  // Smallest window in which the FIXED prompt (system + instructions + label
+  // + output reservation) fits — below it, compactContext refuses to send
+  // (separate, tested behavior), so the sweep starts there.
+  const fixedRequestTokens = (isIterative: boolean) =>
+    Math.ceil(
+      SUMMARIZER_SYSTEM.length +
+        summarizePrompt({ keepFrom: 1, toSummarize: [], kept: [], isIterative }).length,
+    ) + outputTokens;
+  // Sweep every window size so the exact boundary where FILES (not the
+  // transcript) fills the remaining budget is covered, for both the
+  // iterative and non-iterative prompt shapes.
+  for (const isIterative of [false, true]) {
+    const floor = fixedRequestTokens(isIterative);
+    const plan = {
+      keepFrom: 3,
+      toSummarize: [user("goal " + "g".repeat(10000)), call, result],
+      kept: [],
+      isIterative,
+    };
+    for (let window = floor; window <= floor + 2200; window++) {
+      const prompt = summarizePrompt(plan, { totalChars: 10000 }, window, { charsPerToken, outputTokens });
+      const completeRequestTokens = Math.ceil(SUMMARIZER_SYSTEM.length + prompt.length) + outputTokens;
+      assert.ok(
+        completeRequestTokens <= window,
+        `iterative=${isIterative} window=${window}: ${completeRequestTokens} tokens must fit in ${window}`,
+      );
+    }
+    // The sweep must actually exercise the FILES path (a budget where the
+    // verified path list is retained), not pass vacuously on an empty section.
+    const midPrompt = summarizePrompt(plan, { totalChars: 10000 }, floor + 400, { charsPerToken, outputTokens });
+    assert.ok(midPrompt.includes("FILES (extracted") && midPrompt.includes("\nread: "),
+      "the sweep covers a window where the FILES section with its path list is retained");
+  }
+});
+
+test("compactContext: refuses to call summarizer when fixed prompt exceeds the model window", async () => {
+  const ctx: AgentMessage[] = [user("old goal " + "g".repeat(3000)), assistantText("old answer"), user("current"), assistantText("tail")];
+  let calls = 0;
+  const fn: StreamFn = (model, context, options) => {
+    calls++;
+    return fakeStream([{ type: "text", text: "summary" }])(model, context, options);
+  };
+  const tiny: ModelConfig = { ...MODEL, contextWindow: 512 };
+  const r = await compactContext({
+    streamFn: fn,
+    model: tiny,
+    signal: new AbortController().signal,
+    context: ctx,
+    force: true,
+    charsPerToken: 1,
+  });
+  assert.equal(calls, 0, "the summarizer request cannot fit its fixed instructions");
+  assert.equal(r, undefined);
+});
+
+test("compactContext: aborted summary with partial text is rejected", async () => {
+  const ctx: AgentMessage[] = [user("q1"), assistantText("a1"), user("q2"), assistantText("a2")];
+  const partial = assistantText("partial");
+  const fn: StreamFn = async function* () {
+    yield { type: "text_delta", delta: "partial", partial };
+    yield { type: "done", message: { ...partial, stopReason: "aborted" } };
+  };
+  const r = await compactContext({
+    streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
+  });
+  assert.equal(r, undefined);
+});
+
+test("ruleBasedShrink: refuses a result that would grow the context", () => {
+  const tiny = [user("g"), assistantText("a"), assistantText("b")];
+  assert.equal(ruleBasedShrink(tiny, 1, 4), undefined);
 });
 
 test("compactContext: empty summary text → undefined (skip, keep context)", async () => {

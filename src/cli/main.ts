@@ -70,6 +70,7 @@ import { expandTilde, findTreConfig, loadTreConfig } from "../config/tre-config.
 import {
   calibrateCharsPerToken,
   compactContext,
+  estimatePromptOverheadTokens,
   estimateTokens,
   makeSummaryMessage,
   ruleBasedShrink,
@@ -592,6 +593,10 @@ async function flushSinks(sinks: PrintSinks): Promise<void> {
  *      notice (SUMMARY_MARKER + count + file ops); the event carries
  *      `degraded: true`;
  *   3. no plan at all (context too short to fold) → skip, stderr message.
+ * A candidate that is a strict reduction but still exceeds the window's
+ * input budget (the kept tail is atomic — indivisible units can't be
+ * shrunk) is APPLIED, not retried: it is the best available context, and
+ * the event carries `overBudget: true` (stderr explains).
  * Session entry + `context_compacted` event are written here (one place).
  * Returns the new context, or undefined when nothing could be compacted.
  */
@@ -605,6 +610,9 @@ export async function compactNow(deps: {
   systemPrompt: string;
   compactKeepTokens?: number;
   charsPerToken?: number;
+  /** Fixed prompt overhead (system prompt + tool schemas), in estimated
+   *  tokens — included in the actual next-request estimate. */
+  promptOverheadTokens?: number;
   /** A6: skip the shouldCompact trigger check (manual /compact). */
   force?: boolean;
   sinks: PrintSinks;
@@ -615,16 +623,39 @@ export async function compactNow(deps: {
   const lastAsst = [...deps.context]
     .reverse()
     .find((m): m is AssistantMessage => m.role === "assistant");
-  if (!deps.force && !shouldCompact(lastAsst?.usage, deps.model.contextWindow, deps.model.maxTokens)) {
+  const promptOverheadTokens = deps.promptOverheadTokens ?? 0;
+  const currentRequestEstimate = estimateTokens(deps.context, cpt) + promptOverheadTokens;
+  // The estimate-based trigger only helps when folding can actually make the
+  // request fit: the irreducible overhead (system prompt + tool schemas) +
+  // output cap + slack must leave positive room for the foldable context.
+  // Otherwise the overhead alone exceeds the window and no compaction can
+  // make the request fit — the usage-based trigger is the right signal there
+  // (and the request will fail loudly anyway). Without this gate the
+  // overhead inflates the estimate and fires the trigger on the INITIAL
+  // context (before any LLM call) with a bogus tokensBefore.
+  const foldableRoom =
+    deps.model.contextWindow - promptOverheadTokens - deps.model.maxTokens - 1024;
+  const actualRequestNeedsCompaction =
+    foldableRoom > 0 &&
+    currentRequestEstimate + deps.model.maxTokens + 1024 > deps.model.contextWindow;
+  if (
+    !deps.force &&
+    !actualRequestNeedsCompaction &&
+    !shouldCompact(lastAsst?.usage, deps.model.contextWindow, deps.model.maxTokens)
+  ) {
     return undefined;
   }
-  const tokensBefore = lastAsst?.usage?.totalTokens ?? 0;
-  const windowCap = Math.max(512, deps.model.contextWindow - deps.model.maxTokens - 1024);
+  const tokensBefore = lastAsst?.usage?.totalTokens ?? currentRequestEstimate;
+  const windowCap = Math.max(
+    512,
+    deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens,
+  );
   const keepTokens = Math.min(deps.compactKeepTokens ?? 8192, windowCap);
+  const requestBudget = deps.model.contextWindow - deps.model.maxTokens - 1024;
   const emit = async (
     rawSummary: string,
     kept: AgentMessage[],
-    degraded: boolean,
+    kind: "summary" | "degraded" | "over-budget",
   ): Promise<AgentMessage[] | undefined> => {
     const summaryMsg = makeSummaryMessage(rawSummary);
     if (session) {
@@ -643,35 +674,57 @@ export async function compactNow(deps: {
       messagesKept: kept.length,
       summaryChars: rawSummary.length,
       contextTokens: estimateTokens(newContext, cpt),
-      ...(degraded ? { degraded: true } : {}),
+      ...(kind === "degraded" ? { degraded: true } : {}),
+      ...(kind === "over-budget" ? { overBudget: true } : {}),
     });
     return newContext;
   };
 
-  let r = await compactContext({
-    streamFn: deps.streamFn,
-    model: deps.model,
-    signal: deps.signal,
-    context: deps.context,
-    keepTokens,
-    charsPerToken: cpt,
-    force: deps.force,
-  });
-  if (r) return await emit(r.summary, r.kept, false);
+  // The candidate ladder. Every rung returns a STRICTLY smaller context
+  // (compactContext / ruleBasedShrink both refuse growth); the difference
+  // between rungs is how much of the folded prefix survives:
+  //   LLM summary → LLM summary (shrunken transcript) → rule-based notice.
+  // A candidate that still exceeds the window's input budget is NOT a
+  // failure — it is the best available context (the kept tail is atomic and
+  // irreducible), so it is applied and flagged `overBudget` instead of
+  // falling through to a lossier rung.
+  const tryLlm = (transcriptOpts?: { perMessageChars?: number; totalChars?: number; toolResultChars?: number }) =>
+    compactContext({
+      streamFn: deps.streamFn,
+      model: deps.model,
+      signal: deps.signal,
+      context: deps.context,
+      keepTokens,
+      charsPerToken: cpt,
+      promptOverheadTokens: deps.promptOverheadTokens,
+      transcriptOpts,
+      force: deps.force,
+      triggered: true,
+    });
+
+  let r = await tryLlm();
+  if (r) {
+    if (r.estimatedTokensAfter <= requestBudget) return await emit(r.summary, r.kept, "summary");
+    sinks.err.write(
+      `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
+    );
+    return await emit(r.summary, r.kept, "over-budget");
+  }
+  // Cancellation is user intent, not a transient summarizer failure: do not
+  // retry or apply a lossy fallback after the caller aborted compaction.
+  if (deps.signal.aborted) return undefined;
 
   // D1: retry once with a shrunken transcript (halved clips).
   sinks.err.write("compaction: summary call failed — retrying with a smaller transcript\n");
-  r = await compactContext({
-    streamFn: deps.streamFn,
-    model: deps.model,
-    signal: deps.signal,
-    context: deps.context,
-    keepTokens,
-    charsPerToken: cpt,
-    transcriptOpts: { perMessageChars: 750, totalChars: 12000, toolResultChars: 1000 },
-    force: deps.force,
-  });
-  if (r) return await emit(r.summary, r.kept, false);
+  r = await tryLlm({ perMessageChars: 750, totalChars: 12000, toolResultChars: 1000 });
+  if (r) {
+    if (r.estimatedTokensAfter <= requestBudget) return await emit(r.summary, r.kept, "summary");
+    sinks.err.write(
+      `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
+    );
+    return await emit(r.summary, r.kept, "over-budget");
+  }
+  if (deps.signal.aborted) return undefined;
 
   // D2: rule-based fallback (no LLM).
   const shrink = ruleBasedShrink(deps.context, keepTokens, cpt);
@@ -682,7 +735,7 @@ export async function compactNow(deps: {
     const raw = shrink.notice.content.startsWith(SUMMARY_MARKER)
       ? shrink.notice.content.slice(SUMMARY_MARKER.length + 2)
       : shrink.notice.content;
-    return await emit(raw, shrink.kept, true);
+    return await emit(raw, shrink.kept, "degraded");
   }
   // D3: context too short to fold — today's skip behavior.
   sinks.err.write("compaction failed and no safe shrink is possible — the next call may exceed the window.\n");
@@ -778,6 +831,7 @@ export async function runTurn(opts: {
         systemPrompt: opts.systemPrompt,
         compactKeepTokens: opts.compactKeepTokens,
         charsPerToken: cpt,
+        promptOverheadTokens: estimatePromptOverheadTokens(opts.systemPrompt.length, opts.tools, cpt),
         sinks: opts.sinks,
         onEvent: report,
       });
@@ -795,9 +849,12 @@ export async function runTurn(opts: {
       else if (ev.type === "tool_execution_end") await persist(ev.result);
       else if (ev.type === "steer")
         // The steer's user message is pushed to the context by the loop but
-        // travels only as an event — persist it here so a resumed session
-        // keeps the guidance the user gave mid-run.
-        await persist({ role: "user", content: ev.text, timestamp: Date.now() });
+        // travels only as an event — persist the EXACT object the loop
+        // pushed (ev.message) so a resumed session keeps the guidance AND
+        // the entry-id map stays consistent: compaction keys ids by message
+        // identity, so a steer that becomes the first kept message must
+        // resolve to the entry persisted here.
+        await persist(ev.message);
     }
     opts.tap?.(ev);
     printEvent(ev, opts.sinks, session?.path);
@@ -1653,6 +1710,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
             systemPrompt,
             compactKeepTokens: args.compactKeepTokens,
             charsPerToken: cpt,
+            promptOverheadTokens: estimatePromptOverheadTokens(systemPrompt.length, tools, cpt),
             force: true,
             sinks,
             onEvent: async (ev) => {

@@ -59,6 +59,7 @@ import {
   type TuiState,
 } from "./state.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import { estimatePromptOverheadTokens } from "../context/compact.js";
 import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
 import { resolveModel, type ModelsFile } from "../config/models.js";
 import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
@@ -472,6 +473,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           systemPrompt,
           compactKeepTokens: opts.compactKeepTokens,
           charsPerToken: cpt,
+          // C2: the estimate-based trigger needs the same fixed overhead the
+          // auto path passes (system prompt + tool schemas) — without it the
+          // manual trigger under-counts the actual next request.
+          promptOverheadTokens: estimatePromptOverheadTokens(systemPrompt.length, opts.tools, cpt),
           force: true,
           sinks: NULL_SINKS,
           onEvent: async (ev) => setState(applyEvent(state, ev)),

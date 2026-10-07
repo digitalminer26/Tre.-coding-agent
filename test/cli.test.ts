@@ -34,6 +34,7 @@ import {
   runTurn,
   type PrintSinks,
 } from "../src/cli/main.js";
+import { estimateTokens } from "../src/context/compact.js";
 import { Session, replaySession } from "../src/session/session.js";
 import { readWorkerStatuses } from "../src/cli/workers.js";
 import { deriveMaxTurns } from "../src/loop/agent-loop.js";
@@ -282,7 +283,14 @@ function pipedStdin(lines: string[]): NodeJS.ReadableStream {
 test("A6: REPL /compact forces a compaction (summarizer call + session entry + ✂ line)", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
-  await seedHistory(dir, models, session);
+  // A LARGE seed prompt: the folded prefix (the seed prompt — the only
+  // foldable unit) must be substantial enough that the summary is a strict
+  // reduction of it (the marker + summary can't be smaller than a tiny
+  // prompt).
+  await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
+  await main(["run", "old task " + "y".repeat(3000), "--tools", "none", "--models", models, "--session", session], {
+    streamFn: fakeStream([{ type: "text", text: "old answer" }]),
+  });
 
   const S = mkSinks();
   // turn 1 (a normal run), then /compact (the silent summarizer call), EOF.
@@ -1340,10 +1348,14 @@ test(
 
 const SMALL_WINDOW: ModelConfig = { ...MODEL, contextWindow: 2000, maxTokens: 100 };
 
-/** Seed a session with one old [user, assistant] exchange, small-window model. */
+/** Seed a session with one old [user, assistant] exchange, small-window model.
+ *  The old PROMPT is deliberately LARGE: it is the OLDEST unit, so it is what
+ *  the compaction folds — and the folded prefix needs real mass for the
+ *  summary to be a strict reduction of it. (A large old ANSWER would not help:
+ *  the atomic keep-floor keeps it in the tail, leaving a tiny prefix to fold.) */
 async function seedHistory(dir: string, models: string, session: string) {
   await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
-  await main(["run", "old task", "--tools", "none", "--models", models, "--session", session], {
+  await main(["run", "old task " + "y".repeat(3000), "--tools", "none", "--models", models, "--session", session], {
     streamFn: fakeStream([{ type: "text", text: "old answer" }]),
   });
 }
@@ -1451,10 +1463,11 @@ test("WS9: sessionless run still compacts (context management, not persistence)"
 
   const seen: { roles: string[]; first: string }[] = [];
   const base = fakeStream([
-    // turns 1-2: small tool turns — build a multi-unit context (planCompaction
-    // needs ≥ 3 units: 1 foldable + 2 kept)
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo one" } }] },
-    { type: "toolcall", calls: [{ name: "bash", args: { command: "echo two" } }] },
+    // turns 1-2: big tool results — build a multi-unit context with real
+    // mass (planCompaction needs ≥ 3 units, and the folded prefix must be
+    // large enough that the summary is a strict reduction of it)
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "yes x | head -c 4000" } }] },
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "yes x | head -c 4000" } }] },
     // turn 3: usage trips the trigger (1900+100+1024 > 2000)
     { type: "toolcall", calls: [{ name: "bash", args: { command: "echo three" } }], usage: { input: 1890, output: 10, totalTokens: 1900 } },
     // the SILENT summarizer call (no tools) — consumed between turns
@@ -1482,15 +1495,25 @@ test("WS9: sessionless run still compacts (context management, not persistence)"
   assert.equal(seen.length, 5, "turns 1-3 + silent summary + turn 4");
   assert.deepEqual(seen[3]!.roles, ["user"], "the summary call carries only the summarizer prompt");
   assert.match(seen[3]!.first, /summarize/i);
-  assert.deepEqual(seen[4]!.roles, ["user", "assistant", "toolResult", "assistant", "toolResult", "assistant", "toolResult"], "turn 4 sees [summary, a1, tr1, a2, tr2, a3, tr3]");
+  // The 512-token keep-floor (windowCap for this tiny window) keeps the
+  // recent tail [a2, tr2, a3, tr3] and folds the older [user, a1, tr1] —
+  // the big tr1 (4000 chars) gives the folded prefix the mass the summary
+  // must strictly reduce.
+  assert.deepEqual(seen[4]!.roles, ["user", "assistant", "toolResult", "assistant", "toolResult"], "turn 4 sees [summary, a2, tr2, a3, tr3]");
   assert.match(seen[4]!.first, /Compaction summary of earlier context/);
   assert.match(seen[4]!.first, /SUMMARY: the earlier turns were answered\./);
 });
 
-test("WS9: failed summary call → D ladder: retry fails too → rule-based fallback (degraded), run continues", async (t) => {
+test("WS9: failed summaries with a non-shrinking notice skip fallback safely", async (t) => {
   const { dir, models } = await workspace(t);
   const session = join(dir, "s.jsonl");
-  await seedHistory(dir, models, session);
+  // Deliberately SMALL history (unlike seedHistory): the folded prefix must
+  // be too small for the rule-based notice to shrink it — that is the
+  // refusal this test exercises.
+  await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
+  await main(["run", "old task", "--tools", "none", "--models", models, "--session", session], {
+    streamFn: fakeStream([{ type: "text", text: "old answer" }]),
+  });
 
   const base = fakeStream([
     { type: "toolcall", calls: [{ name: "bash", args: { command: "echo fresh" } }], usage: { input: 1890, output: 10, totalTokens: 1900 } },
@@ -1505,24 +1528,11 @@ test("WS9: failed summary call → D ladder: retry fails too → rule-based fall
   });
   assert.equal(code, 0, "a failed summary call never fails the run");
   assert.match(S.err(), /retrying with a smaller transcript/, "the retry is announced");
-  assert.match(S.err(), /rule-based shrink/, "the fallback is announced");
-  assert.match(S.err(), /✂ context compacted.*degraded/, "the ✂ line notes the degraded mode");
+  assert.match(S.err(), /no safe shrink is possible/, "a non-shrinking fallback is refused");
+  assert.doesNotMatch(S.err(), /✂ context compacted.*degraded/);
   const replayed = await replaySession(session);
-  // [notice, a1, u2, a1', tr] + turn 2's final answer = 6 — the folded
-  // prefix (u1) is replaced by the rule-based notice.
-  assert.equal(replayed.context.length, 6);
-  const head = replayed.context[0]!;
-  assert.equal(head.role, "user");
-  if (head.role === "user") {
-    assert.match(head.content, /Compaction summary of earlier context/);
-    assert.match(head.content, /discarded without an LLM summary/);
-  }
-  // The fallback still wrote a compaction entry (replay boundary).
-  const compact = replayed.entries.find((e) => e.type === "compaction");
-  assert.ok(compact, "a compaction entry was appended");
-  if (compact.type === "compaction") {
-    assert.ok(replayed.contextEntryIds.includes(compact.firstKeptEntryId), "firstKeptEntryId resolves");
-  }
+  assert.equal(replayed.context.length, 6, "the original history remains intact");
+  assert.equal(replayed.entries.some((e) => e.type === "compaction"), false, "no unsafe compaction boundary is persisted");
 });
 
 // ─────────────────────────────── D: compactNow (failure escalation) ───────────────────────────────
@@ -1581,6 +1591,44 @@ function compactNowDeps(streamFn: StreamFn, extra?: Record<string, unknown>) {
     err: S.err,
   };
 }
+
+test("D26: estimate-only trigger invokes summarizer even when last usage is below trigger", async () => {
+  let calls = 0;
+  const fn: StreamFn = (model, ctx, opts) => {
+    calls += 1;
+    return fakeStream([{ type: "text", text: "SUMMARY." }])(model, ctx, opts);
+  };
+  const { deps, events } = compactNowDeps(fn, {
+    context: [
+      { role: "user", content: "q".repeat(12000), timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "old" }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 2, usage: { input: 100, output: 10, totalTokens: 110 } },
+      { role: "user", content: "current".repeat(600), timestamp: 3 },
+      { role: "assistant", content: [{ type: "text", text: "tail".repeat(600) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 4, usage: { input: 100, output: 10, totalTokens: 110 } },
+    ],
+  });
+  const r = await compactNow(deps);
+  assert.ok(r);
+  assert.equal(calls, 1, "estimate-triggered compaction invokes the summarizer despite low historical usage");
+  assert.equal(events[0]?.type, "context_compacted");
+  if (events[0]?.type === "context_compacted") assert.equal(events[0].degraded, undefined);
+  assert.ok(estimateTokens(r!) < estimateTokens(deps.context), "estimate-triggered compaction reduces the context");
+});
+
+test("D26: abort during retry does not apply fallback or emit compaction", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const fn: StreamFn = (model, ctx, opts) => {
+    calls += 1;
+    if (calls === 1) return fakeStream([{ type: "error", message: "down" }])(model, ctx, opts);
+    controller.abort();
+    return fakeStream([{ type: "aborted" }])(model, ctx, opts);
+  };
+  const { deps, events } = compactNowDeps(fn, { force: true, signal: controller.signal });
+  const r = await compactNow(deps);
+  assert.equal(r, undefined);
+  assert.equal(events.length, 0);
+  assert.equal(calls, 2);
+});
 
 test("D: compactNow — first call fails, retry succeeds (no degraded flag)", async () => {
   const { deps, events, err } = compactNowDeps(
