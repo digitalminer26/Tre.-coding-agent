@@ -1,5 +1,24 @@
 # Current project status (2026-10-06)
 
+**D27 steering/loop audit findings implemented (2026-10-06, `4501a78`).** The three
+recommendations from the steering/loop integration audit (PLAN.md D27, 2026-10-06,
+previously open/NOT implemented) are now in `src/loop/agent-loop.ts`:
+- **F1 (regression):** guidance arriving while the async `prepareNextTurn` hook
+  (auto-compaction) runs was drained once, before the hook, and never again — so it
+  missed the next LLM request. Added a SECOND drain after the hook resolves and before
+  the stream call. Same helper → same `steer` event + message identity, so the CLI
+  persists it through the existing path (entry-id map stays consistent).
+- **F2 (pre-existing):** fresh user guidance did not reset the identical-batch loop
+  guard, so a legitimate repeat after explicit user instruction still tripped
+  `stopReason "loop"`. A steer delivery now clears `sigHistory` (the per-cycle turn
+  budget is NOT reset).
+- **F3 (pre-existing):** no `signal.aborted` check after the async hook — an abort
+  during the hook still invoked `streamFn` once. Check after the hook and break with
+  `stopReason "aborted"`.
+The three steer-delivery sites (pre-hook, post-hook, keep-alive) now share one
+`drainSteers()` helper. +4 regression tests (F1/F2/F3 + the steer-becomes-first-kept-
+message identity coverage gap). Gate green: 696 pass / 0 fail / 13 skipped.
+
 **Compaction hardening follow-up D26 — audit fixes applied, budget issue open (2026-10-06, uncommitted).** A prior “resolved” claim was premature. Audit found estimate-triggered compaction could degrade without an LLM call; abort during retry could still persist fallback; fallback could enlarge a tiny context; and file-op evidence could match a later reused ID. Fixes: pass the caller’s evaluated trigger into compaction attempts; check abort after retry; cap fallback notice and refuse non-shrinking results; match tool results only within the adjacent result unit. Added targeted regression tests. **Open:** fixed prompt overhead is counted in the trigger but is not fully reserved against kept context. A strict fit guard broke valid current tests and was removed; do not claim the complete next-request estimate is guaranteed to fit. Full gate: 684 passed / 0 failed / 13 skipped. Changes remain uncommitted.
 
 **Release v0.1.5 — published (2026-10-06).** The first release since v0.1.4.
