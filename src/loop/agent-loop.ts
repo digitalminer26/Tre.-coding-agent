@@ -361,6 +361,17 @@ export async function* runLoop(
       if (next !== undefined) context.splice(0, context.length, ...next);
     }
 
+    // Audit follow-up (gpt-6.1-sol, D27): if the run was aborted while the
+    // async hook ran, do NOT deliver guidance that arrived during the hook —
+    // the documented policy is that abort breaks leave pending guidance
+    // undrained (the driver discards the queue). Check BEFORE the post-hook
+    // drain so a hook-time abort does not persist a steer that no model
+    // request will ever see.
+    if (signal.aborted) {
+      stopReason = "aborted";
+      break;
+    }
+
     // D27 Finding 1: the hook is async (auto-compaction awaits an LLM call),
     // so guidance can arrive WHILE it runs. The pre-hook drain above is one-
     // shot; drain a SECOND time after the hook resolves and before the
@@ -370,7 +381,8 @@ export async function* runLoop(
     for (const ev of await drainSteers(turn)) yield ev;
 
     // D27 Finding 3: the hook is async, so the run may be aborted while it
-    // runs. Check before starting work — do not invoke the streamFn after
+    // runs (or while the consumer persists the steer events just emitted).
+    // Check before starting work — do not invoke the streamFn after
     // cancellation (the wire layer honors the signal too, but the guard is
     // about not STARTING work after an abort).
     if (signal.aborted) {

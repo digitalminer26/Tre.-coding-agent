@@ -1359,3 +1359,60 @@ test("D27 coverage: a steer that becomes the first kept message keeps its identi
     "the steer event's message is the same reference the compaction kept",
   );
 });
+
+test("D27 audit: an abort during the hook leaves hook-time guidance undrained", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const q: string[] = [];
+  const queue = {
+    push: (t: string) => q.push(t),
+    drain: () => {
+      const out = [...q];
+      q.length = 0;
+      return out;
+    },
+  };
+  const controller = new AbortController();
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, ctx, o) => {
+    call += 1;
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools: [tool],
+      streamFn,
+      signal: controller.signal,
+      prepareNextTurn: async (_ctx, turn) => {
+        if (turn === 2) {
+          // Simulate the async hook (auto-compaction) in flight: guidance
+          // arrives, THEN the user aborts — before the post-hook drain.
+          await new Promise((r) => setTimeout(r, 10));
+          q.push("guidance typed during the hook");
+          controller.abort();
+        }
+        return undefined;
+      },
+    }),
+  );
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the abort during the hook stops the run");
+  assert.equal(call, 1, "the stream was called only for turn 1 — turn 2's stream was skipped");
+  assert.equal(
+    events.filter((e) => e.type === "steer").length,
+    0,
+    "no steer was delivered — the hook-time guidance was left undrained",
+  );
+  assert.equal(
+    q.length,
+    1,
+    "the guidance is still in the queue — the driver discards it on abort",
+  );
+});
