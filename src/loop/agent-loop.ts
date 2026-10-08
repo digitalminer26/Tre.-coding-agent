@@ -222,6 +222,16 @@ export const ABORTED_CALL_TEXT =
   "The run was aborted before this tool call could run. It was NOT executed. " +
   "If you resume, re-issue it (or a corrected version) as your next action.";
 
+// D27b audit F1 (error path) — a turn that errored (stopReason "error") AFTER
+// emitting tool calls must still give every call a result (I3), or the context
+// is left with orphaned toolCall blocks — the same invalid
+// assistant-with-tool_calls-but-no-tool-result history the abort paths guard
+// against. The calls are NOT executed; each is failed in-band with this text.
+export const ERROR_CALL_TEXT =
+  "The run ended in an error before this tool call could run. It was NOT " +
+  "executed. If you resume, re-issue it (or a corrected version) as your next " +
+  "action.";
+
 /**
  * C26 — the identity of one tool-call batch: tool names + stable-JSON
  * arguments, in call order. Two batches are "the same" iff their
@@ -335,9 +345,9 @@ export async function* runLoop(
    * executing it: every call gets a `toolResult` (I3: every call gets a
    * result) so the context stays a valid history, and the matching
    * `tool_execution_start`/`tool_execution_end` events are emitted so a
-   * consumer can render them. Used when the run aborts after a turn that
-   * already produced tool calls — the calls must not run, but they may not
-   * be left dangling either.
+   * consumer can render them. Used when the run aborts OR errors after a
+   * turn that already produced tool calls — the calls must not run, but
+   * they may not be left dangling either.
    */
   async function* failInband(
     calls: ToolCallBlock[],
@@ -488,10 +498,38 @@ export async function* runLoop(
       break;
     }
 
-    if (message === undefined) break; // StreamFn contract violation — keep what we have
+    if (message === undefined) {
+      // StreamFn contract violation — no `done` event. The turn may still
+      // have emitted tool calls (a `start` + toolcall events with no closing
+      // done); "keep what we have" must not keep them DANGLING. Fail them
+      // in-band (I3: every call gets a result) so the history stays valid,
+      // then stop with the fallback "aborted" reason (no turn completed).
+      const partial = slot >= 0 ? (context[slot] as AssistantMessage) : undefined;
+      const calls = partial
+        ? partial.content.filter((b): b is ToolCallBlock => b.type === "toolCall")
+        : [];
+      if (calls.length > 0) {
+        yield* failInband(calls, ERROR_CALL_TEXT);
+      }
+      break;
+    }
     stopReason = message.stopReason;
 
-    if (message.stopReason === "error") break;
+    if (message.stopReason === "error") {
+      // D27b audit F1 (error path): the turn errored AFTER emitting tool
+      // calls — the wire layer ends the stream with stopReason "error" when
+      // an error payload or a network failure lands mid-turn, after calls
+      // have already been streamed. They must not run, yet they must not be
+      // left dangling in context either — fail them in-band (no execution)
+      // so the history stays valid (I3: every call gets a result).
+      const calls = message.content.filter(
+        (b): b is ToolCallBlock => b.type === "toolCall",
+      );
+      if (calls.length > 0) {
+        yield* failInband(calls, ERROR_CALL_TEXT);
+      }
+      break;
+    }
     if (message.stopReason === "aborted") {
       // D27b audit F1: the stream was aborted mid-turn, but it may have
       // already emitted tool calls before the abort. They must not run, yet

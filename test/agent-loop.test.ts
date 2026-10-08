@@ -1589,6 +1589,179 @@ test("D27b F1: a text-only abort leaves no tool results (regression guard for th
   assert.equal(end.messages.length, 2);
 });
 
+// ─────────────── D27b F1 (tool calls on the "error" path) ───────────────
+// The wire layer ends a stream with stopReason "error" when an error payload
+// or a network failure lands mid-turn — AFTER tool calls have already been
+// streamed. Those calls must not run, yet they must not be left dangling in
+// context either (I3: every call gets a result). The loop fails them in-band.
+
+test("D27b F1 (error path): an error turn that emitted tool calls fails them in-band (no dangling calls)", async () => {
+  const { tool, calls } = makeTool("read");
+  // A StreamFn that emits a tool call, then ends with stopReason "error"
+  // (the wire layer does this when an error payload / network failure lands
+  // after the calls have already been streamed).
+  const asst = (stopReason: AssistantMessage["stopReason"]): AssistantMessage => ({
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } },
+    ],
+    model: MODEL.id,
+    provider: MODEL.provider,
+    stopReason,
+    timestamp: 0,
+  });
+  const streamFn: StreamFn = async function* () {
+    yield { type: "start", partial: asst("stop") };
+    yield { type: "done", message: asst("error") };
+  };
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn,
+    signal: new AbortController().signal,
+  });
+  for await (const e of gen) events.push(e);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "error", "the error is reported");
+  assert.equal(calls.length, 0, "the tool call was NOT executed");
+
+  // The errored assistant message carried one tool call; it must not be left
+  // dangling — it gets an in-band error result so the history is valid (I3).
+  const results = toolResultMessages(end.messages);
+  assert.equal(results.length, 1, "the pending tool call got a result");
+  assert.equal(results[0]!.toolCallId, "c1");
+  assert.equal(results[0]!.isError, true, "the errored call is marked isError");
+  assert.match(results[0]!.content[0]!.text, /error/i);
+
+  // The matching events were emitted so a consumer can render them.
+  assert.equal(toolEndEvents(events).length, 1, "a tool_execution_end was emitted");
+
+  // Context shape: user, assistant(toolCall), toolResult(failed). Every
+  // toolCall block has a matching toolResult (I3).
+  assert.equal(end.messages.length, 3);
+  assert.equal(end.messages[1]!.role, "assistant");
+  assert.equal(end.messages[2]!.role, "toolResult");
+});
+
+test("D27b F1 (error path): a multi-call error turn fails EVERY pending call in-band", async () => {
+  const { tool, calls } = makeTool("read");
+  const asst = (stopReason: AssistantMessage["stopReason"]): AssistantMessage => ({
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } },
+      { type: "toolCall", id: "c2", name: "read", arguments: { path: "b.txt" } },
+    ],
+    model: MODEL.id,
+    provider: MODEL.provider,
+    stopReason,
+    timestamp: 0,
+  });
+  const streamFn: StreamFn = async function* () {
+    yield { type: "start", partial: asst("stop") };
+    yield { type: "done", message: asst("error") };
+  };
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn,
+    signal: new AbortController().signal,
+  });
+  for await (const e of gen) events.push(e);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "error");
+  assert.equal(calls.length, 0, "neither call was executed");
+
+  // Both calls got results, in call order.
+  const results = toolResultMessages(end.messages);
+  assert.equal(results.length, 2, "both pending calls got results");
+  assert.deepEqual(
+    results.map((r) => r.toolCallId),
+    ["c1", "c2"],
+    "results land in call order",
+  );
+  assert.ok(results.every((r) => r.isError === true), "both are isError");
+  assert.equal(toolEndEvents(events).length, 2, "two tool_execution_end events");
+});
+
+test("D27b F1 (error path): a text-only error turn leaves no tool results (regression guard)", async () => {
+  // The existing "error turn" test pins the no-call shape; this one pins that
+  // the in-band failure does NOT fabricate results when there are no calls.
+  const events = await drainLoop([{ type: "error", message: "boom" }], []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "error");
+  assert.equal(toolResultMessages(end.messages).length, 0, "no tool calls → no results");
+  assert.equal(toolEndEvents(events).length, 0, "no tool events emitted");
+  assert.equal(end.messages.length, 2, "user + errored assistant — no synthetic result");
+});
+
+// ─────────────── D27b F1 (tool calls on the no-`done` contract violation) ─────
+// A StreamFn that violates its own contract (WS8's fakeStream does this ON
+// PURPOSE) can emit tool-call events and then end WITHOUT a `done` event. The
+// loop's "keep what we have" fallback must not keep those calls DANGLING.
+
+test("D27b F1 (no done): a StreamFn that emits calls but no `done` fails them in-band (no dangling calls)", async () => {
+  const { tool, calls } = makeTool("read");
+  // A StreamFn that emits a tool call and then simply ends — no `done` event
+  // (a contract violation). The loop's `message === undefined` fallback must
+  // still give the emitted call a result.
+  const streamFn: StreamFn = async function* () {
+    yield {
+      type: "start",
+      partial: {
+        role: "assistant",
+        content: [],
+        model: MODEL.id,
+        provider: MODEL.provider,
+        stopReason: "stop",
+        timestamp: 0,
+      },
+    };
+    yield {
+      type: "toolcall_start",
+      index: 0,
+      id: "c1",
+      name: "read",
+      partial: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }],
+        model: MODEL.id,
+        provider: MODEL.provider,
+        stopReason: "stop",
+        timestamp: 0,
+      },
+    };
+    // No `done` — the stream ends here (contract violation).
+  };
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn,
+    signal: new AbortController().signal,
+  });
+  for await (const e of gen) events.push(e);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "no `done` → the fallback stop reason");
+  assert.equal(calls.length, 0, "the tool call was NOT executed");
+
+  // The emitted tool call must not be left dangling — it gets an in-band
+  // error result so the history is valid (I3).
+  const results = toolResultMessages(end.messages);
+  assert.equal(results.length, 1, "the pending tool call got a result");
+  assert.equal(results[0]!.toolCallId, "c1");
+  assert.equal(results[0]!.isError, true, "the orphaned call is marked isError");
+  assert.match(results[0]!.content[0]!.text, /error/i);
+  assert.equal(toolEndEvents(events).length, 1, "a tool_execution_end was emitted");
+});
+
 test("D27b F2: keep-alive at the budget boundary leaves the steer undrained (no turn left to send it)", async () => {
   const turns: FakeTurn[] = [{ type: "text", text: "done" }];
   const { events, queue } = await drainSteered(turns, [], 1, ["guidance"], {
