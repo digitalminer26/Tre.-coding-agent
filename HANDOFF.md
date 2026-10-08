@@ -1,5 +1,41 @@
 # Current project status (2026-10-06)
 
+**D27b steering/loop audit (second pass, gpt-6.1-sol) + fixes (2026-10-06).** A
+FRESH, independent re-audit of the current steering/loop integration (the D27
+implementation + the `b3a74d4` audit fix, as one body of code) returned
+**HAS-BUGS** — two medium findings the first pass (which reviewed only the
+incremental diff) had not seen. Both were reproduced empirically before fixing:
+- **F1 (medium): abort protection did not cover the pre-hook or keep-alive
+  drains.** The first pass had added abort checks around the *post-hook* drain
+  only. But the consumer (`runAgent` → `onEvent`) `await`s persistence of each
+  event, so a SIGINT abort can land while the generator is suspended at a
+  `yield`; the loop's next drain would then deliver + persist guidance the user
+  never intended. Two gaps: (a) the pre-hook drain ran after the yielded
+  `turn_start` with no cancellation check, and (b) the keep-alive drain ran
+  after the yielded `turn_end` with no check — with no pending guidance that
+  branch even misreported `"stop"` instead of `"aborted"`. Fix: `if
+  (signal.aborted)` checks at the TOP of every `while` iteration (also takes
+  precedence over a coincident budget hit, which would misreport "budget"),
+  immediately after the `turn_start` yield (before the pre-hook drain), and
+  immediately after the `turn_end` yield (before response handling / the
+  keep-alive drain and the length-nudge `continue`).
+- **F2 (medium): keep-alive consumed guidance after the final available turn.**
+  In the `calls.length === 0` branch, the keep-alive `drainSteers` ran before
+  checking whether another model turn was possible. With `maxTurns: 1`,
+  `maxContinuations: 0`, a text-only reply and a pending steer, the loop
+  delivered + persisted the steer, `continue`d, and immediately exited without
+  ever sending that guidance to the model — contradicting the policy that
+  budget exits leave pending guidance undrained. Fix: only drain for keep-alive
+  when a subsequent LLM turn is actually possible — `turn - cycleStart <
+  maxTurns || continuations < maxContinuations` (a still-available continuation
+  resets the cycle, so the steer rides the next real turn). When the runway is
+  exhausted the queue is left untouched and the run reports the normal
+  text-only outcome (`"stop"`), not `"budget"`.
++3 regression tests (pre-hook abort, keep-alive abort, keep-alive at the budget
+boundary). The post-hook checks, destructive snapshot drains, identity-based CLI
+persistence, and `sigHistory` resets were re-verified sound by the reviewer and
+left unchanged. Gate green: 700 pass / 0 fail / 13 skipped.
+
 **D27 steering/loop audit findings implemented (2026-10-06, `4501a78`).** The three
 recommendations from the steering/loop integration audit (PLAN.md D27, 2026-10-06,
 previously open/NOT implemented) are now in `src/loop/agent-loop.ts`:

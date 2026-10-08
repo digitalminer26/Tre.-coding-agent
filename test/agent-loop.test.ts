@@ -1416,3 +1416,77 @@ test("D27 audit: an abort during the hook leaves hook-time guidance undrained", 
     "the guidance is still in the queue — the driver discards it on abort",
   );
 });
+
+// ─────────────────────── D27b (steering/loop audit, second pass) ───────────────
+
+test("D27b F1: an abort while the consumer handles turn_start leaves pre-hook guidance undrained", async () => {
+  const { q, queue } = makeQueue();
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  q.push("guidance"); // queued before turn 1 (hits the pre-hook drain)
+  const controller = new AbortController();
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [],
+    streamFn: fakeStream(turns, { model: MODEL }),
+    signal: controller.signal,
+    steeringQueue: queue,
+  });
+  for await (const e of gen) {
+    events.push(e);
+    if (e.type === "turn_start") controller.abort(); // abort while the consumer handles turn_start
+  }
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted");
+  assert.equal(events.filter((ev) => ev.type === "steer").length, 0, "no steer was delivered");
+  assert.equal(q.length, 1, "the pre-hook guidance was left undrained");
+});
+
+test("D27b F1: an abort while the consumer handles turn_end leaves keep-alive guidance undrained", async () => {
+  const { q, queue } = makeQueue();
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  const base = fakeStream(turns, { model: MODEL });
+  let call = 0;
+  const streamFn: StreamFn = (m, c, o) => {
+    call += 1;
+    if (call === 1) q.push("guidance"); // typed while turn 1's stream is in flight
+    return base(m, c, o);
+  };
+  const controller = new AbortController();
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [],
+    streamFn,
+    signal: controller.signal,
+    steeringQueue: queue,
+  });
+  for await (const e of gen) {
+    events.push(e);
+    if (e.type === "turn_end") controller.abort(); // abort while the consumer handles turn_end
+  }
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the abort is reported, not a normal stop");
+  assert.equal(events.filter((ev) => ev.type === "steer").length, 0, "no steer was delivered");
+  assert.equal(q.length, 1, "the keep-alive guidance was left undrained");
+});
+
+test("D27b F2: keep-alive at the budget boundary leaves the steer undrained (no turn left to send it)", async () => {
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  const { events, queue } = await drainSteered(turns, [], 1, ["guidance"], {
+    maxTurns: 1,
+    maxContinuations: 0,
+  });
+  const end = agentEnd(events);
+  // The model completed its turn normally (text-only) — "stop", not "budget":
+  // the budget cap only means no FURTHER turn is possible, which we don't need
+  // because the model already stopped. (Before the D27b fix the keep-alive
+  // `continue` re-entered the budget check and the run reported "budget".)
+  assert.equal(end.stopReason, "stop", "the text-only turn completed normally");
+  assert.equal(events.filter((e) => e.type === "steer").length, 0, "the steer was not delivered");
+  assert.equal(queue.length, 1, "the steer is still in the queue — no turn was left to send it");
+});

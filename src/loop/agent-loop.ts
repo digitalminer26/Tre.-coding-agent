@@ -321,6 +321,15 @@ export async function* runLoop(
   }
 
   while (true) {
+    // D27b audit: check at the top of every iteration. The keep-alive and
+    // length-nudge `continue` paths skip the end-of-body abort check, so a
+    // cancellation that lands while the consumer handles their events is only
+    // caught here (and it takes precedence over a coincident budget hit, which
+    // would otherwise misreport "budget").
+    if (signal.aborted) {
+      stopReason = "aborted";
+      break;
+    }
     if (turn - cycleStart >= maxTurns) {
       // Budget hit. C26: the cap is a CYCLE trigger, not a hard stop —
       // nudge + reset, up to maxContinuations times. Only when every
@@ -345,6 +354,16 @@ export async function* runLoop(
     }
     turn += 1;
     yield { type: "turn_start", turn };
+
+    // D27b audit: the consumer may abort while handling the previous turn's
+    // events (or the run may already be aborted at the top of the loop — the
+    // keep-alive/length-nudge `continue` paths skip the end-of-body check).
+    // Check BEFORE the pre-hook drain so an aborted run does not deliver or
+    // persist guidance that no model request will ever see.
+    if (signal.aborted) {
+      stopReason = "aborted";
+      break;
+    }
 
     // Steering: guidance typed during the run is queued by the driver and
     // delivered here — after the previous turn's work, before this LLM call.
@@ -411,6 +430,19 @@ export async function* runLoop(
     if (message !== undefined && slot >= 0) context[slot] = message;
 
     yield { type: "turn_end", turn };
+
+    // D27b audit: the consumer may abort while handling turn_end (it awaits
+    // persistence of the turn's messages). Check BEFORE response handling so
+    // a cancellation cannot reach the keep-alive drain or the length-nudge
+    // `continue` — both of which would deliver guidance or start work after
+    // the abort. (An aborted stream already set message.stopReason to
+    // "aborted" below; this covers the consumer-side abort, which leaves the
+    // message intact.)
+    if (signal.aborted) {
+      stopReason = "aborted";
+      break;
+    }
+
     if (message === undefined) break; // StreamFn contract violation — keep what we have
     stopReason = message.stopReason;
 
@@ -436,10 +468,24 @@ export async function* runLoop(
       }
       // Steering keep-alive: the model finished with a text-only reply, but
       // the user typed guidance while it ran — deliver it and keep going.
-      const keepAlive = await drainSteers(turn);
-      if (keepAlive.length > 0) {
-        for (const ev of keepAlive) yield ev;
-        continue;
+      // D27b audit: keep-alive only makes sense if a SUBSEQUENT LLM turn is
+      // possible. After the `continue`, the top-of-loop budget check fires
+      // when `turn - cycleStart >= maxTurns`; if every continuation is also
+      // spent, that iteration breaks with "budget" and the guidance would
+      // have been delivered + persisted but never sent to the model —
+      // contradicting the policy that budget exits leave pending guidance
+      // undrained. Leave the queue untouched in that case (the driver
+      // discards it); drain otherwise, including when a continuation is still
+      // available (the nudge resets the cycle and the steer rides the next
+      // real turn).
+      const runwayExhausted =
+        turn - cycleStart >= maxTurns && continuations >= maxContinuations;
+      if (!runwayExhausted) {
+        const keepAlive = await drainSteers(turn);
+        if (keepAlive.length > 0) {
+          for (const ev of keepAlive) yield ev;
+          continue;
+        }
       }
       break; // normal stop — or length with the nudge already spent
     }
