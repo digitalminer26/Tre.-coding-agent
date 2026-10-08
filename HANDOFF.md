@@ -1,5 +1,21 @@
 # Current project status (2026-10-06)
 
+**implement-audit skill created (2026-10-08).** New deployment-specific
+orchestration skill at `.tre/skills/implement-audit/` (untracked — `.tre/skills/`
+is gitignored; only `git-commit`/`self-improve` are force-added exceptions).
+Runs implement→audit **cycles**: a worker model implements (or fixes) and
+commits, then an independent auditor model audits `baseline..HEAD` and writes a
+`Verdict: CLEAN | FINDINGS` report; the loop repeats up to N cycles, stopping
+EARLY the moment an audit is clean. Both models are user-specifiable (default:
+worker = models.json `default`, auditor = a different model for independence).
+Mechanics: `run-one.sh` (modeled on parallel-delegation's `fanout.sh`) runs one
+`tre. run` one-shot with a wall-clock cap, detached launch + `.rc` polling; the
+auditor is verified read-only post-run (HEAD unchanged, tree clean, report
+present + parseable) with revert+one-rerun on protocol violation. State lives in
+gitignored `.tre/implement-audit/<slug>/` (new `.gitignore` entry — the only
+tracked change). Verified: loader indexes the skill (`loadSkillsIndex`), helper
+runs a real one-shot end-to-end (rc=0), detached launch + poll works.
+
 **D27b F1 follow-up: aborts no longer leave tool calls dangling (2026-10-06).**
 Auditing the `cba725a` fix itself surfaced a regression it introduced: the new
 abort checks break out of the loop *after* a completed assistant message that

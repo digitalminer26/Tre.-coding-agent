@@ -21,6 +21,9 @@ tre.json
 # Parallel-delegation skill state (plan files, prompts, logs, sessions) —
 # local orchestration artifacts, never in git.
 .tre/delegation/
+# Implement-audit skill state (plan, prompts, audit reports, logs, sessions) —
+# local orchestration artifacts, never in git.
+.tre/implement-audit/
 # GitHub push token. The machine-level home is ~/.tre/github-token (outside
 # the repo, never in git). This entry is a legacy safety net for the old
 # repo-local location, still honored by the release tooling as a fallback.
