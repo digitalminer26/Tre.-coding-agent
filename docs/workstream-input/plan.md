@@ -9,8 +9,10 @@ coalescer. Lifecycle, tool, compaction, completion, and in-band error events
 paint immediately; settlement flushes immediately. Slow paints begin a fresh
 coalescing window on completion. Deterministic tests cover router/coalescer
 unit integration, event classification, pending-paint cancellation, and the
-extracted input-binding helper used by the driver's `onChar`; this is not a
-full `runTui` driver regression harness.
+shared input-handler factory used by the driver. The regression test exercises
+that same factory with the real `inputChar` transition; immediate-route
+selection is inside the factory, so a swap to the coalesced route fails. This
+is not a full `runTui` driver regression harness or PTY claim.
 Worker-job cancellation (ownership/cancel propagation across detached and
 parallel jobs; plan steps 2, 4, and 5) remains explicitly out of scope.
 

@@ -38,8 +38,31 @@ export interface RenderCoalescer {
   cancel(): void;
 }
 
-export function makeImmediateInputBinding<T, A>(update: (arg: A) => T, route: (state: T) => void): (arg: A) => void {
-  return (arg) => route(update(arg));
+export interface InputTransitions<T> {
+  char(s: T, ch: string): T;
+  backspace(s: T): T;
+  move(s: T, dir: -1 | 1): T;
+  history(s: T, dir: -1 | 1): T;
+}
+
+/** Build input navigation handlers using the router's immediate path. */
+export function makeInputHandlers<T>(
+  getState: () => T,
+  router: StateUpdateRouter<T>,
+  t: InputTransitions<T>,
+): {
+  onChar(ch: string): void;
+  onBackspace(): void;
+  onMove(dir: -1 | 1): void;
+  onHistory(dir: -1 | 1): void;
+} {
+  const apply = (next: T): void => router.interactive(next);
+  return {
+    onChar: (ch) => apply(t.char(getState(), ch)),
+    onBackspace: () => apply(t.backspace(getState())),
+    onMove: (dir) => apply(t.move(getState(), dir)),
+    onHistory: (dir) => apply(t.history(getState(), dir)),
+  };
 }
 
 export function isHighFrequencyStreamEvent(event: { type: string }): boolean {

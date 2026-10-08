@@ -31,7 +31,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
-import { isHighFrequencyStreamEvent, makeImmediateInputBinding, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
+import { isHighFrequencyStreamEvent, makeInputHandlers, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
@@ -510,20 +510,24 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     })();
   };
 
-  const handlers = {
-    onChar: makeImmediateInputBinding((ch: string) => inputChar(state, ch), setStateNow),
-    onBackspace: (): void => setStateNow(inputBackspace(state)),
-    onMove: (dir: -1 | 1): void => setStateNow(inputMove(state, dir)),
-    onHistory: (dir: -1 | 1): void => {
-      // D16: arrows steer the completion menu when it is visible, else the
-      // prompt history.
-      const nav = menuNav(state, dir);
-      if (nav !== null) {
-        setStateNow(nav);
-        return;
-      }
-      setStateNow(inputHistory(state, dir));
+  const inputHandlers = makeInputHandlers<TuiState>(
+    () => state,
+    stateUpdates,
+    {
+      char: (s, ch) => inputChar(s, ch),
+      backspace: (s) => inputBackspace(s),
+      move: (s, dir) => inputMove(s, dir),
+      history: (s, dir) => {
+        // D16: arrows steer the completion menu when it is visible, else the
+        // prompt history.
+        const nav = menuNav(s, dir);
+        return nav !== null ? nav : inputHistory(s, dir);
+      },
     },
+  );
+
+  const handlers = {
+    ...inputHandlers,
     onSubmit: (): void => {
       // D16: enter first completes the selected menu candidate (one more
       // enter submits the completed word).

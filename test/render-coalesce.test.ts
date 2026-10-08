@@ -10,7 +10,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isHighFrequencyStreamEvent, makeImmediateInputBinding, makeRenderCoalescer, makeStateUpdateRouter } from "../src/tui/render-coalesce.js";
+import { isHighFrequencyStreamEvent, makeInputHandlers, makeRenderCoalescer, makeStateUpdateRouter } from "../src/tui/render-coalesce.js";
+import { inputBackspace, inputChar, inputHistory, inputMove, makeInitialState, type TuiState } from "../src/tui/state.js";
 
 test("driver routes stream callback to coalescer and interactive callback paints immediately", () => {
   const ft = makeFakeTimers();
@@ -33,12 +34,21 @@ test("driver routes stream callback to coalescer and interactive callback paints
     paintNow: () => coalescer.paintNow(),
   });
   const onStream = (value: number): void => route.stream(value);
-  const onInteractiveInput = makeImmediateInputBinding((value: number) => value, route.interactive);
+  const onInteractiveInput = makeInputHandlers<number>(
+    () => current,
+    route,
+    {
+      char: (_s, ch) => Number(ch),
+      backspace: (s) => s,
+      move: (s) => s,
+      history: (s) => s,
+    },
+  ).onChar;
   onStream(1); // first stream paint is immediate
   ft.advance(5);
   onStream(2); // stream update is deferred/coalesced
   assert.equal(paints, 1);
-  onInteractiveInput(3); // must cancel defer and paint synchronously
+  onInteractiveInput("3"); // must cancel defer and paint synchronously
   assert.equal(paints, 2);
   assert.equal(output, "painted:3");
   assert.equal(ft.pending(), 0);
@@ -103,6 +113,40 @@ function makeCoalescer(windowMs = 33) {
   });
   return { c, ft, paints: () => paints };
 }
+
+test("driver input handlers (makeInputHandlers) take the immediate route with the real inputChar transition", () => {
+  const ft = makeFakeTimers();
+  let current: TuiState = { ...makeInitialState("test-model"), input: "ab", cursorPos: 2 };
+  let paints = 0;
+  let lastInput = "";
+  const coalescer = makeRenderCoalescer({
+    windowMs: 33, now: ft.now, setTimeout: ft.setTimeout, clearTimeout: ft.clearTimeout,
+    paint: () => { paints++; lastInput = current.input; },
+  });
+  const route = makeStateUpdateRouter<TuiState>({
+    getState: () => current,
+    setState: (s) => { current = s; },
+    schedule: () => coalescer.schedule(),
+    paintNow: () => coalescer.paintNow(),
+  });
+  const handlers = makeInputHandlers<TuiState>(() => current, route, {
+    char: (s, ch) => inputChar(s, ch),
+    backspace: (s) => inputBackspace(s),
+    move: (s, dir) => inputMove(s, dir),
+    history: (s, dir) => inputHistory(s, dir),
+  });
+  route.stream({ ...current, input: "a" });
+  ft.advance(5);
+  route.stream({ ...current, input: "ab" });
+  assert.equal(ft.pending(), 1);
+  handlers.onChar("c");
+  assert.equal(paints, 2);
+  assert.equal(ft.pending(), 0);
+  assert.equal(current.input, "abc");
+  assert.equal(lastInput, "abc");
+  ft.advance(100);
+  assert.equal(paints, 2);
+});
 
 test("event classification routes deltas coalesced and lifecycle events immediate", () => {
   for (const type of ["text_delta", "thinking_delta", "toolcall_delta"]) assert.equal(isHighFrequencyStreamEvent({ type }), true);

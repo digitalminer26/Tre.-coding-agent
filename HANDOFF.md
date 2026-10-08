@@ -6,9 +6,12 @@ stream deltas. Lifecycle, tool, compaction, completion, and in-band error
 updates use immediate paints; run settlement flushes immediately. Input,
 commands, approvals and worker updates also paint immediately. Deterministic
 tests cover router/coalescer unit integration, event classification, deferred
-paint cancellation, and the exact extracted input-binding helper used by
-`onChar` (not a full `runTui` integration harness). Slow paints reset the
-coalescing window after completion. Worker-job cancellation remains out of
+paint cancellation, and the shared input-handler factory used by `runTui`.
+The regression test invokes that same factory with the real `inputChar`
+transition; immediate-route selection lives inside the factory, so swapping
+to the coalesced route fails the test. This is not a full `runTui`
+integration harness or PTY claim. Slow paints reset the coalescing window
+after completion. Worker-job cancellation remains out of
 scope; see `docs/workstream-input/plan.md`.
 
 
