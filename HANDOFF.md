@@ -1,5 +1,28 @@
 # Current project status (2026-10-06)
 
+**D27b F1 follow-up: aborts no longer leave tool calls dangling (2026-10-06).**
+Auditing the `cba725a` fix itself surfaced a regression it introduced: the new
+abort checks break out of the loop *after* a completed assistant message that
+may contain tool calls but *before* those calls get results. The loop's
+invariant (I3: every call gets a result) was violated — the context was left
+with orphaned `toolCall` blocks and no matching `toolResult`, which the OpenAI
+wire serializer forwards as-is (an assistant-with-`tool_calls` but no
+`tool`-response history — invalid for the next request). Two abort paths were
+affected: the consumer-side check (after the `turn_end` yield, added in
+`cba725a`) and the stream-side break (`message.stopReason === "aborted"`, which
+the real wire layer reaches when the signal aborts mid-turn after calls have
+already streamed). The length-guard and loop-guard paths already failed their
+calls in-band before breaking; the abort paths were the only ones that didn't.
+Fix in `src/loop/agent-loop.ts`: a `failInband(calls, text)` helper (mirrors the
+length/loop-guard pattern — emits `tool_execution_start` for each call, then a
+failed `toolResult` in call order, **no execution**) is invoked on both abort
+paths when the turn produced tool calls, before breaking with `"aborted"`. The
+new exported `ABORTED_CALL_TEXT` tells the model the calls did not run and to
+re-issue them on resume. Text-only aborts are untouched (no synthetic result).
++3 regression tests (consumer-side abort with a tool call, stream-side abort
+with a tool call, and a text-only abort guard). Gate green: 703 pass / 0 fail /
+13 skipped.
+
 **D27b steering/loop audit (second pass, gpt-6.1-sol) + fixes (2026-10-06).** A
 FRESH, independent re-audit of the current steering/loop integration (the D27
 implementation + the `b3a74d4` audit fix, as one body of code) returned

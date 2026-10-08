@@ -212,6 +212,16 @@ export const LOOP_GUARD_TEXT =
   "latest results, pick a different action, or finish with a text-only " +
   "response explaining the situation.";
 
+// D27b audit F1 — an abort that lands after a COMPLETED assistant message
+// that contains tool calls must still give every call a result (I3: every
+// call gets a result), or the context is left with orphaned toolCall blocks
+// that the wire layer would serialize as an invalid assistant-with-tool_calls
+// but-no-tool-result history. The calls are NOT executed; each is failed
+// in-band with this text.
+export const ABORTED_CALL_TEXT =
+  "The run was aborted before this tool call could run. It was NOT executed. " +
+  "If you resume, re-issue it (or a corrected version) as your next action.";
+
 /**
  * C26 — the identity of one tool-call batch: tool names + stable-JSON
  * arguments, in call order. Two batches are "the same" iff their
@@ -318,6 +328,29 @@ export async function* runLoop(
       sigHistory = [];
     }
     return events;
+  }
+
+  /**
+   * D27b audit F1 — fail a completed tool-call batch IN-BAND without
+   * executing it: every call gets a `toolResult` (I3: every call gets a
+   * result) so the context stays a valid history, and the matching
+   * `tool_execution_start`/`tool_execution_end` events are emitted so a
+   * consumer can render them. Used when the run aborts after a turn that
+   * already produced tool calls — the calls must not run, but they may not
+   * be left dangling either.
+   */
+  async function* failInband(
+    calls: ToolCallBlock[],
+    text: string,
+  ): AsyncGenerator<AgentEvent, void, unknown> {
+    for (const call of calls) {
+      yield { type: "tool_execution_start", toolCall: call };
+    }
+    for (const call of calls) {
+      const msg = resultMessage(call, { content: [{ type: "text", text }] }, true);
+      context.push(msg);
+      yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
+    }
   }
 
   while (true) {
@@ -438,15 +471,40 @@ export async function* runLoop(
     // the abort. (An aborted stream already set message.stopReason to
     // "aborted" below; this covers the consumer-side abort, which leaves the
     // message intact.)
+    //
+    // D27b audit F1: if the turn that just ended already produced tool
+    // calls, they must not be left dangling in context — fail them in-band
+    // (no execution) before breaking, so the history stays valid.
     if (signal.aborted) {
       stopReason = "aborted";
+      if (message) {
+        const calls = message.content.filter(
+          (b): b is ToolCallBlock => b.type === "toolCall",
+        );
+        if (calls.length > 0) {
+          yield* failInband(calls, ABORTED_CALL_TEXT);
+        }
+      }
       break;
     }
 
     if (message === undefined) break; // StreamFn contract violation — keep what we have
     stopReason = message.stopReason;
 
-    if (message.stopReason === "error" || message.stopReason === "aborted") break;
+    if (message.stopReason === "error") break;
+    if (message.stopReason === "aborted") {
+      // D27b audit F1: the stream was aborted mid-turn, but it may have
+      // already emitted tool calls before the abort. They must not run, yet
+      // they must not be left dangling in context either — fail them
+      // in-band (no execution) so the history stays valid.
+      const calls = message.content.filter(
+        (b): b is ToolCallBlock => b.type === "toolCall",
+      );
+      if (calls.length > 0) {
+        yield* failInband(calls, ABORTED_CALL_TEXT);
+      }
+      break;
+    }
 
     const calls = message.content.filter((b): b is ToolCallBlock => b.type === "toolCall");
     if (calls.length === 0) {

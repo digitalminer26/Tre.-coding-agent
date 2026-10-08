@@ -31,6 +31,7 @@ import type {
   AgentEvent,
   AgentMessage,
   AssistantMessage,
+  AssistantStreamEvent,
   ExecuteToolCall,
   LlmContext,
   ModelConfig,
@@ -1473,6 +1474,119 @@ test("D27b F1: an abort while the consumer handles turn_end leaves keep-alive gu
   assert.equal(end.stopReason, "aborted", "the abort is reported, not a normal stop");
   assert.equal(events.filter((ev) => ev.type === "steer").length, 0, "no steer was delivered");
   assert.equal(q.length, 1, "the keep-alive guidance was left undrained");
+});
+
+// ─────────────────── D27b F1 (tool calls on abort) ───────────────────
+
+test("D27b F1: an abort while the consumer handles turn_end fails pending tool calls in-band (no dangling calls)", async () => {
+  const { tool, calls } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a.txt" } }] },
+  ];
+  const controller = new AbortController();
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn: fakeStream(turns, { model: MODEL }),
+    signal: controller.signal,
+  });
+  for await (const e of gen) {
+    events.push(e);
+    if (e.type === "turn_end") controller.abort(); // abort while the consumer handles turn_end
+  }
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the abort is reported");
+  assert.equal(calls.length, 0, "the tool call was NOT executed");
+
+  // The completed assistant message carried one tool call; it must not be
+  // left dangling — it gets an in-band error result so the history is valid.
+  const results = toolResultMessages(end.messages);
+  assert.equal(results.length, 1, "the pending tool call got a result");
+  assert.equal(results[0]!.toolCallId, "c1");
+  assert.equal(results[0]!.isError, true, "the aborted call is marked isError");
+  assert.match(results[0]!.content[0]!.text, /aborted/i);
+
+  // The matching events were emitted so a consumer can render them.
+  assert.equal(toolEndEvents(events).length, 1, "a tool_execution_end was emitted");
+
+  // Context shape: user, assistant(toolCall), toolResult(failed).
+  assert.equal(end.messages.length, 3);
+  assert.equal(end.messages[1]!.role, "assistant");
+  assert.equal(end.messages[2]!.role, "toolResult");
+});
+
+test("D27b F1: a stream-side abort that already emitted tool calls fails them in-band (no dangling calls)", async () => {
+  const { tool, calls } = makeTool("read");
+  // A StreamFn that emits a tool call, then ends with stopReason "aborted"
+  // (the wire layer does this when the signal aborts mid-turn after calls
+  // have already been streamed).
+  const asst = (stopReason: AssistantMessage["stopReason"]): AssistantMessage => ({
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } },
+    ],
+    model: MODEL.id,
+    provider: MODEL.provider,
+    stopReason,
+    timestamp: 0,
+  });
+  const streamFn: StreamFn = async function* () {
+    const startEv: AssistantStreamEvent = { type: "start", partial: asst("stop") };
+    yield startEv;
+    const doneEv: AssistantStreamEvent = { type: "done", message: asst("aborted") };
+    yield doneEv;
+  };
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn,
+    signal: new AbortController().signal,
+  });
+  for await (const e of gen) events.push(e);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the stream-side abort is reported");
+  assert.equal(calls.length, 0, "the tool call was NOT executed");
+
+  const results = toolResultMessages(end.messages);
+  assert.equal(results.length, 1, "the pending tool call got a result");
+  assert.equal(results[0]!.toolCallId, "c1");
+  assert.equal(results[0]!.isError, true, "the aborted call is marked isError");
+  assert.match(results[0]!.content[0]!.text, /aborted/i);
+
+  // Context shape: user, assistant(toolCall), toolResult(failed).
+  assert.equal(end.messages.length, 3);
+  assert.equal(end.messages[1]!.role, "assistant");
+  assert.equal(end.messages[2]!.role, "toolResult");
+});
+
+test("D27b F1: a text-only abort leaves no tool results (regression guard for the in-band path)", async () => {
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  const controller = new AbortController();
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [],
+    streamFn: fakeStream(turns, { model: MODEL }),
+    signal: controller.signal,
+  });
+  for await (const e of gen) {
+    events.push(e);
+    if (e.type === "turn_end") controller.abort();
+  }
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted");
+  assert.equal(toolResultMessages(end.messages).length, 0, "no tool calls → no results");
+  assert.equal(toolEndEvents(events).length, 0, "no tool events emitted");
+  // Context shape: user, assistant(text). No dangling call, no synthetic result.
+  assert.equal(end.messages.length, 2);
 });
 
 test("D27b F2: keep-alive at the budget boundary leaves the steer undrained (no turn left to send it)", async () => {
