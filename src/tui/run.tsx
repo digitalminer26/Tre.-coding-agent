@@ -31,7 +31,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
-import { makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
+import { isHighFrequencyStreamEvent, makeImmediateInputBinding, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
@@ -439,10 +439,11 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         compactKeepTokens: opts.compactKeepTokens,
         charsPerToken: cpt,
         steeringQueue: steerQueue,
-        tap: (ev) => setState(applyEvent(state, ev)),
+        tap: (ev) => (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev)),
       });
       context = result.context;
       cpt = result.charsPerToken;
+      if (mounted) coalescer.paintNow(); // flush final state without fabricating an update
       lastInt = 0; // F4: run settled — reset the force-exit grace window
       return result.context;
     } catch (err) {
@@ -491,7 +492,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           promptOverheadTokens: estimatePromptOverheadTokens(systemPrompt.length, opts.tools, cpt),
           force: true,
           sinks: NULL_SINKS,
-          onEvent: async (ev) => setState(applyEvent(state, ev)),
+          onEvent: async (ev) => (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev)),
         });
         if (newCtx === undefined) {
           setStateNow({
@@ -510,7 +511,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   };
 
   const handlers = {
-    onChar: (ch: string): void => setStateNow(inputChar(state, ch)),
+    onChar: makeImmediateInputBinding((ch: string) => inputChar(state, ch), setStateNow),
     onBackspace: (): void => setStateNow(inputBackspace(state)),
     onMove: (dir: -1 | 1): void => setStateNow(inputMove(state, dir)),
     onHistory: (dir: -1 | 1): void => {

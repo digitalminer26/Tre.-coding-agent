@@ -38,6 +38,14 @@ export interface RenderCoalescer {
   cancel(): void;
 }
 
+export function makeImmediateInputBinding<T, A>(update: (arg: A) => T, route: (state: T) => void): (arg: A) => void {
+  return (arg) => route(update(arg));
+}
+
+export function isHighFrequencyStreamEvent(event: { type: string }): boolean {
+  return event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta";
+}
+
 export interface StateUpdateRouter<T> {
   stream(state: T): void;
   interactive(state: T): void;

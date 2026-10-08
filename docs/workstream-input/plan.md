@@ -4,10 +4,13 @@ Status: stream-render coalescing and immediate interactive paints implemented. W
 
 ## Implementation (2026-10-09)
 
-Stream taps route through the coalescer; interactive and lifecycle state
-changes bypass it and paint immediately. Slow paints begin a fresh coalescing
-window on completion. Deterministic routing tests assert the distinct stream
-(schedule) and interactive (paint-now) paths, alongside paint timing tests.
+Only high-frequency text/thinking/tool-argument deltas route through the
+coalescer. Lifecycle, tool, compaction, completion, and in-band error events
+paint immediately; settlement flushes immediately. Slow paints begin a fresh
+coalescing window on completion. Deterministic tests cover router/coalescer
+unit integration, event classification, pending-paint cancellation, and the
+extracted input-binding helper used by the driver's `onChar`; this is not a
+full `runTui` driver regression harness.
 Worker-job cancellation (ownership/cancel propagation across detached and
 parallel jobs; plan steps 2, 4, and 5) remains explicitly out of scope.
 

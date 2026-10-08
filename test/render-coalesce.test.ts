@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeRenderCoalescer, makeStateUpdateRouter } from "../src/tui/render-coalesce.js";
+import { isHighFrequencyStreamEvent, makeImmediateInputBinding, makeRenderCoalescer, makeStateUpdateRouter } from "../src/tui/render-coalesce.js";
 
 test("driver routes stream callback to coalescer and interactive callback paints immediately", () => {
   const ft = makeFakeTimers();
@@ -33,7 +33,7 @@ test("driver routes stream callback to coalescer and interactive callback paints
     paintNow: () => coalescer.paintNow(),
   });
   const onStream = (value: number): void => route.stream(value);
-  const onInteractiveInput = (value: number): void => route.interactive(value);
+  const onInteractiveInput = makeImmediateInputBinding((value: number) => value, route.interactive);
   onStream(1); // first stream paint is immediate
   ft.advance(5);
   onStream(2); // stream update is deferred/coalesced
@@ -103,6 +103,25 @@ function makeCoalescer(windowMs = 33) {
   });
   return { c, ft, paints: () => paints };
 }
+
+test("event classification routes deltas coalesced and lifecycle events immediate", () => {
+  for (const type of ["text_delta", "thinking_delta", "toolcall_delta"]) assert.equal(isHighFrequencyStreamEvent({ type }), true);
+  for (const type of ["agent_start", "agent_end", "start", "done", "context_compacted", "tool_execution_end"]) assert.equal(isHighFrequencyStreamEvent({ type }), false);
+  const { c, ft, paints } = makeCoalescer();
+  const routeEvent = (type: string): void => {
+    if (isHighFrequencyStreamEvent({ type })) c.schedule();
+    else c.paintNow();
+  };
+  routeEvent("text_delta");
+  ft.advance(5);
+  routeEvent("text_delta"); // queued stream paint
+  assert.equal(ft.pending(), 1);
+  routeEvent("agent_end"); // lifecycle routes immediate and cancels pending stream paint
+  assert.equal(paints(), 2);
+  assert.equal(ft.pending(), 0);
+  ft.advance(100);
+  assert.equal(paints(), 2);
+});
 
 test("coalescer: the first event paints immediately (zero added latency)", () => {
   const { c, paints } = makeCoalescer();

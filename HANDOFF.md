@@ -1,10 +1,13 @@
 # Current project status (2026-10-09)
 
 **TUI input responsiveness: stream paints coalesced, interactive paints immediate.**
-`src/tui/run.tsx` routes stream taps through the render coalescer while input,
-commands, approvals, worker/lifecycle updates, and errors use immediate paints.
-The driver-level routing helper has deterministic regression coverage proving
-interactive updates do not pass through `schedule()`. Slow paints reset the
+`src/tui/run.tsx` coalesces only high-frequency text/thinking/tool-argument
+stream deltas. Lifecycle, tool, compaction, completion, and in-band error
+updates use immediate paints; run settlement flushes immediately. Input,
+commands, approvals and worker updates also paint immediately. Deterministic
+tests cover router/coalescer unit integration, event classification, deferred
+paint cancellation, and the exact extracted input-binding helper used by
+`onChar` (not a full `runTui` integration harness). Slow paints reset the
 coalescing window after completion. Worker-job cancellation remains out of
 scope; see `docs/workstream-input/plan.md`.
 
