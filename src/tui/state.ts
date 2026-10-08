@@ -965,12 +965,9 @@ export function fitItemsScrollable(
   viewTop: number | null,
 ): FitWithScroll {
   const budget = itemAreaBudget(rows, extraLines);
-  // One wrap pass: the per-item rendered line lists — both the height
-  // counts AND the sliceable rows (re-wrapping via itemHeight would do the
-  // work twice per frame). C31: each item's lines include its leading blank
-  // line, decided by its ABSOLUTE predecessor in the content (items[i-1]) —
-  // the same rule the count uses, so the content rows are stable as the
-  // viewport moves.
+  // Identity-cached layouts make unchanged historical items O(1) across
+  // stream updates and scrolling. The WeakMap cache in lines.ts keys on the
+  // immutable item identity, width, and predecessor (separator semantics).
   const lineLists = items.map((it, i) => itemLines(it, width, items[i - 1]));
   const total = lineLists.reduce((a, l) => a + l.length, 0);
   const maxScroll = Math.max(0, total - budget);

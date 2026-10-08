@@ -23,11 +23,11 @@ All planned workstreams are complete; the project is in ongoing hardening.
 
 Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
 opt-in mouse tracking, `/models` switching, in-place `/restart` (same session,
-same settings), a context/compaction readout, an
-approval-mode matrix (default `--yes` · `--ask` · `--no-approve`, with
-systemic sensitive/destructive ops blocked in every mode), deployability
-(`npm i -g .` builds `dist/` on install), and loop/stall guards that stop
-runaway and sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
+same settings), a context/compaction readout, approval controls (`--local` is
+the default; `--ask`, `--yes`, and `--no-approve` are alternatives, with
+sensitive/destructive operations still blocked), deployability (`npm i -g .`
+builds `dist/` on install), and loop/stall guards that stop runaway and
+sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 
 ## Docs
 
@@ -55,10 +55,14 @@ The endpoint config is **not in git** (it's per-machine). Create it from the
 template:
 
 ```bash
-cp models.json.example models.json   # then edit models.json
+mkdir -p ~/.tre/tre
+cp models.json.example ~/.tre/tre/models.json   # then edit that file
 ```
 
-Fill in `baseUrl` (your OpenAI-compatible endpoint, e.g.
+An explicit `--models <file>` overrides this path. `models.json` is not
+searched for in the working directory; the checked-in example is a template,
+not a discovered runtime config. Fill in `baseUrl` (your OpenAI-compatible
+endpoint, e.g.
 `http://<host>:<port>/v1`) and the model's `id`. `tre.` reads its endpoint catalog from `~/.tre/tre/models.json` (or an explicit `--models <file>`); it never picks up a generic `models.json` from your working directory. With **no**
 `models.json` (or a blank `baseUrl`), `tre.` prints a step-by-step setup
 guide — REQUIRED vs OPTIONAL fields — and exits.

@@ -41,6 +41,17 @@ ONLY two default dirs (`src/cli/main.ts`):
 
 `--skills <dir>` adds more. Anywhere else is invisible to the agent.
 
+### Helper script paths
+
+Do not assume a skill's helper is at `<cwd>/.tre/skills/<name>/` just because
+that is the project-skill location. On this deployment, user-installed skills
+(and their helpers) live under `~/.tre/agent/skills/<name>/`; for example, the
+Telegram helper is `~/.tre/agent/skills/telegram/telegram.py`. A project may
+also carry a deployment-specific copy under `<cwd>/.tre/skills/`, but that
+path is not guaranteed to exist in every launch directory or checkout. When
+invoking a helper, use its actual installed path (or locate it in the active
+skill directories) rather than guessing from the current working directory.
+
 ## Where an agent can CREATE skills
 
 The agent's `write` tool is confined to the workspace root and its `bash` is
@@ -101,9 +112,10 @@ sessions live outside the repo for a different reason: D20.)
 
 ## bash classification of skill commands
 
-A helper invocation like `python3 .tre/skills/telegram/telegram.py send
-out.txt` is classified **mutating** (not read-only, no sensitive paths) →
-auto-approved in the default `--yes` mode, prompted in `--ask`, blocked in
+A helper invocation like `python3 <installed-skill-dir>/telegram/telegram.py
+send out.txt` is classified **mutating** (not read-only, no sensitive paths)
+→ auto-approved in the default `--local` mode when the command stays within
+safe locations, prompted in `--ask`, auto-approved in `--yes`, and blocked in
 `--no-approve`. If a skill's commands must run in fail-closed mode they need
 to be read-only — usually not worth it.
 

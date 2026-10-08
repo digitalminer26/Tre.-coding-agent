@@ -45,7 +45,7 @@ import {
   infoItem,
   startupInfoItem,
 } from "../src/tui/state.js";
-import { itemLines } from "../src/tui/lines.js";
+import { itemLines, __lineLayoutCount, __resetLineLayoutCount } from "../src/tui/lines.js";
 import type { TuiItem, TuiState } from "../src/tui/state.js";
 
 /**
@@ -1162,6 +1162,26 @@ test("C31: itemLines shapes — icons, hanging indents, separators", () => {
   // error / info: ⚠ / ℹ lead (2 cols), the text hangs under it.
   assert.deepEqual(itemLines({ kind: "error", text: "x" }, 80), [{ spans: [{ text: "\u26a0 x", color: "red" }] }]);
   assert.deepEqual(itemLines({ kind: "info", text: "x" }, 80), [{ spans: [{ text: "\u2139 x", dim: true }] }]);
+});
+
+test("C41: item layouts are cached by item identity, width, and predecessor", () => {
+  const user: TuiItem = { kind: "user", text: "prompt" };
+  const reply: TuiItem = { kind: "assistant", text: "answer", streaming: false, thinking: false, thinkingText: "" };
+  __resetLineLayoutCount();
+  const first = itemLines(user, 80);
+  assert.equal(__lineLayoutCount(), 1);
+  assert.strictEqual(itemLines(user, 80), first);
+  assert.equal(__lineLayoutCount(), 1, "same immutable item/width reuses layout");
+  const at100 = itemLines(user, 100);
+  assert.notStrictEqual(at100, first);
+  assert.equal(__lineLayoutCount(), 2, "width changes invalidate the layout");
+  itemLines(reply, 80, user);
+  assert.equal(__lineLayoutCount(), 3);
+  itemLines(reply, 80);
+  assert.equal(__lineLayoutCount(), 4, "separator predecessor participates in the key");
+  const changed: TuiItem = { kind: "assistant", text: "answer updated", streaming: false, thinking: false, thinkingText: "" };
+  itemLines(changed, 80, user);
+  assert.equal(__lineLayoutCount(), 5, "stream updates create a new immutable item");
 });
 
 test("C28: itemAreaBudget mirrors the fit reservation", () => {

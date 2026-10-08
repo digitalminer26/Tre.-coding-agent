@@ -46,6 +46,19 @@ export interface RLine {
 /** Same wrap options Ink's full-width `<Text>` uses — keep them mirrored. */
 const WRAP = { trim: false, hard: true };
 
+/** Identity cache for immutable TUI items rendered at terminal widths. */
+type CachedLines = { width: number; prev: TuiItem | undefined; lines: RLine[] };
+const lineCache = new WeakMap<TuiItem, CachedLines[]>();
+const CACHE_WIDTHS_PER_ITEM = 4;
+/** Test/diagnostic counter: actual calls that perform line layout. */
+let lineLayoutCount = 0;
+export function __lineLayoutCount(): number {
+  return lineLayoutCount;
+}
+export function __resetLineLayoutCount(): void {
+  lineLayoutCount = 0;
+}
+
 function wrapRows(text: string, width: number): string[] {
   return wrapAnsi(text, Math.max(1, width), WRAP).split("\n");
 }
@@ -119,7 +132,7 @@ function blankBefore(item: TuiItem, prev: TuiItem | undefined): boolean {
  * rendered immediately above (undefined = first) — it decides the C31
  * leading blank line.
  */
-export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[] {
+function computeItemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[] {
   const lines: RLine[] = [];
   if (item.kind !== "tool" || !item.hidden) {
     // The separator is part of THIS item's rendered lines (the lockstep
@@ -290,4 +303,18 @@ export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[]
       return [...lines, ...body];
     }
   }
+}
+
+/** Render once per immutable item/width/predecessor; reuse in fit + draw. */
+export function itemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[] {
+  const cached = lineCache.get(item);
+  const hit = cached?.find((entry) => entry.width === width && entry.prev === prev);
+  if (hit !== undefined) return hit.lines;
+  lineLayoutCount++;
+  const lines = computeItemLines(item, width, prev);
+  const variants = cached ?? [];
+  variants.push({ width, prev, lines });
+  if (variants.length > CACHE_WIDTHS_PER_ITEM) variants.shift();
+  lineCache.set(item, variants);
+  return lines;
 }

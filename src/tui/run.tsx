@@ -31,6 +31,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
+import { makeRenderCoalescer } from "./render-coalesce.js";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
@@ -343,15 +344,29 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   };
 
   // ── state + render ───────────────────────────────────────────────────────
+  //
+  // Render coalescing (the "stuck loop makes the TUI unresponsive" fix):
+  // see src/tui/render-coalesce.ts for the full rationale. State updates
+  // are ALWAYS immediate (logic stays correct); the PAINT is coalesced to
+  // at most one render per ~33ms window. A steady 100 deltas/s becomes
+  // ~30 renders/s — each render is the full re-wrap + reconcile + paint,
+  // so this is what keeps the event loop responsive enough for stdin
+  // (typing, Ctrl-C) to reach handlers. Interactive paths (keystrokes,
+  // approvals, commands, quit) paint immediately: they are sparse, so the
+  // window has almost always elapsed by the time one arrives.
+  const coalescer = makeRenderCoalescer({
+    paint: () => {
+      if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
+    },
+  });
   const setState = (s: TuiState): void => {
     state = s;
-    // Late events (e.g. the aborted agent_end after a /quit-abort) arrive
-    // after unmount — never rerender a dead instance.
-    if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
+    if (mounted) coalescer.schedule();
   };
   const quit = (code: number): void => {
     exitCode = code;
     mounted = false;
+    coalescer.cancel(); // a pending deferred paint must not fire post-unmount
     app.unmount();
   };
 
