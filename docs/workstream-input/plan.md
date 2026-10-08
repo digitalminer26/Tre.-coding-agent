@@ -1,6 +1,15 @@
 # Plan: responsive input and cancellation during workstreams
 
-Status: assessment complete; implementation proposed, not started.
+Status: stream-render coalescing and immediate interactive paints implemented. Worker-job cancellation remains out of scope.
+
+## Implementation (2026-10-09)
+
+Stream taps route through the coalescer; interactive and lifecycle state
+changes bypass it and paint immediately. Slow paints begin a fresh coalescing
+window on completion. Deterministic routing tests assert the distinct stream
+(schedule) and interactive (paint-now) paths, alongside paint timing tests.
+Worker-job cancellation (ownership/cancel propagation across detached and
+parallel jobs; plan steps 2, 4, and 5) remains explicitly out of scope.
 
 ## Goal and scope
 

@@ -12,10 +12,10 @@
  * neither typing nor the abort key ever reaches a handler — the terminal
  * looks "frozen" and the user cannot interrupt a stuck agent.
  *
- * What: state updates stay IMMEDIATE (all logic reads the `state` variable),
- * but the PAINT is coalesced — at most one render per `windowMs`. The first
- * event of a window paints immediately (zero added latency); events inside
- * the window fold into ONE deferred paint at the window's end. A steady
+ * What: stream paints are coalesced — at most one render per `windowMs`.
+ * The first event paints immediately; events inside the window fold into
+ * one deferred paint. Paint duration counts toward the next window, preventing
+ * slow paints from chaining synchronously and starving input. A steady
  * 100 deltas/s becomes ~30 renders/s. Sparse events (a single late delta,
  * a keystroke after a quiet period) paint immediately because the window
  * has already elapsed. Interactive paths never wait more than one window
@@ -36,6 +36,30 @@ export interface RenderCoalescer {
   paintNow(): void;
   /** Drop any pending deferred paint (e.g. on unmount). */
   cancel(): void;
+}
+
+export interface StateUpdateRouter<T> {
+  stream(state: T): void;
+  interactive(state: T): void;
+}
+
+/** Keep high-frequency stream updates on the coalesced path and interactive
+ * feedback on the immediate path. */
+export function makeStateUpdateRouter<T>(opts: {
+  getState: () => T;
+  setState: (state: T) => void;
+  schedule: () => void;
+  paintNow: () => void;
+}): StateUpdateRouter<T> {
+  const update = (state: T, paint: () => void): void => {
+    if (state === opts.getState()) return;
+    opts.setState(state);
+    paint();
+  };
+  return {
+    stream: (state) => update(state, opts.schedule),
+    interactive: (state) => update(state, opts.paintNow),
+  };
 }
 
 export interface RenderCoalescerOptions {
@@ -62,8 +86,8 @@ export function makeRenderCoalescer(opts: RenderCoalescerOptions): RenderCoalesc
       clearT(timer);
       timer = undefined;
     }
-    last = now();
     opts.paint();
+    last = now();
   };
   return {
     schedule(): void {

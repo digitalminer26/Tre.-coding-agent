@@ -1,0 +1,15 @@
+Task completion status
+
+Changes:
+- Completed TUI stream paint coalescing and immediate interactive updates using the driver state-update router already wired in src/tui/run.tsx.
+- Added deterministic driver-routing/coalescer integration coverage: a synthetic stream callback schedules/coalesces, then interactive callback paints synchronously, updates output, and cancels pending paint; same-reference suppression remains in helper.
+- Updated docs/workstream-input/plan.md to state worker-job cancellation remains out of scope (owned job cancellation/propagation; plan steps 2, 4, 5) and summarize rendering implementation/test coverage.
+- HANDOFF.md records current status and cancellation scope.
+
+Verification:
+- npm run build: passed
+- npm test: passed (731 tests; 718 pass, 13 skipped)
+- git diff --check: passed
+- TUI PTY capture intentionally not run per user instruction.
+
+Worker cancellation scope outstanding: ownership/control and cancellation propagation across detached/parallel jobs; no worker-job cancellation implementation in this task.

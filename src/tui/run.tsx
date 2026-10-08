@@ -31,7 +31,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
-import { makeRenderCoalescer } from "./render-coalesce.js";
+import { makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
@@ -251,7 +251,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // a bare mutation would update the state var but never repaint the frame.
   // setState is declared below but initialized before any of these are CALLED.
   const telegramInfo = (text: string): void => {
-    setState({ ...state, items: [...state.items, { kind: "info", text }] });
+    setStateNow({ ...state, items: [...state.items, { kind: "info", text }] });
   };
   // Extract the final assistant text from a run's context (the reply that
   // goes back to the bot). Empty when the run produced no text (e.g. it
@@ -298,7 +298,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // prompt.
         for (const [, sender, text] of msgs) {
           const prompt = `[telegram from ${sender}] ${text}`;
-          setState({ ...state, items: [...state.items, { kind: "user", text: prompt }] });
+          setStateNow({ ...state, items: [...state.items, { kind: "user", text: prompt }] });
           steerQueue.push(prompt);
         }
         telegramInfo(`telegram: ${msgs.length} message(s) steered into the running turn`);
@@ -316,7 +316,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       // M6: a stop during the poll must not start a new run after quit/unmount.
       if (telegramStopped) return;
       const prompt = msgs.map(([, sender, text]) => `[telegram from ${sender}] ${text}`).join("\n");
-      setState({ ...state, busy: true, viewTop: null, items: [...state.items, { kind: "user", text: prompt }] });
+      setStateNow({ ...state, busy: true, viewTop: null, items: [...state.items, { kind: "user", text: prompt }] });
       void (async () => {
         try {
           // runPrompt returns the run's resulting context, or null when the
@@ -345,24 +345,21 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
 
   // ── state + render ───────────────────────────────────────────────────────
   //
-  // Render coalescing (the "stuck loop makes the TUI unresponsive" fix):
-  // see src/tui/render-coalesce.ts for the full rationale. State updates
-  // are ALWAYS immediate (logic stays correct); the PAINT is coalesced to
-  // at most one render per ~33ms window. A steady 100 deltas/s becomes
-  // ~30 renders/s — each render is the full re-wrap + reconcile + paint,
-  // so this is what keeps the event loop responsive enough for stdin
-  // (typing, Ctrl-C) to reach handlers. Interactive paths (keystrokes,
-  // approvals, commands, quit) paint immediately: they are sparse, so the
-  // window has almost always elapsed by the time one arrives.
+  // Only high-frequency stream taps use coalesced paints. Interactive and
+  // lifecycle updates bypass the window so their feedback is immediate.
   const coalescer = makeRenderCoalescer({
     paint: () => {
       if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
     },
   });
-  const setState = (s: TuiState): void => {
-    state = s;
-    if (mounted) coalescer.schedule();
-  };
+  const stateUpdates = makeStateUpdateRouter<TuiState>({
+    getState: () => state,
+    setState: (s) => { state = s; },
+    schedule: () => { if (mounted) coalescer.schedule(); },
+    paintNow: () => { if (mounted) coalescer.paintNow(); },
+  });
+  const setState = stateUpdates.stream;
+  const setStateNow = stateUpdates.interactive;
   const quit = (code: number): void => {
     exitCode = code;
     mounted = false;
@@ -394,7 +391,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   const restartTui = (): void => {
     const spec = restartCommand(opts.restartArgs ?? [], process.env);
     if (spec === null) {
-      setState({ ...state, items: [...state.items, { kind: "info", text: "restart: no relaunch argv available — quit and run tre. again" }] });
+      setStateNow({ ...state, items: [...state.items, { kind: "info", text: "restart: no relaunch argv available — quit and run tre. again" }] });
       return;
     }
     // The child (the new tre.) owns the terminal and handles its own SIGINT,
@@ -451,7 +448,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     } catch (err) {
       // I3: runTurn does not throw for expected failures — this is a net.
       lastInt = 0; // F4: run settled (errored) — reset the grace window
-      setState(noteError({ ...state, busy: false }, `run error: ${String(err)}`));
+      setStateNow(noteError({ ...state, busy: false }, `run error: ${String(err)}`));
       return null;
     }
   };
@@ -465,14 +462,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
    */
   const manualCompact = (s: TuiState): void => {
     if (opts.noCompact) {
-      setState({
+      setStateNow({
         ...s,
         busy: false,
         items: [...s.items, { kind: "info", text: "compact: compaction disabled (--no-compact)" }],
       });
       return;
     }
-    setState({
+    setStateNow({
       ...s,
       items: [...s.items, { kind: "info", text: "compact: summarizing older messages…" }],
     });
@@ -497,41 +494,41 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           onEvent: async (ev) => setState(applyEvent(state, ev)),
         });
         if (newCtx === undefined) {
-          setState({
+          setStateNow({
             ...state,
             busy: false,
             items: [...state.items, { kind: "info", text: "compact: nothing to compact (context too short)" }],
           });
         } else {
           context = newCtx;
-          setState({ ...state, busy: false });
+          setStateNow({ ...state, busy: false });
         }
       } catch (err) {
-        setState(noteError({ ...state, busy: false }, `compact error: ${String(err)}`));
+        setStateNow(noteError({ ...state, busy: false }, `compact error: ${String(err)}`));
       }
     })();
   };
 
   const handlers = {
-    onChar: (ch: string): void => setState(inputChar(state, ch)),
-    onBackspace: (): void => setState(inputBackspace(state)),
-    onMove: (dir: -1 | 1): void => setState(inputMove(state, dir)),
+    onChar: (ch: string): void => setStateNow(inputChar(state, ch)),
+    onBackspace: (): void => setStateNow(inputBackspace(state)),
+    onMove: (dir: -1 | 1): void => setStateNow(inputMove(state, dir)),
     onHistory: (dir: -1 | 1): void => {
       // D16: arrows steer the completion menu when it is visible, else the
       // prompt history.
       const nav = menuNav(state, dir);
       if (nav !== null) {
-        setState(nav);
+        setStateNow(nav);
         return;
       }
-      setState(inputHistory(state, dir));
+      setStateNow(inputHistory(state, dir));
     },
     onSubmit: (): void => {
       // D16: enter first completes the selected menu candidate (one more
       // enter submits the completed word).
       const completed = menuComplete(state);
       if (completed !== null) {
-        setState(completed);
+        setStateNow(completed);
         return;
       }
       const r = submitInput(state);
@@ -566,7 +563,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           // A6: /compact is never a steer — reject it while a run is in
           // flight (the auto trigger will compact at the next turn boundary).
           if (slashBusy.line === "/compact") {
-            setState({
+            setStateNow({
               ...slashBusy.state,
               items: [
                 ...slashBusy.state.items,
@@ -577,7 +574,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           }
           const prevBottom = state.bottom;
           const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
-          setState(slash.handled ? slash.state : slashBusy.state);
+          setStateNow(slash.handled ? slash.state : slashBusy.state);
           if (slash.handled && slash.state.bottom !== prevBottom) {
             saveTuiConfig({ bottom: slash.state.bottom });
           }
@@ -601,7 +598,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           const s = steerInput(state, trimmed);
           if (s !== null) {
             steerQueue.push(s.text);
-            setState(s.state);
+            setStateNow(s.state);
             return;
           }
         }
@@ -629,7 +626,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const prevBottom = state.bottom;
       const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath));
       if (slash.handled) {
-        setState({ ...slash.state, busy: false });
+        setStateNow({ ...slash.state, busy: false });
         // C32: persist the bottom selection — /display-bottom is the only
         // handled command that changes it (the others keep the same array
         // reference, so this fires exactly on a real change).
@@ -650,10 +647,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         return;
       }
       if (prompt.startsWith("/")) {
-        setState(noteError({ ...r.state, busy: false }, `unknown command: ${prompt}`));
+        setStateNow(noteError({ ...r.state, busy: false }, `unknown command: ${prompt}`));
         return;
       }
-      setState(pushUser(r.state, prompt));
+      setStateNow(pushUser(r.state, prompt));
       void runPrompt(prompt);
     },
     onCtrlC: (): void => {
@@ -671,14 +668,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         lastInt = now;
       } else quit(130);
     },
-    onApproval: (ok: boolean): void => setState(approvalAnswer(state, ok)),
+    onApproval: (ok: boolean): void => setStateNow(approvalAnswer(state, ok)),
     onQuit: (): void => quit(0),
     // C38: the model picker — pure state transitions (nav/close); confirm
     // switches via applyModelSwitch AND re-resolves the full ModelConfig +
     // system prompt (the same driver work as a typed `/models <id>` switch).
     onModelPickerNav: (dir: -1 | 1): void => {
       const nav = modelPickerNav(state, dir);
-      if (nav !== null) setState(nav);
+      if (nav !== null) setStateNow(nav);
     },
     onModelPickerConfirm: (): void => {
       // Capture the OLD label BEFORE setState: setState reassigns the outer
@@ -689,7 +686,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const prevLabel = state.modelLabel;
       const confirmed = modelPickerConfirm(state);
       if (confirmed === null) return; // picker closed — nothing to do
-      setState(confirmed);
+      setStateNow(confirmed);
       if (confirmed.modelLabel !== prevLabel) {
         const nm = resolveSwitchedModel(opts.modelsFile, confirmed.modelLabel);
         if (nm !== null) {
@@ -700,13 +697,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
     onModelPickerClose: (): void => {
       const closed = modelPickerClose(state);
-      if (closed !== null) setState(closed);
+      if (closed !== null) setStateNow(closed);
     },
     // C28: output scrollback — pure state transitions (see state.ts).
     onScrollBy: (delta: number, maxScroll: number): void =>
-      setState(scrollBy(state, delta, maxScroll)),
-    onScrollToTop: (): void => setState(scrollToTop(state)),
-    onScrollToBottom: (): void => setState(scrollToBottom(state)),
+      setStateNow(scrollBy(state, delta, maxScroll)),
+    onScrollToTop: (): void => setStateNow(scrollToTop(state)),
+    onScrollToBottom: (): void => setStateNow(scrollToBottom(state)),
   };
 
   // C27: terminal mouse-wheel forwarding so wheel/trackpad events reach the
@@ -823,7 +820,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // guards the rerender on `mounted`, so a tick racing an unmount is
         // harmless (it updates the state var but never repaints a dead app).
         workersSig = sig;
-        setState({ ...state, workers });
+        setStateNow({ ...state, workers });
       }
     } catch {
       // I3: the poller must NEVER throw — a read/prune failure is swallowed
@@ -845,7 +842,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     opts.deps?.askApproval ??
     ((q: string) =>
       new Promise<boolean>((resolve) => {
-        setState(setApproval(state, q, resolve));
+        setStateNow(setApproval(state, q, resolve));
       }));
   const executor = opts.buildExecutor(makeInteractiveAsk(ask, NULL_SINKS.err));
 

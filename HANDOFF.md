@@ -1,4 +1,13 @@
-# Current project status (2026-10-06)
+# Current project status (2026-10-09)
+
+**TUI input responsiveness: stream paints coalesced, interactive paints immediate.**
+`src/tui/run.tsx` routes stream taps through the render coalescer while input,
+commands, approvals, worker/lifecycle updates, and errors use immediate paints.
+The driver-level routing helper has deterministic regression coverage proving
+interactive updates do not pass through `schedule()`. Slow paints reset the
+coalescing window after completion. Worker-job cancellation remains out of
+scope; see `docs/workstream-input/plan.md`.
+
 
 **implement-audit skill created (2026-10-08).** New deployment-specific
 orchestration skill at `.tre/skills/implement-audit/` (untracked — `.tre/skills/`
