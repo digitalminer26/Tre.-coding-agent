@@ -487,13 +487,19 @@ export async function* runLoop(
     // (no execution) before breaking, so the history stays valid.
     if (signal.aborted) {
       stopReason = "aborted";
-      if (message) {
-        const calls = message.content.filter(
-          (b): b is ToolCallBlock => b.type === "toolCall",
-        );
-        if (calls.length > 0) {
-          yield* failInband(calls, ABORTED_CALL_TEXT);
-        }
+      // D27b audit F1 (no-`done` overlap): when the turn ended WITHOUT a
+      // `done` event (StreamFn contract violation), `message` is undefined
+      // but the partial slot may already hold tool calls — derive them from
+      // the same slot the `message === undefined` fallback below uses, and
+      // fail them in-band too (I3: every call gets a result), so a
+      // consumer-side abort cannot leave an orphaned toolCall in context.
+      const source =
+        message ?? (slot >= 0 ? (context[slot] as AssistantMessage) : undefined);
+      const calls = source
+        ? source.content.filter((b): b is ToolCallBlock => b.type === "toolCall")
+        : [];
+      if (calls.length > 0) {
+        yield* failInband(calls, ABORTED_CALL_TEXT);
       }
       break;
     }

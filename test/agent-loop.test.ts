@@ -20,6 +20,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fakeStream, type FakeTurn } from "./fake-stream.js";
 import {
+  ABORTED_CALL_TEXT,
   BUDGET_CONTINUE_TEXT,
   LOOP_GUARD_TEXT,
   batchSignature,
@@ -1759,6 +1760,78 @@ test("D27b F1 (no done): a StreamFn that emits calls but no `done` fails them in
   assert.equal(results[0]!.toolCallId, "c1");
   assert.equal(results[0]!.isError, true, "the orphaned call is marked isError");
   assert.match(results[0]!.content[0]!.text, /error/i);
+  assert.equal(toolEndEvents(events).length, 1, "a tool_execution_end was emitted");
+});
+
+test("D27b F1 (no done + abort): a consumer abort on turn_end still fails the partial's calls in-band (I3)", async () => {
+  const { tool, calls } = makeTool("read");
+  // The overlap the plain no-`done` test does not cover: the StreamFn
+  // violates its contract (emits a tool call, then ends WITHOUT a `done`
+  // event — `message` stays undefined) AND the consumer aborts on
+  // `turn_end`. The `signal.aborted` branch fires first and must fail the
+  // partial slot's calls in-band (abort text — this is an abort, not an
+  // error) before breaking; otherwise the toolCall is left orphaned (I3).
+  const streamFn: StreamFn = async function* () {
+    yield {
+      type: "start",
+      partial: {
+        role: "assistant",
+        content: [],
+        model: MODEL.id,
+        provider: MODEL.provider,
+        stopReason: "stop",
+        timestamp: 0,
+      },
+    };
+    yield {
+      type: "toolcall_start",
+      index: 0,
+      id: "c1",
+      name: "read",
+      partial: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }],
+        model: MODEL.id,
+        provider: MODEL.provider,
+        stopReason: "stop",
+        timestamp: 0,
+      },
+    };
+    // No `done` — the stream ends here (contract violation).
+  };
+  const controller = new AbortController();
+  const events: AgentEvent[] = [];
+  const gen = runLoop({
+    model: MODEL,
+    systemPrompt: "sys",
+    initialMessages: [userMsg("hi")],
+    tools: [tool],
+    streamFn,
+    signal: controller.signal,
+  });
+  for await (const e of gen) {
+    events.push(e);
+    if (e.type === "turn_end") controller.abort();
+  }
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "aborted", "the consumer abort wins");
+  assert.equal(calls.length, 0, "the tool call was NOT executed");
+
+  // I3: every toolCall in the resulting history has a matching toolResult.
+  const results = toolResultMessages(end.messages);
+  const resultIds = new Set(results.map((r) => r.toolCallId));
+  for (const m of end.messages) {
+    if (m.role !== "assistant") continue;
+    for (const b of m.content) {
+      if (b.type === "toolCall") {
+        assert.ok(resultIds.has(b.id), `toolCall ${b.id} has a matching toolResult (I3)`);
+      }
+    }
+  }
+  assert.equal(results.length, 1, "the pending tool call got a result");
+  assert.equal(results[0]!.toolCallId, "c1");
+  assert.equal(results[0]!.isError, true, "the orphaned call is marked isError");
+  assert.equal(results[0]!.content[0]!.text, ABORTED_CALL_TEXT, "failed as an abort, not an error");
   assert.equal(toolEndEvents(events).length, 1, "a tool_execution_end was emitted");
 });
 
