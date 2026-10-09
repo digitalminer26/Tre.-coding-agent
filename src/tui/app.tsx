@@ -7,8 +7,9 @@
 import React from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import cliTruncate from "cli-truncate";
-import type { TuiItem, TuiState, VisibleSlice } from "./state.js";
-import { itemLines } from "./lines.js";
+import type { SelectionAnchor, TuiItem, TuiState, VisibleSlice } from "./state.js";
+import { itemLines, type RLine } from "./lines.js";
+import { isSgrMouse, parseSgrMouse } from "./mouse.js";
 import {
   BOTTOM_FIELDS,
   FIXED_NON_ITEM_LINES,
@@ -16,9 +17,12 @@ import {
   approvalLine,
   bottomLineColors,
   bottomLines,
+  charWidth,
+  dispWidth,
   fitItemsScrollable,
   inputWrap,
   modelPickerMenu,
+  selectedRanges,
   suggestMenu,
   workersLineAnsi,
 } from "./state.js";
@@ -38,14 +42,72 @@ const prevOf = (items: TuiItem[], it: TuiItem): TuiItem | undefined => {
   return i > 0 ? items[i - 1] : undefined;
 };
 
+// ── Mouse-selection highlight (TRE_MOUSE=1) ────────────────────────────────
+// A selected range is painted as a background on the SELECTED CELLS only —
+// the cells the user can see highlighted are exactly the cells /copy copies
+// (same display-column math, charWidth/dispWidth — the shared width rule).
+// The tint is a 256-color gray (#5f5f5f, the "selected text" gray of most
+// terminals): Ink colorizes it through chalk, which degrades to the nearest
+// 16-color bg (bgGray) on terminals without 256-color support — the
+// highlight stays visible at every color level.
+const SEL_BG = "#5f5f5f";
+/** Split a line's display columns at `c`: [before, at, after] — a wide char
+ * straddling the boundary goes to `after` (a half cell is not renderable). */
+function splitAtCols(s: string, c: number): [string, string, string] {
+  let before = "";
+  let at = "";
+  let col = 0;
+  for (const ch of s) {
+    const w = charWidth(ch.codePointAt(0)!);
+    if (col + w <= c) {
+      before += ch;
+    } else if (col >= c) {
+      at += ch;
+    } else {
+      at += ch; // straddles the boundary: the cell belongs to `after`
+      break;
+    }
+    col += w;
+  }
+  const rest = s.slice(before.length + at.length);
+  return [before, at, rest];
+}
+/** Re-style one rendered line: the cells in [from, to) get the selection
+ * background; every original span keeps its own styling (color/dim/bold
+ * untouched — the highlight COMPOSES with the existing colors, it does not
+ * replace them). The span text is split at display columns (splitAtCols),
+ * so a selection edge mid-span yields up to three runs per span. */
+function highlightLine(line: RLine, from: number, to: number): RLine {
+  const spans: RLine["spans"] = [];
+  let col = 0;
+  for (const sp of line.spans) {
+    const w = dispWidth(sp.text);
+    const end = col + w;
+    const a = Math.max(col, from); // selected start, in this span's text
+    const b = Math.min(end, to); // selected end, in this span's text
+    if (a < b) {
+      const [pre, sel, post] = splitAtCols(sp.text, a - col);
+      const [, sel2, post2] = splitAtCols(sel + post, b - a);
+      if (pre !== "") spans.push({ ...sp, text: pre });
+      if (sel2 !== "") spans.push({ ...sp, text: sel2, bg: SEL_BG });
+      if (post2 !== "") spans.push({ ...sp, text: post2 });
+    } else {
+      spans.push(sp);
+    }
+    col = end;
+  }
+  return { spans };
+}
+
 // C27 — mouse-wheel scrolling. SGR (mode 1006) and X11 (4-byte) wheel
 // events arrive at Ink as RAW input text (no parsed `name`): button 64/65
 // (SGR) or 62/63 (X11), the `M` suffix = press (one event per notch); the
 // `m` release is ignored (anchored below) so a press+release pair scrolls
-// once. Clicks/drags are other SGR sequences — swallowed, never typed.
+// once. Clicks/drags/releases are the other SGR sequences — the mouse
+// selection (below) parses them; anything unrecognized is swallowed, never
+// typed.
 const MOUSE_WHEEL_UP = /^\[<(64|62);\d+;\d+M$/;
 const MOUSE_WHEEL_DOWN = /^\[<(65|63);\d+;\d+M$/;
-const MOUSE_SGR = /^\[</;
 /** One wheel notch scrolls this many lines. */
 const SCROLL_LINES = 3;
 
@@ -73,6 +135,13 @@ export interface AppProps {
   onModelPickerConfirm: () => void;
   /** C38: esc — close the picker without switching. */
   onModelPickerClose: () => void;
+  /** Mouse selection: a left-button PRESS in the item viewport (the App
+   * mapped the terminal cell to a content anchor). */
+  onSelectStart: (anchor: SelectionAnchor) => void;
+  /** Mouse selection: a button-held MOTION (drag) — move the endpoint. */
+  onSelectUpdate: (anchor: SelectionAnchor) => void;
+  /** Mouse selection: Esc — clear the selection. */
+  onSelectClear: () => void;
 }
 
 export function App(props: AppProps): React.ReactElement {
@@ -114,6 +183,70 @@ export function App(props: AppProps): React.ReactElement {
   // The wheel only scrolls when the driver enabled mouse tracking
   // (TRE_MOUSE=1, run.tsx) — the hint names it only then.
   const wheel = process.env.TRE_MOUSE ? "/wheel" : "";
+  // Mouse selection (opt-in, TRE_MOUSE=1): the item viewport is the frame's
+  // rows 2..(1+budget) (the header is row 1); the fit guarantees the item
+  // area is exactly `budget` rows tall (visible lines + pad). A terminal
+  // (row, col) maps to a CONTENT anchor through the visible slices — rows
+  // outside the item area (header, hint, menu, picker, separators, input,
+  // bottom display) are NOT selectable (a press there is ignored).
+  const itemAreaHeight =
+    layout.visible.reduce((a, v) => a + (v.to - v.from), 0) + layout.pad;
+  const anchorAt = (row: number, col: number): SelectionAnchor | null => {
+    // 1-based terminal row → 0-based item-area row (the header is row 1).
+    const areaRow = row - 2;
+    if (areaRow < 0 || areaRow >= itemAreaHeight) return null;
+    let r = areaRow;
+    for (const slice of layout.visible) {
+      const h = slice.to - slice.from;
+      if (r < h) {
+        const idx = state.items.indexOf(slice.item);
+        if (idx < 0) return null;
+        const line = slice.from + r;
+        const prev = idx > 0 ? state.items[idx - 1] : undefined;
+        const lineText = itemLines(slice.item, width, prev)[line]?.spans
+          .map((sp) => sp.text)
+          .join("") ?? "";
+        // 1-based terminal col → 0-based display col, clamped to the line's
+        // display width (a press past the end of the line selects to its
+        // end; wide chars count 2 — dispWidth, the shared width rule).
+        return { itemIndex: idx, line, col: Math.max(0, Math.min(col - 1, dispWidth(lineText))) };
+      }
+      r -= h;
+    }
+    // In the pad (below the last visible slice): the nearest content edge —
+    // the last rendered line of the last visible slice, to its end.
+    const last = layout.visible[layout.visible.length - 1];
+    if (last === undefined) return null; // empty content: nothing to select
+    const idx = state.items.indexOf(last.item);
+    if (idx < 0) return null;
+    const prev = idx > 0 ? state.items[idx - 1] : undefined;
+    const lineText = itemLines(last.item, width, prev)[last.to - 1]?.spans
+      .map((sp) => sp.text)
+      .join("") ?? "";
+    return { itemIndex: idx, line: last.to - 1, col: dispWidth(lineText) };
+  };
+  // The selection's per-line column ranges, computed ONCE per render (the
+  // visible slices are highlighted against it below). null = no selection.
+  const selRanges =
+    state.selection === null
+      ? null
+      : selectedRanges(state, (i) => {
+          const it = state.items[i];
+          if (it === undefined) return [];
+          const p = i > 0 ? state.items[i - 1] : undefined;
+          return itemLines(it, width, p).map((l) => l.spans.map((sp) => sp.text).join(""));
+        });
+  const selForSlice = (slice: VisibleSlice): Map<number, [number, number]> | null => {
+    if (selRanges === null) return null;
+    const idx = state.items.indexOf(slice.item);
+    const map = new Map<number, [number, number]>();
+    for (const r of selRanges) {
+      if (r.itemIndex === idx && r.line >= slice.from && r.line < slice.to) {
+        map.set(r.line, [r.from, r.to]);
+      }
+    }
+    return map.size > 0 ? map : null;
+  };
 
   // The keybinding table: the ONLY place that maps keys to intents.
   useInput((input, key) => {
@@ -187,6 +320,30 @@ export function App(props: AppProps): React.ReactElement {
       props.onBackspace();
       return;
     }
+    // Mouse selection (opt-in, TRE_MOUSE=1): the driver enables SGR mouse
+    // reporting (1002 + 1006) only then, so these events arrive only in
+    // mouse mode. A left-button PRESS in the item viewport starts a
+    // selection (anchorAt maps the terminal cell to content coordinates);
+    // a button-held MOTION (SGR b=32) updates the endpoint; a RELEASE
+    // (suffix `m`) fixes it — the selection stays visible for /copy.
+    // Esc clears it (selectClear via onSelectClear). Presses outside the
+    // item viewport (header, hint, menu, separators, input, bottom display)
+    // map to null and are ignored — they never type, never activate
+    // controls, and never start a selection.
+    if (process.env.TRE_MOUSE) {
+      const ev = parseSgrMouse(input);
+      if (ev !== null) {
+        if (ev.button === "left" && ev.pressed && !ev.motion) {
+          const a = anchorAt(ev.row, ev.col);
+          if (a !== null) props.onSelectStart(a);
+        } else if (ev.button === "left" && ev.motion) {
+          const a = anchorAt(ev.row, ev.col);
+          if (a !== null) props.onSelectUpdate(a);
+        }
+        // Releases (and non-left buttons) fix/ignore — no callback needed.
+        return;
+      }
+    }
     // C27/C28: scroll the output area. Placed BEFORE the ctrl catch-all
     // below (Ctrl+Home/End/Ctrl+U/Ctrl+D arrive with key.ctrl set) and
     // before the char path (mouse SGR sequences have no `name` and would
@@ -231,9 +388,19 @@ export function App(props: AppProps): React.ReactElement {
       props.onScrollBy(-halfPage, layout.maxScroll);
       return;
     }
-    // Any other SGR mouse event (clicks, drags, releases): ignore — it
-    // would otherwise land in the input line as garbage text.
-    if (MOUSE_SGR.test(input)) {
+    // Any other SGR mouse event (clicks, drags, releases — e.g. when the
+    // terminal reports mouse events without TRE_MOUSE=1, or a release that
+    // needs no callback): swallow it — it would otherwise land in the input
+    // line as garbage text.
+    if (isSgrMouse(input)) {
+      return;
+    }
+    // Mouse selection: Esc clears an ACTIVE selection (a selection can only
+    // exist in mouse mode, so this never fires otherwise). Placed after the
+    // approval/picker branches (they own Esc there) and before the catch-all
+    // swallow — with no selection, Esc keeps its current behavior (swallowed).
+    if (key.escape && state.selection !== null) {
+      props.onSelectClear();
       return;
     }
     if (key.tab || key.escape || key.ctrl) return;
@@ -260,7 +427,13 @@ export function App(props: AppProps): React.ReactElement {
         {state.busy && <Text color="yellow"> · working…</Text>}
       </Text>
       {layout.visible.map((slice, i) => (
-        <Item key={i} slice={slice} prev={prevOf(state.items, slice.item)} width={width} />
+        <Item
+          key={i}
+          slice={slice}
+          prev={prevOf(state.items, slice.item)}
+          width={width}
+          sel={selForSlice(slice)}
+        />
       ))}
       {Array.from({ length: layout.pad }, (_, i) => (
         <Text key={`pad-${i}`}> </Text>
@@ -366,19 +539,37 @@ export function App(props: AppProps): React.ReactElement {
  * stays exactly `rows` tall. (D15/D19 notes moved to lines.ts with the line
  * shapes.)
  */
-function Item({ slice, prev, width }: { slice: VisibleSlice; prev: TuiItem | undefined; width: number }): React.ReactElement {
+function Item({
+  slice,
+  prev,
+  width,
+  sel,
+}: {
+  slice: VisibleSlice;
+  prev: TuiItem | undefined;
+  width: number;
+  /** The selection's column ranges for this slice's lines, keyed by the
+   * line's index in the item's FULL rendered lines (slice.from..slice.to);
+   * null = no selected line in this slice. */
+  sel: Map<number, [number, number]> | null;
+}): React.ReactElement {
   const lines = itemLines(slice.item, width, prev).slice(slice.from, slice.to);
   return (
     <Box flexDirection="column">
-      {lines.map((line, i) => (
-        <Text key={i}>
-          {line.spans.map((sp, j) => (
-            <Text key={j} color={sp.color} dimColor={sp.dim} bold={sp.bold}>
-              {sp.text}
-            </Text>
-          ))}
-        </Text>
-      ))}
+      {lines.map((line, i) => {
+        const lineIdx = slice.from + i;
+        const range = sel !== null ? sel.get(lineIdx) : undefined;
+        const styled = range !== undefined ? highlightLine(line, range[0], range[1]) : line;
+        return (
+          <Text key={i}>
+            {styled.spans.map((sp, j) => (
+              <Text key={j} color={sp.color} dimColor={sp.dim} bold={sp.bold} backgroundColor={sp.bg}>
+                {sp.text}
+              </Text>
+            ))}
+          </Text>
+        );
+      })}
     </Box>
   );
 }

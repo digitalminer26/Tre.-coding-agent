@@ -211,6 +211,21 @@ export interface TuiState {
    * reads the disk — the TUI stays pure). Feeds the `workers` bottom field.
    */
   workers: WorkerStatus[];
+  /**
+   * Mouse selection (opt-in, TRE_MOUSE=1): two ANCHORS in content
+   * coordinates — each anchor indexes the item's RENDERED lines (the
+   * itemLines output) by line, and that line by DISPLAY column (wide chars
+   * count 2 — dispWidth). null = no selection. The anchors are in CONTENT
+   * space (item index + rendered line), NOT viewport space, so scrolling
+   * (viewTop changes) never moves them; the highlight re-maps them to
+   * viewport rows each render. A new turn (agent_start) and a compaction
+   * (context_compacted) REPLACE the content — the old anchors would point
+   * at different lines, so both events clear the selection. The driver owns
+   * the clipboard: /copy reads the selection via selectedText and writes it
+   * through the injected adapter (the state machine never touches the
+   * terminal or the clipboard).
+   */
+  selection: { from: SelectionAnchor; to: SelectionAnchor } | null;
 }
 
 export function makeInitialState(
@@ -256,6 +271,7 @@ export function makeInitialState(
     info,
     viewTop: null,
     models,
+    selection: null,
     // Endpoint visibility: the driver's workers poller (run.tsx) fills this
     // after mount — it is never a makeInitialState argument (the state
     // machine does no I/O; the poller owns the registry read).
@@ -267,8 +283,12 @@ export function makeInitialState(
 export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
   switch (ev.type) {
     case "agent_start":
-      // C27/C28: a new run's output is the interesting thing — follow the bottom.
-      return { ...state, busy: true, viewTop: null };
+      // C27/C28: a new run's output is the interesting thing — follow the
+      // bottom. The new turn REPLACES the content the selection anchors
+      // (item indices shift as items append), so the selection is cleared —
+      // a stale selection would highlight the wrong lines (documented: a
+      // selection does not survive a new turn).
+      return { ...state, busy: true, viewTop: null, selection: null };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -514,6 +534,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // messages. Estimate from the summary's char count (chars/4, the
         // same estimator the loop uses).
         summaryTokens: Math.ceil(ev.summaryChars / 4),
+        // The compaction REPLACES the context content (older messages are
+        // summarized away) — the selection's anchors would point into
+        // content that no longer exists in the context, so the selection is
+        // cleared (documented: a selection does not survive a compaction).
+        selection: null,
         items: [
           ...state.items,
           {
@@ -752,6 +777,204 @@ export function scrollToBottom(s: TuiState): TuiState {
 /** To the top of the content (content row 0). */
 export function scrollToTop(s: TuiState): TuiState {
   return s.viewTop === 0 ? s : { ...s, viewTop: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Mouse selection (opt-in, TRE_MOUSE=1). The selection is two ANCHORS in
+// content coordinates: itemIndex (index into state.items), line (index into
+// that item's RENDERED lines — the itemLines output), and col (a DISPLAY
+// column on that line — wide chars count 2, dispWidth). Content coordinates
+// survive scroll: a viewport move (viewTop) changes which lines are VISIBLE,
+// never which line a content row IS. The App maps a terminal (row, col) to an
+// anchor through the current fit (fitItemsScrollable's visible slices) and
+// routes the pure transitions below; the driver owns the clipboard (/copy
+// reads selectedText and writes it through the injected adapter).
+//
+// Lifecycle: a left-button PRESS in the item viewport starts a selection
+// (selectStart), a button-held MOTION (SGR b=32) updates the endpoint
+// (selectUpdate — order-normalized), a RELEASE fixes it (the selection stays
+// visible for /copy), Esc clears it (selectClear), and a new turn
+// (agent_start) or a compaction (context_compacted) REPLACES the content, so
+// the stale anchors are cleared there (documented behavior: a selection does
+// not survive a content replacement).
+// ---------------------------------------------------------------------------
+
+/** One end of a selection: a rendered cell of one item (content space). */
+export interface SelectionAnchor {
+  /** Index into state.items. */
+  itemIndex: number;
+  /** Index into that item's rendered lines (itemLines output). */
+  line: number;
+  /** DISPLAY column on that line (0-based; wide chars count 2). */
+  col: number;
+}
+
+/** True when `a` precedes `b` in content order (item, then line, then col). */
+function anchorBefore(a: SelectionAnchor, b: SelectionAnchor): boolean {
+  if (a.itemIndex !== b.itemIndex) return a.itemIndex < b.itemIndex;
+  if (a.line !== b.line) return a.line < b.line;
+  return a.col < b.col;
+}
+
+/** True when two anchors name the same cell (STRUCTURAL — each drag event is
+ * a fresh anchor object, so reference equality would never catch a no-op). */
+function anchorEq(a: SelectionAnchor, b: SelectionAnchor): boolean {
+  return a.itemIndex === b.itemIndex && a.line === b.line && a.col === b.col;
+}
+
+/**
+ * A left-button PRESS in the item viewport: start a new selection anchored
+ * at both ends on `a` (an empty selection — the drag grows it). Replaces any
+ * prior selection (a new press starts a new selection).
+ */
+export function selectStart(s: TuiState, a: SelectionAnchor): TuiState {
+  return { ...s, selection: { from: a, to: a } };
+}
+
+/**
+ * A button-held MOTION (SGR b=32) while a selection is active: move the
+ * ENDPOINT to `a` (the original press point becomes the stable `from`). The
+ * order is NORMALIZED so `from` always precedes `to` — a drag up/left flips
+ * without any caller bookkeeping. Null when no selection is active (a motion
+ * event without a prior press is ignored).
+ */
+export function selectUpdate(s: TuiState, a: SelectionAnchor): TuiState | null {
+  if (s.selection === null) return null;
+  const from = anchorBefore(a, s.selection.from) ? a : s.selection.from;
+  const to = from === s.selection.from ? a : s.selection.from;
+  // Structural no-op check: a drag that re-reports the SAME cell (a fresh
+  // anchor object) must not re-render (coalescing — the plan's "event volume
+  // during drags" risk). Reference equality would miss it.
+  return anchorEq(from, s.selection.from) && anchorEq(to, s.selection.to)
+    ? s
+    : { ...s, selection: { from, to } };
+}
+
+/** Esc (or an explicit clear): drop the selection. */
+export function selectClear(s: TuiState): TuiState {
+  return s.selection === null ? s : { ...s, selection: null };
+}
+
+/**
+ * The selected rendered lines as (itemIndex, line, [fromCol, toCol)) ranges,
+ * IN CONTENT ORDER, for the current layout. `linesOf` supplies each item's
+ * rendered lines (the App passes a closure over itemLines — the same lines
+ * the fit slices and the renderer draws, so the ranges index exactly what is
+ * on screen). A selection spanning one item yields per-line column ranges;
+ * spanning several items yields whole lines of the items strictly between
+ * the anchors and partial first/last lines at the ends. Empty (the anchors
+ * coincide, or the item list shrank below the anchors) → [].
+ */
+export function selectedRanges(
+  s: TuiState,
+  linesOf: (itemIndex: number) => string[],
+): { itemIndex: number; line: number; from: number; to: number }[] {
+  const sel = s.selection;
+  if (sel === null) return [];
+  const { from, to } = sel;
+  const out: { itemIndex: number; line: number; from: number; to: number }[] = [];
+  const push = (itemIndex: number, line: number, fromCol: number, toCol: number): void => {
+    if (toCol <= fromCol) return;
+    const w = dispWidth(linesOf(itemIndex)[line] ?? "");
+    const a = Math.max(0, Math.min(fromCol, w));
+    const b = Math.max(0, Math.min(toCol, w));
+    if (b > a) out.push({ itemIndex, line, from: a, to: b });
+  };
+  if (from.itemIndex === to.itemIndex) {
+    if (from.line === to.line) {
+      push(from.itemIndex, from.line, Math.min(from.col, to.col), Math.max(from.col, to.col));
+    } else {
+      const first = Math.min(from.line, to.line);
+      const last = Math.max(from.line, to.line);
+      const startCol = from.line === first ? from.col : 0;
+      const endCol = to.line === last ? to.col : 0;
+      for (let l = first; l <= last; l++) {
+        const f = l === first ? startCol : 0;
+        // A non-last line of the selection is selected to its END (the whole
+        // visible line) — push clamps to the line's display width, so pass
+        // that width (0 would select nothing and drop the line).
+        const t = l === last ? endCol : dispWidth(linesOf(from.itemIndex)[l] ?? "");
+        push(from.itemIndex, l, f, t);
+      }
+    }
+  } else {
+    const firstItem = Math.min(from.itemIndex, to.itemIndex);
+    const lastItem = Math.max(from.itemIndex, to.itemIndex);
+    for (let i = firstItem; i <= lastItem; i++) {
+      const lines = linesOf(i);
+      if (lines.length === 0) continue;
+      if (i === firstItem && i === lastItem) continue; // unreachable (indices differ)
+      const isFrom = from.itemIndex === i;
+      const isTo = to.itemIndex === i;
+      const firstLine = isFrom ? from.line : 0;
+      const lastLine = isTo ? to.line : lines.length - 1;
+      for (let l = firstLine; l <= lastLine; l++) {
+        // The first line starts at from.col (when this item holds `from`),
+        // else at 0. The last line ends at to.col (when this item holds `to`),
+        // else to the line's END — the whole visible line (push clamps to the
+        // line's display width, so pass that width; 0 would drop the line).
+        const f = l === firstLine ? (isFrom ? from.col : 0) : 0;
+        const t = l === lastLine ? (isTo ? to.col : dispWidth(lines[l] ?? "")) : dispWidth(lines[l] ?? "");
+        push(i, l, f, t);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The PLAIN TEXT of the current selection (no ANSI, no TUI decoration): the
+ * selected display cells of each rendered line, joined with "\n" — a
+ * multi-line selection preserves its line breaks, a partial line keeps only
+ * the selected columns. The rendered lines already carry the item's icons
+ * and indents (❯/◆/gutters) as part of the text; those are part of what the
+ * user SEES selected, so they are copied as-is (the spec's "no decoration"
+ * is honored where the item data has no decoration of its own — the copy is
+ * exactly the visible text of the highlighted cells). Empty selection → "".
+ */
+export function selectedText(
+  s: TuiState,
+  linesOf: (itemIndex: number) => string[],
+): string {
+  const ranges = selectedRanges(s, linesOf);
+  if (ranges.length === 0) return "";
+  const parts: string[] = [];
+  for (const r of ranges) {
+    const line = linesOf(r.itemIndex)[r.line] ?? "";
+    let out = "";
+    let col = 0;
+    for (const ch of line) {
+      const w = charWidth(ch.codePointAt(0)!);
+      const start = col;
+      const end = col + w;
+      // The cell intersects [from, to): include it whole (a wide char
+      // straddling an edge is included whole — a half-wide-char is not a
+      // renderable unit).
+      if (end > r.from && start < r.to) out += ch;
+      col = end;
+      if (col >= r.to) break;
+    }
+    parts.push(out);
+  }
+  return parts.join("\n");
+}
+
+/**
+ * The plain text of the current selection, bound to the item list at
+ * `width` (the rendered lines are itemLines with each item's content
+ * predecessor — the SAME lines the fit counts and the renderer draws). The
+ * driver's `/copy` calls this; the width is the terminal width the App
+ * renders at (the driver measures it the same way). Empty when there is no
+ * selection or the selection is empty.
+ */
+export function copySelectionText(s: TuiState, width: number): string {
+  const linesOf = (itemIndex: number): string[] => {
+    const item = s.items[itemIndex];
+    if (item === undefined) return [];
+    const prev = itemIndex > 0 ? s.items[itemIndex - 1] : undefined;
+    return itemLines(item, width, prev).map((l) => l.spans.map((sp) => sp.text).join(""));
+  };
+  return selectedText(s, linesOf);
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,8 +1258,11 @@ export function fitItemsScrollable(
  * string-width — no new dependency): 0 for zero-width combining marks, 2 for
  * wide (CJK/Hangul) chars, 1 otherwise. The input row is plain text (no ANSI),
  * so per-code-point widths are enough to window it to one display row.
+ * Exported (mouse selection): the viewport→anchor mapping, the highlight
+ * renderer, and the copy extractor all index by DISPLAY column, so they must
+ * share this exact width rule.
  */
-function charWidth(cp: number): number {
+export function charWidth(cp: number): number {
   if (
     (cp >= 0x1100 && cp <= 0x115f) ||
     (cp >= 0x2e80 && cp <= 0x303e) ||
@@ -1054,8 +1280,10 @@ function charWidth(cp: number): number {
   return 1;
 }
 
-/** Total display width of a string (sum of per-code-point widths). */
-function dispWidth(s: string): number {
+/** Total display width of a string (sum of per-code-point widths). Exported
+ * (mouse selection): the viewport→anchor mapping in app.tsx clamps a
+ * terminal column against the line's display width with this exact rule. */
+export function dispWidth(s: string): number {
   let w = 0;
   for (const ch of s) w += charWidth(ch.codePointAt(0)!);
   return w;

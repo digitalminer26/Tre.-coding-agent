@@ -36,6 +36,7 @@ import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
   applyEvent,
+  copySelectionText,
   handleSlashCommand,
   inputBackspace,
   inputChar,
@@ -52,13 +53,18 @@ import {
   scrollBy,
   scrollToBottom,
   scrollToTop,
+  selectClear,
+  selectStart,
+  selectUpdate,
   setApproval,
   startupInfoItem,
   steerInput,
   submitInput,
   submitSlashBusy,
+  type SelectionAnchor,
   type TuiState,
 } from "./state.js";
+import { copyToClipboard, type ClipboardAdapter } from "./clipboard.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
 import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
@@ -163,6 +169,10 @@ export interface TuiRunOptions {
   deps?: {
     /** Injected approver (tests): bypasses the TUI's y/n prompt. */
     askApproval?: AskApproval;
+    /** Injected clipboard adapter (tests): the `/copy` path writes through
+     * this instead of the platform helper (pbcopy/xclip). Absent → the
+     * default adapter (see clipboard.ts). */
+    clipboardAdapter?: ClipboardAdapter;
   };
   /** The argv to re-exec for /restart (main.ts passes the FULL
    *  process.argv — restartCommand strips argv[0], the node binary);
@@ -510,6 +520,46 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     })();
   };
 
+  /**
+   * `/copy` — copy the current mouse selection to the system clipboard.
+   * The selection is read in CONTENT coordinates (copySelectionText, state.ts)
+   * at the CURRENT terminal width (the rendered lines are width-dependent —
+   * wrapping changes the line breaks, so the copy must use the width the
+   * App renders at). The clipboard write is the driver's I/O (clipboard.ts,
+   * injectable adapter); the result lands as an info item (success: the byte
+   * count; failure: the reason — no helper, timeout, empty selection). The
+   * selection itself is NOT cleared (the user may copy it again after a
+   * scroll; Esc clears it). Never throws (I3): a clipboard failure is a
+   * reported info item, not a crash.
+   */
+  const copySelection = (): void => {
+    const width = process.stdout.columns > 0 ? process.stdout.columns : 80;
+    const text = copySelectionText(state, width);
+    if (text === "") {
+      setStateNow({
+        ...state,
+        items: [...state.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }],
+      });
+      return;
+    }
+    const bytes = Buffer.byteLength(text, "utf8");
+    void copyToClipboard(text, opts.deps?.clipboardAdapter).then((res) => {
+      if (!mounted) return; // a copy that settles after quit must not re-render
+      setStateNow({
+        ...state,
+        items: [
+          ...state.items,
+          {
+            kind: "info",
+            text: res.ok
+              ? `copied ${bytes} byte(s) to the clipboard`
+              : `copy failed: ${res.error}`,
+          },
+        ],
+      });
+    });
+  };
+
   const inputHandlers = makeInputHandlers<TuiState>(
     () => state,
     stateUpdates,
@@ -577,6 +627,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
             });
             return;
           }
+          // /copy while busy: the selection is on the rendered content, not
+          // the running loop — it copies fine mid-run (the line was already
+          // cleared by submitSlashBusy).
+          if (slashBusy.line === "/copy") {
+            copySelection();
+            return;
+          }
           const prevBottom = state.bottom;
           const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
           setStateNow(slash.handled ? slash.state : slashBusy.state);
@@ -623,6 +680,15 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       // registry entry for the completion menu).
       if (prompt === "/compact") {
         manualCompact(r.state);
+        return;
+      }
+      // Mouse selection: /copy copies the current selection to the system
+      // clipboard (driver I/O — clipboard.ts). It is a UI command like
+      // /compact (handled before the generic slash dispatch, which would
+      // report it as unknown). The selection survives the copy (Esc clears
+      // it); only the input line is cleared (submitInput already did).
+      if (prompt === "/copy") {
+        copySelection();
         return;
       }
       // D15: slash commands are UI commands, not runs — dispatch through the
@@ -709,6 +775,18 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       setStateNow(scrollBy(state, delta, maxScroll)),
     onScrollToTop: (): void => setStateNow(scrollToTop(state)),
     onScrollToBottom: (): void => setStateNow(scrollToBottom(state)),
+    // Mouse selection (opt-in, TRE_MOUSE=1): pure state transitions (see
+    // state.ts). The App maps the terminal cell to a content anchor; these
+    // just fold the anchor into the selection. The clipboard is the driver's
+    // job — /copy (below) reads the selection and writes it through the
+    // injected adapter (clipboard.ts).
+    onSelectStart: (anchor: SelectionAnchor): void =>
+      setStateNow(selectStart(state, anchor)),
+    onSelectUpdate: (anchor: SelectionAnchor): void => {
+      const next = selectUpdate(state, anchor);
+      if (next !== null) setStateNow(next);
+    },
+    onSelectClear: (): void => setStateNow(selectClear(state)),
   };
 
   // C27: terminal mouse-wheel forwarding so wheel/trackpad events reach the

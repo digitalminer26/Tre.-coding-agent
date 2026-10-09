@@ -102,6 +102,9 @@ const renderApp = (state: TuiState) =>
       onModelPickerNav: () => {},
       onModelPickerConfirm: () => {},
       onModelPickerClose: () => {},
+      onSelectStart: () => {},
+      onSelectUpdate: () => {},
+      onSelectClear: () => {},
     }),
   );
 

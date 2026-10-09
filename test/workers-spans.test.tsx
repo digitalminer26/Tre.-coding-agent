@@ -51,6 +51,9 @@ const makeApp = (state: TuiState) =>
       onModelPickerNav: () => {},
       onModelPickerConfirm: () => {},
       onModelPickerClose: () => {},
+      onSelectStart: () => {},
+      onSelectUpdate: () => {},
+      onSelectClear: () => {},
     }),
   );
 

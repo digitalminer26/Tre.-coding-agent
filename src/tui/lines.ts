@@ -36,6 +36,13 @@ export interface RSpan {
   color?: string;
   /** Ink `dimColor` for this run. */
   dim?: boolean;
+  /**
+   * Ink `backgroundColor` for this run (undefined = default background).
+   * Set ONLY at render time by the mouse-selection highlight (app.tsx) —
+   * the canonical itemLines output never carries it, so the height math and
+   * the copy path are unaffected (style-only, no row-count change).
+   */
+  bg?: string;
 }
 
 /** One rendered terminal row: one or more styled runs, in order. */
