@@ -553,11 +553,6 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       if (!mounted) return; // a copy that settles after quit must not re-render
       setStateNow({
         ...state,
-        input: "",
-        cursorPos: 0,
-        historyIdx: null,
-        history: state.history.includes("/copy") ? state.history : [...state.history, "/copy"],
-        busy: state.busy,
         items: [
           ...state.items,
           {

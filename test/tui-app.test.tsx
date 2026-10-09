@@ -689,13 +689,17 @@ test("mouse selection highlight preserves all text and highlights exactly the co
     process.env.TRE_MOUSE = "1";
     const previousColor = process.env.FORCE_COLOR;
     process.env.FORCE_COLOR = "3";
-    const state = { ...makeInitialState("m"), items: [{ kind: "user" as const, text: "A👩‍💻B" }], selection: { from: { itemIndex: 0, line: 0, col: 3 }, to: { itemIndex: 0, line: 0, col: 4 } } };
-    const app = makeApp(state);
-    const frame = app.lastFrame()!;
-    assert.match(frame, /A👩‍💻B/);
-    assert.ok(frame.includes("👩‍💻"), JSON.stringify(frame));
-    if (previousColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = previousColor;
-    app.unmount();
+    try {
+      const state = { ...makeInitialState("m"), items: [{ kind: "user" as const, text: "A👩‍💻B" }], selection: { from: { itemIndex: 0, line: 0, col: 3 }, to: { itemIndex: 0, line: 0, col: 4 } } };
+      const app = makeApp(state);
+      try {
+        const frame = app.lastFrame()!;
+        assert.match(frame, /A👩‍💻B/);
+        assert.ok(frame.includes("👩‍💻"), JSON.stringify(frame));
+      } finally { app.unmount(); }
+    } finally {
+      if (previousColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = previousColor;
+    }
   } finally {
     if (prev === undefined) delete process.env.TRE_MOUSE;
     else process.env.TRE_MOUSE = prev;
