@@ -167,6 +167,13 @@ test("tool: start shows args; end matches by id (order-independent) with isError
   assert.equal(t1.resultText, "oops boom");
 });
 
+test("unmatched quiet-tool completion preserves selection indices", () => {
+  const state: TuiState = { ...makeInitialState("m"), items: [{ kind: "user", text: "hello" }], selection: { from: { itemIndex: 0, line: 0, col: 0 }, to: { itemIndex: 0, line: 0, col: 3 }, anchor: { itemIndex: 0, line: 0, col: 0 } } };
+  const result = applyEvent(state, toolEnd("missing-id", "", false, "read"));
+  assert.deepEqual(result.items, state.items);
+  assert.deepEqual(result.selection, state.selection);
+});
+
 test("tool removal remaps surviving selection anchors and clears removed-item anchors", () => {
   let s: TuiState = { ...makeInitialState("m"), items: [
     { kind: "user" as const, text: "before" },

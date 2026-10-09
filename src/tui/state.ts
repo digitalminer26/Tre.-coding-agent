@@ -493,9 +493,9 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         const removed = state.items.findIndex((it) => it.kind === "tool" && it.id === ev.toolCallId);
         const remap = (a: SelectionAnchor): SelectionAnchor | null =>
           a.itemIndex === removed ? null : { ...a, itemIndex: a.itemIndex - (removed < a.itemIndex ? 1 : 0) };
-        const from = state.selection === null ? null : remap(state.selection.from);
-        const to = state.selection === null ? null : remap(state.selection.to);
-        const anchor = state.selection === null ? null : remap(state.selection.anchor ?? state.selection.from);
+        const from = state.selection === null ? null : removed < 0 ? state.selection.from : remap(state.selection.from);
+        const to = state.selection === null ? null : removed < 0 ? state.selection.to : remap(state.selection.to);
+        const anchor = state.selection === null ? null : removed < 0 ? (state.selection.anchor ?? state.selection.from) : remap(state.selection.anchor ?? state.selection.from);
         return {
           ...state,
           items: state.items.filter((it) => !(it.kind === "tool" && it.id === ev.toolCallId)),
