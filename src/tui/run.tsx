@@ -543,17 +543,23 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     const text = copySelectionText(state, width);
     const slashState = state.busy ? submitSlashBusy(state)?.state : submitInput(state)?.state;
     const cleared = { ...(slashState ?? state), busy: state.busy, input: "", cursorPos: 0, historyIdx: null, history: [...state.history, "/copy"] };
+    setStateNow(cleared);
     if (text === "") {
-      setStateNow({ ...cleared, items: [...cleared.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }] });
+      setStateNow({ ...state, ...cleared, items: [...cleared.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }] });
       return;
     }
     const bytes = Buffer.byteLength(text, "utf8");
     void copyToClipboard(text, opts.deps?.clipboardAdapter).then((res) => {
       if (!mounted) return; // a copy that settles after quit must not re-render
       setStateNow({
-        ...cleared,
+        ...state,
+        input: "",
+        cursorPos: 0,
+        historyIdx: null,
+        history: state.history.includes("/copy") ? state.history : [...state.history, "/copy"],
+        busy: state.busy,
         items: [
-          ...cleared.items,
+          ...state.items,
           {
             kind: "info",
             text: res.ok

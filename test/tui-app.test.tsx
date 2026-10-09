@@ -683,6 +683,25 @@ test("mouse: WITHOUT TRE_MOUSE a press is swallowed (never typed, no callback)",
   }
 });
 
+test("mouse selection highlight preserves all text and highlights exactly the copied graphemes", async () => {
+  const prev = process.env.TRE_MOUSE;
+  try {
+    process.env.TRE_MOUSE = "1";
+    const previousColor = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = "3";
+    const state = { ...makeInitialState("m"), items: [{ kind: "user" as const, text: "A👩‍💻B" }], selection: { from: { itemIndex: 0, line: 0, col: 3 }, to: { itemIndex: 0, line: 0, col: 4 } } };
+    const app = makeApp(state);
+    const frame = app.lastFrame()!;
+    assert.match(frame, /A👩‍💻B/);
+    assert.ok(frame.includes("👩‍💻"), JSON.stringify(frame));
+    if (previousColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = previousColor;
+    app.unmount();
+  } finally {
+    if (prev === undefined) delete process.env.TRE_MOUSE;
+    else process.env.TRE_MOUSE = prev;
+  }
+});
+
 test("mouse: Esc clears an ACTIVE selection (onSelectClear)", async () => {
   const prev = process.env.TRE_MOUSE;
   try {

@@ -51,22 +51,22 @@ const prevOf = (items: TuiItem[], it: TuiItem): TuiItem | undefined => {
 // 16-color bg (bgGray) on terminals without 256-color support — the
 // highlight stays visible at every color level.
 const SEL_BG = "#5f5f5f";
-/** Split a line's display columns at `c`: [before, at, after] — a wide char
- * straddling the boundary goes to `after` (a half cell is not renderable). */
-function splitAtCols(s: string, c: number): [string, string, string] {
+/** Split at a display-column range. Graphemes intersecting any selected
+ * cell are highlighted whole, matching copy's grapheme extraction. */
+function splitRangeAtCols(s: string, from: number, to: number): [string, string, string] {
   let before = "";
-  let at = "";
+  let selected = "";
+  let after = "";
   let col = 0;
-  let rest = "";
   for (const grapheme of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)) {
     const g = grapheme.segment;
-    const w = stringWidth(g);
-    if (col + w <= c) before += g;
-    else if (col >= c) rest += g;
-    else at += g;
-    col += w;
+    const end = col + stringWidth(g);
+    if (end <= from) before += g;
+    else if (col >= to) after += g;
+    else selected += g;
+    col = end;
   }
-  return [before, at, rest];
+  return [before, selected, after];
 }
 /** Re-style one rendered line: the cells in [from, to) get the selection
  * background; every original span keeps its own styling (color/dim/bold
@@ -82,11 +82,10 @@ function highlightLine(line: RLine, from: number, to: number): RLine {
     const a = Math.max(col, from); // selected start, in this span's text
     const b = Math.min(end, to); // selected end, in this span's text
     if (a < b) {
-      const [pre, tail] = splitAtCols(sp.text, a - col);
-      const [sel2, post2] = splitAtCols(tail, b - a);
+      const [pre, selected, post] = splitRangeAtCols(sp.text, a - col, b - col);
       if (pre !== "") spans.push({ ...sp, text: pre });
-      if (sel2 !== "") spans.push({ ...sp, text: sel2, bg: SEL_BG });
-      if (post2 !== "") spans.push({ ...sp, text: post2 });
+      if (selected !== "") spans.push({ ...sp, text: selected, bg: SEL_BG });
+      if (post !== "") spans.push({ ...sp, text: post });
     } else {
       spans.push(sp);
     }
