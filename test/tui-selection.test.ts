@@ -23,6 +23,7 @@ import type { AgentEvent } from "../src/types.js";
 import {
   applyEvent,
   copySelectionText,
+  dispWidth,
   makeInitialState,
   selectClear,
   selectStart,
@@ -55,27 +56,34 @@ const base = (): TuiState => makeInitialState("m");
 
 test("selectStart: a press anchors both ends (an empty selection)", () => {
   const s = selectStart(base(), anchor(0, 0, 3));
-  assert.deepEqual(s.selection, { from: anchor(0, 0, 3), to: anchor(0, 0, 3) });
+  assert.deepEqual(s.selection, { from: anchor(0, 0, 3), to: anchor(0, 0, 3), anchor: anchor(0, 0, 3) });
 });
 
 test("selectStart: a new press replaces a prior selection", () => {
   let s = selectStart(base(), anchor(0, 0, 1));
   s = selectUpdate(s, anchor(0, 0, 5))!;
   s = selectStart(s, anchor(1, 0, 2));
-  assert.deepEqual(s.selection, { from: anchor(1, 0, 2), to: anchor(1, 0, 2) });
+  assert.deepEqual(s.selection, { from: anchor(1, 0, 2), to: anchor(1, 0, 2), anchor: anchor(1, 0, 2) });
 });
 
 test("selectUpdate: motion moves the endpoint (from stays at the press)", () => {
   let s = selectStart(base(), anchor(0, 0, 0));
   s = selectUpdate(s, anchor(0, 0, 5))!;
-  assert.deepEqual(s.selection, { from: anchor(0, 0, 0), to: anchor(0, 0, 5) });
+  assert.deepEqual(s.selection, { from: anchor(0, 0, 0), to: anchor(0, 0, 5), anchor: anchor(0, 0, 0) });
+});
+
+test("selectUpdate: reversing direction retains the original press anchor", () => {
+  let s = selectStart(base(), anchor(0, 0, 8));
+  s = selectUpdate(s, anchor(0, 0, 3))!;
+  s = selectUpdate(s, anchor(0, 0, 10))!;
+  assert.deepEqual(s.selection, { from: anchor(0, 0, 8), to: anchor(0, 0, 10), anchor: anchor(0, 0, 8) });
 });
 
 test("selectUpdate: a drag up/left is order-normalized (from precedes to)", () => {
   // press at (0,1,5), drag to (0,0,2) — the endpoint is BEFORE the press.
   let s = selectStart(base(), anchor(0, 1, 5));
   s = selectUpdate(s, anchor(0, 0, 2))!;
-  assert.deepEqual(s.selection, { from: anchor(0, 0, 2), to: anchor(0, 1, 5) });
+  assert.deepEqual(s.selection, { from: anchor(0, 0, 2), to: anchor(0, 1, 5), anchor: anchor(0, 1, 5) });
 });
 
 test("selectUpdate: a motion with no active selection returns null", () => {
@@ -236,6 +244,23 @@ test("copySelectionText: renders the real item lines and copies the selected cel
   let s = selectStart(st, anchor(1, 1, 2));
   s = selectUpdate(s, anchor(1, 1, 6))!;
   assert.equal(copySelectionText(s, 80), "done");
+});
+
+test("selectedText preserves blank lines and newline-only ranges", () => {
+  const s = selectUpdate(selectStart(base(), anchor(0, 0, 0)), anchor(0, 2, 0))!;
+  assert.equal(selectedText(s, () => ["alpha", "", "omega"]), "alpha\n\n");
+  const across = selectUpdate(selectStart(base(), anchor(0, 0, 0)), anchor(0, 2, 5))!;
+  assert.equal(selectedText(across, () => ["alpha", "", "omega"]), "alpha\n\nomega");
+  const newlineOnly = selectUpdate(selectStart(base(), anchor(0, 0, 5)), anchor(0, 1, 0))!;
+  assert.equal(selectedText(newlineOnly, () => ["alpha", "omega"]), "\n");
+});
+
+test("copy width matches terminal grapheme widths and retains combined clusters", () => {
+  assert.equal(dispWidth("👩‍💻"), 2);
+  assert.equal(dispWidth("e\u0301"), 1);
+  let s = selectStart(base(), anchor(0, 0, 1));
+  s = selectUpdate(s, anchor(0, 0, 2))!;
+  assert.equal(selectedText(s, () => ["Ae\u0301B"]), "e\u0301");
 });
 
 test("copySelectionText: no selection → empty string", () => {

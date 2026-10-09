@@ -7,6 +7,7 @@
 import React from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import cliTruncate from "cli-truncate";
+import stringWidth from "string-width";
 import type { SelectionAnchor, TuiItem, TuiState, VisibleSlice } from "./state.js";
 import { itemLines, type RLine } from "./lines.js";
 import { isSgrMouse, parseSgrMouse } from "./mouse.js";
@@ -17,7 +18,6 @@ import {
   approvalLine,
   bottomLineColors,
   bottomLines,
-  charWidth,
   dispWidth,
   fitItemsScrollable,
   inputWrap,
@@ -57,19 +57,15 @@ function splitAtCols(s: string, c: number): [string, string, string] {
   let before = "";
   let at = "";
   let col = 0;
-  for (const ch of s) {
-    const w = charWidth(ch.codePointAt(0)!);
-    if (col + w <= c) {
-      before += ch;
-    } else if (col >= c) {
-      at += ch;
-    } else {
-      at += ch; // straddles the boundary: the cell belongs to `after`
-      break;
-    }
+  let rest = "";
+  for (const grapheme of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)) {
+    const g = grapheme.segment;
+    const w = stringWidth(g);
+    if (col + w <= c) before += g;
+    else if (col >= c) rest += g;
+    else at += g;
     col += w;
   }
-  const rest = s.slice(before.length + at.length);
   return [before, at, rest];
 }
 /** Re-style one rendered line: the cells in [from, to) get the selection
@@ -86,8 +82,8 @@ function highlightLine(line: RLine, from: number, to: number): RLine {
     const a = Math.max(col, from); // selected start, in this span's text
     const b = Math.min(end, to); // selected end, in this span's text
     if (a < b) {
-      const [pre, sel, post] = splitAtCols(sp.text, a - col);
-      const [, sel2, post2] = splitAtCols(sel + post, b - a);
+      const [pre, tail] = splitAtCols(sp.text, a - col);
+      const [sel2, post2] = splitAtCols(tail, b - a);
       if (pre !== "") spans.push({ ...sp, text: pre });
       if (sel2 !== "") spans.push({ ...sp, text: sel2, bg: SEL_BG });
       if (post2 !== "") spans.push({ ...sp, text: post2 });
@@ -140,6 +136,7 @@ export interface AppProps {
   onSelectStart: (anchor: SelectionAnchor) => void;
   /** Mouse selection: a button-held MOTION (drag) — move the endpoint. */
   onSelectUpdate: (anchor: SelectionAnchor) => void;
+  onSelectEnd?: () => void;
   /** Mouse selection: Esc — clear the selection. */
   onSelectClear: () => void;
 }
@@ -227,6 +224,15 @@ export function App(props: AppProps): React.ReactElement {
   };
   // The selection's per-line column ranges, computed ONCE per render (the
   // visible slices are highlighted against it below). null = no selection.
+  const nearestAnchor = (row: number, col: number): SelectionAnchor | null => {
+    if (layout.visible.length === 0) return null;
+    const firstRow = 2;
+    const lastRow = firstRow + itemAreaHeight - 1;
+    const clampedRow = Math.max(firstRow, Math.min(row, lastRow));
+    if (row < firstRow) return anchorAt(firstRow, 1);
+    if (row > lastRow) return anchorAt(lastRow, width);
+    return anchorAt(clampedRow, col);
+  };
   const selRanges =
     state.selection === null
       ? null
@@ -336,11 +342,13 @@ export function App(props: AppProps): React.ReactElement {
         if (ev.button === "left" && ev.pressed && !ev.motion) {
           const a = anchorAt(ev.row, ev.col);
           if (a !== null) props.onSelectStart(a);
-        } else if (ev.button === "left" && ev.motion) {
-          const a = anchorAt(ev.row, ev.col);
+        } else if (ev.button === "left" && ev.pressed && ev.motion) {
+          const a = anchorAt(ev.row, ev.col) ?? nearestAnchor(ev.row, ev.col);
           if (a !== null) props.onSelectUpdate(a);
+        } else if (!ev.pressed) {
+          props.onSelectEnd?.();
         }
-        // Releases (and non-left buttons) fix/ignore — no callback needed.
+        // Non-left buttons are ignored.
         return;
       }
     }

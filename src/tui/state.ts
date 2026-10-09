@@ -12,6 +12,7 @@ import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
 import cliTruncate from "cli-truncate";
+import stringWidth from "string-width";
 
 const oneLine = (s: string, n: number): string => {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -225,7 +226,7 @@ export interface TuiState {
    * through the injected adapter (the state machine never touches the
    * terminal or the clipboard).
    */
-  selection: { from: SelectionAnchor; to: SelectionAnchor } | null;
+  selection: { from: SelectionAnchor; to: SelectionAnchor; anchor?: SelectionAnchor } | null;
 }
 
 export function makeInitialState(
@@ -489,9 +490,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           );
         }
         // Success — drop the placeholder entirely (no line at all).
+        const removed = state.items.findIndex((it) => it.kind === "tool" && it.id === ev.toolCallId);
+        const remap = (a: SelectionAnchor): SelectionAnchor | null =>
+          a.itemIndex === removed ? null : { ...a, itemIndex: a.itemIndex - (removed < a.itemIndex ? 1 : 0) };
+        const from = state.selection === null ? null : remap(state.selection.from);
+        const to = state.selection === null ? null : remap(state.selection.to);
+        const anchor = state.selection === null ? null : remap(state.selection.anchor ?? state.selection.from);
         return {
           ...state,
           items: state.items.filter((it) => !(it.kind === "tool" && it.id === ev.toolCallId)),
+          selection: from === null || to === null || anchor === null ? null : { from, to, anchor },
         };
       }
       return withRunningTool(
@@ -828,7 +836,8 @@ function anchorEq(a: SelectionAnchor, b: SelectionAnchor): boolean {
  * prior selection (a new press starts a new selection).
  */
 export function selectStart(s: TuiState, a: SelectionAnchor): TuiState {
-  return { ...s, selection: { from: a, to: a } };
+  const selection = { from: a, to: a, anchor: a };
+  return { ...s, selection };
 }
 
 /**
@@ -840,14 +849,15 @@ export function selectStart(s: TuiState, a: SelectionAnchor): TuiState {
  */
 export function selectUpdate(s: TuiState, a: SelectionAnchor): TuiState | null {
   if (s.selection === null) return null;
-  const from = anchorBefore(a, s.selection.from) ? a : s.selection.from;
-  const to = from === s.selection.from ? a : s.selection.from;
+  const anchor = s.selection.anchor ?? s.selection.from;
+  const from = anchorBefore(a, anchor) ? a : anchor;
+  const to = from === anchor ? a : anchor;
   // Structural no-op check: a drag that re-reports the SAME cell (a fresh
   // anchor object) must not re-render (coalescing — the plan's "event volume
   // during drags" risk). Reference equality would miss it.
-  return anchorEq(from, s.selection.from) && anchorEq(to, s.selection.to)
+  return anchorEq(from, s.selection.from) && anchorEq(to, s.selection.to) && anchorEq(s.selection.anchor ?? s.selection.from, anchor)
     ? s
-    : { ...s, selection: { from, to } };
+    : { ...s, selection: { from, to, anchor } };
 }
 
 /** Esc (or an explicit clear): drop the selection. */
@@ -871,14 +881,16 @@ export function selectedRanges(
 ): { itemIndex: number; line: number; from: number; to: number }[] {
   const sel = s.selection;
   if (sel === null) return [];
-  const { from, to } = sel;
+  if (anchorEq(sel.from, sel.to)) return [];
+  const { from: rawFrom, to: rawTo } = sel;
+  const ordered = anchorBefore(rawFrom, rawTo) ? [rawFrom, rawTo] as const : [rawTo, rawFrom] as const;
+  const [from, to] = ordered;
   const out: { itemIndex: number; line: number; from: number; to: number }[] = [];
   const push = (itemIndex: number, line: number, fromCol: number, toCol: number): void => {
-    if (toCol <= fromCol) return;
     const w = dispWidth(linesOf(itemIndex)[line] ?? "");
     const a = Math.max(0, Math.min(fromCol, w));
     const b = Math.max(0, Math.min(toCol, w));
-    if (b > a) out.push({ itemIndex, line, from: a, to: b });
+    out.push({ itemIndex, line, from: a, to: b });
   };
   if (from.itemIndex === to.itemIndex) {
     if (from.line === to.line) {
@@ -939,22 +951,24 @@ export function selectedText(
   const ranges = selectedRanges(s, linesOf);
   if (ranges.length === 0) return "";
   const parts: string[] = [];
+  let previous: { itemIndex: number; line: number } | null = null;
   for (const r of ranges) {
     const line = linesOf(r.itemIndex)[r.line] ?? "";
     let out = "";
     let col = 0;
-    for (const ch of line) {
-      const w = charWidth(ch.codePointAt(0)!);
+    for (const grapheme of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(line)) {
+      const w = stringWidth(grapheme.segment);
       const start = col;
       const end = col + w;
-      // The cell intersects [from, to): include it whole (a wide char
-      // straddling an edge is included whole — a half-wide-char is not a
-      // renderable unit).
-      if (end > r.from && start < r.to) out += ch;
+      if (end > r.from && start < r.to) out += grapheme.segment;
       col = end;
       if (col >= r.to) break;
     }
+    if (previous !== null && r.itemIndex === previous.itemIndex && r.line > previous.line + 1) {
+      for (let n = previous.line + 1; n < r.line; n++) parts.push("");
+    }
     parts.push(out);
+    previous = { itemIndex: r.itemIndex, line: r.line };
   }
   return parts.join("\n");
 }
@@ -1263,30 +1277,14 @@ export function fitItemsScrollable(
  * share this exact width rule.
  */
 export function charWidth(cp: number): number {
-  if (
-    (cp >= 0x1100 && cp <= 0x115f) ||
-    (cp >= 0x2e80 && cp <= 0x303e) ||
-    (cp >= 0x3041 && cp <= 0x33ff) ||
-    (cp >= 0x3400 && cp <= 0x4dbf) ||
-    (cp >= 0x4e00 && cp <= 0x9fff) ||
-    (cp >= 0xa000 && cp <= 0xa4cf) ||
-    (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) ||
-    (cp >= 0x20000 && cp <= 0x3fffd)
-  ) {
-    return 2;
-  }
-  if ((cp >= 0x300 && cp <= 0x36f) || (cp >= 0x1ab0 && cp <= 0x1aff)) return 0;
-  return 1;
+  return stringWidth(String.fromCodePoint(cp));
 }
 
 /** Total display width of a string (sum of per-code-point widths). Exported
  * (mouse selection): the viewport→anchor mapping in app.tsx clamps a
  * terminal column against the line's display width with this exact rule. */
 export function dispWidth(s: string): number {
-  let w = 0;
-  for (const ch of s) w += charWidth(ch.codePointAt(0)!);
-  return w;
+  return stringWidth(s);
 }
 
 /**

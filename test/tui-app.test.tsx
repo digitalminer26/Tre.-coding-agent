@@ -37,6 +37,7 @@ interface Cbs {
   onModelPickerClose?: () => void;
   onSelectStart?: (anchor: SelectionAnchor) => void;
   onSelectUpdate?: (anchor: SelectionAnchor) => void;
+  onSelectEnd?: () => void;
   onSelectClear?: () => void;
 }
 
@@ -60,6 +61,7 @@ const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
       onModelPickerClose: () => cbs?.onModelPickerClose?.(),
       onSelectStart: (anchor: SelectionAnchor) => cbs?.onSelectStart?.(anchor),
       onSelectUpdate: (anchor: SelectionAnchor) => cbs?.onSelectUpdate?.(anchor),
+      onSelectEnd: () => cbs?.onSelectEnd?.(),
       onSelectClear: () => cbs?.onSelectClear?.(),
     }),
   );
@@ -532,16 +534,18 @@ const MOUSE_ITEMS: TuiItem[] = [
 interface MouseCbs {
   starts: SelectionAnchor[];
   updates: SelectionAnchor[];
+  ends: number;
   clears: number;
   chars: string[];
 }
-const newMouseCbs = (): MouseCbs => ({ starts: [], updates: [], clears: 0, chars: [] });
+const newMouseCbs = (): MouseCbs => ({ starts: [], updates: [], ends: 0, clears: 0, chars: [] });
 
 const makeMouseApp = (state: ReturnType<typeof makeInitialState>, cbs: MouseCbs) =>
   makeApp(state, {
     onChar: (ch: string) => cbs.chars.push(ch),
     onSelectStart: (a: SelectionAnchor) => cbs.starts.push(a),
     onSelectUpdate: (a: SelectionAnchor) => cbs.updates.push(a),
+    onSelectEnd: () => cbs.ends++,
     onSelectClear: () => cbs.clears++,
   });
 
@@ -629,6 +633,7 @@ test("mouse: a RELEASE (suffix m) is swallowed (the selection stays for /copy)",
     await tick();
     assert.deepEqual(cbs.starts, []);
     assert.deepEqual(cbs.updates, []);
+    assert.equal(cbs.ends, 1);
     assert.equal(cbs.clears, 0);
     assert.deepEqual(cbs.chars, []);
     app.unmount();
@@ -648,8 +653,10 @@ test("mouse: a press on the HEADER (row 1) or BELOW the item area (row 18) is ig
     await tick();
     app.stdin.write("\x1b[<0;5;18M"); // below the item area (hint/separator)
     await tick();
+    app.stdin.write("\x1b[<32;5;18M"); // held motion clamps to the nearest content edge
+    await tick();
     assert.deepEqual(cbs.starts, []);
-    assert.deepEqual(cbs.updates, []);
+    assert.equal(cbs.updates.length, 1);
     assert.deepEqual(cbs.chars, []);
     app.unmount();
   } finally {

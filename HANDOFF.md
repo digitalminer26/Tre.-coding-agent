@@ -1,5 +1,7 @@
 # Current project status (2026-10-09)
 
+**Mouse selection/copy correctness fixes in progress (2026-10-09).** Fixed the app highlight split, stable drag anchor, grapheme display widths and combining clusters, blank-line extraction, /copy input clearing, selection rebasing when quiet tools disappear, drag clamping/release, and selection clearing on resize. Build and test suite pass (795 tests: 782 passed, 13 skipped); PTY frame capture verified pinned input/bottom rows. Manual Terminal.app gestures and system clipboard integration remain unverified.
+
 **TUI input responsiveness: stream paints coalesced, interactive paints immediate.**
 `src/tui/run.tsx` coalesces only high-frequency text/thinking/tool-argument
 stream deltas. Lifecycle, tool, compaction, completion, and in-band error

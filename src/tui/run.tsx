@@ -362,6 +362,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
     },
   });
+  let selectionDragging = false;
+  const onResize = (): void => {
+    if (state.selection !== null) setStateNow(selectClear(state));
+  };
   const stateUpdates = makeStateUpdateRouter<TuiState>({
     getState: () => state,
     setState: (s) => { state = s; },
@@ -370,7 +374,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   });
   const setState = stateUpdates.stream;
   const setStateNow = stateUpdates.interactive;
+  process.stdout.on("resize", onResize);
   const quit = (code: number): void => {
+    process.stdout.off("resize", onResize);
     exitCode = code;
     mounted = false;
     coalescer.cancel(); // a pending deferred paint must not fire post-unmount
@@ -535,20 +541,19 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   const copySelection = (): void => {
     const width = process.stdout.columns > 0 ? process.stdout.columns : 80;
     const text = copySelectionText(state, width);
+    const slashState = state.busy ? submitSlashBusy(state)?.state : submitInput(state)?.state;
+    const cleared = { ...(slashState ?? state), busy: state.busy, input: "", cursorPos: 0, historyIdx: null, history: [...state.history, "/copy"] };
     if (text === "") {
-      setStateNow({
-        ...state,
-        items: [...state.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }],
-      });
+      setStateNow({ ...cleared, items: [...cleared.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }] });
       return;
     }
     const bytes = Buffer.byteLength(text, "utf8");
     void copyToClipboard(text, opts.deps?.clipboardAdapter).then((res) => {
       if (!mounted) return; // a copy that settles after quit must not re-render
       setStateNow({
-        ...state,
+        ...cleared,
         items: [
-          ...state.items,
+          ...cleared.items,
           {
             kind: "info",
             text: res.ok
@@ -780,12 +785,16 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     // just fold the anchor into the selection. The clipboard is the driver's
     // job — /copy (below) reads the selection and writes it through the
     // injected adapter (clipboard.ts).
-    onSelectStart: (anchor: SelectionAnchor): void =>
-      setStateNow(selectStart(state, anchor)),
+    onSelectStart: (anchor: SelectionAnchor): void => {
+      selectionDragging = true;
+      setStateNow(selectStart(state, anchor));
+    },
     onSelectUpdate: (anchor: SelectionAnchor): void => {
+      if (!selectionDragging) return;
       const next = selectUpdate(state, anchor);
       if (next !== null) setStateNow(next);
     },
+    onSelectEnd: (): void => { selectionDragging = false; },
     onSelectClear: (): void => setStateNow(selectClear(state)),
   };
 

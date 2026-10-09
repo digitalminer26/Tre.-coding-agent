@@ -167,6 +167,19 @@ test("tool: start shows args; end matches by id (order-independent) with isError
   assert.equal(t1.resultText, "oops boom");
 });
 
+test("tool removal remaps surviving selection anchors and clears removed-item anchors", () => {
+  let s: TuiState = { ...makeInitialState("m"), items: [
+    { kind: "user" as const, text: "before" },
+    { kind: "tool" as const, id: "read-id", name: "read", argsText: "{}", running: true, hidden: true },
+    { kind: "user" as const, text: "after" },
+  ] };
+  s = { ...s, selection: { from: { itemIndex: 2, line: 0, col: 0 }, to: { itemIndex: 2, line: 0, col: 2 }, anchor: { itemIndex: 2, line: 0, col: 0 } } };
+  s = applyEvent(s, toolEnd("read-id", "", false, "read"));
+  assert.equal(s.selection?.from.itemIndex, 1);
+  const onRemoved: TuiState = { ...s, items: [s.items[0]!, { kind: "tool", id: "read-id", name: "read", argsText: "{}", running: true, hidden: true }, s.items[1]!], selection: { from: { itemIndex: 1, line: 0, col: 0 }, to: { itemIndex: 1, line: 0, col: 1 }, anchor: { itemIndex: 1, line: 0, col: 0 } } };
+  assert.equal(applyEvent(onRemoved, toolEnd("read-id", "", false, "read")).selection, null);
+});
+
 test("tool: D19 quiet file tools — hidden mid-flight, dropped on success, unhidden on denial", () => {
   // Mid-flight: the placeholder exists but is hidden (height-0)
   const mid = fold([toolStart("r1", "read", { path: "a.txt" })]);
