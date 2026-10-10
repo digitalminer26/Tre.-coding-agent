@@ -1,5 +1,17 @@
 # Current project status (2026-10-09)
 
+**Durable mouse-selection coverage (implement-audit, part 5 of 5 — 2026-10-09).**
+The driver's mouse-selection GATE is extracted from `src/tui/run.tsx` into
+`src/tui/mouse-gate.ts` (`makeMouseGate` factory, seams: getState/setStateNow,
+returning the four onSelect* handlers; the dragging flag lives in the factory
+closure) — run.tsx spreads `...mouseGate` into the App props, behavior
+byte-identical. `test/tui-mouse-gate.test.ts` pins the sequence: press
+(selectStart applied, gate opens) → drag (selectUpdate applied) → release
+(gate closes, the selection STAYS — /copy can still read it) → subsequent
+motion (NO state change: the handler does not call setStateNow, same
+reference); a motion BEFORE any press is ignored (no selection, no write); a
+second press re-opens the gate; selectClear drops the selection independently.
+
 **Durable mouse-selection coverage (implement-audit, part 4 of 5 — 2026-10-09).**
 The driver's terminal-resize handler is extracted from `src/tui/run.tsx` into
 `src/tui/resize.ts` (`makeResizeHandler` factory, seams: stream/getState/

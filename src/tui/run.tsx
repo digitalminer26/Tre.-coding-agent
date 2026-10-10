@@ -52,20 +52,17 @@ import {
   scrollBy,
   scrollToBottom,
   scrollToTop,
-  selectClear,
-  selectStart,
-  selectUpdate,
   setApproval,
   startupInfoItem,
   steerInput,
   submitInput,
   submitSlashBusy,
-  type SelectionAnchor,
   type TuiState,
 } from "./state.js";
 import { type ClipboardAdapter } from "./clipboard.js";
 import { makeCopySelection } from "./copy.js";
 import { makeResizeHandler } from "./resize.js";
+import { makeMouseGate } from "./mouse-gate.js";
 import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
@@ -364,7 +361,6 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       if (mounted) app.rerender(React.createElement(App, { state, mouseEnabled, ...handlers }));
     },
   });
-  let selectionDragging = false;
   const stateUpdates = makeStateUpdateRouter<TuiState>({
     getState: () => state,
     setState: (s) => { state = s; },
@@ -379,6 +375,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     setStateNow,
   });
   resizeHandler.attach();
+  const mouseGate = makeMouseGate({ getState: () => state, setStateNow });
   const quit = (code: number): void => {
     resizeHandler.detach();
     exitCode = code;
@@ -770,22 +767,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     onScrollToTop: (): void => setStateNow(scrollToTop(state)),
     onScrollToBottom: (): void => setStateNow(scrollToBottom(state)),
     // Mouse selection (opt-in — mouse tracking enabled): pure state
-    // transitions (see state.ts). The App maps the terminal cell to a content
-    // anchor; these
-    // just fold the anchor into the selection. The clipboard is the driver's
-    // job — /copy (below) reads the selection and writes it through the
-    // injected adapter (clipboard.ts).
-    onSelectStart: (anchor: SelectionAnchor): void => {
-      selectionDragging = true;
-      setStateNow(selectStart(state, anchor));
-    },
-    onSelectUpdate: (anchor: SelectionAnchor): void => {
-      if (!selectionDragging) return;
-      const next = selectUpdate(state, anchor);
-      if (next !== null) setStateNow(next);
-    },
-    onSelectEnd: (): void => { selectionDragging = false; },
-    onSelectClear: (): void => setStateNow(selectClear(state)),
+    // transitions (see state.ts) gated by the drag flag (mouse-gate.ts) —
+    // a motion is ignored unless a press is in flight. The App maps the
+    // terminal cell to a content anchor; the clipboard is the driver's job
+    // — /copy reads the selection and writes it through the injected
+    // adapter (clipboard.ts).
+    ...mouseGate,
   };
 
   // C27: terminal mouse-wheel forwarding so wheel/trackpad events reach the
