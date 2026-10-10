@@ -41,10 +41,15 @@ interface Cbs {
   onSelectClear?: () => void;
 }
 
-const makeApp = (state: ReturnType<typeof makeInitialState>, cbs?: Cbs) =>
+const makeApp = (
+  state: ReturnType<typeof makeInitialState>,
+  cbs?: Cbs,
+  mouse = false,
+) =>
   render(
     React.createElement(App, {
       state,
+      mouseEnabled: mouse,
       onChar: (ch: string) => cbs?.onChar?.(ch),
       onBackspace: () => cbs?.onBackspace?.(),
       onScrollBy: (delta: number, maxScroll: number) => cbs?.onScrollBy?.(delta, maxScroll),
@@ -403,43 +408,37 @@ test("C28: pinned frame shows older items, clipped straddlers, and the scroll st
   app.unmount();
 });
 
-test("hint: the wheel is named only when mouse tracking is enabled (TRE_MOUSE)", () => {
-  // The driver enables mouse tracking only when TRE_MOUSE is set (run.tsx);
-  // the hint must not promise a wheel that the terminal never forwards.
-  // Selection is the default — no mouse mode — so the default hint omits it.
+test("hint: the wheel is named only when mouse tracking is enabled (mouseEnabled)", () => {
+  // The driver enables mouse tracking only when mouseTrackingEnabled is
+  // true (run.tsx — env vars over the persisted `mouse` config) and passes
+  // that same value to the App; the hint must not promise a wheel that the
+  // terminal never forwards. Mouse tracking is OFF by default, so the
+  // default hint omits it.
   // 10 items of 200 chars = 39 content lines > the 16-row item budget
   // (same geometry as the C28 test: maxScroll 23).
   const items: TuiItem[] = Array.from({ length: 10 }, (_, i) => ({
     kind: "user",
     text: `item-${i} ` + "x".repeat(192),
   }));
-  const prev = process.env.TRE_MOUSE;
-  try {
-    delete process.env.TRE_MOUSE;
-    const idle = makeApp(makeInitialState("m"));
-    const idleFrame = idle.lastFrame() ?? "";
-    assert.match(idleFrame, /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D scroll ·/);
-    assert.doesNotMatch(idleFrame, /wheel/);
-    idle.unmount();
+  const idle = makeApp(makeInitialState("m"));
+  const idleFrame = idle.lastFrame() ?? "";
+  assert.match(idleFrame, /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D scroll ·/);
+  assert.doesNotMatch(idleFrame, /wheel/);
+  idle.unmount();
 
-    const scrolled = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });
-    const scrolledFrame = scrolled.lastFrame() ?? "";
-    assert.match(scrolledFrame, /scrolled — PgDn ↓ to bottom/);
-    assert.doesNotMatch(scrolledFrame, /wheel/);
-    scrolled.unmount();
+  const scrolled = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });
+  const scrolledFrame = scrolled.lastFrame() ?? "";
+  assert.match(scrolledFrame, /scrolled — PgDn ↓ to bottom/);
+  assert.doesNotMatch(scrolledFrame, /wheel/);
+  scrolled.unmount();
 
-    process.env.TRE_MOUSE = "1";
-    const idle2 = makeApp(makeInitialState("m"));
-    assert.match(idle2.lastFrame() ?? "", /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D\/wheel scroll ·/);
-    idle2.unmount();
+  const idle2 = makeApp(makeInitialState("m"), undefined, true);
+  assert.match(idle2.lastFrame() ?? "", /enter send · PgUp\/PgDn\/Ctrl\+U\/Ctrl\+D\/wheel scroll ·/);
+  idle2.unmount();
 
-    const scrolled2 = makeApp({ ...makeInitialState("m"), items, viewTop: 1 });
-    assert.match(scrolled2.lastFrame() ?? "", /scrolled — PgDn\/wheel ↓ to bottom/);
-    scrolled2.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const scrolled2 = makeApp({ ...makeInitialState("m"), items, viewTop: 1 }, undefined, true);
+  assert.match(scrolled2.lastFrame() ?? "", /scrolled — PgDn\/wheel ↓ to bottom/);
+  scrolled2.unmount();
 });
 
 // ─────────────────────── C38: the interactive model picker ─────────────────
@@ -540,209 +539,150 @@ interface MouseCbs {
 }
 const newMouseCbs = (): MouseCbs => ({ starts: [], updates: [], ends: 0, clears: 0, chars: [] });
 
-const makeMouseApp = (state: ReturnType<typeof makeInitialState>, cbs: MouseCbs) =>
-  makeApp(state, {
-    onChar: (ch: string) => cbs.chars.push(ch),
-    onSelectStart: (a: SelectionAnchor) => cbs.starts.push(a),
-    onSelectUpdate: (a: SelectionAnchor) => cbs.updates.push(a),
-    onSelectEnd: () => cbs.ends++,
-    onSelectClear: () => cbs.clears++,
-  });
+// `mouse` defaults to true — these tests pin the ROUTING that exists only
+// when the driver's mouse decision is on (the App gets it as the
+// mouseEnabled prop; run.tsx computes it via mouseTrackingEnabled).
+const makeMouseApp = (
+  state: ReturnType<typeof makeInitialState>,
+  cbs: MouseCbs,
+  mouse = true,
+) =>
+  makeApp(
+    state,
+    {
+      onChar: (ch: string) => cbs.chars.push(ch),
+      onSelectStart: (a: SelectionAnchor) => cbs.starts.push(a),
+      onSelectUpdate: (a: SelectionAnchor) => cbs.updates.push(a),
+      onSelectEnd: () => cbs.ends++,
+      onSelectClear: () => cbs.clears++,
+    },
+    mouse,
+  );
 
 test("mouse: a left PRESS in the item viewport → onSelectStart with the mapped anchor", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<0;5;2M"); // left press, row 2 (item0 "alpha"), col 5
-    await tick();
-    assert.deepEqual(cbs.starts, [{ itemIndex: 0, line: 0, col: 4 }]);
-    assert.deepEqual(cbs.updates, []);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<0;5;2M"); // left press, row 2 (item0 "alpha"), col 5
+  await tick();
+  assert.deepEqual(cbs.starts, [{ itemIndex: 0, line: 0, col: 4 }]);
+  assert.deepEqual(cbs.updates, []);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });
 
 test("mouse: a button-held MOTION (b=32) → onSelectUpdate with the mapped anchor", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<32;5;4M"); // motion, row 4 (item1 "beta"), col 5
-    await tick();
-    assert.deepEqual(cbs.updates, [{ itemIndex: 1, line: 1, col: 4 }]);
-    assert.deepEqual(cbs.starts, []);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<32;5;4M"); // motion, row 4 (item1 "beta"), col 5
+  await tick();
+  assert.deepEqual(cbs.updates, [{ itemIndex: 1, line: 1, col: 4 }]);
+  assert.deepEqual(cbs.starts, []);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });
 
 test("mouse: a press in the PAD (below the last slice) → the last line's end", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<0;5;17M"); // press in the pad, row 17
-    await tick();
-    // pad → the last rendered line of the last visible slice (item2 line1
-    // "gamma"), to its end (col = its display width).
-    assert.equal(cbs.starts.length, 1);
-    assert.equal(cbs.starts[0]?.itemIndex, 2);
-    assert.equal(cbs.starts[0]?.line, 1);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<0;5;17M"); // press in the pad, row 17
+  await tick();
+  // pad → the last rendered line of the last visible slice (item2 line1
+  // "gamma"), to its end (col = its display width).
+  assert.equal(cbs.starts.length, 1);
+  assert.equal(cbs.starts[0]?.itemIndex, 2);
+  assert.equal(cbs.starts[0]?.line, 1);
+  app.unmount();
 });
 
 test("mouse: a RIGHT press is swallowed (no selection, no typing)", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<2;5;2M"); // right press, row 2
-    await tick();
-    assert.deepEqual(cbs.starts, []);
-    assert.deepEqual(cbs.updates, []);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<2;5;2M"); // right press, row 2
+  await tick();
+  assert.deepEqual(cbs.starts, []);
+  assert.deepEqual(cbs.updates, []);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });
 
 test("mouse: a RELEASE (suffix m) is swallowed (the selection stays for /copy)", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<0;5;2m"); // left release, row 2
-    await tick();
-    assert.deepEqual(cbs.starts, []);
-    assert.deepEqual(cbs.updates, []);
-    assert.equal(cbs.ends, 1);
-    assert.equal(cbs.clears, 0);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<0;5;2m"); // left release, row 2
+  await tick();
+  assert.deepEqual(cbs.starts, []);
+  assert.deepEqual(cbs.updates, []);
+  assert.equal(cbs.ends, 1);
+  assert.equal(cbs.clears, 0);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });
 
 test("mouse: a press on the HEADER (row 1) or BELOW the item area (row 18) is ignored", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<0;5;1M"); // header row
-    await tick();
-    app.stdin.write("\x1b[<0;5;18M"); // below the item area (hint/separator)
-    await tick();
-    app.stdin.write("\x1b[<32;5;18M"); // held motion clamps to the nearest content edge
-    await tick();
-    assert.deepEqual(cbs.starts, []);
-    assert.equal(cbs.updates.length, 1);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b[<0;5;1M"); // header row
+  await tick();
+  app.stdin.write("\x1b[<0;5;18M"); // below the item area (hint/separator)
+  await tick();
+  app.stdin.write("\x1b[<32;5;18M"); // held motion clamps to the nearest content edge
+  await tick();
+  assert.deepEqual(cbs.starts, []);
+  assert.equal(cbs.updates.length, 1);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });
 
-test("mouse: WITHOUT TRE_MOUSE a press is swallowed (never typed, no callback)", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    delete process.env.TRE_MOUSE;
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b[<0;5;2M"); // left press, row 2
-    await tick();
-    assert.deepEqual(cbs.starts, []);
-    assert.deepEqual(cbs.updates, []);
-    assert.deepEqual(cbs.chars, [], "the SGR sequence must not land in the input");
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+test("mouse: WITHOUT mouse tracking a press is swallowed (never typed, no callback)", async () => {
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs, false);
+  app.stdin.write("\x1b[<0;5;2M"); // left press, row 2
+  await tick();
+  assert.deepEqual(cbs.starts, []);
+  assert.deepEqual(cbs.updates, []);
+  assert.deepEqual(cbs.chars, [], "the SGR sequence must not land in the input");
+  app.unmount();
 });
 
 test("mouse selection highlight preserves all text and highlights exactly the copied graphemes", async () => {
-  const prev = process.env.TRE_MOUSE;
+  const previousColor = process.env.FORCE_COLOR;
+  process.env.FORCE_COLOR = "3";
   try {
-    process.env.TRE_MOUSE = "1";
-    const previousColor = process.env.FORCE_COLOR;
-    process.env.FORCE_COLOR = "3";
+    const state = { ...makeInitialState("m"), items: [{ kind: "user" as const, text: "A👩‍💻B" }], selection: { from: { itemIndex: 0, line: 0, col: 3 }, to: { itemIndex: 0, line: 0, col: 4 } } };
+    const app = makeApp(state, undefined, true);
     try {
-      const state = { ...makeInitialState("m"), items: [{ kind: "user" as const, text: "A👩‍💻B" }], selection: { from: { itemIndex: 0, line: 0, col: 3 }, to: { itemIndex: 0, line: 0, col: 4 } } };
-      const app = makeApp(state);
-      try {
-        const frame = app.lastFrame()!;
-        assert.match(frame, /A👩‍💻B/);
-        assert.ok(frame.includes("👩‍💻"), JSON.stringify(frame));
-      } finally { app.unmount(); }
-    } finally {
-      if (previousColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = previousColor;
-    }
+      const frame = app.lastFrame()!;
+      assert.match(frame, /A👩‍💻B/);
+      assert.ok(frame.includes("👩‍💻"), JSON.stringify(frame));
+    } finally { app.unmount(); }
   } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
+    if (previousColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = previousColor;
   }
 });
 
 test("mouse: Esc clears an ACTIVE selection (onSelectClear)", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const state = {
-      ...makeInitialState("m"),
-      items: MOUSE_ITEMS,
-      selection: {
-        from: { itemIndex: 0, line: 0, col: 0 },
-        to: { itemIndex: 0, line: 0, col: 3 },
-      },
-    };
-    const app = makeMouseApp(state, cbs);
-    app.stdin.write("\x1b"); // esc
-    await settle();
-    assert.equal(cbs.clears, 1);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const state = {
+    ...makeInitialState("m"),
+    items: MOUSE_ITEMS,
+    selection: {
+      from: { itemIndex: 0, line: 0, col: 0 },
+      to: { itemIndex: 0, line: 0, col: 3 },
+    },
+  };
+  const app = makeMouseApp(state, cbs);
+  app.stdin.write("\x1b"); // esc
+  await settle();
+  assert.equal(cbs.clears, 1);
+  app.unmount();
 });
 
 test("mouse: Esc with NO selection keeps its current behavior (no clear)", async () => {
-  const prev = process.env.TRE_MOUSE;
-  try {
-    process.env.TRE_MOUSE = "1";
-    const cbs = newMouseCbs();
-    const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
-    app.stdin.write("\x1b"); // esc
-    await settle();
-    assert.equal(cbs.clears, 0);
-    assert.deepEqual(cbs.chars, []);
-    app.unmount();
-  } finally {
-    if (prev === undefined) delete process.env.TRE_MOUSE;
-    else process.env.TRE_MOUSE = prev;
-  }
+  const cbs = newMouseCbs();
+  const app = makeMouseApp({ ...makeInitialState("m"), items: MOUSE_ITEMS }, cbs);
+  app.stdin.write("\x1b"); // esc
+  await settle();
+  assert.equal(cbs.clears, 0);
+  assert.deepEqual(cbs.chars, []);
+  app.unmount();
 });

@@ -14,7 +14,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isSgrMouse, parseSgrMouse } from "../src/tui/mouse.js";
+import { isSgrMouse, mouseTrackingEnabled, parseSgrMouse } from "../src/tui/mouse.js";
 
 // ── press / release / motion ────────────────────────────────────────────────
 
@@ -159,4 +159,25 @@ test("isSgrMouse: false for non-mouse input", () => {
   assert.equal(isSgrMouse("[A"), false);
   assert.equal(isSgrMouse("[<0;10M"), false);
   assert.equal(isSgrMouse("[<0;10;5"), false);
+});
+
+// ── the effective decision (env over the persisted config) ─────────────────
+
+test("mouseTrackingEnabled: the default is OFF (selection-friendly)", () => {
+  assert.equal(mouseTrackingEnabled({}, false), false);
+  assert.equal(mouseTrackingEnabled({}, undefined), false);
+});
+
+test("mouseTrackingEnabled: the persisted config enables it when the env is silent", () => {
+  assert.equal(mouseTrackingEnabled({}, true), true);
+  assert.equal(mouseTrackingEnabled({ TRE_MOUSE: "" }, true), true); // empty = unset
+});
+
+test("mouseTrackingEnabled: TRE_MOUSE=1 wins over a config that says off", () => {
+  assert.equal(mouseTrackingEnabled({ TRE_MOUSE: "1" }, false), true);
+});
+
+test("mouseTrackingEnabled: TRE_NO_MOUSE=1 wins over everything (legacy opt-out)", () => {
+  assert.equal(mouseTrackingEnabled({ TRE_NO_MOUSE: "1" }, true), false);
+  assert.equal(mouseTrackingEnabled({ TRE_NO_MOUSE: "1", TRE_MOUSE: "1" }, true), false);
 });

@@ -42,7 +42,7 @@ const prevOf = (items: TuiItem[], it: TuiItem): TuiItem | undefined => {
   return i > 0 ? items[i - 1] : undefined;
 };
 
-// ── Mouse-selection highlight (TRE_MOUSE=1) ────────────────────────────────
+// ── Mouse-selection highlight (mouse tracking enabled) ─────────────────────
 // A selected range is painted as a background on the SELECTED CELLS only —
 // the cells the user can see highlighted are exactly the cells /copy copies
 // (same display-column math, charWidth/dispWidth — the shared width rule).
@@ -138,10 +138,21 @@ export interface AppProps {
   onSelectEnd?: () => void;
   /** Mouse selection: Esc — clear the selection. */
   onSelectClear: () => void;
+  /** The driver's EFFECTIVE mouse-tracking decision (mouse.ts:
+   * `mouseTrackingEnabled` — env vars over the persisted `mouse` config).
+   * The App routes SGR events and names the wheel in the hint only when
+   * this is true — exactly when the driver enabled the terminal modes.
+   * Defaults to false (selection-friendly) so a bare render never routes
+   * mouse events the terminal was never told to send. */
+  mouseEnabled?: boolean;
 }
 
 export function App(props: AppProps): React.ReactElement {
   const { state } = props;
+  // The driver's effective mouse decision (env over the persisted config) —
+  // the SAME value run.tsx used to enable the terminal modes, so routing,
+  // the hint, and the modes can never disagree.
+  const mouseEnabled = props.mouseEnabled === true;
 
   // Pinned input layout (D14): the frame is exactly `rows` lines tall by
   // construction, so Ink runs in "fullscreen" mode and the bottom stays
@@ -177,10 +188,11 @@ export function App(props: AppProps): React.ReactElement {
   const page = Math.max(1, rows - FIXED_NON_ITEM_LINES - extra);
   const halfPage = Math.max(1, Math.floor(page / 2));
   // The wheel only scrolls when the driver enabled mouse tracking
-  // (TRE_MOUSE=1, run.tsx) — the hint names it only then.
-  const wheel = process.env.TRE_MOUSE ? "/wheel" : "";
-  // Mouse selection (opt-in, TRE_MOUSE=1): the item viewport is the frame's
-  // rows 2..(1+budget) (the header is row 1); the fit guarantees the item
+  // (mouseTrackingEnabled, run.tsx) — the hint names it only then.
+  const wheel = mouseEnabled ? "/wheel" : "";
+  // Mouse selection (opt-in — mouse tracking enabled): the item viewport is
+  // the frame's rows 2..(1+budget) (the header is row 1); the fit guarantees
+  // the item
   // area is exactly `budget` rows tall (visible lines + pad). A terminal
   // (row, col) maps to a CONTENT anchor through the visible slices — rows
   // outside the item area (header, hint, menu, picker, separators, input,
@@ -325,8 +337,9 @@ export function App(props: AppProps): React.ReactElement {
       props.onBackspace();
       return;
     }
-    // Mouse selection (opt-in, TRE_MOUSE=1): the driver enables SGR mouse
-    // reporting (1002 + 1006) only then, so these events arrive only in
+    // Mouse selection (mouse tracking enabled by the driver — env or the
+    // persisted `mouse` config): the driver enables SGR mouse reporting
+    // (1002 + 1006) only then, so these events arrive only in
     // mouse mode. A left-button PRESS in the item viewport starts a
     // selection (anchorAt maps the terminal cell to content coordinates);
     // a button-held MOTION (SGR b=32) updates the endpoint; a RELEASE
@@ -335,7 +348,7 @@ export function App(props: AppProps): React.ReactElement {
     // item viewport (header, hint, menu, separators, input, bottom display)
     // map to null and are ignored — they never type, never activate
     // controls, and never start a selection.
-    if (process.env.TRE_MOUSE) {
+    if (mouseEnabled) {
       const ev = parseSgrMouse(input);
       if (ev !== null) {
         if (ev.button === "left" && ev.pressed && !ev.motion) {
@@ -396,9 +409,9 @@ export function App(props: AppProps): React.ReactElement {
       return;
     }
     // Any other SGR mouse event (clicks, drags, releases — e.g. when the
-    // terminal reports mouse events without TRE_MOUSE=1, or a release that
-    // needs no callback): swallow it — it would otherwise land in the input
-    // line as garbage text.
+    // terminal reports mouse events while the driver's mouse decision is
+    // off, or a release that needs no callback): swallow it — it would
+    // otherwise land in the input line as garbage text.
     if (isSgrMouse(input)) {
       return;
     }
@@ -451,7 +464,8 @@ export function App(props: AppProps): React.ReactElement {
       {/* C27: the hint line doubles as the scroll status — while the view
           is frozen above the bottom, say where it is and how to get back.
           The wheel only works when the driver enabled mouse tracking
-          (TRE_MOUSE=1, run.tsx) — don't promise it in the hint otherwise. */}
+          (mouseTrackingEnabled, run.tsx) — don't promise it in the hint
+          otherwise. */}
       <Text dimColor>
         {oneLine(
           state.approval !== null

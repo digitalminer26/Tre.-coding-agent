@@ -28,25 +28,25 @@ test("tuiConfigPath: ~/.tre/tui.json under the given home", () => {
   assert.equal(tuiConfigPath("/home/u"), "/home/u/.tre/tui.json");
 });
 
-test("defaultTuiConfig: empty bottom selection", () => {
-  assert.deepEqual(defaultTuiConfig(), { bottom: [] });
+test("defaultTuiConfig: empty bottom selection, mouse off", () => {
+  assert.deepEqual(defaultTuiConfig(), { bottom: [], mouse: false });
 });
 
 test("loadTuiConfig: a missing file yields the default (I3, no throw)", () => {
-  assert.deepEqual(loadTuiConfig(join(dir, "nope.json")), { bottom: [] });
+  assert.deepEqual(loadTuiConfig(join(dir, "nope.json")), { bottom: [], mouse: false });
 });
 
 test("loadTuiConfig: corrupt JSON yields the default (I3, no throw)", () => {
   const f = join(dir, "corrupt.json");
   writeFileSync(f, "{ not json\n");
-  assert.deepEqual(loadTuiConfig(f), { bottom: [] });
+  assert.deepEqual(loadTuiConfig(f), { bottom: [], mouse: false });
 });
 
 test("loadTuiConfig: a non-object top level yields the default", () => {
   for (const raw of ['"bottom"', "42", "[\"model\"]", "null"]) {
     const f = join(dir, "bad.json");
     writeFileSync(f, raw);
-    assert.deepEqual(loadTuiConfig(f), { bottom: [] }, `raw: ${raw}`);
+    assert.deepEqual(loadTuiConfig(f), { bottom: [], mouse: false }, `raw: ${raw}`);
   }
 });
 
@@ -62,20 +62,34 @@ test("loadTuiConfig: bottom is normalized — unknown dropped, deduped, order ke
 test("loadTuiConfig: a non-array bottom yields the default selection", () => {
   const f = join(dir, "noarr.json");
   writeFileSync(f, JSON.stringify({ bottom: "model" }));
-  assert.deepEqual(loadTuiConfig(f), { bottom: [] });
+  assert.deepEqual(loadTuiConfig(f), { bottom: [], mouse: false });
+});
+
+test("loadTuiConfig: mouse is a STRICT boolean — only true enables it", () => {
+  for (const [raw, want] of [
+    ['{"mouse": true}', true],
+    ['{"mouse": false}', false],
+    ['{"mouse": "true"}', false], // a string is not a decision
+    ['{"mouse": 1}', false], // a number is not a decision
+    ['{"bottom": ["model"]}', false], // absent = off (the default)
+  ] as Array<[string, boolean]>) {
+    const f = join(dir, "mouse.json");
+    writeFileSync(f, raw);
+    assert.equal(loadTuiConfig(f).mouse, want, `raw: ${raw}`);
+  }
 });
 
 test("loadTuiConfig: every known field survives a round trip", () => {
   const f = join(dir, "all.json");
-  const cfg = { bottom: [...BOTTOM_FIELDS] };
+  const cfg = { bottom: [...BOTTOM_FIELDS], mouse: true };
   saveTuiConfig(cfg, f);
   assert.deepEqual(loadTuiConfig(f), cfg);
 });
 
 test("saveTuiConfig: writes the file, creating the parent dir when missing", () => {
   const nested = join(dir, "deep", "nested", "tui.json");
-  assert.equal(saveTuiConfig({ bottom: ["model"] }, nested), true);
-  assert.deepEqual(JSON.parse(readFileSync(nested, "utf8")), { bottom: ["model"] });
+  assert.equal(saveTuiConfig({ bottom: ["model"], mouse: false }, nested), true);
+  assert.deepEqual(JSON.parse(readFileSync(nested, "utf8")), { bottom: ["model"], mouse: false });
 });
 
 test("saveTuiConfig: an unwritable path fails SOFT (false, no throw)", () => {
@@ -84,13 +98,13 @@ test("saveTuiConfig: an unwritable path fails SOFT (false, no throw)", () => {
   // A directory in the file's place: writeFileSync must fail.
   const f = join(noDir, "sub");
   mkdirSync(f, { recursive: true });
-  assert.equal(saveTuiConfig({ bottom: ["model"] }, f), false);
+  assert.equal(saveTuiConfig({ bottom: ["model"], mouse: false }, f), false);
   rmSync(f, { recursive: true, force: true });
 });
 
 test("saveTuiConfig: the file is one JSON object + trailing newline", () => {
   const f = join(dir, "pretty.json");
-  assert.equal(saveTuiConfig({ bottom: ["cwd"] }, f), true);
+  assert.equal(saveTuiConfig({ bottom: ["cwd"], mouse: true }, f), true);
   const raw = readFileSync(f, "utf8");
-  assert.equal(raw, '{\n  "bottom": [\n    "cwd"\n  ]\n}\n');
+  assert.equal(raw, '{\n  "bottom": [\n    "cwd"\n  ],\n  "mouse": true\n}\n');
 });

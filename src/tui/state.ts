@@ -213,10 +213,11 @@ export interface TuiState {
    */
   workers: WorkerStatus[];
   /**
-   * Mouse selection (opt-in, TRE_MOUSE=1): two ANCHORS in content
-   * coordinates — each anchor indexes the item's RENDERED lines (the
-   * itemLines output) by line, and that line by DISPLAY column (wide chars
-   * count 2 — dispWidth). null = no selection. The anchors are in CONTENT
+   * Mouse selection (opt-in — TRE_MOUSE=1 or the persisted `mouse` config):
+   * two ANCHORS in content coordinates — each anchor indexes the item's
+   * RENDERED lines (the itemLines output) by line, and that line by DISPLAY
+   * column (wide chars count 2 — dispWidth). null = no selection. The anchors
+   * are in CONTENT
    * space (item index + rendered line), NOT viewport space, so scrolling
    * (viewTop changes) never moves them; the highlight re-maps them to
    * viewport rows each render. A new turn (agent_start) and a compaction
@@ -788,8 +789,9 @@ export function scrollToTop(s: TuiState): TuiState {
 }
 
 // ---------------------------------------------------------------------------
-// Mouse selection (opt-in, TRE_MOUSE=1). The selection is two ANCHORS in
-// content coordinates: itemIndex (index into state.items), line (index into
+// Mouse selection (opt-in — TRE_MOUSE=1 or the persisted `mouse` config).
+// The selection is two ANCHORS in content coordinates: itemIndex (index into
+// state.items), line (index into
 // that item's RENDERED lines — the itemLines output), and col (a DISPLAY
 // column on that line — wide chars count 2, dispWidth). Content coordinates
 // survive scroll: a viewport move (viewTop) changes which lines are VISIBLE,

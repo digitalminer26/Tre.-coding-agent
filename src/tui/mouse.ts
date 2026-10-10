@@ -1,6 +1,7 @@
 /**
  * SGR mouse-report parser (mode 1006). The driver enables SGR mouse
- * reporting (1002 + 1006, opt-in via TRE_MOUSE=1) and the terminal delivers
+ * reporting (1002 + 1006 — opt-in via TRE_MOUSE=1 or the persisted `mouse`
+ * config key, decided by mouseTrackingEnabled) and the terminal delivers
  * mouse events as RAW input text (Ink's useInput passes the unparsed CSI
  * sequence through as the `input` string). This module parses those
  * sequences into typed events so the App can route them.
@@ -103,4 +104,28 @@ export function parseSgrMouse(input: string): MouseEvent | null {
  */
 export function isSgrMouse(input: string): boolean {
   return /^\[<\d+;\d+;\d+[Mm]$/.test(input);
+}
+
+/**
+ * The EFFECTIVE mouse-tracking decision — the single source of truth shared
+ * by the driver (run.tsx: enables the terminal modes) and the App (app.tsx:
+ * routes SGR events, names the wheel in the hint). Without this helper the
+ * driver could enable the modes while the App refused to route them (or
+ * vice versa), whenever the two read different inputs.
+ *
+ * Precedence (explicit env always beats the persisted config, so a one-off
+ * launch can flip the file's setting either way):
+ *   TRE_NO_MOUSE=1 → off (legacy opt-out, wins over everything)
+ *   TRE_MOUSE=1    → on  (legacy opt-in)
+ *   otherwise      → the `mouse` key of ~/.tre/tui.json (default off —
+ *                    selection-friendly: the terminal keeps its native
+ *                    highlight-and-copy)
+ */
+export function mouseTrackingEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  configMouse: boolean = false,
+): boolean {
+  if (env.TRE_NO_MOUSE) return false;
+  if (env.TRE_MOUSE) return true;
+  return configMouse;
 }

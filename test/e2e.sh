@@ -609,16 +609,21 @@ PY
 
 scenario_18() { # TUI default is SELECTION-FRIENDLY: no mouse-tracking mode
   # is enabled (1002/1006) — the terminal keeps highlight-and-copy.
-  # (Mouse tracking is opt-in via TRE_MOUSE=1, scenario 15.)
-  local D="$WORK/18"; mkdir -p "$D"
+  # (Mouse tracking is opt-in: TRE_MOUSE=1, scenario 15, or the persisted
+  # "mouse" config key, scenario 20.) HOME is pointed at the scenario dir
+  # so the real user's ~/.tre/tui.json (which may carry "mouse": true)
+  # never leaks into the default-off assertion.
+  local D="$WORK/18"; mkdir -p "$D/home"
   cat > "$D/feed.sh" <<'EOF'
 printf 'Reply with exactly: PONG-18\r'
 wait_turn_done "$SESS" 440 || true
 sleep 3
 quit_retry
 EOF
-  pty_feed 18 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
-    --session "$D/s.jsonl" --cwd "$D"
+  ( export HOME="$D/home"
+    unset TRE_MOUSE TRE_NO_MOUSE # inherited env would override the default
+    pty_feed 18 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+      --session "$D/s.jsonl" --cwd "$D" )
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
   grep -qF "PONG-18" "$D/out.log" || { echo "no PONG-18 in frames"; return 1; }
@@ -628,7 +633,35 @@ EOF
   # highlight-and-copy (grep -F: fixed-string, the ? must not parse).
   grep -qF $'\x1b[?1002h' "$D/out.log" && { echo "mouse base mode 1002 enabled by default — text selection would die"; return 1; }
   grep -qF $'\x1b[?1006h' "$D/out.log" && { echo "mouse SGR mode 1006 enabled by default — text selection would die"; return 1; }
-  echo "rc=0, TUI renders with NO mouse-tracking mode (highlight/copy works; wheel is opt-in TRE_MOUSE=1)"
+  echo "rc=0, TUI renders with NO mouse-tracking mode (highlight/copy works; wheel is opt-in TRE_MOUSE=1 or the mouse config key)"
+}
+
+scenario_20() { # TUI mouse tracking via the PERSISTED config: ~/.tre/tui.json
+  # carries "mouse": true (the TRE_MOUSE=1 equivalent) — the driver enables
+  # 1002+1006 with NO env var, and restores them on exit. HOME is isolated
+  # so the real user's config is never touched.
+  local D="$WORK/20"; mkdir -p "$D/home/.tre"
+  printf '{\n  "bottom": [],\n  "mouse": true\n}\n' > "$D/home/.tre/tui.json"
+  cat > "$D/feed.sh" <<'EOF'
+printf 'Reply with exactly: PONG-20\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  ( export HOME="$D/home"
+    unset TRE_MOUSE TRE_NO_MOUSE # the CONFIG KEY must be the enabler
+    pty_feed 20 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+      --session "$D/s.jsonl" --cwd "$D" )
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  grep -qF "PONG-20" "$D/out.log" || { echo "no PONG-20 in frames"; return 1; }
+  # The config key enabled BOTH modes (no TRE_MOUSE env anywhere).
+  grep -qF $'\x1b[?1002h' "$D/out.log" || { echo "mouse base mode 1002 not enabled from the config key"; return 1; }
+  grep -qF $'\x1b[?1006h' "$D/out.log" || { echo "mouse SGR mode 1006 not enabled from the config key"; return 1; }
+  # ...and both were restored on exit.
+  grep -qF $'\x1b[?1002l' "$D/out.log" || { echo "mouse base mode 1002 not restored on exit"; return 1; }
+  grep -qF $'\x1b[?1006l' "$D/out.log" || { echo "mouse SGR mode 1006 not restored on exit"; return 1; }
+  echo "rc=0, mouse tracking enabled by ~/.tre/tui.json \"mouse\": true (no env var), restored on exit"
 }
 
 scenario_19() { # C35: --extra-root — an assigned sibling is writable (write tool + bash); a non-assigned sibling is refused
@@ -689,6 +722,7 @@ run_one() {
     17) name="tui-slash-mid-run(C32)" ;;
     18) name="tui-no-mouse-by-default" ;;
     19) name="extra-root(C35)" ;;
+    20) name="tui-mouse-config-key" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

@@ -65,6 +65,7 @@ import {
   type TuiState,
 } from "./state.js";
 import { copyToClipboard, type ClipboardAdapter } from "./clipboard.js";
+import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
 import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
@@ -359,7 +360,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // lifecycle updates bypass the window so their feedback is immediate.
   const coalescer = makeRenderCoalescer({
     paint: () => {
-      if (mounted) app.rerender(React.createElement(App, { state, ...handlers }));
+      if (mounted) app.rerender(React.createElement(App, { state, mouseEnabled, ...handlers }));
     },
   });
   let selectionDragging = false;
@@ -644,7 +645,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
           setStateNow(slash.handled ? slash.state : slashBusy.state);
           if (slash.handled && slash.state.bottom !== prevBottom) {
-            saveTuiConfig({ bottom: slash.state.bottom });
+            // Preserve the `mouse` key — the file is the durable mouse
+            // setting; /display-bottom must not clobber it.
+            saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse });
           }
           // C34: a /models <id> switch re-resolves the full ModelConfig (the
           // state machine only re-seeded the label + context field). The
@@ -708,7 +711,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // handled command that changes it (the others keep the same array
         // reference, so this fires exactly on a real change).
         if (slash.state.bottom !== prevBottom) {
-          saveTuiConfig({ bottom: slash.state.bottom });
+          // Preserve the `mouse` key — the file is the durable mouse
+          // setting; /display-bottom must not clobber it.
+          saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse });
         }
         // C34: a /models <id> switch re-resolves the full ModelConfig (the
         // state machine only re-seeded the label + context field); rebuild
@@ -781,8 +786,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       setStateNow(scrollBy(state, delta, maxScroll)),
     onScrollToTop: (): void => setStateNow(scrollToTop(state)),
     onScrollToBottom: (): void => setStateNow(scrollToBottom(state)),
-    // Mouse selection (opt-in, TRE_MOUSE=1): pure state transitions (see
-    // state.ts). The App maps the terminal cell to a content anchor; these
+    // Mouse selection (opt-in — mouse tracking enabled): pure state
+    // transitions (see state.ts). The App maps the terminal cell to a content
+    // anchor; these
     // just fold the anchor into the selection. The clipboard is the driver's
     // job — /copy (below) reads the selection and writes it through the
     // injected adapter (clipboard.ts).
@@ -803,13 +809,18 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // input parser. The DRIVER owns the terminal: enable once here (never
   // inside a component — a raw write would corrupt the frame stream).
   //
-  // OPT-IN (TRE_MOUSE=1), not on-by-default: with a mouse-tracking mode
-  // active the terminal forwards pointer events to the app INSTEAD of doing
-  // its own highlight-and-copy, so text selection dies — and the TUI is a
-  // read-mostly surface. PgUp/PgDn/Home/End already cover scrolling, so
-  // selection is the default; set TRE_MOUSE=1 for wheel/trackpad scrolling.
-  // (Legacy: TRE_NO_MOUSE=1 still forces the no-wheel mode — it can only
-  // keep what is already the default.)
+  // OFF BY DEFAULT (selection-friendly): with a mouse-tracking mode active
+  // the terminal forwards pointer events to the app INSTEAD of doing its
+  // own highlight-and-copy, so native text selection dies. The default
+  // stays off — but it is now PERSISTENTLY CONFIGURABLE: the `mouse` key of
+  // ~/.tre/tui.json (the TUI's permanent home) turns it on without an env
+  // var, and the env vars override the file either way for a one-off
+  // launch (mouseTrackingEnabled, mouse.ts — the single source of truth;
+  // the App receives the same value as a prop so routing and the modes can
+  // never disagree):
+  //   TRE_NO_MOUSE=1 → off (legacy opt-out, wins over everything)
+  //   TRE_MOUSE=1    → on  (legacy opt-in)
+  //   otherwise      → ~/.tre/tui.json "mouse" (default false)
   //
   // TWO modes, not one: 1006 is only the SGR *report format* — in
   // xterm-compatible terminals it enables NO mouse reporting on its own, so
@@ -819,8 +830,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // shapes them as SGR `CSI < b ; x ; y M/m`, which the app parses. 1002 is
   // chosen over 1003 (any-event) so plain pointer motion is NOT reported —
   // less noise, and clicks/drags are still swallowed by the app.
+  const mouseEnabled = mouseTrackingEnabled(process.env, tuiConfig.mouse);
   let mouseMode = false;
-  if (process.env.TRE_MOUSE && !process.env.TRE_NO_MOUSE) {
+  if (mouseEnabled) {
     process.stdout.write("\u001b[?1002h\u001b[?1006h");
     mouseMode = true;
   }
@@ -840,7 +852,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   process.on("SIGTERM", () => process.exit(143));
   process.on("SIGHUP", () => process.exit(129));
 
-  app = render(React.createElement(App, { state, ...handlers }), { exitOnCtrlC: false });
+  app = render(React.createElement(App, { state, mouseEnabled, ...handlers }), { exitOnCtrlC: false });
 
   // C25: React's DEV build fills Node's unbounded performance (User-Timing)
   // buffer with one entry per component render — the 40MB/turn heap growth

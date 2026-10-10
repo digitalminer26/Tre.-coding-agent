@@ -23,10 +23,15 @@ import { BOTTOM_FIELDS } from "./state.js";
 export interface TuiConfig {
   /** D15: field keys shown in the reserved bottom lines, in order. */
   bottom: string[];
+  /** SGR mouse tracking (wheel/trackpad scrolling + mouse selection, the
+   * `TRE_MOUSE=1` equivalent). Absent = false — the default stays
+   * selection-friendly (the terminal keeps its native highlight-and-copy);
+   * the env vars still win over the file (see run.tsx). */
+  mouse: boolean;
 }
 
 export function defaultTuiConfig(): TuiConfig {
-  return { bottom: [] };
+  return { bottom: [], mouse: false };
 }
 
 /** The config file's location: `~/.tre/tui.json` (`home` for tests). */
@@ -71,7 +76,7 @@ export function loadTuiConfig(file: string = tuiConfigPath()): TuiConfig {
         ),
       ]
     : [];
-  return { bottom };
+  return { bottom, mouse: obj.mouse === true };
 }
 
 /**
