@@ -135,10 +135,42 @@ function stateWithSelection(): { state: TuiState; anchor: SelectionAnchor } {
   return { state, anchor };
 }
 
+/**
+ * Seed the input with a NONEMPTY "/copy" line (a real selection is active, so
+ * the synchronous input-clear assertion exercises an actual clear).
+ */
+function seedCopyInput(s: TuiState): TuiState {
+  return inputChar(inputChar(inputChar(inputChar(inputChar(s, "/"), "c"), "o"), "p"), "y");
+}
+
+/**
+ * The concurrent mutations that must SURVIVE a deferred settlement (the audit
+ * regression): while the clipboard write is pending, type a draft, append a
+ * streamed assistant item, flip busy, CHANGE the selection (a new press +
+ * drag to a different cell — non-null), and PIN viewTop to a non-null value.
+ */
+function mutateWhilePending(s: TuiState): TuiState {
+  let st = inputChar(s, "d");
+  st = { ...st, items: [...st.items, { kind: "assistant", text: "streamed", streaming: true, thinking: false, thinkingText: "" }] };
+  st = { ...st, busy: true };
+  const updated = selectUpdate(selectStart(st, { itemIndex: 0, line: 0, col: 3 }), { itemIndex: 0, line: 0, col: 6 });
+  assert.ok(updated !== null); // the selection is active (changed to a new range)
+  st = { ...updated, viewTop: 2 }; // pinned (non-null)
+  return st;
+}
+
+/** The fields settlement must preserve verbatim (the audit's repro caught
+ * clearing exactly these). */
+function snapshotState(s: TuiState): {
+  input: string; busy: boolean; selection: TuiState["selection"]; viewTop: number | null; items: TuiState["items"];
+} {
+  return { input: s.input, busy: s.busy, selection: s.selection, viewTop: s.viewTop, items: s.items };
+}
+
 test("/copy success: feedback lands on the CURRENT items (draft, streamed item, busy all preserved)", async () => {
   const { state: s0 } = stateWithSelection();
   const { adapter, calls, resolve } = deferredAdapter();
-  let state = s0;
+  let state = seedCopyInput(s0);
   const handler = makeCopySelection({
     getState: () => state,
     setStateNow: (s) => { state = s; },
@@ -147,30 +179,37 @@ test("/copy success: feedback lands on the CURRENT items (draft, streamed item, 
     width: () => 80,
   });
   handler();
-  // Synchronous part: the input is cleared and "/copy" lands in history.
+  // Synchronous part: the (nonempty) input is cleared and "/copy" lands in history.
   assert.equal(state.input, "");
   assert.deepEqual(state.history, ["/copy"]);
   assert.equal(calls.length, 1); // the deferred write is in flight
   // Concurrent mutations while the clipboard write is pending:
-  state = inputChar(state, "d"); // draft typed
-  state = { ...state, items: [...state.items, { kind: "assistant", text: "streamed", streaming: true, thinking: false, thinkingText: "" }] };
-  state = { ...state, busy: true };
+  state = mutateWhilePending(state);
+  const before = snapshotState(state); // snapshot immediately before settlement
   resolve();
   await Promise.resolve(); await Promise.resolve(); // let the .then settle
+  // EVERY field mutated while pending survives the settlement:
+  assert.equal(state.input, before.input); // the draft survives
+  assert.equal(state.busy, before.busy); // the busy flip survives
+  assert.deepEqual(state.selection, before.selection); // the changed selection survives
+  assert.equal(state.viewTop, before.viewTop); // the pinned viewport survives
+  assert.equal(state.viewTop, 2); // (and it really was non-null)
+  // The feedback item is appended to EXACTLY the current items:
+  assert.equal(state.items.length, before.items.length + 1);
+  for (let i = 0; i < before.items.length; i++) {
+    assert.deepEqual(state.items[i], before.items[i]);
+  }
+  assert.equal(state.items[1]?.kind, "assistant");
+  assert.equal((state.items[1] as { text: string }).text, "streamed");
   const last = state.items[state.items.length - 1];
   assert.equal(last?.kind, "info");
   assert.equal(last?.text, "copied 5 byte(s) to the clipboard");
-  assert.equal(state.input, "d"); // the draft survives
-  assert.equal(state.busy, true); // the busy flip survives
-  assert.equal(state.items.length, 3); // item + streamed + feedback
-  assert.equal(state.items[1]?.kind, "assistant");
-  assert.equal((state.items[1] as { text: string }).text, "streamed");
 });
 
 test("/copy rejected adapter: the 'copy failed: …' variant lands the same way (current state preserved)", async () => {
   const { state: s0 } = stateWithSelection();
   const { adapter, reject } = deferredAdapter(new Error("pbcopy exited 127: command not found"));
-  let state = s0;
+  let state = seedCopyInput(s0);
   const handler = makeCopySelection({
     getState: () => state,
     setStateNow: (s) => { state = s; },
@@ -179,14 +218,28 @@ test("/copy rejected adapter: the 'copy failed: …' variant lands the same way 
     width: () => 80,
   });
   handler();
-  state = inputChar(state, "x"); // concurrent draft
+  // Synchronous part: the (nonempty) input is cleared and "/copy" lands in history.
+  assert.equal(state.input, "");
+  assert.deepEqual(state.history, ["/copy"]);
+  // Concurrent mutations while the clipboard write is pending:
+  state = mutateWhilePending(state);
+  const before = snapshotState(state); // snapshot immediately before settlement
   reject();
   await Promise.resolve(); await Promise.resolve();
+  // EVERY field mutated while pending survives the settlement:
+  assert.equal(state.input, before.input); // the draft survives
+  assert.equal(state.busy, before.busy); // the busy flip survives
+  assert.deepEqual(state.selection, before.selection); // the changed selection survives
+  assert.equal(state.viewTop, before.viewTop); // the pinned viewport survives
+  assert.equal(state.viewTop, 2); // (and it really was non-null)
+  // The feedback item is appended to EXACTLY the current items:
+  assert.equal(state.items.length, before.items.length + 1);
+  for (let i = 0; i < before.items.length; i++) {
+    assert.deepEqual(state.items[i], before.items[i]);
+  }
   const last = state.items[state.items.length - 1];
   assert.equal(last?.kind, "info");
   assert.equal(last?.text, "copy failed: pbcopy exited 127: command not found");
-  assert.equal(state.input, "x"); // concurrent draft preserved
-  assert.equal(state.items.length, 2); // item + feedback
 });
 
 test("/copy with an empty selection: the info item lands and the adapter is NEVER called", async () => {

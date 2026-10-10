@@ -1,5 +1,23 @@
 # Current project status (2026-10-09)
 
+**Deferred-copy regression coverage hardened (implement-audit, part 3 fix —
+2026-10-09).** The audit found the part-3 deferred tests could not catch a
+settlement that dropped the selection/viewport (nor the streamed/busy
+preservation on the rejection path): they never asserted `selection` or
+`viewTop`, both started with `viewTop: null`, and the rejection test mutated
+only the draft. `test/tui-clipboard.test.ts` now seeds a NONEMPTY `/copy`
+input (a real synchronous clear) in both deferred tests, and while the fake
+adapter is pending each test mutates ALL of: a typed draft, an appended
+streamed assistant item, a busy flip, a CHANGED selection (new press + drag
+to a different cell), and a PINNED non-null `viewTop` (2); it snapshots the
+state immediately before settlement and asserts every field survives
+verbatim, with the feedback item appended to EXACTLY the snapshot's items.
+Verified against the audit's own repro: patching the compiled
+`dist/src/tui/copy.js` settlement to `...settled, selection: null,
+viewTop: null,` makes BOTH deferred tests fail (2 fail / 8 pass); the
+unpatched build passes all 10. No source change (the factory was already
+correct); the empty-selection test is untouched.
+
 **Durable mouse-selection coverage (implement-audit, part 5 of 5 — 2026-10-09).**
 The driver's mouse-selection GATE is extracted from `src/tui/run.tsx` into
 `src/tui/mouse-gate.ts` (`makeMouseGate` factory, seams: getState/setStateNow,
