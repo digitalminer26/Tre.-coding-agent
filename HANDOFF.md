@@ -1,5 +1,18 @@
 # Current project status (2026-10-09)
 
+**Durable mouse-selection coverage (implement-audit, part 3 of 5 — 2026-10-09).**
+The driver's `/copy` handler is extracted from `src/tui/run.tsx` into
+`src/tui/copy.ts` (`makeCopySelection` factory, seams: getState/setStateNow/
+clipboardAdapter/isMounted/width) — run.tsx now wires the factory with the
+real seams, behavior byte-identical. `test/tui-clipboard.test.ts` gains the
+concurrency contract with a DEFERRED fake adapter: the handler clears the
+input and pushes "/copy" to history synchronously; state mutated while the
+clipboard write is in flight (typed draft, appended streamed assistant item,
+busy flip) is preserved when the feedback item lands on the CURRENT state
+("copied N byte(s) to the clipboard"); a REJECTED adapter yields the
+"copy failed: …" variant the same way; an empty selection appends
+"copy: nothing selected (…)" and never calls the adapter.
+
 **Durable mouse-selection coverage (implement-audit, part 2 of 5 — 2026-10-09).**
 `test/tui-state.test.ts` gains the duplicate-completion regression the audit
 passed only as a supplemental check: a SUCCEEDED quiet tool's

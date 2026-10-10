@@ -36,7 +36,6 @@ import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
 import {
   approvalAnswer,
   applyEvent,
-  copySelectionText,
   handleSlashCommand,
   inputBackspace,
   inputChar,
@@ -64,7 +63,8 @@ import {
   type SelectionAnchor,
   type TuiState,
 } from "./state.js";
-import { copyToClipboard, type ClipboardAdapter } from "./clipboard.js";
+import { type ClipboardAdapter } from "./clipboard.js";
+import { makeCopySelection } from "./copy.js";
 import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
@@ -539,33 +539,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
    * scroll; Esc clears it). Never throws (I3): a clipboard failure is a
    * reported info item, not a crash.
    */
-  const copySelection = (): void => {
-    const width = process.stdout.columns > 0 ? process.stdout.columns : 80;
-    const text = copySelectionText(state, width);
-    const slashState = state.busy ? submitSlashBusy(state)?.state : submitInput(state)?.state;
-    const cleared = { ...(slashState ?? state), busy: state.busy, input: "", cursorPos: 0, historyIdx: null, history: [...state.history, "/copy"] };
-    setStateNow(cleared);
-    if (text === "") {
-      setStateNow({ ...state, ...cleared, items: [...cleared.items, { kind: "info", text: "copy: nothing selected (drag in the output area with the mouse)" }] });
-      return;
-    }
-    const bytes = Buffer.byteLength(text, "utf8");
-    void copyToClipboard(text, opts.deps?.clipboardAdapter).then((res) => {
-      if (!mounted) return; // a copy that settles after quit must not re-render
-      setStateNow({
-        ...state,
-        items: [
-          ...state.items,
-          {
-            kind: "info",
-            text: res.ok
-              ? `copied ${bytes} byte(s) to the clipboard`
-              : `copy failed: ${res.error}`,
-          },
-        ],
-      });
-    });
-  };
+  const copySelection = makeCopySelection({
+    getState: () => state,
+    setStateNow,
+    clipboardAdapter: opts.deps?.clipboardAdapter,
+    isMounted: () => mounted,
+    width: () => (process.stdout.columns > 0 ? process.stdout.columns : 80),
+  });
 
   const inputHandlers = makeInputHandlers<TuiState>(
     () => state,
