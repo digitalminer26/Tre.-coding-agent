@@ -65,6 +65,7 @@ import {
 } from "./state.js";
 import { type ClipboardAdapter } from "./clipboard.js";
 import { makeCopySelection } from "./copy.js";
+import { makeResizeHandler } from "./resize.js";
 import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
@@ -364,9 +365,6 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     },
   });
   let selectionDragging = false;
-  const onResize = (): void => {
-    if (state.selection !== null) setStateNow(selectClear(state));
-  };
   const stateUpdates = makeStateUpdateRouter<TuiState>({
     getState: () => state,
     setState: (s) => { state = s; },
@@ -375,9 +373,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   });
   const setState = stateUpdates.stream;
   const setStateNow = stateUpdates.interactive;
-  process.stdout.on("resize", onResize);
+  const resizeHandler = makeResizeHandler({
+    stream: process.stdout,
+    getState: () => state,
+    setStateNow,
+  });
+  resizeHandler.attach();
   const quit = (code: number): void => {
-    process.stdout.off("resize", onResize);
+    resizeHandler.detach();
     exitCode = code;
     mounted = false;
     coalescer.cancel(); // a pending deferred paint must not fire post-unmount

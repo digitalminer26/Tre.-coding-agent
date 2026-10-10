@@ -1,5 +1,15 @@
 # Current project status (2026-10-09)
 
+**Durable mouse-selection coverage (implement-audit, part 4 of 5 — 2026-10-09).**
+The driver's terminal-resize handler is extracted from `src/tui/run.tsx` into
+`src/tui/resize.ts` (`makeResizeHandler` factory, seams: stream/getState/
+setStateNow, returning onResize + attach/detach) — run.tsx wires it with the
+real seams (process.stdout), behavior byte-identical. `test/tui-resize.test.ts`
+pins the contract with a fake EventEmitter stream: with an active selection,
+firing "resize" clears it (the item survives); after detach, firing does
+nothing (the selection survives); with no selection, firing is a no-op
+(setStateNow never called, the SAME state reference — no re-render).
+
 **Durable mouse-selection coverage (implement-audit, part 3 of 5 — 2026-10-09).**
 The driver's `/copy` handler is extracted from `src/tui/run.tsx` into
 `src/tui/copy.ts` (`makeCopySelection` factory, seams: getState/setStateNow/

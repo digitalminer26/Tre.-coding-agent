@@ -40,3 +40,7 @@ tre.json
 
 # tre-deploy skill build output (offline tarballs) — never in git.
 .tre/deploy-out/
+
+# worker scratch files (gate/build output) — never in git.
+.gate.out
+.build.out
