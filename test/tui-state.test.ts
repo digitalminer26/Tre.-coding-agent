@@ -174,6 +174,28 @@ test("unmatched quiet-tool completion preserves selection indices", () => {
   assert.deepEqual(result.selection, state.selection);
 });
 
+test("duplicate quiet-tool completion is a no-op (items and selection unchanged)", () => {
+  // A SUCCEEDED quiet tool is removed on its tool_execution_end and the
+  // selection is remapped; a SECOND end for the same id finds no item
+  // (removed < 0) and must leave items and selection UNCHANGED.
+  let s: TuiState = { ...makeInitialState("m"), items: [
+    { kind: "user" as const, text: "before" },
+    { kind: "tool" as const, id: "read-1", name: "read", argsText: "{}", running: true, hidden: true },
+    { kind: "user" as const, text: "after" },
+  ] };
+  s = { ...s, selection: { from: { itemIndex: 2, line: 0, col: 0 }, to: { itemIndex: 2, line: 0, col: 3 }, anchor: { itemIndex: 2, line: 0, col: 0 } } };
+  // First end: the placeholder is removed and the selection remaps (2 → 1).
+  s = applyEvent(s, toolEnd("read-1", "file body", false, "read"));
+  assert.equal(s.items.length, 2);
+  assert.equal(s.selection?.from.itemIndex, 1);
+  const afterFirst = s;
+  // Second end for the SAME id: no item matches → items and selection are
+  // left exactly as they were (no double-removal, no double-remap).
+  const s2 = applyEvent(afterFirst, toolEnd("read-1", "file body", false, "read"));
+  assert.deepEqual(s2.items, afterFirst.items);
+  assert.deepEqual(s2.selection, afterFirst.selection);
+});
+
 test("tool removal remaps surviving selection anchors and clears removed-item anchors", () => {
   let s: TuiState = { ...makeInitialState("m"), items: [
     { kind: "user" as const, text: "before" },

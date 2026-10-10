@@ -1,5 +1,12 @@
 # Current project status (2026-10-09)
 
+**Durable mouse-selection coverage (implement-audit, part 2 of 5 — 2026-10-09).**
+`test/tui-state.test.ts` gains the duplicate-completion regression the audit
+passed only as a supplemental check: a SUCCEEDED quiet tool's
+tool_execution_end removes the placeholder and remaps the selection; a
+SECOND end for the same id finds no item (removed < 0) and leaves items and
+selection byte-identical to after the first end.
+
 **Durable mouse-selection coverage (implement-audit, part 1 of 5 — 2026-10-09).**
 New `test/tui-selection-styling.test.tsx` pins the styling/copy agreement the
 audit left open: the cells the App highlights (SEL_BG #5f5f5f) are EXACTLY
