@@ -1,5 +1,20 @@
 # Current project status (2026-10-09)
 
+**Durable mouse-selection coverage (implement-audit, part 1 of 5 — 2026-10-09).**
+New `test/tui-selection-styling.test.tsx` pins the styling/copy agreement the
+audit left open: the cells the App highlights (SEL_BG #5f5f5f) are EXACTLY
+the cells /copy copies (copySelectionText). Seven tests assert both sides —
+the frame carries the 256-color bg escape (ESC[48;2;95;95;95m) around exactly
+the expected substring (single highlighted span), and copySelectionText(state,
+100) equals it — for ordinary text, combining clusters (selection ending
+before/after the e+U+0301 cluster: whole-cluster copy is the precomposed é,
+itemLines NFC-normalizes), and wide graphemes (CJK + ZWJ emoji) with the
+selection starting in the FIRST and SECOND cell of a 2-cell grapheme (both
+boundaries take the whole grapheme). NOTE: chalk computes its color level at
+IMPORT time, so this file sets FORCE_COLOR=3 before importing ink (top-level
+await); the in-test env pattern of tui-app.test.tsx only works for
+text-presence assertions, not ANSI.
+
 **Mouse selection/copy correctness fixes in progress (2026-10-09).** Fixed the app highlight split, stable drag anchor, grapheme display widths and combining clusters, blank-line extraction, /copy input clearing and async state merging, selection rebasing when quiet tools disappear, drag clamping/release, selection clearing on resize, and unmatched quiet-tool completion handling. Build and test suite pass (797 tests: 784 passed, 13 skipped); PTY frame capture verified pinned input/bottom rows. Manual Terminal.app gestures and system clipboard integration remain unverified.
 
 **TUI input responsiveness: stream paints coalesced, interactive paints immediate.**
