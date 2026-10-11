@@ -932,13 +932,27 @@ live-network/TTY skips; +3 new tests vs the 601-test D15 baseline).
 `quality-check.sh` OK (43 files scanned, no violations; deps 4/4). No
 guardrail-zone file touched (`src/auth/*` is not in the zone).
 
-**Still open (user action required).** The live smoke test: `tre. login
-chatgpt` in a real browser — the one thing this sandbox cannot do (Cloudflare
-403s non-browser probes at auth.openai.com, so the registered port/path set
-is proven by the reference implementations, not a live handshake). If the
-browser STILL rejects after this fix, the next suspect per the evidence is
-host: try `localhost` instead of `127.0.0.1` (clodex's working shape) —
-everything else in the URL matches a known-good tool.
+**RESOLVED (2026-10-11): the live smoke test passed.** The original open item
+was the browser OAuth handshake the sandbox could not do. It has since
+completed: `~/.tre/chatgpt-auth.json` exists (saved 2026-10-03), `tre. auth
+status` reports it valid, and the **access token works against the live
+endpoint** — `GET chatgpt.com/backend-api/codex/models` returns HTTP 200 with
+the full catalog (10 models), and real turns ran end-to-end on `gpt-6.1-sol`
+and `gpt-6-luna` (sessions of 2026-10-09: assistant text + tool round-trips,
+zero errors). The registered port/path set is now proven by a live handshake,
+not just the reference implementations.
+
+**Still open (user action required): the stored REFRESH token is dead.**
+Forced live refresh on 2026-10-11 → **HTTP 401** for BOTH the default JSON
+encoding and `form` (so it is not the encoding — the code matches Codex's
+JSON behavior; the token file was left untouched by the failed probes). The
+Oct 9 turns never needed a refresh (the access token was unexpired), so this
+went unnoticed until the forced check. Likely cause: a later login (Codex or
+another device) rotated the refresh token, or OpenAI invalidated it.
+Consequence: when the current access token expires (~2026-10-13),
+`resolveAccessToken` will hit the 401 and throw `AuthRequiredError` — the
+user must run `tre. login chatgpt` again. Fix = one fresh browser login;
+no code change is indicated by the evidence.
 
 ---
 
