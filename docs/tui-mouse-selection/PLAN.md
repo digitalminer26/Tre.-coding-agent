@@ -1,16 +1,27 @@
 # Plan: In-app mouse selection and copy for the TUI
 
-Status: implemented. The SGR parser (`src/tui/mouse.ts`), the content-coordinate
-selection model (`src/tui/state.ts`: selectStart/selectUpdate/selectClear,
-selectedRanges/selectedText/copySelectionText), the App routing + viewport→anchor
-mapping + highlight (`src/tui/app.tsx`), the driver's `/copy` + clipboard adapter
-(`src/tui/run.tsx`, `src/tui/clipboard.ts`), and the opt-in mouse-mode enable/restore
-(`src/tui/run.tsx`, TRE_MOUSE=1) are in. Deterministic tests: `test/tui-mouse.test.ts`
-(parser), `test/tui-selection.test.ts` (model), `test/tui-clipboard.test.ts` (copy
-path), `test/tui-app.test.tsx` (routing + mapping); the PTY mode lifecycle (enable +
-restore of 1002/1006) is in `test/e2e.sh`. Manual Terminal.app gesture verification
-(drag creates a visible selection; `/copy` lands the exact text on the macOS
-clipboard) is the remaining acceptance step — it needs a real terminal, not a PTY.
+Status: implemented (2026-10-10). The SGR parser (`src/tui/mouse.ts`), the
+content-coordinate selection model (`src/tui/state.ts`: selectStart/selectUpdate/
+selectClear, selectedRanges/selectedText/copySelectionText), the App routing +
+viewport→anchor mapping + highlight (`src/tui/app.tsx`), the driver's `/copy` +
+clipboard adapter (`src/tui/copy.ts` `makeCopySelection`, `src/tui/clipboard.ts`),
+and the opt-in mouse-mode enable/restore are in. Mouse tracking is opt-in via the
+persisted `mouse` config key (`~/.tre/tui.json`; `mouseTrackingEnabled` shared by
+driver and App) — explicit env always beats the file, so a one-off launch can flip
+it either way: `TRE_NO_MOUSE=1` → off (wins over everything), `TRE_MOUSE=1` → on,
+otherwise the config key (default off: the terminal keeps its native
+highlight-and-copy). Driver handlers are extracted for testability: `makeMouseGate`
+(`src/tui/mouse-gate.ts`), `makeResizeHandler` (`src/tui/resize.ts` — a resize
+clears an active selection), `makeCopySelection` (`src/tui/copy.ts` — a deferred
+copy settles without dropping the selection/viewport/streamed/busy state).
+Deterministic tests: `test/tui-mouse.test.ts` (parser), `test/tui-selection.test.ts`
+(model), `test/tui-clipboard.test.ts` (copy path), `test/tui-app.test.tsx`
+(routing + mapping), `test/tui-mouse-gate.test.ts` (gate lifecycle),
+`test/tui-resize.test.ts` (resize clears selection), `test/tui-selection-styling.test.tsx`
+(highlight == `/copy` agreement); the PTY mode lifecycle (enable + restore of
+1002/1006) is in `test/e2e.sh`. Manual Terminal.app gesture verification (drag
+creates a visible selection; `/copy` lands the exact text on the macOS clipboard)
+is the remaining acceptance step — it needs a real terminal, not a PTY.
 
 ## Goal
 
