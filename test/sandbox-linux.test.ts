@@ -32,10 +32,13 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import {
   __resetLinuxSandboxAvailability,
+  BWRAP_DEFAULT_PATH,
+  BWRAP_ENV_ALLOWLIST,
   bwrapDestDirs,
   bwrapDestFiles,
   bwrapPath,
   buildBwrapArgs,
+  buildBwrapChildEnv,
   linuxSandboxAvailable,
   spawnLinuxSandboxedBash,
 } from "../src/tools/sandbox-linux.js";
@@ -352,3 +355,80 @@ test(
     }
   },
 );
+
+// --- buildBwrapChildEnv (pure; no live bwrap needed) -----------------------
+// The child env must be built from an EXPLICIT allowlist, never a ...caller
+// spread: tokens/keys/arbitrary state in the caller env must not leak into
+// the sandboxed child.
+
+test("buildBwrapChildEnv: allowlisted vars pass through; non-allowlisted vars do NOT", () => {
+  const caller: NodeJS.ProcessEnv = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/home/u",
+    LANG: "en_US.UTF-8",
+    MY_SECRET_TOKEN: "s3cr3t",
+    API_KEY: "abc123",
+  };
+  const env = buildBwrapChildEnv(caller);
+  assert.equal(env.PATH, "/usr/bin:/bin");
+  assert.equal(env.HOME, "/home/u");
+  assert.equal(env.LANG, "en_US.UTF-8");
+  assert.ok(!("MY_SECRET_TOKEN" in env), "MY_SECRET_TOKEN must NOT leak into the child env");
+  assert.ok(!("API_KEY" in env), "API_KEY must NOT leak into the child env");
+  // The three markers are always set.
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(env.TMPDIR, "/tmp");
+  assert.equal(env.TRE_SANDBOX, "1");
+});
+
+test("buildBwrapChildEnv: no PATH in the caller env → the safe-default PATH is used (markers still set)", () => {
+  const env = buildBwrapChildEnv({ HOME: "/home/u" });
+  assert.equal(env.PATH, BWRAP_DEFAULT_PATH, "missing caller PATH falls back to the default");
+  assert.ok(env.PATH!.includes("/usr/bin"), "the default PATH searches the standard dirs");
+  assert.equal(env.HOME, "/home/u");
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, "1");
+  assert.equal(env.TMPDIR, "/tmp");
+  assert.equal(env.TRE_SANDBOX, "1");
+});
+
+test("buildBwrapChildEnv: EMPTY caller PATH → the safe-default PATH is used", () => {
+  const env = buildBwrapChildEnv({ PATH: "", HOME: "/home/u" });
+  assert.equal(env.PATH, BWRAP_DEFAULT_PATH, "an empty caller PATH falls back to the default");
+  assert.equal(env.HOME, "/home/u");
+});
+
+test("buildBwrapChildEnv: caller TMPDIR is FORCED to /tmp", () => {
+  const env = buildBwrapChildEnv({ TMPDIR: "/var/tmp/custom" });
+  assert.equal(env.TMPDIR, "/tmp");
+});
+
+test("buildBwrapChildEnv: caller GIT_CONFIG_NOSYSTEM wins over the default", () => {
+  const env = buildBwrapChildEnv({ GIT_CONFIG_NOSYSTEM: "0" });
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, "0");
+});
+
+test("buildBwrapChildEnv: GIT_DIR (not allowlisted) does NOT leak", () => {
+  const env = buildBwrapChildEnv({ GIT_DIR: "/home/u/.git", GIT_WORK_TREE: "/home/u/proj" });
+  assert.ok(!("GIT_DIR" in env), "GIT_DIR must NOT leak into the child env");
+  assert.ok(!("GIT_WORK_TREE" in env), "GIT_WORK_TREE must NOT leak into the child env");
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, "1");
+});
+
+test("buildBwrapChildEnv: empty caller env → the default PATH + the three markers", () => {
+  const env = buildBwrapChildEnv({});
+  assert.deepEqual(env, {
+    PATH: BWRAP_DEFAULT_PATH,
+    GIT_CONFIG_NOSYSTEM: "1",
+    TMPDIR: "/tmp",
+    TRE_SANDBOX: "1",
+  });
+});
+
+test("BWRAP_ENV_ALLOWLIST: contains the expected vars and no GIT_* except GIT_CONFIG_NOSYSTEM", () => {
+  for (const k of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TERM", "USER", "LOGNAME", "SHELL"]) {
+    assert.ok(BWRAP_ENV_ALLOWLIST.includes(k), `allowlist must include ${k}`);
+  }
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_GLOBAL", "GIT_ASKPASS"]) {
+    assert.ok(!BWRAP_ENV_ALLOWLIST.includes(k), `allowlist must NOT include ${k}`);
+  }
+});

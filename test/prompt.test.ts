@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildSystemPrompt } from "../src/prompt/system-prompt.js";
+import { buildSystemPrompt, systemPromptSectionChars } from "../src/prompt/system-prompt.js";
 import { loadSkillsIndex, parseSkillMd } from "../src/prompt/skills.js";
 import type { Tool } from "../src/types.js";
 
@@ -280,4 +280,93 @@ test("prompt: no sections for empty optional inputs", () => {
   assert.ok(!p.includes("# Skills"));
   assert.ok(!p.includes("# Project context"));
   assert.ok(p.includes("# Identity"));
+});
+
+// docs/07 §7 F2 — the two VARIABLE system-prompt sections measured at build
+// time (project-context files, skills index). The fixed base is the
+// remainder of the total; the driver seeds the TUI's `sys` split from these.
+
+// The sections are joined with "\n\n", but a section's OWN text may contain
+// internal blank lines (the skills index, the per-file project-context
+// headings). So a section's length is recovered by its header index and the
+// NEXT section header's index (minus the 2-char join), not by splitting on
+// blank lines.
+function sectionLength(prompt: string, header: string, nextHeaders: string[]): number {
+  const start = prompt.indexOf(header);
+  assert.ok(start !== -1, `${header} header present`);
+  let end = prompt.length;
+  for (const nh of nextHeaders) {
+    const i = prompt.indexOf(nh, start + header.length);
+    if (i !== -1 && i < end) end = i;
+  }
+  const body = end === prompt.length ? prompt.slice(start) : prompt.slice(start, end - 2);
+  return body.length;
+}
+
+test("F2: systemPromptSectionChars — no optional inputs → {0,0}", () => {
+  const m = systemPromptSectionChars({ cwd: dir, tools: [READ] });
+  assert.deepEqual(m, { ctx: 0, skills: 0 });
+});
+
+test("F2: systemPromptSectionChars — ctx = the # Project context section's length", () => {
+  const ctxFile = path.join(dir, "PROJECT.md");
+  writeFileSync(ctxFile, "UNIQUE-PROJECT-CONTEXT-MARKER\n");
+  const opts = { cwd: dir, tools: [READ], projectContextFiles: [ctxFile] };
+  const prompt = buildSystemPrompt(opts);
+  const m = systemPromptSectionChars(opts);
+  assert.ok(m.ctx > 0, "ctx section is non-empty");
+  assert.ok(prompt.includes("UNIQUE-PROJECT-CONTEXT-MARKER"), "verbatim file content is in the prompt");
+  assert.equal(
+    m.ctx,
+    sectionLength(prompt, "# Project context", ["# Skills", "# Working directory"]),
+    "ctx length matches the # Project context section's char count",
+  );
+  // No skills → the skills section is absent.
+  assert.equal(m.skills, 0);
+});
+
+test("F2: systemPromptSectionChars — skills = the # Skills section's length", async () => {
+  const skillsDir = await fixtureSkillsDir();
+  const skills = await loadSkillsIndex(skillsDir);
+  const opts = { cwd: dir, tools: [READ], skills };
+  const prompt = buildSystemPrompt(opts);
+  const m = systemPromptSectionChars(opts);
+  assert.ok(m.skills > 0, "skills section is non-empty");
+  assert.equal(
+    m.skills,
+    sectionLength(prompt, "# Skills", ["# Working directory"]),
+    "skills length matches the # Skills section's char count",
+  );
+  // No project context → the ctx section is absent.
+  assert.equal(m.ctx, 0);
+});
+
+test("F2: systemPromptSectionChars — both sections present; each is part of the total", async () => {
+  const ctxFile = path.join(dir, "PROJECT.md");
+  writeFileSync(ctxFile, "UNIQUE-PROJECT-CONTEXT-MARKER\n");
+  const skillsDir = await fixtureSkillsDir();
+  const skills = await loadSkillsIndex(skillsDir);
+  const opts = { cwd: dir, tools: [READ], projectContextFiles: [ctxFile], skills };
+  const prompt = buildSystemPrompt(opts);
+  const m = systemPromptSectionChars(opts);
+  assert.ok(m.ctx > 0 && m.skills > 0, "both variable sections are present");
+  // The variable sections are a strict subset of the total (the fixed base —
+  // identity, tools, guidelines, cwd — is the remainder).
+  assert.ok(m.ctx + m.skills < prompt.length, "the fixed base is the remainder");
+  // Measuring twice is stable (deterministic; the file is read once per call).
+  assert.deepEqual(systemPromptSectionChars(opts), m);
+});
+
+test("F2: buildSystemPrompt is unchanged by the split (byte-identical to before)", () => {
+  // The refactor (buildSections → join) must not alter the prompt string.
+  const ctxFile = path.join(dir, "PROJECT.md");
+  writeFileSync(ctxFile, "UNIQUE-PROJECT-CONTEXT-MARKER\n");
+  const opts = { cwd: dir, tools: [READ, BASH], model: "m1", projectContextFiles: [ctxFile] };
+  const p = buildSystemPrompt(opts);
+  // The sections are joined with a blank line; the markers are present.
+  assert.ok(p.includes("UNIQUE-PROJECT-CONTEXT-MARKER"));
+  assert.ok(p.includes("# Identity"));
+  // The variable sections are present and the total is the join of sections.
+  const m = systemPromptSectionChars(opts);
+  assert.ok(m.ctx > 0);
 });

@@ -73,7 +73,11 @@ function deriveGuidelines(tools: Tool[], extra: string[] = []): string[] {
   return out;
 }
 
-export function buildSystemPrompt(opts: SystemPromptOptions): string {
+/** Build the system prompt's SECTIONS (not joined) — the shared source for
+ *  `buildSystemPrompt` (joins them with "\n\n") and `systemPromptSectionChars`
+ *  (measures the two variable ones). Both entry points go through here, so a
+ *  project-context file is read once per call, never re-read for the split. */
+function buildSections(opts: SystemPromptOptions): string[] {
   const { cwd, tools, model, projectContextFiles = [], skills = [], extraGuidelines = [], extraRoots = [] } = opts;
   const sections: string[] = [];
 
@@ -176,5 +180,26 @@ export function buildSystemPrompt(opts: SystemPromptOptions): string {
   }
   sections.push(wdLines.join("\n"));
 
-  return sections.join("\n\n");
+  return sections;
+}
+
+export function buildSystemPrompt(opts: SystemPromptOptions): string {
+  return buildSections(opts).join("\n\n");
+}
+
+/** Char counts of the two VARIABLE system-prompt sections (project-context
+ *  files and the skills index). The fixed base (identity/tools, guidelines,
+ *  cwd) is the remainder of the total. Measured at build time (the driver
+ *  calls this once at startup, not per render). */
+export function systemPromptSectionChars(
+  opts: SystemPromptOptions,
+): { ctx: number; skills: number } {
+  const sections = buildSections(opts);
+  let ctx = 0;
+  let skills = 0;
+  for (const s of sections) {
+    if (s.startsWith("# Project context")) ctx = s.length;
+    else if (s.startsWith("# Skills")) skills = s.length;
+  }
+  return { ctx, skills };
 }

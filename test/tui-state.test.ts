@@ -514,6 +514,55 @@ test("docs/07 item 2: the `context` bottom field appends the last delta; omitted
   );
 });
 
+// docs/07 §7 F2 — the `sys` number in the `context` bottom field splits into
+// the prompt's VARIABLE sections (project context · skills index) when the
+// driver seeded them; 0/0 (unknown) → the bare `sys N` (byte-identical).
+
+test("F2: makeInitialState defaults systemPromptSections to {0,0}", () => {
+  const s = makeInitialState("m");
+  assert.deepEqual(s.systemPromptSections, { ctx: 0, skills: 0 });
+});
+
+test("F2: the `sys` number splits into (ctx X · skills Y) when seeded", () => {
+  // sys 5000 tokens; the variable sections are ctx 2000 + skills 1000 tokens.
+  const s = {
+    ...makeInitialState("m", {}, 131072, 32768, [], 5000),
+    systemPromptSections: { ctx: 2000, skills: 1000 },
+    contextTokens: 25000,
+  };
+  assert.equal(
+    bottomValue(s, "context"),
+    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 1k) · msgs 20k · @97.3k",
+  );
+});
+
+test("F2: 0/0 (unknown) → the bare `sys N` (byte-identical to before the split)", () => {
+  // No split seeded (the default) → the `sys` number renders bare, exactly
+  // as before F2.
+  const s = {
+    ...makeInitialState("m", {}, 131072, 32768, [], 5000),
+    contextTokens: 25000,
+  };
+  assert.equal(
+    bottomValue(s, "context"),
+    "25k/131.1k (19%) · sys 5k · msgs 20k · @97.3k",
+  );
+});
+
+test("F2: only one section seeded → the split still shows both (0 for the other)", () => {
+  // ctx 2000, skills 0 → the split shows `ctx 2k · skills 0` (the 0 is shown
+  // because at least one part is non-zero).
+  const s = {
+    ...makeInitialState("m", {}, 131072, 32768, [], 5000),
+    systemPromptSections: { ctx: 2000, skills: 0 },
+    contextTokens: 25000,
+  };
+  assert.equal(
+    bottomValue(s, "context"),
+    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 0) · msgs 20k · @97.3k",
+  );
+});
+
 test("docs/07 item 2: /context report gains the growth line + turns-until-compaction prediction", () => {
   // window 131072, maxTokens 32768 → threshold 97280. After a 13000-context
   // turn with deltas [1000, 2000]: headroom 84280, avg 1500 → ~56 turns.

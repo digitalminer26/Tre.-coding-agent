@@ -27,6 +27,10 @@ import {
   TELEGRAM_TIMEOUT_MS,
   TELEGRAM_POLL_MS,
 } from "../src/tui/telegram.js";
+import { steerTelegramBatch, steerTelegramBusy } from "../src/tui/run.js";
+import { makeInitialState } from "../src/tui/state.js";
+import type { TuiState } from "../src/tui/state.js";
+import type { SteeringQueue } from "../src/loop/agent-loop.js";
 
 function setup(): { cwd: string; home: string; cleanup: () => void } {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tre-tg-tui-"));
@@ -123,4 +127,110 @@ test("a clean poll still returns null (no regression on the happy path)", async 
   } finally {
     cleanup();
   }
+});
+
+// D25 (deferred item) — the TUI poller no longer early-returns while a run is
+// in flight; the busy branch steers the polled batch into the active run's
+// SteeringQueue. The steer decision is the pure `steerTelegramBatch` helper
+// (extracted from the telegramTick closure so it is unit-testable without a
+// full TUI render). These pin its contract: it builds the `[telegram from
+// <sender>] <text>` prompts, pushes each to the queue, and returns them (the
+// caller appends them to the visible items + the info line).
+test("steerTelegramBatch: builds [telegram from <sender>] <text> prompts, pushes each, returns them", () => {
+  const pushed: string[] = [];
+  const msgs: [string, string, string][] = [
+    ["chat1", "Alice", "hello"],
+    ["chat2", "Bob", "second message"],
+  ];
+  const returned = steerTelegramBatch(msgs, (p) => pushed.push(p));
+  assert.deepEqual(pushed, [
+    "[telegram from Alice] hello",
+    "[telegram from Bob] second message",
+  ]);
+  // The returned prompts are the SAME strings that were pushed (the caller
+  // appends these to the visible items).
+  assert.deepEqual(returned, pushed);
+});
+
+test("steerTelegramBatch: an empty batch pushes nothing and returns [] (no spurious steer/info)", () => {
+  const pushed: string[] = [];
+  const returned = steerTelegramBatch([], (p) => pushed.push(p));
+  assert.deepEqual(pushed, []);
+  assert.deepEqual(returned, []);
+});
+
+test("steerTelegramBatch: is pure (no I/O, no state mutation) — the queue callback is the only side channel", () => {
+  // The helper takes the push callback as a parameter (it never touches a
+  // shared queue) and returns a fresh array each call — two calls with the
+  // same input are independent.
+  const a: string[] = [];
+  const b: string[] = [];
+  const msgs: [string, string, string][] = [["c", "S", "t"]];
+  const r1 = steerTelegramBatch(msgs, (p) => a.push(p));
+  const r2 = steerTelegramBatch(msgs, (p) => b.push(p));
+  assert.deepEqual(a, ["[telegram from S] t"]);
+  assert.deepEqual(b, ["[telegram from S] t"]);
+  assert.deepEqual(r1, r2);
+  // The input array is not mutated.
+  assert.deepEqual(msgs, [["c", "S", "t"]]);
+});
+
+// D25 — the BUSY-branch wiring (the part the earlier tests did NOT cover):
+// a message polled while a run is in flight must be steered into the ACTIVE
+// SteeringQueue AND surfaced as visible items + an info line, in one atomic
+// state update. `steerTelegramBusy` is the pure decision extracted from the
+// `telegramTick` closure, so it can be driven directly without a full TUI render.
+function fakeQueue(): SteeringQueue & { pushed: string[] } {
+  const pushed: string[] = [];
+  return { pushed, push: (p: string) => pushed.push(p), drain: () => [] };
+}
+function busyState(): TuiState {
+  return { ...makeInitialState("m"), busy: true, items: [{ kind: "user", text: "original prompt" }] };
+}
+
+test("steerTelegramBusy: steers the batch into the active queue AND appends items + info line", () => {
+  const queue = fakeQueue();
+  const state = busyState();
+  const msgs: [string, string, string][] = [
+    ["chat1", "Alice", "hello"],
+    ["chat2", "Bob", "second"],
+  ];
+  const next = steerTelegramBusy(state, msgs, queue);
+  assert.ok(next, "a non-empty batch returns a new state");
+  // The messages were pushed to the ACTIVE steering queue (drained before the
+  // next LLM call) in the [telegram from <sender>] <text> form.
+  assert.deepEqual(queue.pushed, ["[telegram from Alice] hello", "[telegram from Bob] second"]);
+  // The returned state appends the prompts as visible user items + the info
+  // line, preserving the existing items and keeping busy true.
+  assert.equal(next!.items.length, state.items.length + 3, "2 user items + 1 info line appended");
+  assert.deepEqual(next!.items[state.items.length], { kind: "user", text: "[telegram from Alice] hello" });
+  assert.deepEqual(next!.items[state.items.length + 1], { kind: "user", text: "[telegram from Bob] second" });
+  assert.deepEqual(next!.items[state.items.length + 2], {
+    kind: "info",
+    text: "telegram: 2 message(s) steered into the running turn",
+  });
+  assert.equal(next!.busy, true, "the run is still busy after steering");
+  // The original items are preserved (not replaced).
+  assert.deepEqual(next!.items[0], { kind: "user", text: "original prompt" });
+});
+
+test("steerTelegramBusy: an empty batch is a no-op (null — no steer, no items, no info line)", () => {
+  const queue = fakeQueue();
+  const state = busyState();
+  const next = steerTelegramBusy(state, [], queue);
+  assert.equal(next, null, "empty batch → null (the caller returns without updating state)");
+  assert.deepEqual(queue.pushed, [], "nothing is pushed to the queue");
+  // The state is untouched (no spurious `0 message(s) steered` info line).
+  assert.equal(state.items.length, 1);
+});
+
+test("steerTelegramBusy: is pure w.r.t. the state (returns a NEW state; the input is not mutated)", () => {
+  const queue = fakeQueue();
+  const state = busyState();
+  const before = state.items.length;
+  const msgs: [string, string, string][] = [["c", "S", "t"]];
+  const next = steerTelegramBusy(state, msgs, queue);
+  assert.notEqual(next, state, "returns a distinct state object");
+  assert.equal(state.items.length, before, "the input state's items are not mutated");
+  assert.equal(next!.items.length, before + 2, "the new state has the appended items");
 });

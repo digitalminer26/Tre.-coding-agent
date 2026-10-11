@@ -143,6 +143,17 @@ export interface TuiState {
    */
   systemPromptTokens: number;
   /**
+   * docs/07 §7 F2 — the system prompt's VARIABLE sections, in tokens
+   * (chars/4, the same estimate as `systemPromptTokens`): `ctx` = the
+   * project-context files section, `skills` = the skills index section. The
+   * fixed base (identity/tools, guidelines, cwd) is the remainder
+   * (`systemPromptTokens − ctx − skills`) and is not shown separately.
+   * Seeded once at startup by the driver (measured at prompt-build time);
+   * 0/0 = unknown (no split supplied) — the `sys` number then renders
+   * without the split suffix.
+   */
+  systemPromptSections: { ctx: number; skills: number };
+  /**
    * Estimated tokens of the CURRENT compaction summary (chars/4) — set on
    * each `context_compacted` (the summary is a user message in context, so
    * it is part of contextTokens; this tracks it separately so the breakdown
@@ -241,6 +252,10 @@ export function makeInitialState(
   systemPromptTokens: number = 0,
   /** C34: the model catalog (light) for `/models` — seeded by the driver. */
   models: ModelOption[] = [],
+  /** docs/07 §7 F2: the prompt's VARIABLE sections (project context, skills
+   *  index) in tokens — seeded once at startup; the `sys` number in the
+   *  context field splits on it. 0/0 = unknown → `sys` renders bare. */
+  systemPromptSections: { ctx: number; skills: number } = { ctx: 0, skills: 0 },
 ): TuiState {
   return {
     items: [],
@@ -261,6 +276,7 @@ export function makeInitialState(
     contextWindow: window,
     maxTokens,
     systemPromptTokens,
+    systemPromptSections,
     summaryTokens: 0,
     contextTokens: 0,
     lastUsage: null,
@@ -1686,7 +1702,16 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       const pct = state.contextWindow > 0 ? ` (${Math.round((bd.total / state.contextWindow) * 100)}%)` : "";
       const parts = [
         `${fmtTokens(bd.total)}/${win}${pct}`,
-        `sys ${fmtTokens(bd.system)}`,
+        // docs/07 §7 F2: the `sys` number splits into the prompt's VARIABLE
+        // sections (project context · skills index) when the driver seeded
+        // them; 0/0 (unknown) → the bare `sys N` (byte-identical to before).
+        `sys ${fmtTokens(bd.system)}${
+          state.systemPromptSections.ctx > 0 || state.systemPromptSections.skills > 0
+            ? ` (ctx ${fmtTokens(state.systemPromptSections.ctx)} · skills ${fmtTokens(
+                state.systemPromptSections.skills,
+              )})`
+            : ""
+        }`,
         ...(bd.summary > 0 ? [`sum ${fmtTokens(bd.summary)}`] : []),
         `msgs ${fmtTokens(bd.messages)}`,
       ];

@@ -82,7 +82,7 @@ import { openAiResponsesStream } from "../wire/openai-responses.js";
 import { makeStreamDispatcher } from "../wire/dispatcher.js";
 import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { isDirectInvocation, restartCommand } from "../tui/restart.js";
-import { buildSystemPrompt } from "../prompt/system-prompt.js";
+import { buildSystemPrompt, systemPromptSectionChars } from "../prompt/system-prompt.js";
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
 import { bashSandboxAvailable } from "../tools/sandbox.js";
@@ -1345,13 +1345,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const skills = await loadSkills(skillDirs);
 
   // system prompt
-  let systemPrompt = buildSystemPrompt({
+  const systemPromptOpts = {
     cwd: root,
     tools: wiredTools,
     model: model.id,
     skills,
     extraRoots,
-  });
+  };
+  let systemPrompt = buildSystemPrompt(systemPromptOpts);
+  // docs/07 §7 F2: the prompt's VARIABLE sections (project-context files,
+  // skills index) measured ONCE at build time — the `sys` number in the TUI
+  // context field splits into `sys N (ctx X · skills Y)`. Same lifecycle as
+  // systemPromptTokens: seeded at startup, NOT re-measured on a /models
+  // switch (the section sizes don't change with the model name).
+  const systemPromptSections = systemPromptSectionChars(systemPromptOpts);
 
   // Every interactive TUI run gets a durable session by default. Sessions
   // stay outside repositories (~/.tre/sessions/) so the agent cannot read or
@@ -1487,6 +1494,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       modelsFile,
       rebuildSystemPrompt: (modelId: string) =>
         buildSystemPrompt({ cwd: root, tools: wiredTools, model: modelId, skills, extraRoots }),
+      // docs/07 §7 F2: the startup prompt's variable-section char counts
+      // (project context, skills index) — the `sys` split in the context
+      // field. Seeded once, like systemPromptTokens (no per-switch update).
+      systemPromptSections,
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
       sessionPath: sessionFile,

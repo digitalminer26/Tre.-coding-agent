@@ -57,6 +57,7 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
+  type TuiItem,
   type TuiState,
 } from "./state.js";
 import { type ClipboardAdapter } from "./clipboard.js";
@@ -119,6 +120,52 @@ function resolveSwitchedModel(modelsFile: ModelsFile | undefined, modelId: strin
   }
 }
 
+/**
+ * D25 (deferred item) — the TUI poller's busy-branch steer decision,
+ * extracted as a PURE helper so it is unit-testable (the `telegramTick`
+ * closure itself is not exported and cannot be driven from a test without a
+ * full TUI render). Given the polled messages and the steer queue, build the
+ * `[telegram from <sender>] <text>` prompts, push them to the queue, and
+ * return the prompts (the caller appends them to the visible items + the
+ * info line). No state mutation, no I/O.
+ */
+export function steerTelegramBatch(
+  msgs: [string, string, string][],
+  push: (prompt: string) => void,
+): string[] {
+  return msgs.map(([, sender, text]) => {
+    const prompt = `[telegram from ${sender}] ${text}`;
+    push(prompt);
+    return prompt;
+  });
+}
+
+/**
+ * D25 — the TUI poller's BUSY-branch decision, extracted as a PURE helper so
+ * the busy-vs-idle wiring is unit-testable (the `telegramTick` closure itself
+ * is not exported and cannot be driven from a test without a full TUI render).
+ * Given the current state, the polled batch, and the ACTIVE steering queue:
+ * steer every message into the queue and return the NEW state (the prompts as
+ * visible user items + the "steered" info line, in one atomic update). Returns
+ * null for an empty batch (a no-op — no steer, no items, no info line). No I/O.
+ */
+export function steerTelegramBusy(
+  state: TuiState,
+  msgs: [string, string, string][],
+  steerQueue: SteeringQueue,
+): TuiState | null {
+  if (msgs.length === 0) return null;
+  const prompts = steerTelegramBatch(msgs, (p) => steerQueue.push(p));
+  return {
+    ...state,
+    items: [
+      ...state.items,
+      ...prompts.map((text): TuiItem => ({ kind: "user", text })),
+      { kind: "info", text: `telegram: ${msgs.length} message(s) steered into the running turn` },
+    ],
+  };
+}
+
 export interface TuiRunOptions {
   model: ModelConfig;
   systemPrompt: string;
@@ -165,6 +212,17 @@ export interface TuiRunOptions {
    * prompt's "# Model" line would be stale).
    */
   rebuildSystemPrompt?: (modelId: string) => string;
+  /**
+   * docs/07 §7 F2: the STARTUP prompt's variable-section char counts
+   * (project-context files = `ctx`, skills index = `skills`) — the driver
+   * measures them once at build time (systemPromptSectionChars). Converted
+   * to tokens (chars/4, the same estimate as `systemPromptTokens`) and
+   * seeded into the state; the `sys` number in the context field splits
+   * into `sys N (ctx X · skills Y)`. Same lifecycle as systemPromptTokens:
+   * seeded once, NOT updated on a /models switch. Absent → 0/0 (the split
+   * is omitted — the old `sys N` rendering).
+   */
+  systemPromptSections?: { ctx: number; skills: number };
   deps?: {
     /** Injected approver (tests): bypasses the TUI's y/n prompt. */
     askApproval?: AskApproval;
@@ -193,6 +251,15 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // its size (chars/4, the loop's estimator) so the `context` field can show
   // where the tokens come from (system prompt vs the message history).
   const systemPromptTokens = Math.ceil((opts.systemPrompt ?? "").length / 4);
+  // docs/07 §7 F2: the prompt's VARIABLE sections (project-context files,
+  // skills index) — char counts measured once at build time by the driver,
+  // converted to tokens with the SAME chars/4 estimate as systemPromptTokens
+  // so the split's parts live on the same scale as the `sys` total. Seeded
+  // once, like systemPromptTokens (NOT re-measured on a /models switch).
+  const systemPromptSectionTokens = {
+    ctx: Math.ceil((opts.systemPromptSections?.ctx ?? 0) / 4),
+    skills: Math.ceil((opts.systemPromptSections?.skills ?? 0) / 4),
+  };
   // C34: the ACTIVE model + system prompt are MUTABLE — `/models <id>`
   // re-resolves the full ModelConfig by id and rebuilds the prompt, so the
   // next run uses the new model. `opts.model`/`opts.systemPrompt` are the
@@ -215,6 +282,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     tuiConfig.bottom,
     systemPromptTokens,
     catalog,
+    systemPromptSectionTokens,
   );
   state = { ...state, modelUsage: opts.historicalModelUsage ?? {} };
   // The startup behavior-settings summary — a single multi-line INFO item
@@ -284,9 +352,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     if (telegramTickInFlight) return;
     telegramTickInFlight = true;
     try {
-      // A run is in flight (state.busy is set synchronously before a run
-      // starts, so it is accurate here) — skip this tick.
-      if (state.busy) return;
+      // D25: do NOT skip the tick while a run is in flight — the poll runs
+      // either way, and the post-await busy re-check below decides: busy →
+      // steer the batch into the running loop; idle → start a new run.
       let msgs: [string, string, string][] | null;
       try {
         msgs = await telegram.poll();
@@ -298,19 +366,19 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       // M6: the poll was in flight when stopTelegram() ran — a stop happened
       // during the await; do not act on these messages (no steer/run/reply).
       if (telegramStopped) return;
-      // Re-check after the await: a user prompt may have started a run while
-      // the poll was in flight.
+      // Re-check after the await: a run may be in flight either because it
+      // was already running when the tick fired (D25: the tick no longer
+      // early-returns on busy, so mid-turn messages are picked up here) or
+      // because a user prompt started one while the poll was in flight.
       if (state.busy) {
         // Steer every message into the ACTIVE running loop (the queue that
         // runPrompt installed — it is drained before the next LLM call). No
         // reply is sent here: the running run's final text answers the user's
-        // prompt.
-        for (const [, sender, text] of msgs) {
-          const prompt = `[telegram from ${sender}] ${text}`;
-          setStateNow({ ...state, items: [...state.items, { kind: "user", text: prompt }] });
-          steerQueue.push(prompt);
-        }
-        telegramInfo(`telegram: ${msgs.length} message(s) steered into the running turn`);
+        // prompt. Empty batch → null (a no-op: no steer, no items, no info
+        // line). One atomic state update (prompts + info line together).
+        const next = steerTelegramBusy(state, msgs, steerQueue);
+        if (next === null) return;
+        setStateNow(next);
         return;
       }
       // Idle — fold the whole batch into ONE prompt (a single run answers all

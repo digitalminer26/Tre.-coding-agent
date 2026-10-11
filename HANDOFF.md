@@ -1,5 +1,43 @@
 # Current project status (2026-10-11)
 
+**Uncommitted delta (2026-10-11): F2 section split + bwrap env allowlist +
+D25 telegram mid-turn steer.** Three workstreams landed in the working tree
+(not yet committed — pending user review):
+
+1. **F2 — system-prompt section split (docs/07 §7 F2).** The driver now
+   measures the startup prompt's variable sections at build time
+   (`systemPromptSectionChars` in `src/prompt/system-prompt.ts`) and the TUI
+   renders the `sys` number as `sys N (ctx X · skills Y)` (`systemPromptSections`
+   in `src/tui/state.ts`, consumed by `run.tsx`). `ctx` = project-context
+   files, `skills` = skills index; the identity/tools + guidelines portion is
+   `systemPromptTokens − ctx − skills` and is not shown separately. This closes
+   the "item 5 (system-prompt section split)" future item. F1 (message
+   composition — tools/model/user split) remains logged, not designed.
+
+2. **bwrap child-env allowlist (Linux sandbox).** `src/tools/sandbox-linux.ts`
+   adds `BWRAP_ENV_ALLOWLIST` (PATH, HOME, TMPDIR, LANG, LC_ALL, LC_CTYPE,
+   LC_MESSAGES, TERM, USER, LOGNAME, SHELL) + `buildBwrapChildEnv`, so the
+   sandboxed child no longer inherits the caller's full environment (which may
+   hold tokens/keys). A missing/empty PATH falls back to `BWRAP_DEFAULT_PATH`;
+   `GIT_CONFIG_NOSYSTEM` defaults to `1`, `TMPDIR` to `/tmp`, and `TRE_SANDBOX=1`
+   is always set. This closes the "consider an explicit allowlist separately"
+   follow-up.
+
+3. **D25 — Telegram mid-turn steer (the deferred busy-branch item).** The TUI
+   poller used to SKIP the tick while a run was in flight (`if (state.busy)
+   return;`), so bot messages accumulated in Telegram's queue until the run
+   went idle. D25 removes that skip: the poll now runs either way, and the
+   post-await busy re-check decides — busy → steer the batch into the running
+   loop, idle → start a new run. The steer decision is extracted as pure,
+   unit-testable helpers: `steerTelegramBatch` builds the
+   `[telegram from <sender>] <text>` prompts and `steerTelegramBusy` pushes
+   them to the active steering queue + appends them as visible user items + an
+   info line in one atomic update (returns null for an empty batch).
+
+**Gate.** `tsc` clean; `quality-check.sh` OK (51 files); full suite
+**835 pass / 0 fail / 13 skipped** (the 13 are the pre-existing TTY/TUI-live +
+platform skips).
+
 **REPL steering parity + sessionless-TUI heap caveat closed (2026-10-11).**
 Two small increments landed:
 
@@ -304,7 +342,17 @@ F3 check (after emitting the steer events) is retained, since cancellation can
 also occur while the consumer persists the emitted steer events. +1 regression
 test. Gate green: 697 pass / 0 fail / 13 skipped.
 
-**Compaction hardening follow-up D26 — audit fixes applied, budget issue open (2026-10-06, uncommitted).** A prior “resolved” claim was premature. Audit found estimate-triggered compaction could degrade without an LLM call; abort during retry could still persist fallback; fallback could enlarge a tiny context; and file-op evidence could match a later reused ID. Fixes: pass the caller’s evaluated trigger into compaction attempts; check abort after retry; cap fallback notice and refuse non-shrinking results; match tool results only within the adjacent result unit. Added targeted regression tests. **Open:** fixed prompt overhead is counted in the trigger but is not fully reserved against kept context. A strict fit guard broke valid current tests and was removed; do not claim the complete next-request estimate is guaranteed to fit. Full gate: 684 passed / 0 failed / 13 skipped. Changes remain uncommitted.
+**Compaction hardening follow-up D26 — audit fixes applied, budget issue open (2026-10-06, uncommitted).** A prior “resolved” claim was premature. Audit found estimate-triggered compaction could degrade without an LLM call; abort during retry could still persist fallback; fallback could enlarge a tiny context; and file-op evidence could match a later reused ID. Fixes: pass the caller’s evaluated trigger into compaction attempts; check abort after retry; cap fallback notice and refuse non-shrinking results; match tool results only within the adjacent result unit. Added targeted regression tests. **RESOLVED (2026-10-11, `3e60367`):** the open budget item — fixed prompt
+overhead counted in the trigger but not fully reserved against kept context —
+is closed by the keep-plan budget reservation: the keep window is now sized to
+`window − maxTokens − slack − promptOverhead − summaryBudget` in BOTH
+`compactContext` and `compactNow`, so the whole candidate ladder is on the
+same budget. The strict fit guard that was removed in D26 (it broke valid
+current compaction) was NOT re-added — the reservation shrinks the keep plan
+so the candidate fits, instead of refusing a valid compaction. Do not claim
+the complete next-request estimate is guaranteed to fit; the guarantee is
+`requestBudget + one indivisible unit`. The D26 audit fixes themselves landed
+in `d4dc284`. Full gate at the time: 684 passed / 0 failed / 13 skipped.
 
 **Release v0.1.5 — published (2026-10-06).** The first release since v0.1.4.
 Ships the Linux bwrap sandbox (module + wiring + the mount-order fix +
@@ -319,7 +367,7 @@ Assets at GitHub release v0.1.5: `tre-coding-agent-0.1.5-offline.tgz`
 The bundle does not touch user config (`~/.tre/tre/models.json`, auth
 files) — re-deploying to the VM keeps its llama.cpp model catalog.
 
-**Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. Child env still inherits most caller variables; consider an explicit allowlist separately. Host `/tmp` marker invisibility remains documented as a manual-only check.
+**Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. **RESOLVED (2026-10-11, uncommitted):** the "child env still inherits most caller variables; consider an explicit allowlist separately" item is closed by `BWRAP_ENV_ALLOWLIST` + `buildBwrapChildEnv` in `src/tools/sandbox-linux.ts` (see the top status entry) — the bwrap child now gets only the allowlisted vars + the three markers, not the caller's full environment. Host `/tmp` marker invisibility remains documented as a manual-only check.
 
 **ChatGPT login now works headless / over SSH (2026-10-06, `d605662`).**
 `tre. login chatgpt` on a machine with no browser (the lab VM, ssh sessions)
@@ -942,7 +990,23 @@ and `gpt-6-luna` (sessions of 2026-10-09: assistant text + tool round-trips,
 zero errors). The registered port/path set is now proven by a live handshake,
 not just the reference implementations.
 
-**Still open (user action required): the stored REFRESH token is dead.**
+**RESOLVED (2026-10-11): the dead-refresh-token item is closed.** The
+"stored REFRESH token is dead" note below was written at 13:44:31 UTC
+(commit `7154583`) — 2 minutes BEFORE a fresh token pair was saved to
+`~/.tre/chatgpt-auth.json` at **13:46:46 UTC** (`savedAt`), with
+`expiresAt` now **2026-10-21 13:46:46 UTC** (the old pair was due ~10-13).
+The access token in that fresh pair was verified live the same day:
+`chatgpt.com/backend-api/codex/responses` (gpt-6-luna, stream:true,
+store:false) → **HTTP 200**, stream started. The refresh token of the fresh
+pair was NOT force-probed deliberately — a successful refresh rotates it,
+and a manual probe would have left the file holding a dead old refresh
+token. If the 13:46 write was a fresh browser login (most likely, given the
+10-day expiry), the refresh token is valid by construction. Next natural
+check: the first real refresh on/after 2026-10-21.
+
+<details><summary>Superseded note (kept for the record): the stored REFRESH
+token was dead as of the 13:44 UTC check.</summary>
+
 Forced live refresh on 2026-10-11 → **HTTP 401** for BOTH the default JSON
 encoding and `form` (so it is not the encoding — the code matches Codex's
 JSON behavior; the token file was left untouched by the failed probes). The
@@ -953,6 +1017,8 @@ Consequence: when the current access token expires (~2026-10-13),
 `resolveAccessToken` will hit the 401 and throw `AuthRequiredError` — the
 user must run `tre. login chatgpt` again. Fix = one fresh browser login;
 no code change is indicated by the evidence.
+
+</details>
 
 ---
 
@@ -1123,9 +1189,12 @@ covered). Mock: `.repro/mock-cache.mjs` + `.repro/feed-docs07.sh` (local,
 gitignored).
 
 **Remaining (future, spec §7):** item 3 (message composition — tools/model/
-user split) and item 5 (system-prompt section split) are logged, not
-designed. docs/08 H2–H4 (same-failure repetition, loop visibility,
-checkpoint commits) also remain.
+user split, F1) is still logged, not designed. **Item 5 (system-prompt
+section split, F2) is RESOLVED (2026-10-11, uncommitted)** — `systemPromptSectionChars`
++ `systemPromptSections` render the `sys` number as `sys N (ctx X · skills Y)`
+(see the top status entry). docs/08: H2 (same-failure repetition) is
+implemented; H3 (loop visibility) and H4 (checkpoint commits) remain logged,
+not designed.
 
 ---
 
@@ -1514,6 +1583,15 @@ regions.
 
 **Status: WORK COMPLETE, gate green — COMMITTED.**
 
+> **Superseded (2026-10-04, `c37b6a0` + 2026-10-11 D25):** this section is the
+> original 2026-09-27 record and still says "30s" throughout — the poll cadence
+> is now **15s** (`TELEGRAM_POLL_MS = 15_000`, `TELEGRAM_LONG_POLL_SEC = 15`),
+> and the TUI startup line now reads `telegram: polling every 15s (reply via
+> bot)`. The original also **skipped the tick while a run was in flight**
+> (`if (state.busy) return;` — messages accumulated until idle); D25 (2026-10-11,
+> uncommitted) removes that skip so the poll steers into the running turn. See
+> the top status entry.
+
 **Why.** The telegram skill (always-active, previous increment) told the
 agent to poll "at natural breakpoints," but the agent is TURN-BASED: while
 the TUI is open and IDLE, no turn runs, so nothing ever polled — messages
@@ -1583,7 +1661,9 @@ batch into one prompt. (4) on a run error the shared `context` var holds the
 previous run's text → `runPrompt` returns its context; the reply path uses
 it, sends nothing on null.
 
-**Known limitations.** Not real-time: worst-case latency is one 30s tick.
+**Known limitations.** Not real-time: worst-case latency is one 15s tick
+(cadence was 30s at this section's date; `c37b6a0` moved it to 15s — see the
+superseding note above).
 While a long task is in flight, incoming messages steer into it and get no
 separate reply (by design — one reply per run). Plain/one-shot mode has no
 poller (the driver is TUI-only). The timer is unref'd, so it never keeps the

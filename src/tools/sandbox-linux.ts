@@ -195,18 +195,52 @@ export function __resetLinuxSandboxAvailability(): void {
   pathCache = undefined;
 }
 
+/** The ONLY caller variables the bwrap child receives (no spread — the
+ *  caller's env may hold tokens/keys/arbitrary state that must not leak into
+ *  the sandboxed child). PATH is needed for the child's shell to find
+ *  binaries; HOME for tools that read it (git, python); the locale/term/
+ *  identity vars for sane interactive behavior. GIT_* (other than
+ *  GIT_CONFIG_NOSYSTEM, set below) is intentionally NOT allowlisted — a
+ *  caller-supplied GIT_DIR/GIT_WORK_TREE could redirect git. */
+export const BWRAP_ENV_ALLOWLIST: readonly string[] = [
+  "PATH", "HOME", "TMPDIR",
+  "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+  "TERM", "USER", "LOGNAME", "SHELL",
+];
+
+/** Safe-default PATH for the bwrap child when the caller's PATH is missing or
+ *  empty — the standard Linux search order, so `node`, `git`, `python3`, etc.
+ *  are still found. The child's rootfs is the caller's own filesystem (bwrap
+ *  binds the real dirs), so this default is a superset of what the caller's
+ *  PATH would have searched. */
+export const BWRAP_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/** Pure: given the caller env, return the child env (allowlisted vars +
+ *  the three markers). No I/O. A missing or EMPTY caller PATH falls back to
+ *  `BWRAP_DEFAULT_PATH` (the child shell must be able to find its binaries);
+ *  a non-empty caller PATH passes through unchanged. */
+export function buildBwrapChildEnv(callerEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const k of BWRAP_ENV_ALLOWLIST) {
+    const v = callerEnv[k];
+    if (v !== undefined) env[k] = v;
+  }
+  if (env.PATH === undefined || env.PATH === "") env.PATH = BWRAP_DEFAULT_PATH;
+  env.GIT_CONFIG_NOSYSTEM = callerEnv.GIT_CONFIG_NOSYSTEM ?? "1";
+  env.TMPDIR = "/tmp";
+  env.TRE_SANDBOX = "1";
+  return env;
+}
+
 /** Spawn a command under the Linux Bubblewrap workspace policy. */
 export async function spawnLinuxSandboxedBash(
   command: string,
   opts: { cwd?: string; env: NodeJS.ProcessEnv; detached?: boolean; extraRoots?: string[] },
 ): Promise<SandboxSpawn> {
   const cwd = opts.cwd ?? process.cwd();
-  const env: NodeJS.ProcessEnv = {
-    ...opts.env,
-    GIT_CONFIG_NOSYSTEM: opts.env.GIT_CONFIG_NOSYSTEM ?? "1",
-    TMPDIR: "/tmp",
-    TRE_SANDBOX: "1",
-  };
+  // Allowlisted child env (no ...opts.env spread) — the three markers are
+  // always set; both the bwrap and the nested (TRE_SANDBOX=1) case use it.
+  const env = buildBwrapChildEnv(opts.env);
   const shell = existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
   if (process.env.TRE_SANDBOX === "1") {
     return { child: spawn(shell, ["-c", command], { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: opts.detached }), dispose: async () => {} };
