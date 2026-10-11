@@ -275,6 +275,16 @@ test("context_compacted appends a compaction item", () => {
   assert.equal(s.items[0]!.kind, "compaction");
 });
 
+test("compaction_skipped appends an info item (the TUI's sinks are nulled)", () => {
+  // compactNow fires (or is forced) but nothing can be compacted; the skip is
+  // surfaced as this event so the TUI — whose sinks are nulled — still shows
+  // it as a note item, and the context is left untouched.
+  const s = fold([{ type: "compaction_skipped", reason: "no safe shrink is possible" }]);
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "info");
+  if (last.kind === "info") assert.equal(last.text, "no safe shrink is possible");
+});
+
 test("contextTokens: tracks the last done usage; compaction resets to the new estimate", () => {
   // No usage yet → 0 (the `context` field shows the window, "no usage yet").
   const s0 = makeInitialState("m", {}, 131072, 32768);

@@ -242,6 +242,16 @@ export type AgentEvent =
        *  anyway: smaller than before, larger than the budget. */
       overBudget?: boolean;
     }
+  | {
+      /** The compaction trigger fired (or was forced) but nothing could be
+       *  compacted — the context is UNCHANGED. Carries the reason (the TUI
+       *  renders it as a note item; the CLI prints it to stderr). Without
+       *  this event the TUI's skip note was swallowed (compactNow writes to
+       *  its sinks, which the TUI nulls out) and the user saw no sign that
+       *  the context was left uncompacted. */
+      type: "compaction_skipped";
+      reason: string;
+    }
   | AssistantStreamEvent;
 
 /**

@@ -531,6 +531,12 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         `\n✂ context compacted: ~${Math.round(ev.tokensBefore / 100) / 10}k tokens → summary (${ev.summaryChars} chars) + last ${ev.messagesKept} message(s) kept${degradedNote}\n`,
       );
       break;
+    case "compaction_skipped":
+      // The trigger fired (or was forced) but nothing could be compacted —
+      // the context is unchanged. Emitted by compactNow so the TUI (whose
+      // sinks are nulled) still surfaces the skip; the CLI prints it here.
+      sinks.err.write(`\n${ev.reason}\n`);
+      break;
     case "turn_budget":
       // C26: informational — the run continues on a fresh cycle.
       sinks.err.write(
@@ -670,7 +676,14 @@ export async function compactNow(deps: {
     if (session) {
       const firstId = ids.get(kept[0]!);
       if (!firstId) {
-        sinks.err.write("note: compaction skipped — kept messages have no session entry ids\n");
+        // A candidate was produced but can't be persisted (no session entry
+        // ids) — nothing is compacted. Emit the skip as an EVENT (not a
+        // direct stderr write) so the TUI, whose sinks are nulled, still
+        // surfaces it; the CLI prints it via printEvent.
+        await deps.onEvent({
+          type: "compaction_skipped",
+          reason: "compaction skipped — kept messages have no session entry ids",
+        });
         return undefined;
       }
       const entryId = await session.appendCompaction(rawSummary, firstId, tokensBefore);
@@ -746,8 +759,13 @@ export async function compactNow(deps: {
       : shrink.notice.content;
     return await emit(raw, shrink.kept, "degraded");
   }
-  // D3: context too short to fold — today's skip behavior.
-  sinks.err.write("compaction failed and no safe shrink is possible — the next call may exceed the window.\n");
+  // D3: context too short to fold — the skip. Emit it as an EVENT (not a
+  // direct stderr write) so the TUI, whose sinks are nulled, still surfaces
+  // it; the CLI prints it via printEvent.
+  await deps.onEvent({
+    type: "compaction_skipped",
+    reason: "compaction failed and no safe shrink is possible — the next call may exceed the window",
+  });
   return undefined;
 }
 

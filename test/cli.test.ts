@@ -1746,11 +1746,16 @@ test("D: compactNow — force: true compacts even when the trigger is not met", 
 });
 
 test("D: compactNow — force with a too-short context → undefined (no plan)", async () => {
-  const { deps, err } = compactNowDeps(
+  const { deps, events } = compactNowDeps(
     fakeStream([{ type: "text", text: "S." }]),
     { force: true, context: [{ role: "user", content: "q1", timestamp: 1 }] },
   );
   const r = await compactNow(deps);
   assert.equal(r, undefined);
-  assert.match(err(), /no safe shrink is possible/);
+  // The skip is surfaced as an EVENT (not a direct stderr write) so the TUI,
+  // whose sinks are nulled, still sees it; the CLI prints it via printEvent.
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.type, "compaction_skipped");
+  if (events[0]!.type === "compaction_skipped")
+    assert.match(events[0]!.reason, /no safe shrink is possible/);
 });

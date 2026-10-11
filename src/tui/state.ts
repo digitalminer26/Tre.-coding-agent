@@ -559,6 +559,13 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         ],
       };
     }
+    case "compaction_skipped": {
+      // compactNow fired (or was forced) but nothing could be compacted —
+      // the context is UNCHANGED. The TUI's sinks are nulled, so this event
+      // is the only channel that surfaces the skip; render it as a note
+      // item (the same treatment as the other compactNow diagnostics).
+      return { ...state, items: [...state.items, { kind: "info", text: ev.reason }] };
+    }
     default:
       return state;
   }
