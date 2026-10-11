@@ -219,6 +219,20 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
   no successful verification in between" or "N turns with zero successful
   calls". The strongest anti-loop signal and the riskiest (false positives
   on legitimately iterative work) — needs its own design pass.
-- **F2 — Loop telemetry.** Count loop/stall/budget stops per session in
-  the TUI bottom line, so the user sees the agent fighting its cage in
-  real time (pairs with H3).
+- **F2 — Loop telemetry (implemented — minimal scope).** The TUI counts
+  how often the loop guard's autonomous retry (H5) actually RECOVERED, per
+  session (the TUI process — the events are not persisted, so the counters
+  reset on restart, like the other tallies): a run in which the guard fired
+  counts once in `fired` (one per run, no matter how many retries it spent),
+  and a run that fired a retry and ended with a
+  clean `stop` counts as one recovered run (one per run, no matter how many
+  retries it spent; a run that fired but ended `loop` (retry budget spent) or
+  `budget`/`length`/`error`/`aborted` did not complete — it is in `fired`,
+  not `recovered`).
+  Surfaced by `/stats_loop_guard` (one info line: fires, recovered, rate,
+  verdict) — deliberately NOT a bottom-line field (the bottom line is
+  reserved for high-frequency daily-use items). This is the evidence for the
+  stall-detector question: frequent fires with a low recovery rate argue for
+  a higher retry budget, H3 visibility, or the stall guard. The spec-literal
+  part (counting loop/stall/budget stops in the bottom line, "fighting its
+  cage in real time") is deferred.

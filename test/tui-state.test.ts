@@ -44,6 +44,7 @@ import {
   SLASH_COMMANDS,
   slashCandidates,
   statsLine,
+  statsLoopGuardLine,
   steerInput,
   submitInput,
   submitSlashBusy,
@@ -1383,8 +1384,136 @@ test("handleSlashCommand: /stats appends one info line and touches nothing else"
   assert.equal(r.state.toolCalls, 4);
 });
 
-// ── /restart: in-place relaunch (feedback here; the re-exec is the driver's) ──
+// ── F2 (docs/08 §7): loop-guard telemetry — /stats_loop_guard ──────────────
 
+test("F2: guard_retry increments the session fire count and marks the run", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 5, retry: 1, maxRetries: 1 });
+  assert.equal(s.guardRetry.fired, 1, "the session fire count increments");
+  assert.equal(s.guardRetry.recovered, 0, "recovery is not known until agent_end");
+  assert.equal(s.guardRetryRunFired, 1, "the current run is marked as having fired");
+  // the info item still lands (H5 behavior unchanged)
+  const last = s.items[s.items.length - 1];
+  assert.equal(last?.kind, "info");
+});
+
+test("F2: a run that fires a retry and ends stop is recovered (one per run)", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 5, retry: 1, maxRetries: 2 });
+  s = applyEvent(s, { type: "guard_retry", turn: 7, retry: 2, maxRetries: 2 });
+  assert.equal(s.guardRetry.fired, 1, "fired is per-RUN — two retries in one run count once");
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  assert.equal(s.guardRetry.recovered, 1, "ONE recovered run, not one per retry");
+  assert.equal(s.guardRetryRunFired, 0, "the per-run mark clears at agent_end");
+});
+
+test("F2: a run that fires a retry but ends budget/length/error is NOT recovered", () => {
+  for (const stopReason of ["budget", "length", "error"] as const) {
+    let s = makeInitialState("m");
+    s = applyEvent(s, { type: "agent_start" });
+    s = applyEvent(s, { type: "guard_retry", turn: 5, retry: 1, maxRetries: 1 });
+    s = applyEvent(s, { type: "agent_end", stopReason, messages: [] });
+    assert.equal(s.guardRetry.fired, 1, `${stopReason}: the fire is still counted`);
+    assert.equal(s.guardRetry.recovered, 0, `${stopReason}: no completion — not recovered`);
+  }
+});
+
+test("F2: a run that fires a retry and ends loop is NOT recovered", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 5, retry: 1, maxRetries: 1 });
+  s = applyEvent(s, { type: "agent_end", stopReason: "loop", messages: [] });
+  assert.equal(s.guardRetry.fired, 1);
+  assert.equal(s.guardRetry.recovered, 0, "the retry budget was spent — not recovered");
+});
+
+test("F2: the per-run mark clears at agent_end (a later no-fire run is not recovered)", () => {
+  let s = makeInitialState("m");
+  // run 1: fires and recovers
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 3, retry: 1, maxRetries: 1 });
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  assert.deepEqual(s.guardRetry, { fired: 1, recovered: 1 });
+  assert.equal(s.guardRetryRunFired, 0, "agent_end clears the per-run mark");
+  // run 2: no fire, ends stop → must NOT count as recovered (the mark is 0)
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  assert.deepEqual(s.guardRetry, { fired: 1, recovered: 1 }, "unchanged — no new fire, no new recovery");
+});
+
+test("F2: multiple runs accumulate (recover then fail)", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 2, retry: 1, maxRetries: 1 });
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, { type: "guard_retry", turn: 4, retry: 1, maxRetries: 1 });
+  s = applyEvent(s, { type: "agent_end", stopReason: "loop", messages: [] });
+  assert.equal(s.guardRetry.fired, 2);
+  assert.equal(s.guardRetry.recovered, 1);
+});
+
+test("statsLoopGuardLine: no fires → the 'not fired' note", () => {
+  assert.equal(
+    statsLoopGuardLine(makeInitialState("m")),
+    "loop guard: no guard-retry fires this session (the loop guard has not fired)",
+  );
+});
+
+test("statsLoopGuardLine: fires + recoveries → counts, rate, verdict", () => {
+  const base = makeInitialState("m");
+  // 2 fires, 1 recovered (50%)
+  const half = { ...base, guardRetry: { fired: 2, recovered: 1 } };
+  assert.equal(
+    statsLoopGuardLine(half),
+    "loop guard: 2 fire(s), 1 recovered (50%) — 1 fire(s) did not complete after the retry (this session)",
+  );
+  // all recovered
+  const all = { ...base, guardRetry: { fired: 3, recovered: 3 } };
+  assert.equal(
+    statsLoopGuardLine(all),
+    "loop guard: 3 fire(s), 3 recovered (100%) — every fire recovered (this session)",
+  );
+  // none recovered
+  const none = { ...base, guardRetry: { fired: 2, recovered: 0 } };
+  assert.equal(
+    statsLoopGuardLine(none),
+    "loop guard: 2 fire(s), 0 recovered (0%) — no fire recovered (none completed after the retry) (this session)",
+  );
+});
+
+test("handleSlashCommand: /stats_loop_guard appends the telemetry line (pure, busy-safe)", () => {
+  const s = {
+    ...makeInitialState("m"),
+    guardRetry: { fired: 1, recovered: 1 },
+    input: "left alone",
+    busy: true,
+  };
+  const r = handleSlashCommand(s, "/stats_loop_guard");
+  assert.equal(r.handled, true);
+  assert.equal(r.state.items.length, s.items.length + 1, "exactly one item appended");
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.equal(
+    (info as { text: string }).text,
+    "loop guard: 1 fire(s), 1 recovered (100%) — every fire recovered (this session)",
+  );
+  // the rest of the state is untouched (busy stays — the run continues)
+  assert.equal(r.state.input, "left alone");
+  assert.equal(r.state.busy, true);
+  assert.deepEqual(r.state.guardRetry, { fired: 1, recovered: 1 }, "the report does not mutate the counters");
+});
+
+test("SLASH_COMMANDS: /stats_loop_guard is registered with a summary", () => {
+  const cmd = SLASH_COMMANDS.find((c) => c.name === "stats_loop_guard");
+  assert.ok(cmd !== undefined, "stats_loop_guard is in the registry");
+  assert.ok(cmd!.summary.length > 0, "the menu shows a summary");
+  assert.ok(slashCandidates("/stats_").includes("/stats_loop_guard"), "the menu prefix-filters it");
+});
+
+// ── /restart: in-place relaunch (feedback here; the re-exec is the driver's) ──
 test("SLASH_COMMANDS: /restart is registered with a summary", () => {
   const restart = SLASH_COMMANDS.find((c) => c.name === "restart");
   assert.ok(restart !== undefined, "restart is in the registry");

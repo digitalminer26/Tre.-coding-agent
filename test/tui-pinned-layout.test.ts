@@ -583,14 +583,14 @@ test("slashCandidates: bare command words only, alphabetical prefix filter", () 
   assert.deepEqual(slashCandidates(""), []); // no slash
   assert.deepEqual(slashCandidates("quit"), []); // no leading slash
   assert.deepEqual(slashCandidates("/quit"), ["/quit"]);
-  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/models", "/quit", "/restart", "/stats", "/usage"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/models", "/quit", "/restart", "/stats", "/stats_loop_guard", "/usage"]); // all, alphabetical
   assert.deepEqual(slashCandidates("/u"), ["/usage"]); // usage remains discoverable by prefix
   assert.deepEqual(slashCandidates("/d"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/di"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/display-bottom"), ["/display-bottom"]); // exact
   assert.deepEqual(slashCandidates("/c"), ["/compact", "/context"]);
   assert.deepEqual(slashCandidates("/m"), ["/models"]);
-  assert.deepEqual(slashCandidates("/st"), ["/stats"]);
+  assert.deepEqual(slashCandidates("/st"), ["/stats", "/stats_loop_guard"]); // both stats commands
   assert.deepEqual(slashCandidates("/zz"), []); // no match
   assert.deepEqual(slashCandidates("/display-bottom m"), []); // space → arguments, menu hides
   assert.deepEqual(slashCandidates("/quit "), []); // completed word (trailing space)
@@ -601,7 +601,7 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // no menu for a plain prompt
   assert.deepEqual(suggestMenu({ ...s, input: "hi" }, 80), []);
 
-  // "/" → all commands (9), but the menu caps at MENU_MAX_LINES (5) —
+  // "/" → all commands (10), but the menu caps at MENU_MAX_LINES (5) —
   // later commands, including /usage, are hidden; type /u to find it.
   const all = suggestMenu({ ...s, input: "/" }, 80);
   assert.equal(all.length, 5);
