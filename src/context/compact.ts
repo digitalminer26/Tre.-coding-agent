@@ -630,15 +630,27 @@ export async function compactContext(opts: {
   // with a small/negative keepTokens keeps the minimal atomic suffix (the
   // walk breaks on the first unit).
   //
-  // Resulting UNIFORM guarantee (the keep budget is a PLANNING target —
-  // atomic tool-call/result units can't be split, so the kept suffix may
-  // overshoot it by at most one indivisible unit, and an accepted summary is
-  // bounded by the summarizer's maxTokens): the candidate [summary, …kept] +
-  // overhead is bounded by requestBudget + one indivisible unit in every
-  // regime. When the headroom is below 512 (or negative), the plan keeps the
-  // minimal atomic suffix and the candidate can still exceed requestBudget —
-  // best effort; compactNow then flags the applied candidate `overBudget`
-  // (it is still a strict reduction of the old context).
+  // Resulting guarantee (the keep budget is a PLANNING target, not a hard cap
+  // — two bounded extensions can push the kept suffix past it):
+  //   (1) atomic tool-call/result units can't be split, so the kept suffix may
+  //       overshoot the target by at most ONE indivisible unit (and an
+  //       accepted summary is bounded by the summarizer's maxTokens);
+  //   (2) planCompaction's mandatory last-user preservation
+  //       (`if (lastUser > 0 && lastUser < keepFrom) keepFrom = lastUser`)
+  //       moves the keep boundary back to the most recent user message, which
+  //       can be MANY units behind the target — so the kept suffix (and the
+  //       candidate) can exceed the target by more than one indivisible unit.
+  // In the normal regime (no last-user extension) the candidate
+  // [summary, …kept] + overhead is bounded by requestBudget + one indivisible
+  // unit; when the last-user extension fires it is bounded by requestBudget +
+  // the extension (the extra units pulled in to keep the most recent user
+  // message verbatim). When the headroom is below 512 (or negative), the plan
+  // keeps the minimal atomic suffix and the candidate can still exceed
+  // requestBudget — best effort. In ALL cases compactNow validates the
+  // complete candidate against requestBudget after the summary and flags the
+  // applied candidate `overBudget` when it exceeds the budget (it is still a
+  // strict reduction of the old context), so the caller always knows when the
+  // applied candidate was over budget.
   const headroom =
     opts.model.contextWindow - opts.model.maxTokens - 1024 - promptOverhead - summaryBudget;
   const windowCap = headroom;

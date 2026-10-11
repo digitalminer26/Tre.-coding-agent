@@ -1,5 +1,25 @@
 # Current project status (2026-10-11)
 
+**D26-audit comment correction (2026-10-11).** The D26 compaction keep-floor
+fix (`4188529`) documented a "UNIFORM guarantee" that the compaction candidate
+is "bounded by `requestBudget` + one indivisible unit in every regime". An
+independent audit (gpt-6-luna, cycle 1) found that comment overstates the
+bound: `planCompaction`'s mandatory last-user preservation
+(`if (lastUser > 0 && lastUser < keepFrom) keepFrom = lastUser`) moves the keep
+boundary back to the most recent user message, which can be MANY units behind
+the backward-walk target — so the kept suffix (and the candidate) can exceed
+the target by more than one indivisible unit. This is a documentation-accuracy
+fix, not a behavior change: the `overBudget` flag in `compactNow` already
+catches any candidate that exceeds `requestBudget` (including the
+last-user-extended case), so the caller always knows when the applied
+candidate was over budget. The guarantee comments in BOTH `src/context/compact.ts`
+and `src/cli/main.ts` now state the bound precisely (normal regime: +one
+indivisible unit; last-user extension: +the extension; floor regime: best
+effort, flagged `overBudget`) and no longer call it "uniform". New regression
+test `planCompaction: last-user preservation extends the kept suffix by more
+than one unit (bound is a planning target)` in `test/compact.test.ts` pins the
+extension behavior.
+
 **Uncommitted delta (2026-10-11): F2 section split + bwrap env allowlist +
 D25 telegram mid-turn steer.** Three workstreams landed in the working tree
 (not yet committed — pending user review):

@@ -274,6 +274,40 @@ test("planCompaction: big keepTokens target is honored (keeps at least that many
   assert.notEqual(plan.kept[0]!.role, "toolResult");
 });
 
+test("planCompaction: last-user preservation extends the kept suffix by more than one unit (bound is a planning target)", () => {
+  // The keep budget is a PLANNING target, not a hard cap. planCompaction's
+  // mandatory last-user preservation (`if (lastUser > 0 && lastUser < keepFrom)
+  // keepFrom = lastUser`) moves the keep boundary back to the most recent user
+  // message, which can be MANY units behind the backward-walk target — so the
+  // kept suffix (and the candidate) can exceed the target by more than one
+  // indivisible unit. This pins that behavior: with a small keep target the
+  // walk stops at the last two units, but the most recent user message sits
+  // several units back, so the kept suffix is extended to include it (plus the
+  // intervening toolCall/result unit).
+  const ctx: AgentMessage[] = [
+    user("old"), // unit 0 (index 0) — folded
+    assistantText("a"), // unit 1 (index 1) — folded
+    user("recent task"), // unit 2 (index 2) — the most recent user message (lastUser)
+    assistantToolCall("bash", { command: "ls" }), // unit 3 (index 3) — pulled in by the extension
+    toolResult("ok"), // (index 4)
+    assistantToolCall("bash", { command: "pwd" }), // unit 5 (index 5) — walk target keepFrom
+    toolResult("ok"), // (index 6)
+    assistantText("done"), // unit 7 (index 7)
+  ];
+  // keepTokens 5: the backward walk stops at keepFrom 5 (units 5+7), but
+  // lastUser is 2, so the keep boundary is extended back to index 2.
+  const plan = planCompaction(ctx, 5);
+  assert.ok(plan, "a plan exists");
+  assert.equal(plan.keepFrom, 2, "keepFrom lands on the most recent user message");
+  assert.equal(plan.kept[0]!.role, "user", "the kept suffix starts at the user message");
+  assert.ok(
+    plan.kept.includes(ctx[3]!),
+    "the intervening toolCall unit (before the walk target) is kept — the extension added more than one indivisible unit",
+  );
+  assert.equal(plan.toSummarize.length > 0, true, "the old units are folded");
+  assert.deepEqual([...plan.toSummarize, ...plan.kept], ctx, "no overlap, no loss");
+});
+
 test("renderTranscript: user text, tool calls with args, results incl. (ERROR)", () => {
   const t = renderTranscript([
     user("do the thing"),
