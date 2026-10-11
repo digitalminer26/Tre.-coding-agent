@@ -1,4 +1,37 @@
-# Current project status (2026-10-09)
+# Current project status (2026-10-11)
+
+**Compaction: keep-plan budget reservation (D26) + skip visibility (2026-10-11).**
+Two committed increments in the compaction area, each one behavior (self-improve
+protocol):
+
+1. **Keep-plan budget reservation (D26) — `3e60367`.** The open D26 item: the
+   fixed prompt overhead was counted in the trigger but not fully reserved
+   against the kept context, so the candidate `[summary, …kept] + overhead`
+   exceeded the input budget by ~the summary's size. The keep window is now
+   sized to `window − maxTokens − slack − promptOverhead − summaryBudget`
+   (`summaryBudget = min(1024, maxTokens)` — an accepted summary is bounded by
+   the summarizer's `maxTokens`, since one that hits the cap is rejected as
+   `stopReason "length"`). Applied in BOTH `compactContext` (the LLM path) and
+   `compactNow`'s `keepTokens` (the `ruleBasedShrink` fallback), so the whole
+   candidate ladder is on the same budget. This is a PLANNING-TIME reservation,
+   not the strict fit-guard that was removed in D26 (which broke valid current
+   compaction) — it shrinks the keep plan so the candidate fits, and does not
+   refuse a valid compaction. +1 regression test (`compactContext: the keep
+   plan reserves the summary budget…`).
+
+2. **Skip visibility (TUI) — `36bd0e5`.** `compactNow`'s two skip paths (no
+   session entry ids; D3 "no safe shrink") wrote directly to `sinks.err` and
+   returned `undefined` with NO event. The TUI nulls its sinks, so a skipped
+   compaction was invisible there — the user saw no sign the context was left
+   uncompacted. The skip is now a `compaction_skipped` `AgentEvent` (the same
+   channel as the success path's `context_compacted`): the TUI renders it as a
+   note (info) item via `applyEvent`; the plain CLI prints it via `printEvent`.
+   +2 tests (the TUI `applyEvent` case; the CLI D3-skip now asserts the event).
+
+**Gate.** `tsc` clean; full suite **809 pass / 0 fail / 13 skipped** (the 13 are
+the pre-existing TTY/TUI-live + platform skips). `quality-check.sh` source scan
+OK (51 files). PTY frame capture confirms the pinned block is intact (hint / `─`
+/ input row / `─` / `model:`) after the `state.ts` change.
 
 **Deferred-copy regression coverage hardened (implement-audit, part 3 fix —
 2026-10-09).** The audit found the part-3 deferred tests could not catch a
