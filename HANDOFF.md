@@ -2086,14 +2086,14 @@ traceable to the published packages, not a local install); README's
 the two stale "Still open" lines in older sections are marked RESOLVED.
 Gate re-run clean (433 pass / 0 fail / 8 skip).
 
-**Still open (needs user decision, not started):** removing the `pi`
-dependency — scope unresolved (all references vs the borrowed code /
-`.pi/` convention). NOTE (2026-09-27): the convention half (`.pi/` paths)
-is resolved by this section; the scope question is now only about the
-factual citations + L1/L2 borrowed code, which the freeze note in
-`docs/03` says stand as-is until the reference is re-audited.
+**RESOLVED (no action needed):** the "removing the `pi` dependency" item is
+stale — `pi` was never a package.json dependency (it was a global install
+used as the design reference, removed 2026-09-27; `git log -S` confirms it
+never entered package.json). The `.pi/` convention half is resolved by this
+section; the remaining L1/L2 factual citations stand as-is, frozen by the
+`docs/03` freeze note until the reference is re-audited. Nothing to remove.
 
-# HANDOFF — TUI scroll: stop resetting the viewport when steering (IN PROGRESS, 2026-09-26)
+# HANDOFF — TUI scroll: stop resetting the viewport when steering (COMPLETED, 2026-09-27)
 
 **User report:** two-finger trackpad drag doesn't scroll the TUI, and the
 screen "resets/clears" when steering (typing a line + Enter mid-run).
@@ -2110,7 +2110,7 @@ increments, PTY-verified.
   (follow bottom), so a steer yanks the viewport back to the bottom. Repro:
   scroll up to `↑22/22`, steer "be brief" → hint flips back to `enter send`.
 
-**Increment 1 (next): preserve `viewTop` in `steerInput`.**
+**Increment 1 (COMPLETED, `dd25cc6` 2026-09-27): preserve `viewTop` in `steerInput`.**
 - Change: `src/tui/state.ts` `steerInput` — drop `viewTop: null` from the
   returned state (keep `input:""`, `cursorPos:0`, `historyIdx:null`, history
   push, user item, `busy:true`).
@@ -2158,9 +2158,9 @@ increments, PTY-verified.
   'scrolled' or 'enter send') = the hint-sequence check.
 - `out.log` / `out-clean.txt` — earlier plain wheel repro.
 
-**State:** BOTH increments done. Increment 1 committed (`dd25cc6`).
-Increment 2 (run.tsx 1002 + e2e.sh grep -qF fix + handoff) is staged for
-commit. Mock server may still be running (`pkill -f mock-slow.mjs` to stop;
+**State:** BOTH increments done and committed. Increment 1 (`dd25cc6`),
+Increment 2 (`1f02781`: run.tsx 1002 + e2e.sh grep -qF fix + handoff).
+Mock server may still be running (`pkill -f mock-slow.mjs` to stop;
 port in `.repro/mock-port.txt`). Root `models.json` deleted.
 
 ---
@@ -2698,11 +2698,10 @@ heredoc commit form → reversible (no prompt in ask); `git stash push -m wip`
 `echo $(rm -rf x)` / `$(curl …)` → neither read-only nor reversible (still
 gate); `git commit -m "$(rm -rf /)"` → destructive label inherited.
 
-**Still open (needs user decision, not started):** removing the `pi`
-dependency — scope unresolved (all references vs the borrowed code /
-`.pi/` convention). RESOLVED 2026-09-27 (see top section): the convention
-half (`.pi/` paths) is done; the rest is the factual citations, frozen by
-the `docs/03` freeze note.
+**RESOLVED (no action needed):** the "removing the `pi` dependency" item is
+stale — `pi` was never a package.json dependency (global install removed
+2026-09-27). The `.pi/` convention half is done; the L1/L2 factual citations
+stand as-is, frozen by the `docs/03` freeze note. Nothing to remove.
 
 # HANDOFF — reversible actions stop prompting; approval questions state reversibility (2026-09-25)
 
@@ -2746,11 +2745,10 @@ without a prompt in ask mode; `curl -s …` prompts with the
 `[not provably reversible]` tag; `rm -rf /` still prompts DESTRUCTIVE;
 `--no-approve` still allows `ls` and blocks `mv a b`.
 
-**Still open (needs user decision, not started):** removing the `pi`
-dependency — scope unresolved (all references vs the borrowed code /
-`.pi/` convention). RESOLVED 2026-09-27 (see top section): the convention
-half (`.pi/` paths) is done; the rest is the factual citations, frozen by
-the `docs/03` freeze note.
+**RESOLVED (no action needed):** the "removing the `pi` dependency" item is
+stale — `pi` was never a package.json dependency (global install removed
+2026-09-27). The `.pi/` convention half is done; the L1/L2 factual citations
+stand as-is, frozen by the `docs/03` freeze note. Nothing to remove.
 
 # HANDOFF — thinking block: the model's reasoning reads as a distinct, scannable block (2026-09-25)
 
