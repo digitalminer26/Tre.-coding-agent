@@ -1637,6 +1637,21 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     r.on("line", (line: string) => {
       const c = consumer;
       if (!c) {
+        // Steering (plain REPL): a non-empty, non-slash line typed while a
+        // run is in flight is guidance for the running loop — echo it and
+        // queue it for the loop's next drain (the keep-alive path). The TUI
+        // does the same (submitInput → steerInput); the REPL previously
+        // buffered such lines as the NEXT prompt, so steering was TUI-only.
+        // Slash lines and empty lines keep the old behavior (queued as the
+        // next prompt).
+        if (active && activeSteer !== null) {
+          const trimmed = line.trim();
+          if (trimmed !== "" && !trimmed.startsWith("/")) {
+            activeSteer.push(trimmed);
+            sinks.err.write(`steered into the running turn: ${trimmed}\n`);
+            return;
+          }
+        }
         queuedLines.push(line);
         return;
       }

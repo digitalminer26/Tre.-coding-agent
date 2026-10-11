@@ -271,6 +271,62 @@ test("main: bare launch on piped stdin → plain REPL (ui auto), exits 0 on EOF"
   assert.match(S.out(), /hi there/); // the scripted turn's text was streamed
 });
 
+test("REPL: a line typed while a run is in flight STEERS the loop (not queued as the next prompt)", async (t) => {
+  // node --test runs with non-TTY stdin; under a real TTY the auto resolver
+  // would pick the TUI, so skip there.
+  if (process.stdin.isTTY) t.skip("stdin is a TTY");
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  // turn 1 (only the seed prompt in context): emit a partial delta, then HANG
+  // so the run stays active while the steer line is pushed. turn 2 (the steer
+  // is now in context): the steer's reply.
+  let signalRunStarted: () => void = () => {};
+  const runStarted = new Promise<void>((r) => (signalRunStarted = r));
+  let releaseTurn1: () => void = () => {};
+  const streamFn: StreamFn = (model, ctx, opts) => {
+    if (ctx.messages.length <= 1) {
+      // turn 1 — the run is now in flight.
+      signalRunStarted();
+      const base: AssistantMessage = {
+        role: "assistant", content: [], model: model.id, provider: model.provider,
+        stopReason: "stop", timestamp: Date.now(),
+      };
+      return (async function* () {
+        yield { type: "start", partial: base };
+        yield { type: "text_delta", delta: "working", partial: { ...base, content: [{ type: "text", text: "working" }] } };
+        await new Promise<void>((r) => (releaseTurn1 = r)); // hold the turn open
+        yield { type: "done", message: { ...base, content: [{ type: "text", text: "working" }], stopReason: "stop" } };
+      })();
+    }
+    // turn 2 — the steer was appended to the context by the loop's drain.
+    return fakeStream([{ type: "text", text: "done" }])(model, ctx, opts);
+  };
+  // stdin: push the prompt, wait until turn 1 has started (the run is now
+  // active), THEN push the steer line + release turn 1 + EOF. A plain
+  // pipedStdin would push both lines before the run starts, so the steer
+  // would be mis-queued as the next prompt.
+  const stdin = new Readable({ read: () => {} });
+  stdin.push("start work\n");
+  void runStarted.then(() => {
+    stdin.push("steer me\n"); // processed while active → steered (echoed)
+    // Hold turn 1 open long enough that the steer line is DEFINITELY processed
+    // (as a steer, not the next prompt) before the run ends — releasing in the
+    // same microtask would race the line event against the generator's done.
+    setTimeout(() => {
+      releaseTurn1(); // end turn 1's hang → the run proceeds to turn 2
+      stdin.push(null); // EOF
+    }, 50);
+  });
+  const code = await main(["--tools", "none", "--models", models, "--cwd", dir], {
+    streamFn,
+    sinks: S.sinks,
+    stdin,
+  });
+  assert.equal(code, 0);
+  assert.match(S.err(), /steered into the running turn: steer me/); // the steer was echoed
+  assert.match(S.out(), /done/); // the steer's reply was streamed (turn 2 ran)
+});
+
 /** A fresh piped REPL stdin (per test) — the shared process.stdin can only
  *  be pushed-to ONCE (EOF), so each REPL test owns its own stream. */
 function pipedStdin(lines: string[]): NodeJS.ReadableStream {
