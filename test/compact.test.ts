@@ -584,6 +584,46 @@ test("compactContext: the keep plan reserves the summary budget, so the candidat
   );
 });
 
+test("compactContext: floor regime — the keep plan targets the reserved headroom, not the 512 floor", async () => {
+  // window 3000 / maxTokens 200 → summaryBudget = min(1024, 200) = 200.
+  // With a large prompt overhead (1276), the reserved headroom is
+  //   3000 − 200 − 1024 − 1276 − 200 = 300  (a few hundred tokens, < 512).
+  // Under the OLD 512 floor the keep target would be 512, so the walk would
+  // keep 52 of the 10-token units (520 tokens) — leaving NO room for the
+  // overhead + summary, so the candidate blew past the input budget by far
+  // more than one atomic unit. The fix makes the keep plan target the
+  // headroom (300) in ALL regimes: the walk keeps 30 units (300 tokens), so
+  // the candidate [summary, …kept] + overhead stays within one indivisible
+  // unit of requestBudget.
+  const model: ModelConfig = { ...MODEL, contextWindow: 3000, maxTokens: 200 };
+  const promptOverheadTokens = 1276;
+  const unit = "x".repeat(40); // 10 est tokens each
+  const ctx: AgentMessage[] = Array.from({ length: 100 }, () => user("u" + unit.slice(1)));
+  const r = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: "S".repeat(200) }]),
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens,
+    force: true,
+  });
+  assert.ok(r, "compaction happened");
+  // The headroom is 300, so the keep walk stops at the 30th unit (300 est
+  // tokens) — NOT the 512 floor, which would have kept 52 units.
+  const unitTokens = 10;
+  assert.equal(r!.kept.length, 30, "the keep plan targets the 300-token headroom, not the 512 floor");
+  assert.equal(r!.kept[0], ctx[70]!, "the keep window starts at the headroom-sized boundary (unit 70)");
+  assert.deepEqual(r!.kept, ctx.slice(70), "kept is the headroom-sized suffix");
+  // The candidate is bounded by requestBudget + one indivisible unit.
+  // (With the old 512 floor the keep walk would have kept 52 units — 520
+  // tokens — and the candidate would have exceeded requestBudget by far more
+  // than one atomic unit.)
+  assert.ok(
+    r!.estimatedTokensAfter <= r!.requestBudget + unitTokens,
+    `candidate (${r!.estimatedTokensAfter}) is within one atomic unit of the input budget (${r!.requestBudget}); the 512 floor would have kept 52 units and blown the budget`,
+  );
+});
+
 test("compactContext: calibrated charsPerToken shrinks the keep window for dense content", async () => {
   // Each big message ~2000 est tokens at chars/4. With cpt 2 (dense), each
   // counts ~4000, so the keep walk stops earlier (keeps fewer messages)

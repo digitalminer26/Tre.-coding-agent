@@ -569,12 +569,28 @@ export async function compactContext(opts: {
   // but not fully reserved against the kept context, so the candidate
   // exceeded the input budget by ~the summary's size.)
   const summaryBudget = Math.min(1024, opts.model.maxTokens);
-  // Keep at least 512 tokens for atomic units; final validation decides if
-  // an indivisible suffix can actually fit.
-  const windowCap = Math.max(
-    512,
-    opts.model.contextWindow - opts.model.maxTokens - 1024 - promptOverhead - summaryBudget,
-  );
+  // The reserved headroom is the budget the keep plan must fit within:
+  // window − maxTokens − slack − overhead − summaryBudget. The keep plan
+  // targets the headroom in ALL regimes (the old 512 floor is gone — it was
+  // a no-op when headroom ≥ 512, and when headroom < 512 it DEFENDED the
+  // reservation: a 512-token keep target left no room for the overhead +
+  // summary, so the candidate could exceed the input budget by far more
+  // than one atomic unit). A negative headroom is fine: planCompaction
+  // with a small/negative keepTokens keeps the minimal atomic suffix (the
+  // walk breaks on the first unit).
+  //
+  // Resulting UNIFORM guarantee (the keep budget is a PLANNING target —
+  // atomic tool-call/result units can't be split, so the kept suffix may
+  // overshoot it by at most one indivisible unit, and an accepted summary is
+  // bounded by the summarizer's maxTokens): the candidate [summary, …kept] +
+  // overhead is bounded by requestBudget + one indivisible unit in every
+  // regime. When the headroom is below 512 (or negative), the plan keeps the
+  // minimal atomic suffix and the candidate can still exceed requestBudget —
+  // best effort; compactNow then flags the applied candidate `overBudget`
+  // (it is still a strict reduction of the old context).
+  const headroom =
+    opts.model.contextWindow - opts.model.maxTokens - 1024 - promptOverhead - summaryBudget;
+  const windowCap = headroom;
   const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap), cpt);
   if (!plan) return undefined;
 

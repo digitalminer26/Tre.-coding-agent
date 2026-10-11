@@ -1,5 +1,48 @@
 # Current project status (2026-10-11)
 
+**Compaction: drop the 512 keep-floor + pin `printEvent` skip (implement-audit
+D26, 2026-10-11).** An independent audit of the D26 budget reservation found
+the 512-token floor in the keep-plan window cap could defeat the reservation,
+and that `printEvent`'s `compaction_skipped` case was untested. Both fixed in
+one increment:
+
+1. **The 512 keep-floor is removed — the keep plan targets the reserved
+   headroom in ALL regimes.** The cap was `windowCap = Math.max(512, headroom)`
+   where `headroom = window − maxTokens − slack − promptOverhead −
+   summaryBudget`. The floor was a no-op when `headroom ≥ 512`, but when
+   `headroom < 512` (a tiny window + a large prompt overhead) it DEFENDED the
+   reservation: the keep plan targeted 512 tokens, leaving no room for the
+   overhead + summary, so the candidate `[summary, …kept] + overhead` could
+   exceed the input budget by far more than one atomic unit. The cap is now
+   `windowCap = headroom` (the floor is gone): the keep plan targets the
+   headroom in every regime, so the candidate is bounded by
+   `requestBudget + one indivisible unit` uniformly. A negative headroom is
+   fine — `planCompaction` with a small/negative `keepTokens` keeps the
+   minimal atomic suffix (the walk breaks on the first unit); that candidate
+   can still exceed `requestBudget`, in which case `compactNow` flags it
+   `overBudget` (best effort — it is still a strict reduction of the old
+   context). Applied in BOTH `compactContext` (the LLM path) and `compactNow`
+   (the `ruleBasedShrink` fallback), so the ladder stays on the same budget;
+   the comments in both files state the uniform guarantee. +1 regression test
+   (`compactContext: floor regime — the keep plan targets the reserved
+   headroom, not the 512 floor`). Three pre-existing e2e tests (A6 `/compact`,
+   WS9 mid-run, WS9 sessionless) sit in the floor regime (negative headroom)
+   and were pinning the old 512-floor keep counts — their expected kept
+   suffixes are now the minimal atomic unit, and their comments were updated
+   to say so (the WS9 sessionless comment referenced the removed "512-token
+   keep-floor"). The WS10 s12 small-window test (normal regime, headroom 2776)
+   is unchanged and still passes.
+
+2. **`printEvent` `compaction_skipped` is now pinned.** The TUI side was
+   covered (`test/tui-state.test.ts`) and the CLI D3-skip test asserted the
+   event, but the printer case itself was untested. +1 test
+   (`printEvent: compaction_skipped → reason to stderr`) in `test/cli.test.ts`
+   next to the other `printEvent` tests, asserting the reason lands on stderr
+   and nothing goes to stdout.
+
+**Gate.** `tsc` clean; full suite **811 pass / 0 fail / 13 skipped** (the 13
+are the pre-existing TTY/TUI-live + platform skips).
+
 **Compaction: keep-plan budget reservation (D26) + skip visibility (2026-10-11).**
 Two committed increments in the compaction area, each one behavior (self-improve
 protocol):

@@ -308,8 +308,12 @@ test("A6: REPL /compact forces a compaction (summarizer call + session entry + �
   assert.equal(code, 0);
   assert.match(S.err(), /✂ context compacted/, "the ✂ line prints like the auto path");
   const replayed = await replaySession(session);
-  // [summary, a1, u2, a2] — the folded prefix (u1) became the summary.
-  assert.equal(replayed.context.length, 4);
+  // [summary, u2, a2] — the folded prefix (u1, a1) became the summary. The
+  // headroom (window − maxTokens − slack − overhead − summaryBudget) is
+  // NEGATIVE for this tiny window + the real prompt overhead, so the keep
+  // plan targets the headroom (not the old 512 floor) and keeps only the
+  // minimal atomic suffix — the most recent [user, assistant] unit.
+  assert.equal(replayed.context.length, 3);
   const head = replayed.context[0]!;
   assert.equal(head.role, "user");
   if (head.role === "user") {
@@ -469,6 +473,27 @@ test("printEvent: D19 — read/write/edit silent on success, denial shown, bash 
     printEvent(ev, sinks);
   }
   assert.equal(out, "  ✗ denied: outside the workspace\n\n→ bash {\"command\":\"ls\"}\n  ✓ a b\n");
+});
+
+test("printEvent: compaction_skipped → reason to stderr", () => {
+  // The TUI renders compaction_skipped as a note item (covered in
+  // test/tui-state.test.ts); the CLI prints it via printEvent. This pins
+  // the printer case: the reason text lands on stderr, not stdout.
+  let out = "";
+  let err = "";
+  const sinks: PrintSinks = {
+    out: { write: (s) => (out += s) },
+    err: { write: (s) => (err += s) },
+  };
+  printEvent(
+    {
+      type: "compaction_skipped",
+      reason: "compaction failed and no safe shrink is possible — the next call may exceed the window",
+    },
+    sinks,
+  );
+  assert.match(err, /compaction failed and no safe shrink is possible/);
+  assert.equal(out, "", "nothing goes to stdout");
 });
 
 // ─────────────────────────── one-shot + session ───────────────────────────
@@ -1351,8 +1376,7 @@ const SMALL_WINDOW: ModelConfig = { ...MODEL, contextWindow: 2000, maxTokens: 10
 /** Seed a session with one old [user, assistant] exchange, small-window model.
  *  The old PROMPT is deliberately LARGE: it is the OLDEST unit, so it is what
  *  the compaction folds — and the folded prefix needs real mass for the
- *  summary to be a strict reduction of it. (A large old ANSWER would not help:
- *  the atomic keep-floor keeps it in the tail, leaving a tiny prefix to fold.) */
+ *  summary to be a strict reduction of it. */
 async function seedHistory(dir: string, models: string, session: string) {
   await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
   await main(["run", "old task " + "y".repeat(3000), "--tools", "none", "--models", models, "--session", session], {
@@ -1404,21 +1428,24 @@ test("WS9: context over budget mid-run → silent summary call, compacted contex
   assert.deepEqual(seen[0]!.roles, ["user", "assistant", "user"], "turn 1 sees the resumed context");
   assert.equal(seen[1]!.tools, 0, "the summary call has no tools");
   assert.match(seen[1]!.first, /summarize/i, "the summary call carries the summarizer system prompt");
-  assert.deepEqual(seen[2]!.roles, ["user", "assistant", "user", "assistant", "toolResult"], "turn 2 sees [summary, a1, u2, a1', tr]");
+  assert.deepEqual(seen[2]!.roles, ["user", "user", "assistant", "toolResult"], "turn 2 sees [summary, u2, a1', tr]");
   assert.match(seen[2]!.first, /Compaction summary of earlier context/);
   assert.match(seen[2]!.first, /SUMMARY: old task was answered earlier\./);
 
   // The session file replayed must reproduce the compacted context
-  // ([summary, a1, u2, a1', tr] + turn 2's final answer = 6).
+  // ([summary, u2, a1', tr] + turn 2's final answer = 5). The headroom is
+  // negative for this tiny window + real prompt overhead, so the keep plan
+  // targets the headroom (not the old 512 floor) and keeps only the minimal
+  // atomic suffix — the most recent [user, assistant, toolResult] unit.
   const replayed = await replaySession(session);
-  assert.equal(replayed.context.length, 6);
+  assert.equal(replayed.context.length, 5);
   const head = replayed.context[0]!;
   assert.equal(head.role, "user");
   if (head.role === "user") {
     assert.match(head.content, /Compaction summary of earlier context/);
     assert.match(head.content, /SUMMARY: old task was answered earlier\./);
   }
-  assert.equal(replayed.context[4]!.role, "toolResult");
+  assert.equal(replayed.context[3]!.role, "toolResult");
   // The compaction entry itself is in the log with a resolvable firstKeptEntryId.
   const compact = replayed.entries.find((e) => e.type === "compaction");
   assert.ok(compact, "a compaction entry was appended");
@@ -1495,11 +1522,13 @@ test("WS9: sessionless run still compacts (context management, not persistence)"
   assert.equal(seen.length, 5, "turns 1-3 + silent summary + turn 4");
   assert.deepEqual(seen[3]!.roles, ["user"], "the summary call carries only the summarizer prompt");
   assert.match(seen[3]!.first, /summarize/i);
-  // The 512-token keep-floor (windowCap for this tiny window) keeps the
-  // recent tail [a2, tr2, a3, tr3] and folds the older [user, a1, tr1] —
-  // the big tr1 (4000 chars) gives the folded prefix the mass the summary
-  // must strictly reduce.
-  assert.deepEqual(seen[4]!.roles, ["user", "assistant", "toolResult", "assistant", "toolResult"], "turn 4 sees [summary, a2, tr2, a3, tr3]");
+  // The headroom (window − maxTokens − slack − overhead − summaryBudget) is
+  // negative for this tiny window + the real prompt overhead, so the keep
+  // plan targets the headroom (not the old 512 floor) and keeps only the
+  // minimal atomic suffix — the most recent [a3, tr3] unit — folding the
+  // older [user, a1, tr1, a2, tr2]. The big tr1/tr2 (4000 chars each) give
+  // the folded prefix the mass the summary must strictly reduce.
+  assert.deepEqual(seen[4]!.roles, ["user", "assistant", "toolResult"], "turn 4 sees [summary, a3, tr3]");
   assert.match(seen[4]!.first, /Compaction summary of earlier context/);
   assert.match(seen[4]!.first, /SUMMARY: the earlier turns were answered\./);
 });

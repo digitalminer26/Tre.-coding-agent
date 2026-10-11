@@ -660,11 +660,28 @@ export async function compactNow(deps: {
   // rejected), so that is the reservation. compactContext applies the same
   // reservation to its own plan; this keeps compactNow's ruleBasedShrink
   // fallback on the same budget so the ladder is consistent.
+  //
+  // The reserved headroom (window − maxTokens − slack − overhead −
+  // summaryBudget) is the budget the keep plan must fit within. The keep
+  // plan targets the headroom in ALL regimes (the old 512 floor is gone — it
+  // was a no-op when headroom ≥ 512, and when headroom < 512 it DEFENDED the
+  // reservation: a 512-token keep target left no room for the overhead +
+  // summary, so the candidate could exceed the input budget by far more than
+  // one atomic unit). A negative headroom is fine: planCompaction with a
+  // small/negative keepTokens keeps the minimal atomic suffix (the walk
+  // breaks on the first unit). Resulting UNIFORM guarantee (the keep budget
+  // is a PLANNING target — atomic units can't be split, so the kept suffix
+  // may overshoot it by at most one indivisible unit, and an accepted summary
+  // is bounded by the summarizer's maxTokens): the candidate [summary, …kept]
+  // + overhead is bounded by requestBudget + one indivisible unit in every
+  // regime. When the headroom is below 512 (or negative), the plan keeps the
+  // minimal atomic suffix and the candidate can still exceed requestBudget —
+  // best effort; the applied candidate is then flagged `overBudget` below
+  // (it is still a strict reduction of the old context).
   const summaryBudget = Math.min(1024, deps.model.maxTokens);
-  const windowCap = Math.max(
-    512,
-    deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens - summaryBudget,
-  );
+  const headroom =
+    deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens - summaryBudget;
+  const windowCap = headroom;
   const keepTokens = Math.min(deps.compactKeepTokens ?? 8192, windowCap);
   const requestBudget = deps.model.contextWindow - deps.model.maxTokens - 1024;
   const emit = async (
