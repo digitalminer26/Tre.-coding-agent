@@ -556,6 +556,34 @@ test("compactContext: the keep budget is a planning target, not a hard guard", a
   assert.ok(r!.estimatedTokensAfter > 5, "the estimate exceeds the target");
 });
 
+test("compactContext: the keep plan reserves the summary budget, so the candidate fits the input budget (D26)", async () => {
+  // 100 uniform units of 40 chars (10 est tokens each) = 1000 est tokens.
+  // The keep walk lands on an atomic boundary; the candidate is
+  // [summary, …kept] + overhead. Before the reservation the keep window was
+  // sized to (budget − overhead) with NO room for the summary, so the
+  // candidate exceeded the input budget by ~the summary's size. The fix
+  // reserves the fixed prompt overhead AND the summarizer's output budget,
+  // so the candidate fits (up to the overshoot of one indivisible unit).
+  const unit = "x".repeat(40); // 10 est tokens
+  const ctx: AgentMessage[] = Array.from({ length: 100 }, () => user("u" + unit.slice(1)));
+  const summary = "S".repeat(200); // ~61 est tokens once the marker is added
+  const r = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: summary }]),
+    model: MODEL, // window 2000, maxTokens 100
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 100,
+    force: true,
+  });
+  assert.ok(r, "compaction happened");
+  const unitTokens = 10; // each message is 40 chars = 10 est tokens
+  const summaryTokens = Math.ceil((SUMMARY_MARKER.length + 2 + summary.length) / 4);
+  assert.ok(
+    r!.estimatedTokensAfter <= r!.requestBudget + unitTokens,
+    `candidate (${r!.estimatedTokensAfter}) is within one atomic unit of the input budget (${r!.requestBudget}); before the reservation it was ~the summary (${summaryTokens}) over`,
+  );
+});
+
 test("compactContext: calibrated charsPerToken shrinks the keep window for dense content", async () => {
   // Each big message ~2000 est tokens at chars/4. With cpt 2 (dense), each
   // counts ~4000, so the keep walk stops earlier (keeps fewer messages)

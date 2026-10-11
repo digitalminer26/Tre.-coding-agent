@@ -10,9 +10,11 @@
  *               NEXT prompt size) plus the output budget
  *               (`maxTokens` + 1024 slack) would exceed `contextWindow`.
  *   keep      — the most recent messages up to ~`keepTokens` (default 8192,
- *               ESTIMATED: chars/4; capped by the model's window:
- *               window - maxTokens - slack, so a compacted context can
- *               actually fit), snapped to unit boundaries so a toolCall
+ *               ESTIMATED: chars/4; capped by the model's window minus the
+ *               fixed prompt overhead AND the summarizer's output budget —
+ *               window - maxTokens - slack - overhead - summaryBudget — so
+ *               the candidate [summary, …kept] + overhead can actually fit
+ *               the input budget), snapped to unit boundaries so a toolCall
  *               assistant message is never split from its
  *               ToolResultMessages. The most recent user message is kept
  *               verbatim unless it is the ONLY user message (index 0) —
@@ -558,10 +560,21 @@ export async function compactContext(opts: {
   // window - maxTokens - slack.
   const cpt = opts.charsPerToken ?? 4;
   const promptOverhead = opts.promptOverheadTokens ?? 0;
-  // Reserve fixed prompt overhead when the caller requires a fit check.
+  // The summarizer's output is bounded by its maxTokens (a summary that hits
+  // the cap is rejected as stopReason "length"), so an ACCEPTED summary is at
+  // most this many tokens. Reserve it in the keep plan alongside the fixed
+  // prompt overhead: the candidate is [summary, …kept] + overhead, so the
+  // keep window must leave room for BOTH the overhead and the summary, not
+  // just the kept messages. (D26: the overhead was counted in the trigger
+  // but not fully reserved against the kept context, so the candidate
+  // exceeded the input budget by ~the summary's size.)
+  const summaryBudget = Math.min(1024, opts.model.maxTokens);
   // Keep at least 512 tokens for atomic units; final validation decides if
   // an indivisible suffix can actually fit.
-  const windowCap = Math.max(512, opts.model.contextWindow - opts.model.maxTokens - 1024);
+  const windowCap = Math.max(
+    512,
+    opts.model.contextWindow - opts.model.maxTokens - 1024 - promptOverhead - summaryBudget,
+  );
   const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap), cpt);
   if (!plan) return undefined;
 

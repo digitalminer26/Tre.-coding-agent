@@ -646,9 +646,18 @@ export async function compactNow(deps: {
     return undefined;
   }
   const tokensBefore = lastAsst?.usage?.totalTokens ?? currentRequestEstimate;
+  // Reserve the fixed prompt overhead AND the summarizer's output budget in
+  // the keep plan: the candidate is [summary, …kept] + overhead, so the keep
+  // window must leave room for both (D26 — the overhead was counted in the
+  // trigger but not fully reserved against the kept context). The summary is
+  // bounded by the summarizer's maxTokens (a summary hitting the cap is
+  // rejected), so that is the reservation. compactContext applies the same
+  // reservation to its own plan; this keeps compactNow's ruleBasedShrink
+  // fallback on the same budget so the ladder is consistent.
+  const summaryBudget = Math.min(1024, deps.model.maxTokens);
   const windowCap = Math.max(
     512,
-    deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens,
+    deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens - summaryBudget,
   );
   const keepTokens = Math.min(deps.compactKeepTokens ?? 8192, windowCap);
   const requestBudget = deps.model.contextWindow - deps.model.maxTokens - 1024;
