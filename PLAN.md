@@ -1,7 +1,7 @@
 # Coding Agent — Build Plan & Workstreams
 
-> **Status note (2026-10-03):** This is the original build plan and its
-> decision log is historical through D25 (2026-10-02); it is not a complete
+> **Status note (2026-10-06):** This is the original build plan and its
+> decision log is historical through D27 (2026-10-06); it is not a complete
 > inventory of later hardening. The foundational workstreams are complete.
 > For current project status, see `README.md` and the top of `HANDOFF.md`;
 > later contract increments are recorded in `docs/02-contracts.md` and the
@@ -327,8 +327,10 @@ before it merges.
 ## 8. Out of scope (MVP)
 
 Anthropic-native wire, image inputs, subagents, branch/tree navigation, themes/keybindings,
-VM sandboxing, multi-model routing, OAuth/expiring-token handling. All have seams reserved
-in the contracts; none block the MVP.
+VM sandboxing, multi-model routing. All have seams reserved in the contracts; none block
+the MVP. (OAuth/expiring-token handling, originally out of scope, has since been
+implemented — ChatGPT-Plus OAuth + token refresh; see `README.md` "ChatGPT Plus" and
+`src/auth/`.)
 
 ## 9. Decision log
 

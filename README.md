@@ -39,6 +39,9 @@ sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
 - `docs/06-compaction-cheap-wins.md` — compaction cheap wins + failure escalation (A1–A6, D)
 - `docs/07-context-display-fidelity.md` — context display fidelity changes and remaining items
 - `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups
+- `docs/09-linux-sandbox.md` — Linux bash sandbox (Bubblewrap) boundary and mount order (Darwin stays on Seatbelt)
+- `docs/tui-mouse-selection/PLAN.md` — TUI in-app mouse selection + `/copy` (implemented)
+- `docs/workstream-input/plan.md` — responsive input during workstreams: stream-render coalescing + immediate interactive paints (implemented)
 - `HANDOFF.md` — dated implementation history (historical statuses may be superseded)
 - `PLAN.md` — original workstreams and decisions (historical; see status note there and HANDOFF for later increments)
 
