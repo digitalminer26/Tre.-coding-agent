@@ -328,24 +328,36 @@ test("contextTokens: tracks the last done usage; compaction resets to the new es
 
 // ── context breakdown: where the tokens come from + when compaction fires ──
 
-test("compactThreshold = window − maxTokens − slack (the real shouldCompact trigger)", () => {
+test("compactThreshold = window − reserve − slack (the real shouldCompact trigger)", () => {
   assert.equal(compactThreshold(131072, 32768), 131072 - 32768 - 1024); // 97280
+  assert.equal(compactThreshold(131072, 16384), 131072 - 16384 - 1024); // 113664 (default reserve)
   assert.equal(compactThreshold(131072, 0), 131072 - 1024);
   assert.equal(compactThreshold(0, 32768), 0); // unknown window → 0
-  assert.equal(compactThreshold(100, 32768), 0); // window < max → 0 (never compact)
+  assert.equal(compactThreshold(100, 32768), 0); // window < reserve → 0 (never compact)
 });
 
 test("contextBreakdown: system / summary / messages split; headroom vs the trigger", () => {
-  // window 131072, maxTokens 32768 → threshold 97280. system 5000, summary 0,
-  // total 25000 → messages = 25000 − 5000 = 20000, headroom = 97280 − 25000.
+  // window 131072, reserve 16384 (default — no compactionReserve set) →
+  // threshold 113664. system 5000, summary 0, total 25000 →
+  // messages = 25000 − 5000 = 20000, headroom = 113664 − 25000.
   const s = { ...makeInitialState("m", {}, 131072, 32768, [], 5000), contextTokens: 25000 };
   const bd = contextBreakdown(s);
   assert.deepEqual(
     { system: bd.system, summary: bd.summary, messages: bd.messages, total: bd.total },
     { system: 5000, summary: 0, messages: 20000, total: 25000 },
   );
-  assert.equal(bd.threshold, 97280);
-  assert.equal(bd.headroom, 97280 - 25000);
+  assert.equal(bd.threshold, 113664);
+  assert.equal(bd.headroom, 113664 - 25000);
+
+  // A LEGITIMATE zero reserve ("compact as early as possible") must be
+  // preserved, NOT conflated with "unset" (the default). The displayed
+  // threshold must equal compact.ts's compactionReserve(model) = 0, i.e.
+  // window − 0 − slack = 130048 — NOT the default's 113664. (Audit finding A:
+  // the old `> 0` fallback mis-displayed a zero reserve as the default.)
+  const sZero = { ...s, compactionReserve: 0 };
+  assert.equal(contextBreakdown(sZero).threshold, 131072 - 0 - 1024); // 130048
+  // unset (undefined) → the default 16384, as before.
+  assert.equal(contextBreakdown({ ...s, compactionReserve: undefined }).threshold, 113664);
 
   // after a compaction the summary is a distinct bucket (summaryTokens set by
   // the context_compacted event).
@@ -357,7 +369,7 @@ test("contextBreakdown: system / summary / messages split; headroom vs the trigg
   );
 
   // over the trigger → negative headroom (compaction is due).
-  const s3 = { ...s, contextTokens: 100000 };
+  const s3 = { ...s, contextTokens: 120000 };
   assert.ok(contextBreakdown(s3).headroom < 0);
 
   // unknown window (0) → threshold 0, headroom = −total (but the report
@@ -369,10 +381,10 @@ test("contextBreakdown: system / summary / messages split; headroom vs the trigg
 test("contextUrgencyColor: green < 70% ≤ yellow < 90% ≤ red; undefined when unknown", () => {
   const mk = (total: number): TuiState =>
     ({ ...makeInitialState("m", {}, 131072, 32768), contextTokens: total, systemPromptTokens: 0 });
-  // threshold 97280. 50% → green, 75% → yellow, 95% → red.
-  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.5))), "green");
-  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.75))), "yellow");
-  assert.equal(contextUrgencyColor(mk(Math.round(97280 * 0.95))), "red");
+  // threshold 113664 (default reserve 16384). 50% → green, 75% → yellow, 95% → red.
+  assert.equal(contextUrgencyColor(mk(Math.round(113664 * 0.5))), "green");
+  assert.equal(contextUrgencyColor(mk(Math.round(113664 * 0.75))), "yellow");
+  assert.equal(contextUrgencyColor(mk(Math.round(113664 * 0.95))), "red");
   // no usage yet → undefined (dim); unknown window → undefined.
   assert.equal(contextUrgencyColor({ ...makeInitialState("m", {}, 131072, 32768) }), undefined);
   assert.equal(contextUrgencyColor({ ...makeInitialState("m"), contextTokens: 5000 }), undefined);
@@ -392,11 +404,11 @@ test("contextReport: multi-line breakdown + compaction trigger (the /context bod
       "context: 25k/131.1k (19%)",
       "  system prompt: 5k (fixed floor)",
       "  messages: 20k",
-      "  compaction: at 97.3k — 72.3k headroom left",
+      "  compaction: at 113.7k — 88.7k headroom left",
     ].join("\n"),
   );
   // over the trigger → DUE.
-  const over = { ...s, contextTokens: 100000 };
+  const over = { ...s, contextTokens: 120000 };
   assert.match(contextReport(over), /compaction: DUE — over the trigger by/);
 });
 
@@ -498,19 +510,19 @@ test("docs/07 item 2: the `context` bottom field appends the last delta; omitted
   const first = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 11000 };
   assert.equal(
     bottomValue(first, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k",
   );
   // a growth → `· +1k` at the end.
   const grown = { ...first, contextDelta: 1000 };
   assert.equal(
     bottomValue(grown, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · +1k",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k · +1k",
   );
   // a shrink (e.g. after a compaction) → `· −170k` (U+2212 minus).
   const shrunken = { ...first, contextDelta: -170000 };
   assert.equal(
     bottomValue(shrunken, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · −170k",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k · −170k",
   );
 });
 
@@ -532,7 +544,7 @@ test("F2: the `sys` number splits into (ctx X · skills Y) when seeded", () => {
   };
   assert.equal(
     bottomValue(s, "context"),
-    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 1k) · msgs 20k · @97.3k",
+    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 1k) · msgs 20k · @113.7k",
   );
 });
 
@@ -545,7 +557,7 @@ test("F2: 0/0 (unknown) → the bare `sys N` (byte-identical to before the split
   };
   assert.equal(
     bottomValue(s, "context"),
-    "25k/131.1k (19%) · sys 5k · msgs 20k · @97.3k",
+    "25k/131.1k (19%) · sys 5k · msgs 20k · @113.7k",
   );
 });
 
@@ -559,13 +571,14 @@ test("F2: only one section seeded → the split still shows both (0 for the othe
   };
   assert.equal(
     bottomValue(s, "context"),
-    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 0) · msgs 20k · @97.3k",
+    "25k/131.1k (19%) · sys 5k (ctx 2k · skills 0) · msgs 20k · @113.7k",
   );
 });
 
 test("docs/07 item 2: /context report gains the growth line + turns-until-compaction prediction", () => {
-  // window 131072, maxTokens 32768 → threshold 97280. After a 13000-context
-  // turn with deltas [1000, 2000]: headroom 84280, avg 1500 → ~56 turns.
+  // window 131072, reserve 16384 (default) → threshold 113664. After a
+  // 13000-context turn with deltas [1000, 2000]: headroom 100664, avg 1500
+  // → ~67 turns.
   const s = {
     ...makeInitialState("m", {}, 131072, 32768),
     contextTokens: 13000,
@@ -574,9 +587,9 @@ test("docs/07 item 2: /context report gains the growth line + turns-until-compac
   };
   const r = contextReport(s);
   assert.match(r, /  growth: \+2k last turn · \+1\.5k avg \(2 turns\)/);
-  assert.match(r, /  ~56 turns until compaction/);
+  assert.match(r, /  ~67 turns until compaction/);
   // the prediction uses the MEAN, not the last value (1500, not 2000).
-  assert.ok(!r.includes("~42 turns"), "prediction must use the mean, not the last delta");
+  assert.ok(!r.includes("~50 turns"), "prediction must use the mean, not the last delta");
 });
 
 test("docs/07 item 2: prediction omitted when shrinking or DUE; the growth line still shows", () => {
@@ -594,7 +607,7 @@ test("docs/07 item 2: prediction omitted when shrinking or DUE; the growth line 
   // DUE (headroom <= 0) → the DUE line covers it; no prediction at all.
   const due = {
     ...makeInitialState("m", {}, 131072, 32768),
-    contextTokens: 100000,
+    contextTokens: 120000,
     contextDelta: 1000,
     deltaHistory: [1000],
   };
@@ -672,20 +685,20 @@ test("docs/07 item 4: context_compacted increments compactionCount + captures th
 test("docs/07 item 4: the `context` bottom field appends ×N; omitted before the first compaction", () => {
   const base = { ...makeInitialState("m", {}, 131072, 32768), contextTokens: 11000 };
   // no compaction yet → no ×N.
-  assert.equal(bottomValue(base, "context"), "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k");
+  assert.equal(bottomValue(base, "context"), "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k");
   // ×1 is already notable (the count is the point).
   assert.equal(
     bottomValue({ ...base, compactionCount: 1 }, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×1",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k · ×1",
   );
   assert.equal(
     bottomValue({ ...base, compactionCount: 2 }, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×2",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k · ×2",
   );
   // ×N sits BEFORE the delta (item 2) when both are present.
   assert.equal(
     bottomValue({ ...base, compactionCount: 2, contextDelta: 1000 }, "context"),
-    "11k/131.1k (8%) · sys 0 · msgs 11k · @97.3k · ×2 · +1k",
+    "11k/131.1k (8%) · sys 0 · msgs 11k · @113.7k · ×2 · +1k",
   );
 });
 
@@ -728,7 +741,7 @@ test("handleSlashCommand: /context appends the breakdown as an info item", () =>
 test("bottomLineColors: the context line is tinted by urgency, the rest dim", () => {
   const s = {
     ...makeInitialState("m", {}, 131072, 32768, ["model", "context", "turn"]),
-    contextTokens: Math.round(97280 * 0.75), // yellow zone
+    contextTokens: Math.round(113664 * 0.75), // yellow zone (threshold 113664)
     systemPromptTokens: 0,
   };
   assert.deepEqual(bottomLineColors(s), [undefined, "yellow", undefined]);

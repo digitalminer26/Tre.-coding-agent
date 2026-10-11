@@ -7,8 +7,12 @@
  *
  *   trigger   — the last assistant message's real usage (`totalTokens` =
  *               prompt + completion of the last call, a close proxy for the
- *               NEXT prompt size) plus the output budget
- *               (`maxTokens` + 1024 slack) would exceed `contextWindow`.
+ *               NEXT prompt size) plus the compaction reserve
+ *               (`compactionReserve` + 1024 slack) would exceed
+ *               `contextWindow`. The reserve is a SEPARATE knob from the
+ *               model's output cap (`maxTokens`): it only sets the leading
+ *               "start compacting now" threshold, so a smaller reserve delays
+ *               compaction without shrinking what the model can emit.
  *   keep      — the most recent messages up to ~`keepTokens` (default 8192,
  *               ESTIMATED: chars/4; capped by the model's window minus the
  *               fixed prompt overhead AND the summarizer's output budget —
@@ -54,6 +58,47 @@ import type {
 /** Marker prefix of a compaction summary message (single source of truth —
  *  session.ts materializes replayed summaries with the same format). */
 export const SUMMARY_MARKER = "[Compaction summary of earlier context]";
+
+/** The summarizer's output cap (tokens). A summary is structured prose
+ *  (GOAL/DONE/STATE/FILES/NEXT, "under 500 words") — 1024 tokens was far
+ *  more than the prose needs, but the cap ALSO bounds the summary that the
+ *  keep plan reserves (`summaryBudget`), so it is the right lever for the
+ *  over-budget failures: a smaller reservation → a larger keep window → a
+ *  candidate that fits. 2048 keeps comfortable head room for a long FILES
+ *  list (up to 50 verified paths) while still halving the old reservation.
+ *  A summary that hits the cap (stopReason "length") is still ACCEPTED when
+ *  it produced text — a truncated structured summary is a usable, strict
+ *  reduction of the context (see the `length` handling in compactContext). */
+export const SUMMARIZER_MAX_TOKENS = 2048;
+
+/** The summarizer's output cap for a model: the fixed SUMMARIZER_MAX_TOKENS,
+ *  clamped to the model's own maxTokens (a model that can't emit 2048 tokens
+ *  can't emit a 2048-token summary). Single source of truth for the
+ *  summarizer cap — used by compactContext (the call's maxTokens and the
+ *  keep-plan reservation) and by compactNow (the same reservation, so the
+ *  ruleBasedShrink fallback stays on the same budget). */
+export function summarizerMaxTokens(model: ModelConfig): number {
+  return Math.min(SUMMARIZER_MAX_TOKENS, model.maxTokens);
+}
+
+/** The compaction trigger's reserved headroom (tokens) — the default reserve
+ *  when a model's `compactionReserve` is unset. This is the "start compacting
+ *  now" threshold, NOT the model's output cap: it is deliberately smaller
+ *  than a full `maxTokens` so compaction fires later (fewer compactions per
+ *  session) while the model's `maxTokens` (the `max_tokens` sent to the
+ *  server and the keep plan's post-compaction fit) is left untouched. 16384
+ *  halves the old `maxTokens`-sized reserve on the 131k window (trigger
+ *  ~97k → ~113k tokens) without touching output capacity. */
+export const DEFAULT_COMPACTION_RESERVE = 16384;
+
+/** The compaction reserve for a model: its `compactionReserve` when set,
+ *  else DEFAULT_COMPACTION_RESERVE. Single source of truth for the trigger's
+ *  reserve — used by shouldCompact (the loop's auto-compact decision) and by
+ *  the TUI's compactThreshold (the displayed trigger), so the number the user
+ *  sees is the number the loop actually compares against. */
+export function compactionReserve(model: ModelConfig): number {
+  return model.compactionReserve ?? DEFAULT_COMPACTION_RESERVE;
+}
 
 /** The user message that carries a compaction summary into the context. */
 export function makeSummaryMessage(summary: string, timestamp = Date.now()): UserMessage {
@@ -142,17 +187,20 @@ export function calibrateCharsPerToken(
 /**
  * Compaction trigger. `usage` is the LAST assistant message's usage
  * (totalTokens = last prompt + completion ≈ next prompt size). True when
- * `totalTokens + maxTokens + slack` would exceed the window. No usage (no
+ * `totalTokens + reserve + slack` would exceed the window. `reserve` is the
+ * model's COMPACTION RESERVE (compactionReserve), NOT its output cap — the
+ * leading "start compacting now" threshold, kept separate from `maxTokens`
+ * so delaying compaction never shrinks what the model can emit. No usage (no
  * assistant turn yet) → false.
  */
 export function shouldCompact(
   usage: Usage | undefined,
   contextWindow: number,
-  maxTokens: number,
+  reserve: number,
   slack = 1024,
 ): boolean {
   if (!usage) return false;
-  return usage.totalTokens + maxTokens + slack > contextWindow;
+  return usage.totalTokens + reserve + slack > contextWindow;
 }
 
 export interface CompactionPlan {
@@ -550,7 +598,10 @@ export async function compactContext(opts: {
   if (
     !opts.force &&
     !opts.triggered &&
-    !shouldCompact(lastAssistant?.usage, opts.model.contextWindow, opts.model.maxTokens)
+    // The trigger uses the COMPACTION RESERVE (a leading threshold), not
+    // maxTokens — the keep plan below still reserves the full maxTokens for
+    // the post-compaction fit.
+    !shouldCompact(lastAssistant?.usage, opts.model.contextWindow, compactionReserve(opts.model))
   ) {
     return undefined;
   }
@@ -568,7 +619,7 @@ export async function compactContext(opts: {
   // just the kept messages. (D26: the overhead was counted in the trigger
   // but not fully reserved against the kept context, so the candidate
   // exceeded the input budget by ~the summary's size.)
-  const summaryBudget = Math.min(1024, opts.model.maxTokens);
+  const summaryBudget = summarizerMaxTokens(opts.model);
   // The reserved headroom is the budget the keep plan must fit within:
   // window − maxTokens − slack − overhead − summaryBudget. The keep plan
   // targets the headroom in ALL regimes (the old 512 floor is gone — it was
@@ -598,7 +649,7 @@ export async function compactContext(opts: {
   let failed = false;
   let aborted = false;
   try {
-    const summarizerModel = { ...opts.model, maxTokens: Math.min(1024, opts.model.maxTokens) };
+    const summarizerModel = { ...opts.model, maxTokens: summarizerMaxTokens(opts.model) };
     const prompt = summarizePrompt(
       plan,
       {
@@ -620,10 +671,18 @@ export async function compactContext(opts: {
     }, { signal: opts.signal })) {
       if (ev.type === "text_delta") text += ev.delta;
       if (ev.type === "done") {
+        // `length` is NOT a failure: the model produced the maximum allowed
+        // output (the summarizer cap) — a truncated but structured summary is
+        // still usable and a strict reduction of the context, so it is
+        // ACCEPTED (the final text.trim() === "" guard below still rejects a
+        // length stop that yielded no text). Treating `length` as total
+        // failure was the root cause of the 100% fallback rate: a structured
+        // GOAL/DONE/STATE/FILES/NEXT summary of a long context regularly
+        // exceeds the old 1024 cap, so every compaction fell through to the
+        // lossy rule-based notice.
         if (
           ev.message.stopReason === "error" ||
-          ev.message.stopReason === "aborted" ||
-          ev.message.stopReason === "length"
+          ev.message.stopReason === "aborted"
         ) failed = true;
         if (ev.message.stopReason === "aborted") aborted = true;
       }

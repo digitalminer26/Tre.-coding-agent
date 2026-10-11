@@ -32,6 +32,7 @@ import type {
 } from "../src/types.js";
 import {
   SUMMARY_MARKER,
+  SUMMARIZER_MAX_TOKENS,
   calibrateCharsPerToken,
   compactContext,
   estimatePromptOverheadTokens,
@@ -39,10 +40,13 @@ import {
   extractFileOps,
   isSummaryMessage,
   makeSummaryMessage,
+  compactionReserve,
+  DEFAULT_COMPACTION_RESERVE,
   planCompaction,
   ruleBasedShrink,
   renderTranscript,
   shouldCompact,
+  summarizerMaxTokens,
   summarizePrompt,
   SUMMARIZER_SYSTEM,
   type CompactionPlan,
@@ -56,6 +60,10 @@ const MODEL: ModelConfig = {
   api: "openai-completions",
   contextWindow: 2000,
   maxTokens: 100,
+  // The trigger's reserve equals maxTokens here so the tiny-window trigger
+  // math is unchanged by the maxTokens→compactionReserve separation (a real
+  // model sets compactionReserve independently of its output cap).
+  compactionReserve: 100,
 };
 
 const user = (s: string): UserMessage => ({ role: "user", content: s, timestamp: 1 });
@@ -170,10 +178,29 @@ test("calibrateCharsPerToken: excludes the last assistant message from the estim
   assert.equal(cpt, 4);
 });
 
-test("shouldCompact: no usage → false; under budget → false; over → true", () => {
+test("shouldCompact: no usage → false; under reserve → false; over → true", () => {
   assert.equal(shouldCompact(undefined, 2000, 100), false);
   assert.equal(shouldCompact(usageOf(500), 2000, 100), false); // 500+100+1024 < 2000
   assert.equal(shouldCompact(usageOf(1500), 2000, 100), true); // 1500+100+1024 > 2000
+});
+
+test("compactionReserve: model's compactionReserve when set, else the default", () => {
+  assert.equal(DEFAULT_COMPACTION_RESERVE, 16384);
+  const base = {
+    id: "m",
+    provider: "p",
+    baseUrl: "http://x",
+    api: "openai-completions" as const,
+    contextWindow: 131072,
+    maxTokens: 32768,
+  };
+  // unset → default (the trigger's leading threshold)
+  assert.equal(compactionReserve(base), 16384);
+  // set → the model's own value (per-model tuning)
+  assert.equal(compactionReserve({ ...base, compactionReserve: 8192 }), 8192);
+  // the reserve is INDEPENDENT of maxTokens: a big output cap does not
+  // (and should not) push the trigger earlier.
+  assert.equal(compactionReserve({ ...base, maxTokens: 65536 }), 16384);
 });
 
 test("planCompaction: context too short (fewer than 3 units) → undefined", () => {
@@ -780,7 +807,12 @@ test("compactContext: calibrated dense transcripts are clipped to fit before the
   assert.ok(r, "the successful summary is accepted");
 });
 
-test("compactContext: truncated summary with partial text is rejected", async () => {
+test("compactContext: truncated (length) summary WITH text is ACCEPTED (usable, not a total failure)", async () => {
+  // #2: a summary that hits the output cap (stopReason "length") but still
+  // produced a structured body is a strict reduction of the context — accept
+  // it. The old code treated `length` as total failure, which (combined with
+  // the 1024 cap) made every long-context compaction fall through to the
+  // lossy rule-based notice.
   const ctx: AgentMessage[] = [
     user("old goal " + "g".repeat(3000)), assistantText("old answer"), user("current"), assistantText("tail"),
   ];
@@ -792,7 +824,24 @@ test("compactContext: truncated summary with partial text is rejected", async ()
   const r = await compactContext({
     streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
   });
-  assert.equal(r, undefined, "an incomplete summary must not replace history");
+  assert.ok(r, "a truncated-but-structured summary is usable — it shrinks the context");
+  assert.equal(r!.summary, "partial GOAL only", "the truncated text is kept verbatim");
+});
+
+test("compactContext: truncated (length) summary with NO text is still rejected", async () => {
+  // A `length` stop that yielded no text has nothing to fold the prefix into
+  // (the text.trim() === "" guard) — still a failure, not a usable summary.
+  const ctx: AgentMessage[] = [
+    user("old goal " + "g".repeat(3000)), assistantText("old answer"), user("current"), assistantText("tail"),
+  ];
+  const empty = assistantText("");
+  const fn: StreamFn = async function* () {
+    yield { type: "done", message: { ...empty, stopReason: "length" } };
+  };
+  const r = await compactContext({
+    streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
+  });
+  assert.equal(r, undefined, "a length stop with no text is still a failure");
 });
 
 test("renderTranscript: zero and tiny clip limits never exceed their limit", () => {
@@ -994,4 +1043,68 @@ test("compactContext: empty summary text → undefined (skip, keep context)", as
   const fn = fakeStream([{ type: "text", text: "   " }]);
   const r = await compactContext({ streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx });
   assert.equal(r, undefined);
+});
+
+test("summarizerMaxTokens: min(SUMMARIZER_MAX_TOKENS, model.maxTokens)", () => {
+  assert.equal(SUMMARIZER_MAX_TOKENS, 2048);
+  // A model with a big maxTokens → the fixed 2048 cap.
+  assert.equal(summarizerMaxTokens({ ...MODEL, maxTokens: 32768 }), 2048);
+  // Exactly at the cap → 2048.
+  assert.equal(summarizerMaxTokens({ ...MODEL, maxTokens: 2048 }), 2048);
+  // A model with a small maxTokens → clamped to the model's own cap.
+  assert.equal(summarizerMaxTokens({ ...MODEL, maxTokens: 100 }), 100);
+});
+
+test("compactContext: the summarizer call uses the summarizer cap as its maxTokens", async () => {
+  const model: ModelConfig = { ...MODEL, contextWindow: 4000, maxTokens: 8000 };
+  const ctx: AgentMessage[] = [
+    user("old " + "y".repeat(8000)),
+    assistantText("x".repeat(8000)),
+    user("current"),
+    assistantText("ok", usageOf(3100)),
+  ];
+  let seenMax: number | undefined;
+  const partial = assistantText("SUMMARY");
+  const fn: StreamFn = (m, c, o) => {
+    seenMax = m.maxTokens;
+    return (async function* () {
+      yield { type: "text_delta", delta: "SUMMARY", partial };
+      yield { type: "done", message: partial };
+    })();
+  };
+  const r = await compactContext({ streamFn: fn, model, signal: new AbortController().signal, context: ctx, force: true });
+  assert.ok(r, "compaction happened");
+  assert.equal(seenMax, summarizerMaxTokens(model), "the summarizer call's maxTokens is the summarizer cap");
+  assert.equal(seenMax, 2048, "2048 for a model with maxTokens 8000");
+});
+
+test("compactContext: the keep plan reserves the summarizer cap (2048), not the old 1024", async () => {
+  // A model (maxTokens 8000) reserves the summarizer cap (2048) in the keep
+  // plan. The old code reserved min(1024, maxTokens)=1024, so its keep window
+  // was 1024 tokens LARGER; the new reservation is 1024 tokens SMALLER (more
+  // headroom for the now-larger summary), so the keep walk stops earlier.
+  // headroom = 16000 − 8000 − 1024 − 0 − 2048 = 4928 (< the 8192 default, so
+  // it is the keep target). 1200 units of 10 tokens: the walk keeps 493 units
+  // (4930 ≥ 4928). The old 1024 reservation (headroom 5952) would have kept
+  // 596 units — 103 more, ≈ the 1024-token difference.
+  const model: ModelConfig = { ...MODEL, contextWindow: 16000, maxTokens: 8000 };
+  const unit = "x".repeat(40); // 10 est tokens each
+  const ctx: AgentMessage[] = Array.from({ length: 1200 }, () => user("u" + unit.slice(1)));
+  const r = await compactContext({
+    streamFn: fakeStream([{ type: "text", text: "S".repeat(200) }]),
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 0,
+    force: true,
+  });
+  assert.ok(r, "compaction happened");
+  assert.equal(
+    r!.kept.length, 493,
+    "the keep walk keeps 493 units (the 2048 reservation), not 596 (the old 1024 reservation)",
+  );
+  assert.ok(
+    r!.estimatedTokensAfter <= r!.requestBudget + 10,
+    `candidate (${r!.estimatedTokensAfter}) is within one atomic unit of the input budget (${r!.requestBudget})`,
+  );
 });

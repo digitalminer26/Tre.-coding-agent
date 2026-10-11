@@ -246,6 +246,7 @@ Invariants:
 | `tool_execution_end`      | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
 | `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
+| `guard_retry`             | the loop guard (same batch 3×) fired; the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"` |
 
 ## Contract 3 — `StreamFn`
@@ -288,11 +289,15 @@ interface Tool {
 
 ## `ModelConfig` (models.json)
 
-`{ id, provider, baseUrl, api, contextWindow, maxTokens, temperature?, apiKey?, compat? }`
-— one entry per model. `compat` (per-model flags: `maxTokensField`,
-`supportsUsageInStreaming`, `requiresAssistantAfterToolResult`,
-`extraParams`) is where endpoint quirks live, so the wire layer stays one code
-path. Swapping endpoints = editing models.json.
+`{ id, provider, baseUrl, api, contextWindow, maxTokens, compactionReserve?, temperature?, apiKey?, compat? }`
+— one entry per model. `maxTokens` is the output cap (the `max_tokens` sent to
+the server); `compactionReserve` (optional, default 16384) is the compaction
+trigger's reserved headroom — a SEPARATE knob that sets the leading "start
+compacting now" threshold without touching output capacity. `compat` (per-model
+flags: `maxTokensField`, `supportsUsageInStreaming`,
+`requiresAssistantAfterToolResult`, `extraParams`) is where endpoint quirks
+live, so the wire layer stays one code path. Swapping endpoints = editing
+models.json.
 
 ## The invariants, restated
 

@@ -11,7 +11,9 @@ import {
   buildModelsSetupGuide,
   findModelsFile,
   hasEndpoint,
+  loadModelsFile,
   readActiveModelLenient,
+  resolveModel,
 } from "../src/config/models.js";
 
 test("findModelsFile: explicit path wins even if it does not exist", () => {
@@ -141,4 +143,34 @@ test("readActiveModelLenient: bad json / missing file → null; empty models →
   const empty = path.join(dir, "empty.json");
   fs.writeFileSync(empty, JSON.stringify({ default: "x", models: [] }));
   assert.deepEqual(readActiveModelLenient(empty), {});
+});
+
+// Audit finding E: compactionReserve normalization. A finite, non-negative
+// number is preserved (0 is VALID — "compact as early as possible"); a
+// negative, non-finite, or non-numeric value is a config error and is DROPPED
+// (left unset) so the trigger falls back to DEFAULT_COMPACTION_RESERVE instead
+// of firing at a nonsense threshold. Tested through the REAL normalization
+// path (loadModelsFile → resolveModel → normalizeModel), which is what feeds
+// the compaction trigger (readActiveModelLenient is the raw setup-guide path).
+test("compactionReserve: finite non-negative preserved; negative/non-numeric dropped", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mk = (reserve: unknown) => {
+    const p = path.join(dir, `m-${Math.random().toString(36).slice(2)}.json`);
+    const entry: Record<string, unknown> = {
+      id: "m", provider: "p", baseUrl: "http://x/v1", api: "openai-completions",
+      contextWindow: 131072, maxTokens: 32768,
+    };
+    if (reserve !== undefined) entry.compactionReserve = reserve;
+    fs.writeFileSync(p, JSON.stringify({ default: "m", models: [entry] }));
+    return resolveModel(loadModelsFile(p));
+  };
+  // valid values are preserved verbatim (0 is legal).
+  assert.equal(mk(0).compactionReserve, 0);
+  assert.equal(mk(8192).compactionReserve, 8192);
+  assert.equal(mk(16384.5).compactionReserve, 16384.5); // float is a valid token count
+  // config errors are dropped (left unset → the trigger defaults to 16384).
+  assert.equal(mk(-1).compactionReserve, undefined);
+  assert.equal(mk("16384").compactionReserve, undefined); // string is not a number
+  assert.equal(mk(undefined).compactionReserve, undefined); // absent
 });

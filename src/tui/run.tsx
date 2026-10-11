@@ -273,6 +273,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     provider: m.provider,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
+    compactionReserve: m.compactionReserve,
   }));
   let state: TuiState = makeInitialState(
     model.id,
@@ -283,6 +284,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     systemPromptTokens,
     catalog,
     systemPromptSectionTokens,
+    // Preserve `undefined` (unset → TUI defaults to DEFAULT_COMPACTION_RESERVE);
+    // a legitimate 0 must NOT be mapped to "unset" here.
+    model.compactionReserve,
   );
   state = { ...state, modelUsage: opts.historicalModelUsage ?? {} };
   // The startup behavior-settings summary — a single multi-line INFO item

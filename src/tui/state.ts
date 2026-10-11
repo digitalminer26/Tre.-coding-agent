@@ -8,6 +8,7 @@
  * approval) — the keybinding table itself lives in app.tsx.
  */
 import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type Usage, type WorkerStatus } from "../types.js";
+import { DEFAULT_COMPACTION_RESERVE } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
@@ -31,6 +32,10 @@ export interface ModelOption {
   provider: string;
   contextWindow: number;
   maxTokens: number;
+  /** The model's compaction reserve (the trigger's headroom). OPTIONAL:
+   *  `undefined` (unset) → the TUI falls back to DEFAULT_COMPACTION_RESERVE;
+   *  a legitimate `0` is preserved (compact as early as possible). */
+  compactionReserve?: number;
 }
 
 export type TuiItem =
@@ -134,6 +139,12 @@ export interface TuiState {
   contextWindow: number;
   /** The model's output cap (maxTokens) — static, from ModelConfig. */
   maxTokens: number;
+  /** The model's compaction reserve (the trigger's headroom) — static, from
+   *  ModelConfig. OPTIONAL: `undefined` means "unset" (the display falls back
+   *  to DEFAULT_COMPACTION_RESERVE), while `0` is a LEGITIMATE value ("compact
+   *  as early as possible") that must be preserved, not conflated with unset.
+   *  This mirrors compact.ts's `model.compactionReserve ?? DEFAULT`. */
+  compactionReserve?: number;
   /**
    * Estimated tokens of the system prompt (chars/4) — static for the session
    * (the prompt is built once at startup). Feeds the `context` field's
@@ -256,6 +267,10 @@ export function makeInitialState(
    *  index) in tokens — seeded once at startup; the `sys` number in the
    *  context field splits on it. 0/0 = unknown → `sys` renders bare. */
   systemPromptSections: { ctx: number; skills: number } = { ctx: 0, skills: 0 },
+  /** The model's compaction reserve (the trigger's headroom). OPTIONAL: pass
+   *  `undefined` for "unset" (the display falls back to DEFAULT_COMPACTION_RESERVE);
+   *  a legitimate `0` is preserved, not conflated with unset. */
+  compactionReserve?: number,
 ): TuiState {
   return {
     items: [],
@@ -275,6 +290,7 @@ export function makeInitialState(
     toolCalls: 0,
     contextWindow: window,
     maxTokens,
+    compactionReserve,
     systemPromptTokens,
     systemPromptSections,
     summaryTokens: 0,
@@ -373,6 +389,20 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           {
             kind: "info",
             text: `turn budget (${ev.maxTurns}) reached — continuing (cycle ${ev.cycle}/${ev.maxCycles})`,
+          },
+        ],
+      };
+    case "guard_retry":
+      // The loop guard (same batch 3×) fired; the run auto-retries once with
+      // an approach-changing nudge instead of stopping. Informational — the
+      // run keeps going (the model must pick a different action).
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          {
+            kind: "info",
+            text: `loop guard fired (same tool call 3× in a row) — retrying with a changed approach (retry ${ev.retry}/${ev.maxRetries})`,
           },
         ],
       };
@@ -1516,17 +1546,18 @@ function fmtTokens(t: number): string {
 
 /**
  * The compaction trigger threshold — the value of `contextTokens` at which
- * compact.ts's `shouldCompact` fires: `totalTokens + maxTokens + slack >
- * window`, i.e. `totalTokens > window − maxTokens − slack` (slack 1024).
- * 0 = unknown (no window). This is the SAME number the loop compares
- * against, so the bottom field reports the real trigger, not a guess.
+ * compact.ts's `shouldCompact` fires: `totalTokens + reserve + slack >
+ * window`, i.e. `totalTokens > window − reserve − slack` (slack 1024). The
+ * `reserve` is the model's COMPACTION RESERVE (the leading "start compacting
+ * now" threshold), NOT its output cap — so this matches the loop's real
+ * trigger, which also uses the reserve. 0 = unknown (no window).
  */
-export function compactThreshold(window: number, maxTokens: number, slack = 1024): number {
+export function compactThreshold(window: number, reserve: number, slack = 1024): number {
   if (window <= 0) return 0;
-  // Clamp to 0 when the window is smaller than the output budget + slack
+  // Clamp to 0 when the window is smaller than the reserve + slack
   // (compaction could never make the context fit): the trigger is then
   // "always due", which the display treats the same as an unknown window.
-  return Math.max(0, window - maxTokens - slack);
+  return Math.max(0, window - reserve - slack);
 }
 
 /**
@@ -1588,7 +1619,12 @@ export function contextBreakdown(state: TuiState): ContextBreakdown {
   const system = state.systemPromptTokens;
   const summary = state.summaryTokens;
   const messages = Math.max(0, total - system - summary);
-  const threshold = compactThreshold(state.contextWindow, state.maxTokens);
+  // The trigger's reserve — EXACTLY compact.ts's compactionReserve(model):
+  // `compactionReserve ?? DEFAULT_COMPACTION_RESERVE`. `undefined` (unset) →
+  // the default; a legitimate `0` is preserved (NOT conflated with unset), so
+  // the displayed threshold is the number the loop actually compares against.
+  const reserve = state.compactionReserve ?? DEFAULT_COMPACTION_RESERVE;
+  const threshold = compactThreshold(state.contextWindow, reserve);
   return { system, summary, messages, total, threshold, headroom: threshold - total };
 }
 
@@ -1945,6 +1981,8 @@ export function applyModelSwitch(state: TuiState, modelId: string): TuiState | n
     modelLabel: m.id,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
+    // Preserve `undefined` (unset) — a legitimate 0 must not become "unset".
+    compactionReserve: m.compactionReserve,
   };
 }
 

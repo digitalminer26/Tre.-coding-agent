@@ -439,11 +439,12 @@ test("bottomLines: values, order, truncation, unknown keys, padding", () => {
     "context: 131.1k window (no usage yet)",
   );
   // enriched: used/window + the system/summary/messages split + the
-  // compaction trigger `@T` (threshold = window − maxTokens − slack; the
-  // base state has maxTokens 0). systemPromptTokens set so "sys" is non-zero.
+  // compaction trigger `@T` (threshold = window − reserve − slack; the base
+  // state sets no compactionReserve, so the default 16384 applies).
+  // systemPromptTokens set so "sys" is non-zero.
   assert.equal(
     bottomLines({ ...base, bottom: ["context"], contextWindow: 81920, contextTokens: 25341, systemPromptTokens: 500 }, 80)[0],
-    "context: 25.3k/81.9k (31%) · sys 0.5k · msgs 24.8k · @80.9k",
+    "context: 25.3k/81.9k (31%) · sys 0.5k · msgs 24.8k · @64.5k",
   );
   // unknown window but known usage → no %, no trigger (threshold 0)
   assert.equal(
@@ -453,7 +454,7 @@ test("bottomLines: values, order, truncation, unknown keys, padding", () => {
   // compaction drop: 120k → 9.6k reads as a visible reset
   assert.equal(
     bottomLines({ ...base, bottom: ["context"], contextWindow: 131072, contextTokens: 9600 }, 80)[0],
-    "context: 9.6k/131.1k (7%) · sys 0 · msgs 9.6k · @130k",
+    "context: 9.6k/131.1k (7%) · sys 0 · msgs 9.6k · @113.7k",
   );
   // big windows format as M; over the trigger → DUE
   assert.equal(

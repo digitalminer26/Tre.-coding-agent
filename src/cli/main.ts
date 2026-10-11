@@ -72,9 +72,11 @@ import {
   compactContext,
   estimatePromptOverheadTokens,
   estimateTokens,
+  compactionReserve,
   makeSummaryMessage,
   ruleBasedShrink,
   shouldCompact,
+  summarizerMaxTokens,
   SUMMARY_MARKER,
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
@@ -543,6 +545,13 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         `\n⏳ turn budget (${ev.maxTurns}) reached — continuing (cycle ${ev.cycle}/${ev.maxCycles})\n`,
       );
       break;
+    case "guard_retry":
+      // The loop guard (same batch 3×) fired; the run auto-retries once with
+      // an approach-changing nudge instead of stopping. Informational.
+      sinks.err.write(
+        `\n↻ loop guard fired (same tool call 3× in a row) — retrying with a changed approach (retry ${ev.retry}/${ev.maxRetries})\n`,
+      );
+      break;
     case "agent_end":
       if (ev.stopReason === "error") {
         const last = ev.messages[ev.messages.length - 1]!;
@@ -647,7 +656,10 @@ export async function compactNow(deps: {
   if (
     !deps.force &&
     !actualRequestNeedsCompaction &&
-    !shouldCompact(lastAsst?.usage, deps.model.contextWindow, deps.model.maxTokens)
+    // The usage-based trigger uses the COMPACTION RESERVE (a leading
+    // threshold), not maxTokens — the separate `actualRequestNeedsCompaction`
+    // fit check above still reserves the full maxTokens for the next output.
+    !shouldCompact(lastAsst?.usage, deps.model.contextWindow, compactionReserve(deps.model))
   ) {
     return undefined;
   }
@@ -678,7 +690,7 @@ export async function compactNow(deps: {
   // minimal atomic suffix and the candidate can still exceed requestBudget —
   // best effort; the applied candidate is then flagged `overBudget` below
   // (it is still a strict reduction of the old context).
-  const summaryBudget = Math.min(1024, deps.model.maxTokens);
+  const summaryBudget = summarizerMaxTokens(deps.model);
   const headroom =
     deps.model.contextWindow - deps.model.maxTokens - 1024 - promptOverheadTokens - summaryBudget;
   const windowCap = headroom;

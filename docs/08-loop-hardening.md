@@ -1,6 +1,6 @@
-# Spec — Loop hardening: windowed stall guard (H1) + follow-ups (H2–H4)
+# Spec — Loop hardening: windowed stall guard (H1) + follow-ups (H2–H5)
 
-Status: **H1 approved 2026-09-30; H2 implemented. H3–H4 logged, not yet
+Status: **H1 approved 2026-09-30; H2 + H5 implemented. H3–H4 logged, not yet
 implemented.** All new logic is L3 (independent); no pi prior art (see
 `docs/03-citation-policy.md`).
 
@@ -147,6 +147,55 @@ feature is not finished) as an explicitly-marked WIP commit
 session was that the finished half of docs/07 item 1 was never committed;
 checkpoint commits cap the loss at the last half-hour instead of the whole
 session.
+
+### H5 — Bounded autonomous retry on the loop guard (implemented)
+
+**Problem.** The loop guard (same tool-call batch 3× in a row) stops the
+run with `stopReason "loop"` and the TUI/CLI prints "send another prompt to
+continue." That forces a manual message even in the common case where the
+model just needs a kick to try a *different* approach. The goal: minimize
+user intervention **without** reintroducing the runaway the guard exists to
+prevent.
+
+**Design (the two properties that make it safe).** A guard hit is converted
+into an autonomous retry only when the retry is (1) **bounded** and
+(2) **different**:
+
+- **Bounded** — `maxGuardRetries` (default **1**; `0` restores the old hard
+  stop). At the cap the run stops with `stopReason "loop"` exactly as before.
+  The worst case is a small, fixed number of extra turns, so a genuinely
+  stuck model still terminates (no runaway). The per-cycle turn budget
+  independently bounds the run too.
+- **Different** — the retry injects an **approach-changing** nudge
+  (`GUARD_RETRY_TEXT`: "you are stuck on that action; you MUST pick a
+  DIFFERENT tool / arguments / path; do NOT re-issue the same call"), not a
+  "keep going" nudge. A blind continue would just re-fire the guard. The
+  identical-batch history (`sigHistory`) is RESET for the retry, so the model
+  gets a fresh 3-attempt window (the same reset D27 Finding 2 applies when a
+  steer lands).
+
+**Scope.** The **`loop` guard only.** `budget` already auto-continues per
+cycle (C26) — nothing to gain. `stall` is deliberately left manual: its wall
+is *external and deterministic* (the sandbox denies what it denies), so an
+autonomous nudge rarely un-sticks it and the real fix is new information only
+the user can supply — auto-retrying it would burn the retries and land back
+on the user.
+
+**Mechanics.** At the guard site (after the in-band `LOOP_GUARD_TEXT` results
+are already in context), if `guardRetries < maxGuardRetries`: increment, reset
+`sigHistory`, push the nudge as a user message, emit a `guard_retry` event
+(`turn`, `retry`, `maxRetries`), and `continue` (the nudge consumes no turn).
+Otherwise stop with `stopReason "loop"`. The nudge rides the context only
+(not persisted to the session — the real resume path is a fresh prompt, as
+with the budget nudge). The `guard_retry` event is surfaced as an info item
+in the TUI and a stderr line in the CLI (mirroring `turn_budget`).
+
+**Exit criteria.** `maxGuardRetries` option + `DEFAULT_MAX_GUARD_RETRIES`
+(=1) exported; `guard_retry` event in the contracts table; TUI + CLI surface
+it; `test/agent-loop.test.ts`: (a) the default auto-retries once then stops
+with `loop` (6 identical turns); (b) `maxGuardRetries 0` = legacy hard stop;
+(c) a model that changes approach on the retry recovers and the run
+completes with `stopReason "stop"`. `npm run build` + `npm test` green.
 
 ## Exit criteria (H1)
 

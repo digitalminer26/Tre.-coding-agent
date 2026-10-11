@@ -202,6 +202,24 @@ export type AgentEvent =
       /** The per-cycle cap that was exhausted. */
       maxTurns: number;
     }
+  | {
+      /**
+       * The loop guard (same tool-call batch 3× in a row) fired, but the run
+       * is auto-retrying INSTEAD of stopping: the loop injected an
+       * approach-changing nudge and reset the identical-batch history so the
+       * model gets one fresh window. Bounded (see the loop's
+       * `DEFAULT_MAX_GUARD_RETRIES`): at the cap the run stops with
+       * stopReason "loop" as before. Informational, not an error — the run
+       * keeps going. Emitted by the loop at the guard site.
+       */
+      type: "guard_retry";
+      /** Turn counter at the moment the guard fired. */
+      turn: number;
+      /** Retry number, 1-based (1 = the first autonomous retry). */
+      retry: number;
+      /** Total autonomous retries allowed before the run stops. */
+      maxRetries: number;
+    }
   | { type: "turn_start"; turn: number }
   | { type: "turn_end"; turn: number }
   | {
@@ -387,6 +405,18 @@ export interface ModelConfig {
   contextWindow: number;
   /** Default output cap (max_tokens) for this model. */
   maxTokens: number;
+  /**
+   * The compaction trigger's reserved headroom (tokens) — how much room the
+   * `shouldCompact` trigger keeps for the model's next output before it fires
+   * (`totalTokens + compactionReserve + slack > contextWindow`). DELIBERATELY
+   * separate from `maxTokens`: `maxTokens` is the hard output cap sent to the
+   * server (and the keep plan's post-compaction fit), while `compactionReserve`
+   * is only the leading "start compacting now" threshold. A smaller reserve
+   * delays compaction (fewer compactions per session) WITHOUT shrinking what
+   * the model can emit. Optional — defaults to `DEFAULT_COMPACTION_RESERVE`
+   * (see compact.ts) when unset.
+   */
+  compactionReserve?: number;
   temperature?: number;
   apiKey?: string;
   compat?: ModelCompat;

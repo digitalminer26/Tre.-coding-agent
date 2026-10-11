@@ -55,6 +55,9 @@ const MODEL: ModelConfig = {
   api: "openai-completions",
   contextWindow: 32000,
   maxTokens: 4096,
+  // The trigger's reserve equals maxTokens here so the trigger math is
+  // unchanged by the maxTokens→compactionReserve separation.
+  compactionReserve: 4096,
 };
 
 async function fakeHome(t: test.TestContext): Promise<string> {
@@ -1427,7 +1430,14 @@ test(
 
 // ──────────────────────────────── WS9: compaction ────────────────────────────────
 
-const SMALL_WINDOW: ModelConfig = { ...MODEL, contextWindow: 2000, maxTokens: 100 };
+const SMALL_WINDOW: ModelConfig = {
+  ...MODEL,
+  contextWindow: 2000,
+  maxTokens: 100,
+  // Override the reserve to match the (reduced) maxTokens so the tiny-window
+  // trigger math is unchanged by the maxTokens→compactionReserve separation.
+  compactionReserve: 100,
+};
 
 /** Seed a session with one old [user, assistant] exchange, small-window model.
  *  The old PROMPT is deliberately LARGE: it is the OLDEST unit, so it is what

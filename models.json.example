@@ -9,6 +9,7 @@
       "apiKey": "not-needed",
       "contextWindow": 131072,
       "maxTokens": 32768,
+      "compactionReserve": 16384,
       "temperature": 0.6
     },
     {

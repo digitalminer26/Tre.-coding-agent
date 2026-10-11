@@ -22,7 +22,7 @@ import { fakeStream, type FakeTurn } from "./fake-stream.js";
 import {
   ABORTED_CALL_TEXT,
   BUDGET_CONTINUE_TEXT,
-  LOOP_GUARD_TEXT,
+  GUARD_RETRY_TEXT,
   batchSignature,
   deriveMaxTurns,
   runLoop,
@@ -757,29 +757,92 @@ test("C26: maxContinuations 0 → legacy hard stop at the first budget hit", asy
   assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
 });
 
-test("C26: loop detection — same batch 3× → third NOT executed, stopReason loop", async () => {
+test("C26: loop detection — same batch 3× → guarded, auto-retry once, then stopReason loop", async () => {
+  const { tool, calls } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  // SIX identical turns: the first 3 fire the guard (→ 1 auto-retry), the
+  // next 3 re-fire it (the retry is spent) → the run stops with "loop".
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({
+    type: "toolcall",
+    calls: [same],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop", "the guard re-fires after the retry is spent");
+  assert.equal(end.maxTurns, undefined, "a loop stop is not a budget stop");
+  // One autonomous retry happened (default maxGuardRetries = 1).
+  const retries = events.filter((e) => e.type === "guard_retry");
+  assert.equal(retries.length, 1, "one guard_retry event (the single auto-retry)");
+  assert.deepEqual(retries[0], {
+    type: "guard_retry",
+    turn: 3,
+    retry: 1,
+    maxRetries: 1,
+  });
+  // The guarded batches (turns 3 and 6) were NOT executed; turns 1,2,4,5 were.
+  assert.equal(calls.length, 4, "the two guarded batches were not executed");
+  // Both guarded batches got in-band error results (I3).
+  const guardedResults = events.filter(
+    (e) => e.type === "tool_execution_end" && e.result.isError === true,
+  );
+  assert.equal(guardedResults.length, 2, "each guarded batch got an error result");
+  for (const g of guardedResults) {
+    const text = (g as Extract<AgentEvent, { type: "tool_execution_end" }>)
+      .result.content[0] as { type: "text"; text: string };
+    assert.match(text.text, /Runaway loop detected/);
+  }
+  // The approach-changing nudge is in the final context (the model saw it).
+  const nudges = end.messages.filter(
+    (m) => m.role === "user" && m.content === GUARD_RETRY_TEXT,
+  );
+  assert.equal(nudges.length, 1, "GUARD_RETRY_TEXT injected into context");
+  // No turn_budget was involved.
+  assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
+});
+
+test("loop guard: maxGuardRetries 0 → legacy hard stop at the first guard hit", async () => {
   const { tool, calls } = makeTool("read");
   const same = { id: "c1", name: "read", args: { path: "x" } };
   const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
     type: "toolcall",
     calls: [same],
   }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, maxGuardRetries: 0 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop", "0 retries = stop at the first guard hit");
+  assert.equal(events.filter((e) => e.type === "guard_retry").length, 0, "no retry");
+  assert.equal(calls.length, 2, "only the first two repeats executed");
+  assert.equal(
+    events.filter((e) => e.type === "tool_execution_end" && e.result.isError === true).length,
+    1,
+    "the 3rd identical batch was not executed (one guarded result)",
+  );
+  // The 4th scripted turn was never consumed (the run stopped at turn 3).
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 3);
+});
+
+test("loop guard: the auto-retry lets a model that changes approach recover", async () => {
+  const { tool, calls } = makeTool("read");
+  const a = { id: "c1", name: "read", args: { path: "x" } };
+  const b = { id: "c2", name: "read", args: { path: "y" } };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [a] },
+    { type: "toolcall", calls: [a] },
+    { type: "toolcall", calls: [a] }, // 3rd identical → guard fires → auto-retry
+    { type: "toolcall", calls: [b] }, // nudged: the model picks a different action
+    { type: "text", text: "recovered" },
+  ];
   const events = await drainLoop(turns, [tool], { maxTurns: 50 });
   const end = agentEnd(events);
-  assert.equal(end.stopReason, "loop", "three identical batches stop the run");
-  assert.equal(end.maxTurns, undefined, "a loop stop is not a budget stop");
-  // Only the first TWO repeats executed — the third was guarded.
-  assert.equal(calls.length, 2, "the 3rd identical batch was not executed");
-  // The guarded batch still got in-band error results (I3).
-  const guardedResults = events.filter(
-    (e) => e.type === "tool_execution_end" && e.result.isError === true,
+  assert.equal(end.stopReason, "stop", "the run recovers and completes normally");
+  const retries = events.filter((e) => e.type === "guard_retry");
+  assert.equal(retries.length, 1, "one auto-retry");
+  // a ran twice (executed), the 3rd a was guarded, then b ran once.
+  assert.equal(calls.length, 3, "a×2 + b×1 executed; the guarded a was not");
+  const nudges = end.messages.filter(
+    (m) => m.role === "user" && m.content === GUARD_RETRY_TEXT,
   );
-  assert.equal(guardedResults.length, 1, "the guarded call got one error result");
-  const text = (guardedResults[0] as Extract<AgentEvent, { type: "tool_execution_end" }>)
-    .result.content[0] as { type: "text"; text: string };
-  assert.match(text.text, /Runaway loop detected/);
-  // No turn_budget was involved.
-  assert.equal(events.filter((e) => e.type === "turn_budget").length, 0);
+  assert.equal(nudges.length, 1, "the approach-changing nudge is in context");
 });
 
 test("stall: a result with details.stall → run stops with stopReason stall", async () => {
@@ -870,26 +933,33 @@ test("C26: loop history resets when a DIFFERENT batch intervenes", async () => {
 
 test("C26: length-guarded batches count toward the loop signature too", async () => {
   // A model stuck re-issuing the SAME truncated call: length-guard errors
-  // on repeats 1–2, loop detection stops it on repeat 3 (not after the
-  // full cycle budget).
+  // on repeats 1–2, the loop guard fires on repeat 3 (→ 1 auto-retry), the
+  // pattern repeats, and the guard re-fires on the 6th (retry spent) → stop.
   const { tool, calls } = makeTool("read");
   const truncated = { id: "t1", name: "read", args: { path: "x" } };
-  const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({
     type: "length",
     calls: [truncated],
   }));
   const events = await drainLoop(turns, [tool], { maxTurns: 50 });
   const end = agentEnd(events);
-  assert.equal(end.stopReason, "loop", "3× identical truncated batch → loop");
+  assert.equal(end.stopReason, "loop", "the guard re-fires after the retry is spent");
   assert.equal(calls.length, 0, "truncated calls are never executed");
-  // Repeats 1–2 got the length-guard text, repeat 3 got the loop text.
+  assert.equal(
+    events.filter((e) => e.type === "guard_retry").length,
+    1,
+    "one auto-retry",
+  );
+  // Repeats 1–2 got the length-guard text, repeat 3 the loop text (→ retry),
+  // then 4–5 length-guard, 6 loop text (retry spent → stop).
   const ends = events.filter(
     (e) => e.type === "tool_execution_end" && e.result.isError === true,
   ) as Extract<AgentEvent, { type: "tool_execution_end" }>[];
-  assert.equal(ends.length, 3);
+  assert.equal(ends.length, 6);
   assert.match(ends[0]!.result.content[0]!.text, /truncated/);
   assert.match(ends[1]!.result.content[0]!.text, /truncated/);
   assert.match(ends[2]!.result.content[0]!.text, /Runaway loop detected/);
+  assert.match(ends[5]!.result.content[0]!.text, /Runaway loop detected/);
 });
 
 test("C26: batchSignature — stable across key order, sensitive to tool/args", () => {

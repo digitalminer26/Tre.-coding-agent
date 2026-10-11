@@ -125,6 +125,16 @@ export interface AgentLoopOptions {
    */
   maxContinuations?: number;
   /**
+   * How many times the loop auto-retries after the loop guard (same tool-call
+   * batch 3× in a row) fires, instead of stopping with stopReason "loop".
+   * Default 1 (one approach-changing retry, then stop). 0 restores the old
+   * behavior: the run stops at the first guard hit. Each retry resets the
+   * identical-batch history and injects an approach-changing nudge, so the
+   * model gets one fresh window to pick a different action; the cap bounds
+   * the worst case to a small, fixed number of extra turns (no runaway).
+   */
+  maxGuardRetries?: number;
+  /**
    * Hook between turns: return a reduced/rewritten context for the next
    * turn, or undefined to keep the current one.
    */
@@ -211,6 +221,31 @@ export const LOOP_GUARD_TEXT =
   "row. This repeat was not executed. Change your approach — re-read the " +
   "latest results, pick a different action, or finish with a text-only " +
   "response explaining the situation.";
+
+// The loop guard (same batch 3× in a row) fired, but the run is auto-retrying
+// instead of stopping. This is an APPROACH-CHANGING nudge, not a "keep going"
+// nudge: the whole point is that the model was stuck repeating the same
+// failing action, so a blind "continue" would just re-fire the guard. The
+// model must pick a DIFFERENT action. Bounded by DEFAULT_MAX_GUARD_RETRIES —
+// at the cap the run stops with stopReason "loop" as before, so a genuinely
+// stuck model still terminates in bounded time.
+export const GUARD_RETRY_TEXT =
+  "You just repeated the same tool call(s) 3 times in a row — the repeat was " +
+  "not executed, and the run is continuing automatically. You are stuck on " +
+  "that action. You MUST change your approach: pick a DIFFERENT tool, or " +
+  "different arguments, or a different path. Do NOT re-issue the same call. " +
+  "If the task is actually complete, reply with a final summary and call no " +
+  "more tools.";
+
+/**
+ * How many times the loop auto-retries after the loop guard (same batch 3×)
+ * fires, instead of stopping with stopReason "loop". Default 1: one
+ * approach-changing retry, then the run stops (resumable, as before). The
+ * retry resets the identical-batch history so the model gets a fresh window;
+ * the cap bounds the worst case to a small, fixed number of extra turns, so
+ * a genuinely stuck model still terminates (no runaway).
+ */
+export const DEFAULT_MAX_GUARD_RETRIES = 1;
 
 // D27b audit F1 — an abort that lands after a COMPLETED assistant message
 // that contains tool calls must still give every call a result (I3: every
@@ -307,6 +342,14 @@ export async function* runLoop(
   const maxCycles = maxContinuations + 1;
   let cycleStart = 0; // turn at which the current cycle began
   let continuations = 0;
+  // Loop-guard auto-retry: how many times the same-batch-3× guard has fired
+  // and been converted into an approach-changing retry (bounded by
+  // maxGuardRetries). At the cap the run stops with stopReason "loop".
+  const maxGuardRetries =
+    options.maxGuardRetries !== undefined
+      ? options.maxGuardRetries
+      : DEFAULT_MAX_GUARD_RETRIES;
+  let guardRetries = 0;
   // C26 — loop detection: signatures of the last two issued batches.
   let sigHistory: string[] = [];
 
@@ -614,6 +657,30 @@ export async function* runLoop(
           );
           context.push(msg);
           yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
+        }
+        // Bounded auto-retry: instead of stopping outright, convert the guard
+        // hit into ONE approach-changing retry (default; maxGuardRetries 0
+        // restores the old hard stop). The in-band error results above are
+        // already in context, so the model sees exactly what was not executed
+        // and why; the nudge tells it to pick a DIFFERENT action (not "keep
+        // going" — that would just re-fire the guard). Resetting sigHistory
+        // gives the model a fresh 3-attempt window; the turn budget still
+        // bounds the run, so a genuinely stuck model still terminates.
+        if (guardRetries < maxGuardRetries) {
+          guardRetries += 1;
+          sigHistory = [];
+          context.push({
+            role: "user",
+            content: GUARD_RETRY_TEXT,
+            timestamp: Date.now(),
+          });
+          yield {
+            type: "guard_retry",
+            turn,
+            retry: guardRetries,
+            maxRetries: maxGuardRetries,
+          };
+          continue; // the nudge consumes no turn (it is not an LLM call)
         }
         stopReason = "loop";
         break;

@@ -54,6 +54,17 @@ function normalizeModel(m: unknown, i: number): ModelConfig {
     maxTokens: need("maxTokens") as number,
   };
   if (typeof o.apiKey === "string") model.apiKey = o.apiKey;
+  // compactionReserve: a finite, non-negative token count. A negative or
+  // non-finite value is a config error — drop it (leave unset) so the trigger
+  // falls back to DEFAULT_COMPACTION_RESERVE rather than firing at a nonsense
+  // (earlier-than-zero) threshold. `0` is VALID (compact as early as possible).
+  if (
+    typeof o.compactionReserve === "number" &&
+    Number.isFinite(o.compactionReserve) &&
+    o.compactionReserve >= 0
+  ) {
+    model.compactionReserve = o.compactionReserve;
+  }
   if (typeof o.temperature === "number") model.temperature = o.temperature;
   if (o.auth === "chatgpt-oauth") model.auth = "chatgpt-oauth";
   if (o.compat && typeof o.compat === "object") {
@@ -126,7 +137,13 @@ const REQUIRED_FIELDS: (keyof ModelConfig)[] = [
 ];
 
 /** Optional model fields (the guide lists them, but they never block start). */
-const OPTIONAL_FIELDS: (keyof ModelConfig)[] = ["apiKey", "auth", "temperature", "compat"];
+const OPTIONAL_FIELDS: (keyof ModelConfig)[] = [
+  "apiKey",
+  "auth",
+  "temperature",
+  "compat",
+  "compactionReserve",
+];
 
 function isPopulated(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -160,6 +177,8 @@ function placeholder(f: keyof ModelConfig): string | number | object {
       return 0.6;
     case "compat":
       return {};
+    case "compactionReserve":
+      return 16384;
   }
 }
 
