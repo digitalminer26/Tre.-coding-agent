@@ -1,5 +1,34 @@
 # Current project status (2026-10-11)
 
+**REPL steering parity + sessionless-TUI heap caveat closed (2026-10-11).**
+Two small increments landed:
+
+1. **REPL: a line typed while a run is in flight now STEERS the running loop
+   instead of being queued as the next prompt** (commit `6860aae`). The TUI
+   already had this (`submitInput → steerInput`); the plain REPL buffered such
+   lines as the next prompt, so steering was TUI-only. `src/cli/main.ts`'s REPL
+   line handler now checks `active && activeSteer !== null` and, for a
+   non-empty non-slash line, pushes it to the steer queue (echoed to stderr)
+   and returns; slash/empty lines keep the old queued-as-next-prompt behavior.
+   +1 e2e test (`test/cli.test.ts`): turn 1 hangs while active, a steer line is
+   pushed mid-run, turn 2 runs with the steer in context.
+
+2. **The "sessionless TUI long-run" heap caveat is RESOLVED** (docs-only). The
+   ~15-25MB/turn render-path growth measured in a long sessionless TUI run was
+   the same root cause as the C25 OOM — the DEV react-reconciler emitting a
+   `performance.measure` per render, held in Node's unbounded User-Timing
+   buffer. It was already fixed at the root (commit `48fa890`: remove
+   `console.timeStamp` before ink links) with the C25 `perf-sweep` as a
+   backstop, and verified flat live (before — 742,662 entries / 604MB at 28
+   min; after — 1 entry / 18MB at 6+ min). The stale "still open /
+   investigation in flight" caveat in the auto-compaction section is now marked
+   RESOLVED with the before/after numbers. (An external RSS probe was attempted
+   to re-confirm, but the tre. sandbox blocks `ps` on other PIDs —
+   `Operation not permitted` — so the committed live before/after is the
+   authoritative measurement.)
+
+**Gate.** `tsc` clean; full suite **812 pass / 0 fail / 13 skipped**.
+
 **Compaction: drop the 512 keep-floor + pin `printEvent` skip (implement-audit
 D26, 2026-10-11).** An independent audit of the D26 budget reservation found
 the 512-token floor in the keep-plan window cap could defeat the reservation,
@@ -3371,12 +3400,17 @@ What changed (one increment, 2 files, commit 2fbbddb):
   → asserts the silent summary call happened, the report line was printed,
   and turn 4's context starts with the `Compaction summary` user message.
 
-Caveat (still open, next increment): compaction bounds the CONTEXT, but a
-separate ~15-25MB/turn heap growth was measured in a long sessionless TUI
-run (live heap ≈ 2× the context size) — investigation with an instrumented
-repro was in flight (heap snapshots + render-path harness), see session
-notes. The OOM class is now much harder to hit (compaction keeps the context
-small), but the growth should still be pinned down.
+Caveat (RESOLVED): compaction bounds the CONTEXT; the separate ~15-25MB/turn
+heap growth measured in a long sessionless TUI run (live heap ≈ 2× the
+context size) was pinned down to the same root cause as the C25 OOM — the DEV
+react-reconciler emitting a `performance.measure` per render, held in Node's
+unbounded User-Timing buffer. Fixed at the root (commit 48fa890: remove
+`console.timeStamp` before ink links so the DEV reconciler never creates the
+measures) with the C25 `perf-sweep` as a backstop. Live before/after under an
+identical TUI session: before — 742,662 entries / 604MB heap at 28 min,
+growing ~450 entries/s; after — **1 entry / 18MB heap at 6+ min, flat**. Both
+the context side (compaction) and the rendering side effect (User-Timing) are
+now bounded, so long sessionless runs are viable.
 
 ## The input line WRAPS at the terminal width instead of truncating (317 tests: 309 pass 0 fail; PTY frame verified)
 
