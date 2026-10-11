@@ -3309,7 +3309,7 @@ inside the window — it now fires at ~48k total instead of ~64k, which only
 makes compaction EARLIER, never later. No code change; verified via
 `loadModelsFile` + full gate.
 
-## C25 — the 2GB OOM crash is fixed: React's User-Timing entries are swept (329 tests: 322 pass 0 fail)
+## C25/C29 — the 2GB OOM crash is fixed at the root; the User-Timing sweep remains a backstop (329 tests: 322 pass 0 fail)
 
 Root cause of the recurring `JavaScript heap out of memory` crash (reproduced
 live three times): the DEV build of react-reconciler — what ink runs under —
@@ -3635,9 +3635,12 @@ Verification (all under a no-winsize PTY, 3000 frames):
   (readdirSync noise).
 
 Notes for the next session:
-- The heap-OOM half of the user's original crash (28 min, session-less) is
-  still open. Long self-improve runs should use `--session` (compaction on)
-  and `NODE_OPTIONS="--max-old-space-size=..."` is NOT a fix, only a delay.
+- The heap-OOM half of the user's original crash is resolved by the later C25
+  User-Timing sweep and C29 root fix documented above; sessionless TUI runs
+  also have auto-compaction enabled, so `--session` is not required for either
+  heap bounding or context bounding. The original 2026-09-20 crash's exact
+  session-specific trigger remains historical context, but its mitigations
+  were superseded.
 - `module.register()` prints a DEP0205 deprecation warning on Node 26 —
   cosmetic; revisit when the minimum Node floor moves.
 
