@@ -140,16 +140,16 @@ export interface TuiState {
    * auto-retried with an approach-changing nudge (H5) — one per run, no
    * matter how many retries it spent. `recovered` counts the runs that
    * fired a retry and then ended with a clean `stop` — i.e. the model
-   * changed approach and COMPLETED its task (the retry earned its keep). A
-   * run that fired but ended `loop` (retry budget spent) or
-   * `budget`/`length`/`error`/`aborted` did NOT complete — it is counted in
-   * `fired`, not `recovered`. Surfaced by `/stats_loop_guard`.
+   * changed approach and the run ended normally (the retry earned its
+   * keep). A run that fired but ended `loop` (retry budget spent) or
+   * `stall`/`budget`/`length`/`error`/`aborted` did NOT complete — it is
+   * counted in `fired`, not `recovered`. Surfaced by `/stats_loop_guard`.
    */
   guardRetry: { fired: number; recovered: number };
   /**
    * F2 — the number of `guard_retry` events in the CURRENT run (reset on
    * `agent_start`). Internal bookkeeping for `guardRetry.recovered`: a run
-   * that fires one or more retries and ends without a `loop` stop counts as
+   * that fires one or more retries and ends with a clean `stop` counts as
    * ONE recovered run, regardless of how many retries it spent. Not
    * surfaced directly.
    */
@@ -399,11 +399,11 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         ];
       }
       // F2: this run fired one or more guard retries and ended with a clean
-      // `stop` → the model changed approach and COMPLETED its task (the
+      // `stop` → the model changed approach and the run ended normally (the
       // retry earned its keep). One recovered RUN per run, no matter how
       // many retries it spent. A run that fired but ended `loop` (retry
-      // budget spent) or `budget`/`length`/`error`/`aborted` (unrelated
-      // outcome) did NOT complete — not recovered.
+      // budget spent) or `stall`/`budget`/`length`/`error`/`aborted`
+      // (unrelated outcome) did NOT complete — not recovered.
       const recovered =
         state.guardRetryRunFired > 0 && ev.stopReason === "stop"
           ? state.guardRetry.recovered + 1
@@ -2011,12 +2011,12 @@ export function statsLine(state: TuiState, sessionBytes?: number): string {
  * `fired` = the number of RUNS in which the loop guard fired and the loop
  * converted the hit into an approach-changing retry (one per run).
  * `recovered` = the number of RUNS that fired at least one retry and then
- * ended with a clean `stop` (the model changed approach and completed its
- * task — the retry earned its keep). A run that fired but ended `loop`
- * (retry budget spent) or `budget`/`length`/`error`/`aborted` did not
- * complete: counted in `fired`, not in `recovered`. The rate is the answer
- * to "does the auto-retry earn its keep" — the evidence for whether a stall
- * detector (or a higher retry budget) is worth building.
+ * ended with a clean `stop` (the model changed approach and the run ended
+ * normally — the retry earned its keep). A run that fired but ended `loop`
+ * (retry budget spent) or `stall`/`budget`/`length`/`error`/`aborted` did
+ * not complete: counted in `fired`, not in `recovered`. The rate is the
+ * answer to "does the auto-retry earn its keep" — the evidence for whether
+ * a stall detector (or a higher retry budget) is worth building.
  */
 export function statsLoopGuardLine(state: TuiState): string {
   const { fired, recovered } = state.guardRetry;

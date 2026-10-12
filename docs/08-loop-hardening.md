@@ -227,8 +227,8 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
   and a run that fired a retry and ended with a
   clean `stop` counts as one recovered run (one per run, no matter how many
   retries it spent; a run that fired but ended `loop` (retry budget spent) or
-  `budget`/`length`/`error`/`aborted` did not complete — it is in `fired`,
-  not `recovered`).
+  `stall`/`budget`/`length`/`error`/`aborted` did not complete — it is in
+  `fired`, not `recovered`).
   Surfaced by `/stats_loop_guard` (one info line: fires, recovered, rate,
   verdict) — deliberately NOT a bottom-line field (the bottom line is
   reserved for high-frequency daily-use items). This is the evidence for the
