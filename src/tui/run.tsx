@@ -25,14 +25,15 @@
  */
 import React from "react";
 import { spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
 import { isHighFrequencyStreamEvent, makeInputHandlers, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
-import { loadTuiConfig, saveTuiConfig } from "./tui-config.js";
+import { loadTuiConfig, resolveBottomFields, saveTuiConfig, tuiConfigPath } from "./tui-config.js";
+import { makeElapsedTicker } from "./elapsed-ticker.js";
 import {
   approvalAnswer,
   applyEvent,
@@ -247,6 +248,18 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // (~/.tre/tui.json) — a missing/corrupt file silently yields the default
   // (empty selection), so a first launch behaves exactly as before.
   const tuiConfig = loadTuiConfig();
+  // The `subtasks` field is ON by default (like `workers` — a live
+  // workstream indicator the user did not explicitly turn off). The seed
+  // decision lives in resolveBottomFields (tui-config.ts, pure + unit-
+  // tested): it seeds `["subtasks"]` only on a TRUE first launch (no config
+  // file), honors an explicit `bottomSet` decision verbatim (including an
+  // explicit off), and — critically — honors a PRE-UPGRADE config (file
+  // present, no marker) verbatim so the upgrade never clobbers the user's
+  // saved layout.
+  const bottomFields = resolveBottomFields(tuiConfig, existsSync(tuiConfigPath()));
+  // The marker's live value — flipped to true on the first /display-bottom
+  // (any selection, including off) and persisted with the selection.
+  let tuiConfigBottomSet = tuiConfig.bottomSet;
   // The system prompt is the fixed floor of every turn's context — estimate
   // its size (chars/4, the loop's estimator) so the `context` field can show
   // where the tokens come from (system prompt vs the message history).
@@ -280,7 +293,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     info,
     model.contextWindow,
     model.maxTokens,
-    tuiConfig.bottom,
+    bottomFields,
     systemPromptTokens,
     catalog,
     systemPromptSectionTokens,
@@ -528,7 +541,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         compactKeepTokens: opts.compactKeepTokens,
         charsPerToken: cpt,
         steeringQueue: steerQueue,
-        tap: (ev) => (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev)),
+        tap: (ev) => {
+          // The elapsed clock follows the run's own events: armed on
+          // agent_start, stopped on agent_end (see the timer above).
+          if (ev.type === "agent_start") onAgentStart();
+          else if (ev.type === "agent_end") onAgentEnd();
+          (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev));
+        },
       });
       context = result.context;
       cpt = result.charsPerToken;
@@ -538,6 +557,11 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     } catch (err) {
       // I3: runTurn does not throw for expected failures — this is a net.
       lastInt = 0; // F4: run settled (errored) — reset the grace window
+      // The run died WITHOUT agent_end (a streamFn that throws before the
+      // loop's first yield, or a wiring error) — the tap never stopped the
+      // elapsed ticker, so stop it here or it would repaint forever (the
+      // clock is cleared by the busy:false below, but the 1s timer is not).
+      stopElapsedTick();
       setStateNow(noteError({ ...state, busy: false }, `run error: ${String(err)}`));
       return null;
     }
@@ -581,7 +605,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           promptOverheadTokens: estimatePromptOverheadTokens(systemPrompt.length, opts.tools, cpt),
           force: true,
           sinks: NULL_SINKS,
-          onEvent: async (ev) => (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev)),
+          onEvent: async (ev) => {
+            // /compact is NOT a run: compactNow emits only compaction events
+            // (context_compacted / compaction_skipped) — it never emits
+            // agent_start/agent_end (those come from runLoop), so the
+            // elapsed clock is untouched by a manual compact. The ✂ line and
+            // context-field update flow through applyEvent like any event.
+            (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev));
+          },
         });
         if (newCtx === undefined) {
           setStateNow({
@@ -698,8 +729,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           setStateNow(slash.handled ? slash.state : slashBusy.state);
           if (slash.handled && slash.state.bottom !== prevBottom) {
             // Preserve the `mouse` key — the file is the durable mouse
-            // setting; /display-bottom must not clobber it.
-            saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse });
+            // setting; /display-bottom must not clobber it. The bottomSet
+            // marker flips to true on the FIRST /display-bottom (any
+            // selection, including off) so an explicit off survives the
+            // relaunch.
+            tuiConfigBottomSet = true;
+            saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse, bottomSet: tuiConfigBottomSet });
           }
           // C34: a /models <id> switch re-resolves the full ModelConfig (the
           // state machine only re-seeded the label + context field). The
@@ -761,11 +796,14 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         setStateNow({ ...slash.state, busy: false });
         // C32: persist the bottom selection — /display-bottom is the only
         // handled command that changes it (the others keep the same array
-        // reference, so this fires exactly on a real change).
+        // reference, so this fires exactly on a real change). The bottomSet
+        // marker flips to true on the FIRST /display-bottom (any selection,
+        // including off) so an explicit off survives the relaunch.
         if (slash.state.bottom !== prevBottom) {
           // Preserve the `mouse` key — the file is the durable mouse
           // setting; /display-bottom must not clobber it.
-          saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse });
+          tuiConfigBottomSet = true;
+          saveTuiConfig({ bottom: slash.state.bottom, mouse: tuiConfig.mouse, bottomSet: tuiConfigBottomSet });
         }
         // C34: a /models <id> switch re-resolves the full ModelConfig (the
         // state machine only re-seeded the label + context field); rebuild
@@ -795,6 +833,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         if (now - lastInt < SIGINT_GRACE_MS) {
           stopTelegram();
           stopWorkersPoller();
+          stopElapsedTick();
           restoreMouseMode();
           process.exit(130);
         }
@@ -984,6 +1023,34 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   };
   workersArm();
 
+  // ── Elapsed-time tick (1s, armed only while busy) ───────────────────────
+  // The header's right-most item is the RUN's elapsed time (runStartedAt →
+  // now). Stream events repaint continuously while the model streams, but a
+  // LONG TOOL CALL (bash can run minutes) emits no stream events — without
+  // a tick the clock would freeze mid-run. So: while busy, repaint once a
+  // second (a fresh state reference — the router no-ops on an identical
+  // reference, and the elapsed value is computed at RENDER time in app.tsx,
+  // so a fresh reference with identical data is exactly what repaints).
+  //
+  // The timer is ARMED, not always-running: it starts on `agent_start`
+  // (the run's first event — the same event that sets runStartedAt) and
+  // stops on `agent_end` (the run's last — the same event that clears
+  // runStartedAt). While idle there is no pending 1s timer at all — the
+  // old always-on version kept a live (unref'd) timer and a no-op repaint
+  // pass alive for the whole session, and its `elapsedStopped` flag made it
+  // un-armable after any exit path ran. A manual `/compact` is NOT a run
+  // (compactNow emits no agent_start/agent_end — only compaction events),
+  // so it leaves the clock untouched; the clock follows real runs only.
+  // The arm/stop/tick contract itself is unit-tested in
+  // test/elapsed-ticker.test.ts.
+  const elapsedTicker = makeElapsedTicker({
+    shouldPaint: () => state.busy && state.runStartedAt !== null && mounted,
+    paint: () => setStateNow({ ...state }), // fresh reference → the router repaints
+  });
+  const stopElapsedTick = (): void => elapsedTicker.stop();
+  const onAgentStart = (): void => elapsedTicker.arm();
+  const onAgentEnd = (): void => elapsedTicker.stop();
+
   // ── approval + executor ──────────────────────────────────────────────────
   const ask: AskApproval =
     opts.deps?.askApproval ??
@@ -1003,6 +1070,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       if (now - lastInt < SIGINT_GRACE_MS) {
         stopTelegram();
         stopWorkersPoller();
+        stopElapsedTick();
         restoreMouseMode();
         process.exit(130);
       }
@@ -1011,6 +1079,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     } else {
       stopTelegram(); // process.exit skips the finally below
       stopWorkersPoller();
+      stopElapsedTick();
       restoreMouseMode();
       process.exit(130);
     }
@@ -1021,6 +1090,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   } finally {
     stopTelegram();
     stopWorkersPoller();
+    stopElapsedTick();
     restoreMouseMode();
     stopPerfSweep();
     process.off("SIGINT", onSigint);

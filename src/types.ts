@@ -463,3 +463,17 @@ export interface WorkerStatus {
   /** The worker's prompt (truncated) — what it was asked to do. */
   task: string;
 }
+
+/**
+ * One subtask in the agent's current workstream (the `subtask` tool's
+ * list, src/tools/subtask.ts). The TUI carries the list in state.subtasks
+ * (fed by the tool's `details.subtasks` on tool_execution_end) to drive the
+ * `subtasks` bottom field — `done/total <active subtask name>`.
+ */
+export interface SubtaskInfo {
+  /** 1-based position in the list (assigned by `create`). */
+  id: number;
+  /** The subtask's name (what the user sees in the bottom display). */
+  name: string;
+  status: "queued" | "in-progress" | "done" | "failed";
+}

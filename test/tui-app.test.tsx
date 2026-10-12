@@ -106,6 +106,26 @@ test("renders a busy indicator and the streaming caret", () => {
   app.unmount();
 });
 
+test("the busy header shows the run's elapsed time (right-most item)", () => {
+  // runStartedAt is stamped by agent_start (state.ts) and cleared by
+  // agent_end; while both hold, the header suffix is " · working… · Mm SSs".
+  const mk = (busy: boolean, runStartedAt: number | null) => {
+    const s = { ...makeInitialState("m"), busy, runStartedAt, items: [] as TuiItem[] };
+    const a = makeApp(s);
+    const frame = a.lastFrame() ?? "";
+    a.unmount();
+    return frame;
+  };
+  // ~2m 10s in the past (the clock moves <1s during the render).
+  const frame = mk(true, Date.now() - 130_000);
+  assert.match(frame, /working…/);
+  assert.match(frame, /· 2m 10s/);
+  // idle: no elapsed item at all
+  assert.doesNotMatch(mk(false, Date.now() - 130_000), /2m 10s/);
+  // busy but no runStartedAt (defensive): just "working…"
+  assert.doesNotMatch(mk(true, null), /2m 10s/);
+});
+
 test("the busy header stays ONE row: a long model label truncates, never wraps", () => {
   // The frame is exactly `rows` tall by construction; the busy suffix
   // (" · working…") is appended to the dim base, so the base must be

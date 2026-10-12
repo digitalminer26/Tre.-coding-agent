@@ -215,10 +215,12 @@ test("parseArgs: tui and --plain are mutually exclusive (either order)", () => {
 });
 
 test("resolveTools: all / none / filter / unknown", () => {
-  assert.equal(resolveTools("all").tools.length, 4);
+  assert.equal(resolveTools("all").tools.length, 5);
   assert.equal(resolveTools("none").tools.length, 0);
   const f = resolveTools("bash,read");
   assert.deepEqual(f.tools.map((t) => t.name).sort(), ["bash", "read"]);
+  // `subtask` is a first-class tool: it resolves by name and is in "all".
+  assert.deepEqual(resolveTools("subtask").tools.map((t) => t.name), ["subtask"]);
   assert.match(resolveTools("bash,nope")!.error ?? "", /unknown tool/);
 });
 

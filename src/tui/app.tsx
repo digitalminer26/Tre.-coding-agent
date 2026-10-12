@@ -20,6 +20,7 @@ import {
   bottomLines,
   dispWidth,
   fitItemsScrollable,
+  formatElapsedMs,
   inputWrap,
   modelPickerMenu,
   selectedRanges,
@@ -427,6 +428,18 @@ export function App(props: AppProps): React.ReactElement {
     if (input !== "" && !key.meta) props.onChar(input);
   });
 
+  // The header's busy suffix, computed ONCE per render (not twice — a
+  // second-boundary flip between the two computations could reserve the
+  // width for one string and render another, wrapping the row). " ·
+  // working…" plus the right-most ELAPSED item (" · 2m 34s" — runStartedAt
+  // is set by agent_start, cleared by agent_end); empty when idle.
+  const headerSuffix =
+    state.busy && state.runStartedAt !== null
+      ? ` · working… · ${formatElapsedMs(Date.now() - state.runStartedAt)}`
+      : state.busy
+        ? " · working…"
+        : "";
+
   // Frame, top -> bottom (exactly `rows` lines by construction):
   //   header(1) + visible items + pad + [approval(1)] + hint(1)
   //   + [D16 menu lines (0..MENU_MAX_LINES)]
@@ -438,13 +451,14 @@ export function App(props: AppProps): React.ReactElement {
         {/* busy = YELLOW, not dim: the one moment the header should jump
             out is while the agent is working (the dim chrome is the
             resting state). The base is truncated to leave room for the
-            indicator — the header is ALWAYS exactly one row (frame
-            contract), so the busy suffix must never push it past width. */}
+            FULL busy suffix (headerSuffix) — the header is ALWAYS exactly
+            one row (frame contract), so the suffix must never push it
+            past width. */}
         {oneLine(
           `tre. · ${state.modelLabel} — turn ${state.turn}`,
-          state.busy ? Math.max(1, width - " · working…".length) : width
+          Math.max(1, width - headerSuffix.length),
         )}
-        {state.busy && <Text color="yellow"> · working…</Text>}
+        {state.busy && <Text color="yellow">{headerSuffix}</Text>}
       </Text>
       {layout.visible.map((slice, i) => (
         <Item

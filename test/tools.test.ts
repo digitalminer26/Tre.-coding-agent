@@ -98,8 +98,8 @@ async function drain(gen: AsyncGenerator<AgentEvent, void, unknown>): Promise<Ag
 
 test("registry: add / get / list / size", () => {
   const reg = defaultRegistry();
-  assert.equal(reg.size, 4);
-  assert.deepEqual(reg.list().map((t) => t.name).sort(), ["bash", "edit", "read", "write"]);
+  assert.equal(reg.size, 5);
+  assert.deepEqual(reg.list().map((t) => t.name).sort(), ["bash", "edit", "read", "subtask", "write"]);
   assert.equal(reg.get("read"), readTool);
   assert.equal(reg.get("nope"), undefined);
   assert.throws(() => reg.add(readTool), /duplicate tool name/);

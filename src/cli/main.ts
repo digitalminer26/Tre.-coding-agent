@@ -86,7 +86,7 @@ import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { isDirectInvocation, restartCommand } from "../tui/restart.js";
 import { buildSystemPrompt, systemPromptSectionChars } from "../prompt/system-prompt.js";
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
-import { DEFAULT_TOOLS, createBashTool, makeToolExecutor } from "../tools/index.js";
+import { DEFAULT_TOOLS, createBashTool, createSubtaskTool, makeToolExecutor } from "../tools/index.js";
 import { bashSandboxAvailable } from "../tools/sandbox.js";
 import {
   makeSafetyHooks,
@@ -1354,11 +1354,53 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // on darwin the child is kernel-sandboxed to the same boundary (WS11).
   // C35: extra roots are re-allowed in the per-call kernel policy AND in
   // the write/edit path sandbox — one boundary, both layers.
-  const wiredTools = tools.map((t) =>
-    t.name === "bash"
-      ? createBashTool(root, { sandbox: !args.noSandbox, extraRoots })
-      : t,
-  );
+  //
+  // The session PATH is computed BEFORE the tools are wired: the `subtask`
+  // tool binds to the session id (the file's basename) so its list is
+  // scoped per session. Only the path moves up — the session OPEN/CREATE
+  // block (replay, model re-resolve, its side effects) keeps its position
+  // below, unchanged.
+  // Every interactive TUI run gets a durable session by default. Sessions
+  // stay outside repositories (~/.tre/sessions/) so the agent cannot read or
+  // edit its own history. Explicit --session/--resume always take precedence;
+  // --session-auto retains its existing behavior for non-TUI invocations too.
+  const ui: "plain" | "tui" =
+    args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";
+  let autoSessionPath: string | undefined;
+  if (args.sessionAuto || (ui === "tui" && !args.sessionPath && !args.resumePath)) {
+    autoSessionPath = defaultSessionPath();
+    mkdirSync(path.dirname(autoSessionPath), { recursive: true });
+    sinks.err.write(`session: ${autoSessionPath}\n`);
+  }
+  const sessionFile = args.resumePath ?? args.sessionPath ?? autoSessionPath;
+
+  const wiredTools = tools.map((t) => {
+    if (t.name === "bash") {
+      return createBashTool(root, { sandbox: !args.noSandbox, extraRoots });
+    }
+    if (t.name === "subtask") {
+      // Bound to the session file's PATH so the subtask list is scoped per
+      // session — keyed by basename + a short hash of the FULL path
+      // (subtaskKey) so two sessions in different directories with the same
+      // filename do NOT collide onto one list. The path is resolved to
+      // ABSOLUTE here (the driver owns the CWD context): a relative
+      // `--session X` opened from two different working dirs must key to two
+      // different lists, and the file itself is CWD-relative, so the absolute
+      // path is exactly where it lives. No session file (plain run without
+      // --session-auto and no TTY) → IN-MEMORY-ONLY: a sessionless run must
+      // not share the "default" file, or unrelated runs on the same machine
+      // would clobber each other's lists. The list still works for the run's
+      // lifetime; it just does not survive the process.
+      const subtaskSession =
+        sessionFile !== undefined ? path.resolve(sessionFile) : undefined;
+      return createSubtaskTool(
+        subtaskSession ?? "default",
+        deps.home ?? homedir(),
+        subtaskSession !== undefined,
+      );
+    }
+    return t;
+  });
 
   // skills
   const skillDirs = args.skillDirs.length > 0 ? args.skillDirs : defaultSkillDirs(root);
@@ -1380,20 +1422,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // switch (the section sizes don't change with the model name).
   const systemPromptSections = systemPromptSectionChars(systemPromptOpts);
 
-  // Every interactive TUI run gets a durable session by default. Sessions
-  // stay outside repositories (~/.tre/sessions/) so the agent cannot read or
-  // edit its own history. Explicit --session/--resume always take precedence;
-  // --session-auto retains its existing behavior for non-TUI invocations too.
-  const ui: "plain" | "tui" =
-    args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";
-  let autoSessionPath: string | undefined;
-  if (args.sessionAuto || (ui === "tui" && !args.sessionPath && !args.resumePath)) {
-    autoSessionPath = defaultSessionPath();
-    mkdirSync(path.dirname(autoSessionPath), { recursive: true });
-    sinks.err.write(`session: ${autoSessionPath}\n`);
-  }
-
-  // session (resume / create / --session-auto)
+  // session (resume / create / --session-auto) — `sessionFile` was computed
+  // above (before the tool wiring) so the `subtask` tool can bind to the
+  // session id; this block only OPENS/CREATES the session (replay, model
+  // re-resolve) — its side effects keep their original position.
   let session: SessionType | undefined;
   let context: AgentMessage[] = [];
   // A1: session-lifetime calibrated chars-per-token (runTurn refines it
@@ -1403,7 +1435,6 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // from the replay on resume (a compaction's firstKeptEntryId must name a
   // kept message's entry); filled as new messages are appended.
   const entryIds = new Map<AgentMessage, string>();
-  const sessionFile = args.resumePath ?? args.sessionPath ?? autoSessionPath;
   if (sessionFile !== undefined) {
     try {
       if (args.resumePath || existsSync(sessionFile)) {

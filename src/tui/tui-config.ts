@@ -28,10 +28,47 @@ export interface TuiConfig {
    * selection-friendly (the terminal keeps its native highlight-and-copy);
    * the env vars still win over the file (see run.tsx). */
   mouse: boolean;
+  /**
+   * Whether the user has EVER made an explicit bottom-selection decision
+   * (`/display-bottom`, with or without fields). Absent = false.
+   *
+   * Why the marker exists: `bottom: []` alone is ambiguous — it is BOTH
+   * "no config yet" (first launch) AND "the user explicitly turned the
+   * bottom off" (`/display-bottom` with no args). Without the marker, an
+   * explicit off is re-defaulted to `["subtasks"]` on the next launch.
+   * The driver seeds `["subtasks"]` only when `bottomSet === false`; a
+   * saved `bottom: []` with `bottomSet: true` is honored as off.
+   */
+  bottomSet: boolean;
 }
 
 export function defaultTuiConfig(): TuiConfig {
-  return { bottom: [], mouse: false };
+  return { bottom: [], mouse: false, bottomSet: false };
+}
+
+/**
+ * Resolve the effective bottom-field selection at startup (the driver calls
+ * this with the loaded config + whether `~/.tre/tui.json` exists).
+ *
+ * `subtasks` is ON by default (like `workers` — a live workstream indicator
+ * the user did not explicitly turn off), so it is SEEDed when the user has
+ * never made an explicit bottom-selection decision. "Never decided" is the
+ * narrow case of a TRUE first launch — no config file at all:
+ * - `bottomSet === true` → the user decided (`/display-bottom`) → honor
+ *   `bottom` verbatim (INCLUDING an explicit off, `bottom: []`).
+ * - `bottomSet === false` + file ABSENT → first launch → seed `["subtasks"]`.
+ * - `bottomSet === false` + file PRESENT → a PRE-UPGRADE config written by an
+ *   older version (the marker is new); the user already chose `bottom`, so
+ *   honor it verbatim — the only migration that does not clobber their
+ *   layout. (saveTuiConfig runs only from /display-bottom, so file-existence
+ *   ⟺ the user configured it.)
+ *
+ * Pure (no I/O) — `fileExists` is injected by the caller (the driver's
+ * existsSync) so the decision is unit-testable without a home dir.
+ */
+export function resolveBottomFields(cfg: TuiConfig, fileExists: boolean): string[] {
+  if (cfg.bottomSet) return cfg.bottom;
+  return fileExists ? cfg.bottom : ["subtasks"];
 }
 
 /** The config file's location: `~/.tre/tui.json` (`home` for tests). */
@@ -76,7 +113,7 @@ export function loadTuiConfig(file: string = tuiConfigPath()): TuiConfig {
         ),
       ]
     : [];
-  return { bottom, mouse: obj.mouse === true };
+  return { bottom, mouse: obj.mouse === true, bottomSet: obj.bottomSet === true };
 }
 
 /**

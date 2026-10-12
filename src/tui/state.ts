@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type Usage, type WorkerStatus } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
 import { DEFAULT_COMPACTION_RESERVE } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
@@ -96,6 +96,15 @@ export interface TuiState {
   historyIdx: number | null;
   /** A runTurn is in flight (agent_start…agent_end). */
   busy: boolean;
+  /**
+   * Epoch ms the CURRENT run started (agent_start), or null when idle.
+   * The header shows the elapsed time (`Date.now() − runStartedAt`) as its
+   * right-most item while busy. Set/cleared by applyEvent (agent_start /
+   * agent_end) — every run exit path emits agent_end (the loop's contract:
+   * runAgent throws if the generator ends without it), so the clock cannot
+   * get stuck.
+   */
+  runStartedAt: number | null;
   /** Current turn number (turn_start). */
   turn: number;
   /**
@@ -257,6 +266,18 @@ export interface TuiState {
    */
   workers: WorkerStatus[];
   /**
+   * Workstream tracking: the agent's current subtask list (the `subtask`
+   * tool's list, src/tools/subtask.ts). The driver's event tap fills it —
+   * applyEvent reads `details.subtasks` off every successful `subtask`
+   * tool_execution_end (the tool returns the FULL list in details on every
+   * action, so the state always mirrors the tool's last result). The state
+   * machine never reads the disk — same purity contract as `workers`.
+   * Feeds the `subtasks` bottom field. Empty = no subtasks (the agent has
+   * not broken the work down yet). On session RESUME the list is stale
+   * (events are not replayed) — the next `subtask list` call refreshes it.
+   */
+  subtasks: SubtaskInfo[];
+  /**
    * Mouse selection (opt-in — TRE_MOUSE=1 or the persisted `mouse` config):
    * two ANCHORS in content coordinates — each anchor indexes the item's
    * RENDERED lines (the itemLines output) by line, and that line by DISPLAY
@@ -301,6 +322,7 @@ export function makeInitialState(
     history: [],
     historyIdx: null,
     busy: false,
+    runStartedAt: null,
     turn: 0,
     approval: null,
     modelLabel,
@@ -334,6 +356,10 @@ export function makeInitialState(
     // after mount — it is never a makeInitialState argument (the state
     // machine does no I/O; the poller owns the registry read).
     workers: [],
+    // Workstream tracking: filled by applyEvent from the `subtask` tool's
+    // results (details.subtasks on tool_execution_end) — same purity
+    // contract as `workers` (the state machine never reads the disk).
+    subtasks: [],
   };
 }
 
@@ -348,7 +374,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // selection does not survive a new turn).
       // F2: a fresh run starts with no guard-retry fires of its own — the
       // per-run counter resets (the session totals survive).
-      return { ...state, busy: true, viewTop: null, selection: null, guardRetryRunFired: 0 };
+      return { ...state, busy: true, runStartedAt: Date.now(), viewTop: null, selection: null, guardRetryRunFired: 0 };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -411,6 +437,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       return {
         ...state,
         busy: false,
+        runStartedAt: null,
         approval: null,
         items,
         guardRetry: { ...state.guardRetry, recovered },
@@ -603,11 +630,24 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           selection: from === null || to === null || anchor === null ? null : { from, to, anchor },
         };
       }
-      return withRunningTool(
+      // The `subtask` tool returns its FULL list in `details.subtasks` on
+      // every successful action (create/list/mark) — the TUI mirrors it into
+      // state.subtasks so the `subtasks` bottom field re-renders. Error
+      // results carry no details (the list is unchanged) — skipped.
+      let subtasks: SubtaskInfo[] | null = null;
+      if (ev.result.toolName === "subtask" && ev.result.isError !== true) {
+        const d = ev.result.details;
+        if (d !== undefined && Array.isArray(d.subtasks)) {
+          const norm = normalizeSubtaskList(d.subtasks);
+          if (norm !== null) subtasks = norm; // null is unreachable: Array.isArray above
+        }
+      }
+      const ended = withRunningTool(
         state,
         (t) => ({ ...t, running: false, resultText: text, isError: ev.result.isError === true }),
         ev.toolCallId,
       );
+      return subtasks === null ? ended : { ...ended, subtasks };
     }
     case "context_compacted": {
       // docs/07 item 2: the compaction SHRINKS the context — the delta is
@@ -1589,7 +1629,7 @@ export function menuComplete(s: TuiState): TuiState | null {
 // ---------------------------------------------------------------------------
 
 /** Fields the user may pin into the bottom lines, in menu order. */
-export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cache", "cwd", "session", "workers"] as const;
+export const BOTTOM_FIELDS = ["model", "status", "turn", "tokens", "context", "cache", "cwd", "session", "workers", "subtasks"] as const;
 export type BottomField = (typeof BOTTOM_FIELDS)[number];
 
 /** Compact token count: 0 → "0", 999 → "1k", 45234 → "45.2k", 2100000 → "2.1M". */
@@ -1766,6 +1806,50 @@ export function contextUrgencyColor(state: TuiState): string | undefined {
   return "green";
 }
 
+/**
+ * Validate + coerce an unknown value (from a tool result's
+ * `details.subtasks`) into a `SubtaskInfo[]`, or null when it is not a list
+ * (defensive: the tool is the only producer, but a hand-crafted or future
+ * result must not corrupt state). Pure — no I/O. Items that are not
+ * objects with a usable name are dropped; ids fall back to 1-based
+ * positions, unknown statuses to "queued" (mirrors the tool's
+ * normalizeSubtaskFile so the two can never drift on shape).
+ */
+export function normalizeSubtaskList(parsed: unknown): SubtaskInfo[] | null {
+  if (!Array.isArray(parsed)) return null;
+  const out: SubtaskInfo[] = [];
+  for (let i = 0; i < parsed.length; i++) {
+    const it = parsed[i];
+    if (it === null || typeof it !== "object" || Array.isArray(it)) continue;
+    const r = it as Record<string, unknown>;
+    const name = typeof r.name === "string" ? r.name : "";
+    if (name === "") continue;
+    const id = typeof r.id === "number" && Number.isFinite(r.id) ? Math.round(r.id) : i + 1;
+    const status =
+      r.status === "queued" || r.status === "in-progress" || r.status === "done" || r.status === "failed"
+        ? r.status
+        : "queued";
+    out.push({ id, name, status });
+  }
+  return out;
+}
+
+/**
+ * The elapsed-time format for the header's right-most item: `<s>s` under a
+ * minute, `<m>m <ss>s` under an hour (seconds zero-padded to 2 — `3m 07s`),
+ * `<h>h <mm>m` beyond (minutes zero-padded to 2 — `1h 04m`). Negative input
+ * (a skewed clock) clamps to 0. Pure — unit-testable.
+ */
+export function formatElapsedMs(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${sec}s`;
+}
+
 /** The value shown for one field ("—" when a static label is absent). */
 export function bottomValue(state: TuiState, field: BottomField): string {
   switch (field) {
@@ -1839,6 +1923,16 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       // More than 3 workers → the first 3 + a `+N` suffix (this is ONE
       // bottom line; bottomLines truncates it to the terminal width).
       return workersBottomValue(state.workers);
+    case "subtasks":
+      // Workstream progress: `done/total <name>`. The name is the ACTIVE
+      // subtask (first in-progress by id) — that is what the agent is
+      // working on RIGHT NOW; when none is in-progress but some remain, the
+      // NEXT one (first queued) is shown with a `(next)` marker; all done →
+      // `done`; the only remaining item failed → `(failed)`. The fraction is
+      // done/total (a failed item is not done). Empty list → "none" (the
+      // agent has not broken the work down yet). bottomLines truncates the
+      // name to the terminal width.
+      return subtasksBottomValue(state.subtasks);
   }
 }
 
@@ -1869,6 +1963,29 @@ function workersBottomValue(workers: WorkerStatus[]): string {
   // plain space (not the " · " worker separator) so it reads as a summary
   // tail: `a t0 · b t0 · c t0 +1`.
   return extra > 0 ? `${workers.length}: ${base} +${extra}` : `${workers.length}: ${base}`;
+}
+
+/**
+ * The `subtasks` field's one-liner, split out of bottomValue's switch to
+ * keep the case readable (same pure contract: state in, string out).
+ * Format: `done/total <name>` — see the `subtasks` case for the selection
+ * rules (active → next → all-done → failed-only).
+ */
+export function subtasksBottomValue(subtasks: SubtaskInfo[]): string {
+  if (subtasks.length === 0) return "none";
+  const total = subtasks.length;
+  const done = subtasks.filter((s) => s.status === "done").length;
+  const byId = [...subtasks].sort((a, b) => a.id - b.id);
+  const active = byId.find((s) => s.status === "in-progress");
+  if (active !== undefined) return `${done}/${total} ${active.name}`;
+  if (done === total) return `${done}/${total} done`;
+  const next = byId.find((s) => s.status === "queued");
+  if (next !== undefined) return `${done}/${total} ${next.name} (next)`;
+  // Nothing in-progress, not all done, nothing queued → the only remaining
+  // state is failed item(s): name the first (by id) so the user sees WHICH
+  // subtask died.
+  const failed = byId.find((s) => s.status === "failed");
+  return failed !== undefined ? `${done}/${total} ${failed.name} (failed)` : `${done}/${total}`;
 }
 
 /**

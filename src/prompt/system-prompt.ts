@@ -61,6 +61,10 @@ const TOOL_GUIDELINES: { requires: string[]; text: string }[] = [
     requires: ["bash", "edit"],
     text: "After editing code, verify it compiles or runs (e.g. with bash) before declaring the work done.",
   },
+  {
+    requires: ["subtask"],
+    text: "For multi-part work, break the task into subtasks with the subtask tool (create them up front, mark in-progress as you start, done/failed as you finish) — the TUI shows progress in the bottom display.",
+  },
 ];
 
 function deriveGuidelines(tools: Tool[], extra: string[] = []): string[] {

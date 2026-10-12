@@ -8,6 +8,7 @@ import type {
   AgentEvent,
   AssistantMessage,
   ContentBlock,
+  SubtaskInfo,
   ToolResultMessage,
 } from "../src/types.js";
 import {
@@ -48,6 +49,9 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
+  subtasksBottomValue,
+  formatElapsedMs,
+  normalizeSubtaskList,
   type ModelOption,
   type TuiItem,
   type TuiState,
@@ -1564,4 +1568,208 @@ test("handleSlashCommand: /restart touches no bottom/modelLabel/busy (pure feedb
   assert.equal(r.state.modelLabel, "m", "modelLabel unchanged");
   assert.equal(r.state.busy, true, "busy unchanged — the driver owns the re-exec");
   assert.equal(r.state.input, "left alone", "input unchanged");
+});
+
+// ── subtasks (the `subtask` tool's bottom field) ───────────────────────────
+
+const subEnd = (
+  id: string,
+  subtasks: unknown,
+  isError = false,
+): AgentEvent => ({
+  type: "tool_execution_end",
+  toolCallId: id,
+  result: {
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "subtask",
+    content: [{ type: "text", text: "ok" }],
+    isError,
+    ...(isError ? {} : { details: { subtasks } }),
+    timestamp: 0,
+  },
+});
+
+test("applyEvent: subtask tool_execution_end mirrors details.subtasks into state", () => {
+  let s = makeInitialState("m");
+  assert.deepEqual(s.subtasks, []);
+  s = applyEvent(s, subEnd("1", [
+    { id: 1, name: "wire state", status: "in-progress" },
+    { id: 2, name: "add tests", status: "queued" },
+  ]));
+  assert.deepEqual(s.subtasks, [
+    { id: 1, name: "wire state", status: "in-progress" },
+    { id: 2, name: "add tests", status: "queued" },
+  ]);
+  // a later mark replaces the whole list (the tool returns the full list)
+  s = applyEvent(s, subEnd("2", [
+    { id: 1, name: "wire state", status: "done" },
+    { id: 2, name: "add tests", status: "in-progress" },
+  ]));
+  assert.equal(s.subtasks[0]!.status, "done");
+  assert.equal(s.subtasks[1]!.status, "in-progress");
+});
+
+test("applyEvent: subtask ERROR result does NOT touch state.subtasks", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, subEnd("1", [
+    { id: 1, name: "a", status: "queued" },
+  ]));
+  const before = s.subtasks;
+  s = applyEvent(s, subEnd("2", null, true)); // isError: no details
+  assert.equal(s.subtasks, before, "error result leaves the list unchanged");
+  // a non-subtask tool's details are ignored too
+  s = applyEvent(s, {
+    type: "tool_execution_end",
+    toolCallId: "3",
+    result: {
+      role: "toolResult", toolCallId: "3", toolName: "bash",
+      content: [{ type: "text", text: "ok" }],
+      details: { subtasks: [{ id: 9, name: "injected", status: "done" }] },
+      timestamp: 0,
+    },
+  });
+  assert.equal(s.subtasks, before, "another tool's details are not subtask data");
+});
+
+test("applyEvent: malformed details.subtasks is ignored (I3)", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, {
+    type: "tool_execution_end",
+    toolCallId: "1",
+    result: {
+      role: "toolResult", toolCallId: "1", toolName: "subtask",
+      content: [{ type: "text", text: "ok" }],
+      details: { subtasks: "not-an-array" },
+      timestamp: 0,
+    },
+  });
+  assert.deepEqual(s.subtasks, []);
+  s = applyEvent(s, {
+    type: "tool_execution_end",
+    toolCallId: "2",
+    result: {
+      role: "toolResult", toolCallId: "2", toolName: "subtask",
+      content: [{ type: "text", text: "ok" }],
+      details: { subtasks: [{ name: "real" }, "junk", { id: 2, name: "b", status: "bogus" }] },
+      timestamp: 0,
+    },
+  });
+  assert.deepEqual(s.subtasks, [
+    { id: 1, name: "real", status: "queued" },
+    { id: 2, name: "b", status: "queued" },
+  ]);
+});
+
+test("subtasksBottomValue: none / active / next / all-done / failed-only", () => {
+  assert.equal(subtasksBottomValue([]), "none");
+  // active (in-progress) wins, by id order
+  assert.equal(
+    subtasksBottomValue([
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "in-progress" },
+      { id: 3, name: "c", status: "in-progress" },
+    ]),
+    "1/3 b",
+  );
+  // nothing in-progress → the next queued one, marked (next)
+  assert.equal(
+    subtasksBottomValue([
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "queued" },
+    ]),
+    "1/2 b (next)",
+  );
+  // all done
+  assert.equal(
+    subtasksBottomValue([
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "done" },
+    ]),
+    "2/2 done",
+  );
+  // the only remaining item is failed (failed is NOT counted as done)
+  assert.equal(
+    subtasksBottomValue([
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "failed" },
+    ]),
+    "1/2 b (failed)",
+  );
+  // unsorted input: selection is by id, not array order
+  assert.equal(
+    subtasksBottomValue([
+      { id: 2, name: "b", status: "queued" },
+      { id: 1, name: "a", status: "in-progress" },
+    ]),
+    "0/2 a",
+  );
+});
+
+test("bottomValue: the `subtasks` field renders the one-liner", () => {
+  const st: SubtaskInfo[] = [
+    { id: 1, name: "wire state", status: "done" },
+    { id: 2, name: "add tests", status: "in-progress" },
+  ];
+  const s = { ...makeInitialState("m"), subtasks: st };
+  assert.equal(bottomValue(s, "subtasks"), "1/2 add tests");
+  assert.equal(bottomValue(makeInitialState("m"), "subtasks"), "none");
+});
+
+test("BOTTOM_FIELDS: `subtasks` is registered LAST (existing configs keep order)", () => {
+  assert.equal(BOTTOM_FIELDS[BOTTOM_FIELDS.length - 1], "subtasks");
+  assert.ok((BOTTOM_FIELDS as readonly string[]).includes("subtasks"));
+  // /display-bottom accepts it and rejects unknown fields
+  const r = handleSlashCommand(makeInitialState("m"), "/display-bottom subtasks");
+  assert.equal(r.handled, true);
+  assert.deepEqual(r.state.bottom, ["subtasks"]);
+  const last = r.state.items[r.state.items.length - 1]!;
+  assert.equal(last.kind, "info");
+  assert.match(last.text, /display-bottom: subtasks/);
+});
+
+test("bottomLines: the subtasks line truncates to the width", () => {
+  const st: SubtaskInfo[] = [
+    { id: 1, name: "a very long subtask name that will not fit", status: "in-progress" },
+    { id: 2, name: "b", status: "queued" },
+  ];
+  const s = { ...makeInitialState("m", {}, 0, 0, ["subtasks"]), subtasks: st };
+  const lines = bottomLines(s, 20);
+  assert.equal(lines.length, 3, "padded to RESERVED_BOTTOM_LINES");
+  const line = lines[0]!;
+  assert.ok(line.length <= 20, `line fits the width: ${JSON.stringify(line)}`);
+  assert.ok(line.startsWith("subtasks: 0/2 a"));
+});
+
+// ── elapsed time (header right-most item) ──────────────────────────────────
+
+test("formatElapsedMs: s / m+ss / h+mm boundaries", () => {
+  assert.equal(formatElapsedMs(0), "0s");
+  assert.equal(formatElapsedMs(999), "0s");
+  assert.equal(formatElapsedMs(42_000), "42s");
+  assert.equal(formatElapsedMs(59_999), "59s");
+  assert.equal(formatElapsedMs(60_000), "1m 00s");
+  assert.equal(formatElapsedMs(157_000), "2m 37s");
+  assert.equal(formatElapsedMs(3_599_000), "59m 59s");
+  assert.equal(formatElapsedMs(3_600_000), "1h 00m");
+  assert.equal(formatElapsedMs(3_924_000), "1h 05m");
+  assert.equal(formatElapsedMs(-5_000), "0s", "negative (skewed clock) clamps");
+});
+
+test("applyEvent: agent_start sets runStartedAt, agent_end clears it", () => {
+  let s = makeInitialState("m");
+  assert.equal(s.runStartedAt, null);
+  const t0 = Date.now();
+  s = applyEvent(s, { type: "agent_start" });
+  assert.equal(s.busy, true);
+  assert.ok(s.runStartedAt !== null && s.runStartedAt >= t0, "runStartedAt stamped at start");
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  assert.equal(s.busy, false);
+  assert.equal(s.runStartedAt, null, "cleared on a clean stop");
+  // every exit path clears it (the loop emits agent_end for all stopReasons)
+  for (const stopReason of ["error", "aborted", "budget", "loop", "stall", "length"] as const) {
+    let s2 = applyEvent(makeInitialState("m"), { type: "agent_start" });
+    s2 = applyEvent(s2, { type: "agent_end", stopReason, messages: [] });
+    assert.equal(s2.runStartedAt, null, `cleared on ${stopReason}`);
+  }
 });

@@ -1,4 +1,45 @@
-# Current project status (2026-10-11)
+# Current project status (2026-10-12)
+
+**Subtask visibility + header elapsed time (2026-10-12).** Two TUI features
+landed in the working tree (workstream `.tre/delegation/subtask-visibility/`,
+both waves C+D done; local endpoints A/B failed — orchestrator implemented
+directly):
+
+1. **Subtask tracking (new `subtask` tool).** A first-class tool
+   (create/list/mark) added to `DEFAULT_TOOLS` (`src/tools/subtask.ts`). It
+   persists a session-scoped JSON list (`~/.tre/subtasks/<basename>-<hash>.json`
+   — keyed by sanitized basename + 8-hex hash of the FULL path, so two sessions
+   in different dirs with the same filename do NOT collide; a resumed session
+   keeps the same file). Cross-process safety: a per-session lock file (O_EXCL)
+   that the holder HEARTBEATS (mtime refresh) for as long as it is held, so a
+   LIVE holder is never stale-claimed — only a holder silent for `staleAfterMs`
+   (crashed/kill -9) is. A corrupt list file is REFUSED, not silently treated
+   as empty (a bad read can never clobber the only copy of the user's list).
+   Sessionless runs (no session file) use an IN-MEMORY-ONLY list so unrelated
+   runs on one machine don't share the "default" file. The TUI mirrors the
+   tool's `details.subtasks` into `state.subtasks` on every successful
+   `tool_execution_end` (state.ts reads it off the event — `resultMessage`
+   copies `result.details` onto the toolResult message) and renders a
+   default-ON `subtasks` bottom field: `done/total <active|next (next)|done|
+   failed>`. `subtasks` is seeded ON only on a TRUE first launch (no config
+   file); a pre-upgrade config or an explicit `/display-bottom` decision
+   (tracked by the new `bottomSet` marker) is honored verbatim, so the seed
+   never clobbers a saved layout.
+2. **Header elapsed time.** `state.runStartedAt` (ms epoch) is stamped on
+   `agent_start` and cleared on `agent_end`; the header's right-most item shows
+   ` · working… · 2m 34s` while busy (computed at render time in app.tsx). A
+   1s unref'd ticker (`src/tui/elapsed-ticker.ts`, `makeElapsedTicker`) repaints
+   during LONG TOOL CALLS (stream events don't repaint then — a bash call can
+   run minutes) and is ARMED on agent_start / STOPPED on agent_end, so there is
+   no pending timer while idle; every run exit path (run-error catch, both
+   SIGINT branches, `finally`) also stops it. A manual `/compact` emits no
+   agent_start/agent_end (only compaction events), so it leaves the clock
+   untouched.
+
+**Gate.** `tsc` clean; full suite **916 tests, 903 pass, 0 fail, 13 skipped**
+(the 13 are the pre-existing TTY/TUI-live + platform skips). New tests:
+`test/subtask-tool.test.ts`, `test/elapsed-ticker.test.ts`; extended:
+`tui-state`, `tui-app`, `tui-config`, `tools`, `cli`.
 
 **D26-audit comment correction (2026-10-11).** The D26 compaction keep-floor
 fix (`4188529`) documented a "UNIFORM guarantee" that the compaction candidate
