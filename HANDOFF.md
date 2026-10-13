@@ -1,4 +1,36 @@
-# Current project status (2026-10-12)
+# Current project status (2026-10-13)
+
+**Subtask key canonicalization (2026-10-13).** The subtask-visibility audit
+(2026-10-12) found a real canonical-path divergence: the driver bound the
+subtask tool to `path.resolve(sessionFile)`, but `path.resolve` does NOT
+resolve symlinks or `..` components — so two spellings of the SAME physical
+session file (a symlink and its target) key to DIFFERENT subtask lists, and a
+resume through the symlink would silently start a second list next to the
+first. (The auditor's literal "relative path from a different CWD" scenario
+does not bite: `Session.open` fails first — the file is CWD-relative — but
+the symlink case is real.) Fix: `canonicalSessionPath` in
+`src/tools/subtask.ts` — `realpathSync` with two fallbacks so the key stays a
+pure, stable function of the input: (a) the file does not exist yet (fresh
+session) → if the final component is a BROKEN symlink, follow it (a later run
+with the file present would canonicalize to the target — the key must not
+diverge), then walk up to the deepest resolvable ancestor and re-append the
+missing tail (the file lands exactly where the driver opens it); (b) the path
+exists but cannot be resolved (EPERM under a strict sandbox — the C35
+`validateExtraRoot` case) → return the input unchanged (fail-safe; the key is
+still stable). The driver (`main.ts` tool wiring) canonicalizes the resolved
+session path before binding the tool. New tests: `test/subtask-tool.test.ts`
+(symlink+target → same key; fresh-session stability across file creation;
+broken-symlink follow; EPERM fallback (chmod-000, root-skipped); symlink-cycle
+termination) and `test/cli.test.ts` (resume THROUGH a symlink → list file
+keyed by the canonical target path, not the link spelling). A follow-up audit
+of the fix found one portability bug: the ENOENT ancestor walk stopped only at
+`.`/`/`, so on Windows a missing path under an unresolvable drive or UNC root
+would loop forever at the root (`dirname("C:\\")` is `"C:\\"`); the walk now
+detects the fixed point (`dirname(dir) === dir`) instead of hard-coding POSIX
+roots.
+
+**Gate.** `tsc` clean; full suite **922 tests, 909 pass, 0 fail, 13 skipped**
+(the 13 are the pre-existing TTY/TUI-live + platform skips).
 
 **Subtask visibility + header elapsed time (2026-10-12).** Two TUI features
 landed in the working tree (workstream `.tre/delegation/subtask-visibility/`,

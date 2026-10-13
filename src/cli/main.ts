@@ -86,7 +86,7 @@ import { runLoop, type SteeringQueue } from "../loop/agent-loop.js";
 import { isDirectInvocation, restartCommand } from "../tui/restart.js";
 import { buildSystemPrompt, systemPromptSectionChars } from "../prompt/system-prompt.js";
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
-import { DEFAULT_TOOLS, createBashTool, createSubtaskTool, makeToolExecutor } from "../tools/index.js";
+import { DEFAULT_TOOLS, canonicalSessionPath, createBashTool, createSubtaskTool, makeToolExecutor } from "../tools/index.js";
 import { bashSandboxAvailable } from "../tools/sandbox.js";
 import {
   makeSafetyHooks,
@@ -1383,16 +1383,20 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // session — keyed by basename + a short hash of the FULL path
       // (subtaskKey) so two sessions in different directories with the same
       // filename do NOT collide onto one list. The path is resolved to
-      // ABSOLUTE here (the driver owns the CWD context): a relative
-      // `--session X` opened from two different working dirs must key to two
-      // different lists, and the file itself is CWD-relative, so the absolute
-      // path is exactly where it lives. No session file (plain run without
+      // ABSOLUTE and CANONICALIZED here (the driver owns the CWD context):
+      // a relative `--session X` opened from two different working dirs must
+      // key to two different lists, and the file itself is CWD-relative, so
+      // the absolute path is exactly where it lives; canonicalization
+      // (realpath) additionally makes a symlinked spelling of the same
+      // physical file key to the SAME list as its target. No session file (plain run without
       // --session-auto and no TTY) → IN-MEMORY-ONLY: a sessionless run must
       // not share the "default" file, or unrelated runs on the same machine
       // would clobber each other's lists. The list still works for the run's
       // lifetime; it just does not survive the process.
       const subtaskSession =
-        sessionFile !== undefined ? path.resolve(sessionFile) : undefined;
+        sessionFile !== undefined
+          ? canonicalSessionPath(path.resolve(sessionFile))
+          : undefined;
       return createSubtaskTool(
         subtaskSession ?? "default",
         deps.home ?? homedir(),

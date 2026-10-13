@@ -17,7 +17,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, mkdir, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, mkdir, readdir, symlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
@@ -37,6 +37,7 @@ import {
 import { estimateTokens } from "../src/context/compact.js";
 import { Session, replaySession } from "../src/session/session.js";
 import { readWorkerStatuses } from "../src/cli/workers.js";
+import { subtaskDir, subtaskKey, canonicalSessionPath } from "../src/tools/subtask.js";
 import { deriveMaxTurns } from "../src/loop/agent-loop.js";
 import type {
   AgentEvent,
@@ -668,6 +669,49 @@ test("main --resume on a missing file: exit 2, no crash", async (t) => {
   });
   assert.equal(code, 2);
   assert.match(S.err(), /session/);
+});
+
+test("main: --resume via a symlink keys the subtask list to the TARGET path", async (t) => {
+  // The audit finding: path.resolve alone would key the symlink spelling to
+  // a different subtask list than the target. The driver canonicalizes
+  // (realpath), so a run resumed THROUGH the symlink writes its list under
+  // the target's key.
+  const home = await fakeHome(t);
+  const { dir, models } = await workspace(t);
+  const real = join(dir, "real.jsonl");
+  const link = join(dir, "link.jsonl");
+  // First run creates the session at the real path (a valid session file).
+  await main(["run", "first", "--tools", "none", "--models", models, "--session", real], {
+    streamFn: fakeStream([{ type: "text", text: "one" }]),
+    sinks: mkSinks().sinks,
+    home,
+  });
+  await symlink(real, link);
+  // Second run resumes THROUGH the symlink and records a subtask.
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "subtask", args: { action: "create", items: ["a"] } }] },
+    { type: "text", text: "done" },
+  ]);
+  const S = mkSinks();
+  const code = await main(["run", "second", "--tools", "subtask", "--yes", "--models", models, "--resume", link], {
+    streamFn,
+    sinks: S.sinks,
+    home,
+  });
+  assert.equal(code, 0);
+  const subDir = subtaskDir(home);
+  const entries = await readdir(subDir);
+  // The list must be keyed by the canonical (target) path — NOT the symlink
+  // spelling. (On macOS the tmp dir itself is a symlink, so the canonical
+  // form of `real` differs from the input spelling — canonicalize both
+  // sides.)
+  const targetKey = subtaskKey(canonicalSessionPath(real));
+  assert.ok(
+    entries.includes(`${targetKey}.json`),
+    `list file is keyed by the canonical TARGET path (got: ${entries.join(", ")})`,
+  );
+  assert.notEqual(targetKey, subtaskKey(link), "the symlink spelling would key differently");
+  assert.ok(!entries.includes(`${subtaskKey(link)}.json`), "no list file under the symlink spelling");
 });
 
 test("main: provider error is data — exit 1, error printed, failed worker status retained", async (t) => {

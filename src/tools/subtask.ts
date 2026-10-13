@@ -31,16 +31,19 @@
 import {
   closeSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import type { SubtaskInfo, Tool, ToolResult } from "../types.js";
@@ -323,11 +326,89 @@ function safeStemPart(s: string): string {
  * get DIFFERENT stems (basename-only scoping would collide them onto one
  * list — the audit finding). The hash is stable for a given path, so a
  * resumed session keeps the same list file.
+ *
+ * The path should be CANONICALIZED before keying (canonicalSessionPath —
+ * the driver does this): without it, a symlinked spelling of the same
+ * physical session file would key to a different list than its target.
  */
 export function subtaskKey(sessionId: string): string {
   const base = safeStemPart(basename(sessionId));
   const digest = createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
   return `${base}-${digest}`;
+}
+
+/**
+ * Canonicalize a session-file path for subtask keying. `path.resolve` alone
+ * does NOT resolve symlinks or `..` components, so two spellings of the SAME
+ * physical file (e.g. a symlink and its target, or a `..`-spelled ancestor)
+ * key to DIFFERENT subtask lists — the audit finding. `realpathSync` fixes
+ * that, with fallbacks so the key stays a pure, stable function of the
+ * path:
+ * - the file does not exist yet (a fresh session): if the final component
+ *   is a broken symlink, follow it (a later run with the file present
+ *   would canonicalize to the target — the key must not diverge); then
+ *   canonicalize the deepest existing ancestor and re-append the missing
+ *   tail (the file will land exactly where the driver opens it);
+ * - `realpathSync` throws for a path that EXISTS but cannot be resolved
+ *   (EPERM under a strict sandbox — the C35 validateExtraRoot case):
+ *   return the input unchanged (fail-safe: the key is still stable; the
+ *   divergence only reappears in the unresolvable case, where nothing
+ *   more can be done).
+ */
+export function canonicalSessionPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      // The path exists but cannot be resolved (EPERM under a strict
+      // sandbox — the C35 validateExtraRoot case): return the input
+      // unchanged (the key is still a stable function of the input).
+      return p;
+    }
+    return canonicalizeMissing(p, 0);
+  }
+}
+
+/**
+ * The ENOENT branch of canonicalSessionPath: the file does not exist yet
+ * (a fresh session). If the final component is a symlink whose target is
+ * ALSO missing, follow it (lstat does not follow, so a broken link is
+ * still readable) — otherwise the first run (file absent) would key to the
+ * symlink spelling while a later run (file present) keys to the target.
+ * Then walk up to the deepest resolvable ancestor, canonicalize it, and
+ * re-append the missing tail: the file lands exactly where the driver
+ * opens it, and a later run canonicalizes to the same path. The depth
+ * bound stops a symlink cycle (a→b→a) from looping forever.
+ */
+function canonicalizeMissing(p: string, depth: number): string {
+  if (depth < 40) {
+    try {
+      if (lstatSync(p).isSymbolicLink()) {
+        const target = readlinkSync(p);
+        return canonicalizeMissing(
+          isAbsolute(target) ? target : join(dirname(p), target),
+          depth + 1,
+        );
+      }
+    } catch {
+      // lstat failed — not a symlink; fall through to the ancestor walk.
+    }
+  }
+  const tail: string[] = [basename(p)];
+  let dir = dirname(p);
+  for (;;) {
+    try {
+      return join(realpathSync(dir), ...tail);
+    } catch {
+      // dirname(root) is root on POSIX, Windows drive roots, and UNC roots.
+      // Detect a fixed point rather than hard-coding only "/".
+      const parent = dirname(dir);
+      if (parent === dir || dir === ".") break; // nothing resolvable
+      tail.unshift(basename(dir));
+      dir = parent;
+    }
+  }
+  return p;
 }
 
 const text = (t: string): ToolResult["content"] => [{ type: "text", text: t }];

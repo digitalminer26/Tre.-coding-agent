@@ -4,8 +4,8 @@ Invoke as `tre.` (the legacy `coding-agent` command remains as an alias).
 
 A small, fully-owned coding agent: a TypeScript harness that talks to an
 OpenAI-compatible LLM endpoint (first target: the TKG llama.cpp server), runs
-an agent loop with tools (`read`/`write`/`edit`/`bash`), and persists sessions
-as JSONL.
+an agent loop with tools (`read`/`write`/`edit`/`bash`/`subtask`), and
+persists sessions as JSONL.
 
 Built from scratch using pi (MIT) as a *design reference* — no code vendored.
 Every design decision is traceable to the walkthrough (a frozen record of the
@@ -26,8 +26,10 @@ opt-in mouse tracking, `/models` switching, in-place `/restart` (same session,
 same settings), a context/compaction readout, approval controls (`--local` is
 the default; `--ask`, `--yes`, and `--no-approve` are alternatives, with
 sensitive/destructive operations still blocked), deployability (`npm i -g .`
-builds `dist/` on install), and loop/stall guards that stop runaway and
-sandbox-wall retry loops. See `HANDOFF.md` for the dated change log.
+builds `dist/` on install), loop/stall guards that stop runaway and
+sandbox-wall retry loops, and a session-scoped `subtask` tool (create/list/
+mark) whose progress the TUI renders in a bottom field next to a header
+elapsed-time ticker. See `HANDOFF.md` for the dated change log.
 
 ## Docs
 

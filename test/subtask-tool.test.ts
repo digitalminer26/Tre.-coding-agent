@@ -6,11 +6,12 @@
  */
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   acquireSubtaskLock,
+  canonicalSessionPath,
   createSubtaskTool,
   formatSubtaskSummary,
   normalizeSubtaskFile,
@@ -216,6 +217,88 @@ test("subtask: subtaskKey is stable (a resumed session keeps its list file)", ()
   const p = "/home/u/.tre/sessions/tre-20260101-000000-1.jsonl";
   assert.equal(subtaskKey(p), subtaskKey(p), "same path → same key");
   assert.match(subtaskKey(p), /^tre-20260101-000000-1\.jsonl-[0-9a-f]{8}$/, "stem is basename + 8-hex-char hash");
+});
+
+test("subtask: canonicalSessionPath — symlink and target key to the SAME list", () => {
+  // The audit finding: path.resolve does not resolve symlinks, so the
+  // symlink spelling and the target spelling of the SAME physical session
+  // file key to different lists. Canonicalization must unify them.
+  const real = path.join(home, "sessions", "tre-20260101-000000-1.jsonl");
+  mkdirSync(path.dirname(real), { recursive: true });
+  writeFileSync(real, "{}\n", "utf8");
+  const link = path.join(home, "link.jsonl");
+  symlinkSync(real, link);
+  assert.equal(
+    subtaskKey(canonicalSessionPath(link)),
+    subtaskKey(canonicalSessionPath(real)),
+    "symlink and target → the same subtask key",
+  );
+  assert.equal(
+    canonicalSessionPath(link),
+    canonicalSessionPath(real),
+    "both spellings canonicalize to the same path",
+  );
+});
+
+test("subtask: canonicalSessionPath — fresh session (missing file) keeps a stable key", () => {
+  // A session that does not exist yet: canonicalize the existing parent and
+  // re-append the tail. The key must be STABLE across runs — a later run
+  // with the file present must map to the same list (resume survives).
+  const real = path.join(home, "sessions", "fresh.jsonl");
+  mkdirSync(path.dirname(real), { recursive: true });
+  const before = canonicalSessionPath(real);
+  writeFileSync(real, "{}\n", "utf8");
+  const after = canonicalSessionPath(real);
+  assert.equal(before, after, "key is stable across file creation (resume survives)");
+  assert.equal(subtaskKey(before), subtaskKey(after), "same list before/after creation");
+});
+
+test("subtask: canonicalSessionPath — fresh session via a BROKEN symlink follows the link", () => {
+  // The file does not exist yet, but the path is a symlink whose target is
+  // also missing. The first run must key to the TARGET spelling — a later
+  // run (file present) canonicalizes to the target too.
+  const real = path.join(home, "sessions", "target.jsonl");
+  mkdirSync(path.dirname(real), { recursive: true });
+  const link = path.join(home, "link.jsonl");
+  symlinkSync(real, link); // target does not exist → broken link
+  const before = canonicalSessionPath(link);
+  writeFileSync(real, "{}\n", "utf8");
+  const after = canonicalSessionPath(link);
+  assert.equal(before, after, "broken symlink → target spelling, stable after creation");
+  assert.equal(before, canonicalSessionPath(real), "link spelling → the target's canonical path");
+});
+
+test("subtask: canonicalSessionPath — unresolvable path returns the input unchanged", () => {
+  // A path that EXISTS but cannot be resolved (EPERM under a strict
+  // sandbox — the C35 case) must fall back to the input unchanged: the key
+  // stays a stable function of the input. Hermetically: a chmod-000 parent
+  // makes realpathSync throw EPERM (skipped under root).
+  const base = mkdtempSync(path.join(tmpdir(), "subtask-eperm-"));
+  const locked = path.join(base, "locked");
+  const target = path.join(locked, "dir", "s.jsonl");
+  mkdirSync(target, { recursive: true });
+  try {
+    if (process.getuid?.() !== 0) {
+      chmodSync(locked, 0o000);
+      try {
+        assert.equal(canonicalSessionPath(target), target, "EPERM → input unchanged (fail-safe)");
+      } finally {
+        chmodSync(locked, 0o755);
+      }
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("subtask: canonicalSessionPath — a symlink cycle does not loop", () => {
+  const a = path.join(home, "a.jsonl");
+  const b = path.join(home, "b.jsonl");
+  symlinkSync(b, a);
+  symlinkSync(a, b);
+  const r = canonicalSessionPath(a); // must return (no infinite loop)
+  assert.equal(typeof r, "string");
+  assert.ok(r.length > 0);
 });
 
 test("subtask: two sessions are isolated (per-session files)", async () => {

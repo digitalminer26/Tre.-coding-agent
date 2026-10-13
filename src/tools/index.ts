@@ -15,7 +15,7 @@ export { readTool } from "./read.js";
 export { writeTool } from "./write.js";
 export { editTool } from "./edit.js";
 export { bashTool, createBashTool } from "./bash.js";
-export { subtaskTool, createSubtaskTool } from "./subtask.js";
+export { subtaskTool, createSubtaskTool, canonicalSessionPath, subtaskKey } from "./subtask.js";
 export { ToolRegistry } from "./registry.js";
 export {
   makeToolExecutor,
