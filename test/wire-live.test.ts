@@ -110,3 +110,70 @@ test("live: makes a real tool call end to end", { timeout: 200_000 }, async (t) 
   // eslint-disable-next-line no-console
   console.log("[live] tool call ok");
 });
+
+// ─────────────────────── OpenRouter (live) ───────────────────────
+//
+// Skipped unless RUN_LIVE=1 AND OPENROUTER_API_KEY is set. Verifies the
+// OpenRouter integration end to end: the standard completions wire against
+// https://openrouter.ai/api/v1, per-model `headers` (attribution), and the
+// reasoning/thinking mapping (OpenRouter passes provider reasoning through;
+// the wire reads `reasoning_content` — this test reports what arrives so a
+// provider that uses a different field is visible rather than silent).
+function openrouterModel() {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new Error("OPENROUTER_API_KEY is not set");
+  const id = process.env.OPENROUTER_MODEL ?? "openai/gpt-4o-mini";
+  return {
+    id,
+    provider: "openrouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    api: "openai-completions" as const,
+    apiKey: key,
+    contextWindow: 128000,
+    maxTokens: 2048,
+    headers: {
+      "X-Title": "tre.",
+      "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent",
+    },
+  };
+}
+
+test("live: OpenRouter streams a real text reply end to end", { timeout: 200_000 }, async (t) => {
+  if (process.env.RUN_LIVE !== "1") {
+    t.skip("set RUN_LIVE=1 to run against the live endpoint");
+    return;
+  }
+  if (!process.env.OPENROUTER_API_KEY) {
+    t.skip("set OPENROUTER_API_KEY to run against OpenRouter");
+    return;
+  }
+  const model = openrouterModel();
+  const ctx: Parameters<typeof openAiStream>[1] = {
+    systemPrompt: "You are a terse assistant.",
+    messages: [
+      { role: "user", content: "Reply with exactly the word: ping", timestamp: Date.now() },
+    ] as AgentMessage[],
+    tools: [],
+  };
+  let deltas = 0;
+  let thinking = 0;
+  for await (const e of openAiStream(model, ctx, {
+    signal: AbortSignal.timeout(180_000),
+  })) {
+    if (e.type === "text_delta") deltas += 1;
+    if (e.type === "thinking_delta") thinking += 1;
+    if (e.type === "done") {
+      assert.equal(e.message.stopReason, "stop");
+      const text = e.message.content
+        .filter((b): b is { type: "text"; text: string } => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+      assert.ok(text.length > 0, "expected visible text");
+      assert.match(text.toLowerCase(), /ping/);
+      assert.ok(e.message.usage, "usage reported");
+    }
+  }
+  assert.ok(deltas > 0, "expected streamed text deltas");
+  // eslint-disable-next-line no-console
+  console.log(`[live] openrouter ok (deltas=${deltas}, thinking=${thinking}) → ${model.id}`);
+});

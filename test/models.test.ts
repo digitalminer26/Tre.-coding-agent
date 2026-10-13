@@ -174,3 +174,50 @@ test("compactionReserve: finite non-negative preserved; negative/non-numeric dro
   assert.equal(mk("16384").compactionReserve, undefined); // string is not a number
   assert.equal(mk(undefined).compactionReserve, undefined); // absent
 });
+
+// Per-model `headers` (OpenRouter attribution / custom request headers): a
+// plain object of valid HTTP header name → value is preserved verbatim;
+// anything else is a config error. Control characters in values (a stray
+// newline = header injection) and invalid names (empty, spaces) are rejected
+// at LOAD time — undici's fetch would otherwise fail every request to the
+// model with an opaque TypeError.
+test("headers: valid object preserved; malformed entries are config errors", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mk = (headers: unknown) => {
+    const p = path.join(dir, `h-${Math.random().toString(36).slice(2)}.json`);
+    const entry: Record<string, unknown> = {
+      id: "m", provider: "p", baseUrl: "http://x/v1", api: "openai-completions",
+      contextWindow: 131072, maxTokens: 32768,
+    };
+    if (headers !== undefined) entry.headers = headers;
+    fs.writeFileSync(p, JSON.stringify({ default: "m", models: [entry] }));
+    return resolveModel(loadModelsFile(p));
+  };
+  // valid: preserved verbatim (hyphens, dots, digits, underscores are legal
+  // token characters).
+  const ok = mk({
+    "X-Title": "tre.",
+    "HTTP-Referer": "https://example.com",
+    "X_Custom-1.0": "ok",
+  });
+  assert.deepEqual(ok.headers, {
+    "X-Title": "tre.",
+    "HTTP-Referer": "https://example.com",
+    "X_Custom-1.0": "ok",
+  });
+  // absent: left unset.
+  assert.equal(mk(undefined).headers, undefined);
+  // malformed values: config errors.
+  assert.throws(() => mk({ "X-Title": "" }), /headers/); // empty value
+  assert.throws(() => mk({ "X-Title": "a\r\nX-Injected: yes" }), /headers/); // newline = header injection
+  assert.throws(() => mk({ "X-Title": "a\u0000b" }), /headers/); // NUL control char
+  assert.throws(() => mk({ "X-Title": 5 }), /headers/); // non-string value
+  // malformed names: config errors.
+  assert.throws(() => mk({ "": "x" }), /headers/); // empty name
+  assert.throws(() => mk({ "X Bad": "x" }), /headers/); // space is not a token char
+  // not an object at all: config errors.
+  assert.throws(() => mk(["X-Title"]), /headers/); // array, not object
+  assert.throws(() => mk("X-Title: tre."), /headers/); // string, not object
+  assert.throws(() => mk(null), /headers/); // null
+});

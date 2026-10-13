@@ -96,6 +96,40 @@ with "callback ports 1455 and 1457 are in use", another OpenAI sign-in
 the login also accepts a pasted redirect URL (from the address bar after
 logging in on another machine).
 
+### OpenRouter (any hosted model, one key)
+
+[OpenRouter](https://openrouter.ai) fronts hundreds of hosted models behind
+one OpenAI-compatible `/chat/completions` endpoint and one API key — so it
+runs on the standard `openai-completions` wire, no special code. Create a key
+at [openrouter.ai/keys](https://openrouter.ai/keys), then add one entry per
+model you want (the `id` is OpenRouter's `vendor/model` slug, e.g.
+`anthropic/claude-sonnet-4`):
+
+```json
+{
+  "id": "<vendor/model-id>",
+  "provider": "openrouter",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "api": "openai-completions",
+  "apiKey": "sk-or-...",
+  "contextWindow": 200000,
+  "maxTokens": 8192,
+  "headers": {
+    "X-Title": "tre.",
+    "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent"
+  }
+}
+```
+
+- `headers` (per-model, optional) is sent verbatim with every request —
+  OpenRouter uses `X-Title`/`HTTP-Referer` for app attribution on its
+  rankings page. Any custom header works here.
+- Provider routing and reasoning knobs go through `compat.extraParams`
+  (merged into the request body): `"provider": { "order": ["bedrock",
+  "anthropic"] }`, `"reasoning": { "effort": "medium" }`, …
+- `contextWindow`/`maxTokens` are per model — check the model's page on
+  openrouter.ai.
+
 ## Releasing
 
 `tre.` ships as a self-contained **offline tarball** (pre-built `dist/` + the

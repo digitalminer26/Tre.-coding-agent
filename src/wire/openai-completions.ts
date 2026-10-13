@@ -353,6 +353,7 @@ export const openAiStream: StreamFn = (model, ctx, opts) => {
         url: completionsUrl(model.baseUrl),
         body: JSON.stringify(buildParams(model, ctx)),
         apiKey: opts.apiKey ?? model.apiKey,
+        headers: model.headers,
         signal: opts.signal,
       });
       for await (const frame of frames) {

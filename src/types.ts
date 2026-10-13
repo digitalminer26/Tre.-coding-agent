@@ -419,6 +419,16 @@ export interface ModelConfig {
   compactionReserve?: number;
   temperature?: number;
   apiKey?: string;
+  /**
+   * Extra HTTP headers sent verbatim with every request to this model's
+   * endpoint (merged under the default `accept`/`content-type` headers; an
+   * entry here overrides them). For OpenRouter this is where the optional
+   * attribution headers go: `X-Title` (a human label for the app) and
+   * `HTTP-Referer` (where the app lives). Names must be valid HTTP token
+   * characters and values must not contain control characters — validated
+   * at config load (a typo would otherwise fail every request opaquely).
+   */
+  headers?: Record<string, string>;
   compat?: ModelCompat;
   /**
    * D15 — how the wire authenticates. "chatgpt-oauth": the access token is

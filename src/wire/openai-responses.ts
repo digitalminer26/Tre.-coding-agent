@@ -357,6 +357,7 @@ export const openAiResponsesStream: StreamFn = (model, ctx, opts) => {
           url: responsesUrl(model.baseUrl || CHATGPT_API_BASE),
           body: JSON.stringify(buildResponsesParams(model, ctx)),
           apiKey: bearer,
+          headers: model.headers,
           signal: opts.signal,
         });
         for await (const frame of frames) {

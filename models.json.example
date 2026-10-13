@@ -21,6 +21,25 @@
       "contextWindow": 200000,
       "maxTokens": 32768,
       "temperature": 0.6
+    },
+    {
+      "id": "<vendor/model-id>",
+      "provider": "openrouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-or-...",
+      "contextWindow": 200000,
+      "maxTokens": 8192,
+      "headers": {
+        "X-Title": "tre.",
+        "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent"
+      },
+      "compat": {
+        "extraParams": {
+          "provider": { "order": ["<preferred-provider>"] },
+          "reasoning": { "effort": "medium" }
+        }
+      }
     }
   ]
 }

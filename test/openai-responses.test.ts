@@ -400,3 +400,29 @@ test("auth: 401 on a static-key model is NOT retried (no token store)", async (t
     await mock.close();
   }
 });
+
+test("model.headers: sent verbatim with the Responses request", async () => {
+  const mock = await startMockResponses("text");
+  try {
+    const model: ModelConfig = {
+      ...MODEL,
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      headers: {
+        "X-Title": "tre.",
+        "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent",
+      },
+    };
+    await collectResponsesStream(openAiResponsesStream, model, noToolsCtx(), {
+      signal: new AbortController().signal,
+    });
+    const h = mock.lastHeaders;
+    assert.ok(h, "mock captured the request headers");
+    assert.equal(h?.["x-title"], "tre.");
+    assert.equal(h?.["http-referer"], "https://github.com/digitalminer26/Tre.-coding-agent");
+    assert.equal(h?.["content-type"], "application/json");
+    assert.equal(h?.["authorization"], "Bearer test-key");
+  } finally {
+    await mock.close();
+  }
+});

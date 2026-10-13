@@ -38,6 +38,8 @@ export interface MockResponses {
   lastRequest: Record<string, unknown> | null;
   /** The Authorization header of the most recent request, or null. */
   lastAuth: string | null;
+  /** Raw headers of the most recent request (lower-cased keys), or null. */
+  lastHeaders: Record<string, string | string[] | undefined> | null;
   /** Every Authorization header seen, in order (401-retry assertions). */
   authHistory: string[];
   /** Total requests received. */
@@ -168,10 +170,11 @@ function framesFor(
 export async function startMockResponses(
   scenario: MockResponsesScenario,
 ): Promise<MockResponses> {
-  const lastRequest: { body: Record<string, unknown> | null; auth: string | null } = {
-    body: null,
-    auth: null,
-  };
+  const lastRequest: {
+    body: Record<string, unknown> | null;
+    auth: string | null;
+    headers: Record<string, string | string[] | undefined> | null;
+  } = { body: null, auth: null, headers: null };
   const authHistory: string[] = [];
   let requestCount = 0;
   const server = http.createServer((req, res) => {
@@ -185,6 +188,7 @@ export async function startMockResponses(
         lastRequest.body = null;
       }
       lastRequest.auth = req.headers.authorization ?? null;
+      lastRequest.headers = { ...req.headers };
       authHistory.push(lastRequest.auth ?? "");
 
       // 401-then-ok: the first request is rejected (stale token), the retry
@@ -217,6 +221,9 @@ export async function startMockResponses(
     },
     get lastAuth() {
       return lastRequest.auth;
+    },
+    get lastHeaders() {
+      return lastRequest.headers;
     },
     get authHistory() {
       return authHistory;

@@ -13,6 +13,11 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type { ModelConfig } from "../types.js";
 
+/** RFC 9110 §5.2 — header-name token characters (what undici accepts). */
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/** Control characters undici rejects in a header value (\x00–\x1f, \x7f). */
+const BAD_HEADER_VALUE_RE = /[\u0000-\u001f\u007f]/;
+
 export interface ModelsFile {
   default: string;
   models: ModelConfig[];
@@ -54,6 +59,30 @@ function normalizeModel(m: unknown, i: number): ModelConfig {
     maxTokens: need("maxTokens") as number,
   };
   if (typeof o.apiKey === "string") model.apiKey = o.apiKey;
+  // headers: a plain object of valid HTTP header name → value. Names must be
+  // RFC 9110 token characters and values must not contain control
+  // characters — undici's fetch REJECTS such entries at request time with an
+  // opaque TypeError, so a typo (a stray newline = header injection) would
+  // otherwise fail EVERY request to the model instead of the config load.
+  if (o.headers !== undefined) {
+    const ok =
+      typeof o.headers === "object" &&
+      o.headers !== null &&
+      !Array.isArray(o.headers) &&
+      Object.entries(o.headers as Record<string, unknown>).every(
+        ([k, v]) =>
+          typeof v === "string" &&
+          v.trim().length > 0 &&
+          !BAD_HEADER_VALUE_RE.test(v) &&
+          HEADER_NAME_RE.test(k),
+      );
+    if (!ok) {
+      throw new Error(
+        `models.json: models[${i}].headers must be an object of valid HTTP header name → value (non-empty strings, no control characters)`,
+      );
+    }
+    model.headers = o.headers as Record<string, string>;
+  }
   // compactionReserve: a finite, non-negative token count. A negative or
   // non-finite value is a config error — drop it (leave unset) so the trigger
   // falls back to DEFAULT_COMPACTION_RESERVE rather than firing at a nonsense
@@ -141,6 +170,7 @@ const OPTIONAL_FIELDS: (keyof ModelConfig)[] = [
   "apiKey",
   "auth",
   "temperature",
+  "headers",
   "compat",
   "compactionReserve",
 ];
@@ -173,6 +203,8 @@ function placeholder(f: keyof ModelConfig): string | number | object {
       return "<api-key>";
     case "auth":
       return "chatgpt-oauth";
+    case "headers":
+      return { "X-Title": "<app-label>" };
     case "temperature":
       return 0.6;
     case "compat":

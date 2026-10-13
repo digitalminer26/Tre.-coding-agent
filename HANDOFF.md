@@ -1,5 +1,44 @@
 # Current project status (2026-10-13)
 
+**OpenRouter integration + per-model request headers (2026-10-13).** OpenRouter
+is an OpenAI-compatible `/chat/completions` endpoint, so it runs on the
+existing completions wire with no new wire code — the integration is config +
+docs plus one small code addition: a per-model `headers` field
+(`ModelConfig.headers`, `src/types.ts`) sent verbatim with every request
+(merged under the default `accept`/`content-type` headers). That is where
+OpenRouter's optional attribution headers go (`X-Title`, `HTTP-Referer`), and
+it is a generally useful escape hatch for any endpoint that needs custom
+headers. Wiring: `normalizeModel` validates the field (names must be RFC
+9110 token characters, values non-empty strings with no control characters —
+a stray newline is header injection, and undici's fetch would otherwise fail
+every request to the model with an opaque TypeError; anything else is a
+config error), the
+setup guide lists it as optional, and BOTH wires (`openai-completions.ts`,
+`openai-responses.ts`) pass `model.headers` through `sseStream` (which already
+accepted `headers` — `http.ts` needed no change). Provider routing and
+reasoning knobs need no code: `compat.extraParams` merges them into the
+request body verbatim (`provider.order`, `reasoning.effort`, …). Docs:
+`models.json.example` gains a third (OpenRouter) entry; the README gains an
+"OpenRouter" section (key from openrouter.ai/keys, `vendor/model` ids,
+`headers`, `compat.extraParams`). Tests: `test/models.test.ts` (headers
+validation — valid token names preserved; empty values, control characters
+(newline injection, NUL), invalid names (empty, space), non-string values,
+array/string/null rejected),
+`test/wire.test.ts` + `test/mock-sse.ts` (headers land on the wire verbatim,
+defaults intact; absent field → no custom headers),
+`test/openai-responses.test.ts` + `test/mock-responses.ts` (same, Responses
+wire), `test/wire-live.test.ts` (RUN_LIVE + OPENROUTER_API_KEY-gated real
+round-trip; reports thinking-delta count so a provider that passes reasoning
+through a different field than `reasoning_content` is visible, not silent).
+Known limitation: 429 backoff is exponential and does not honor
+`retry-after` (acceptable; noted). Deliberately NOT built: a model-discovery
+command (`GET /api/v1/models` → catalog) — the model page on openrouter.ai
+covers ids/windows/pricing and adding a model is a 30-second hand edit.
+
+**Gate.** `tsc` clean; full suite **927 tests, 913 pass, 0 fail, 14 skipped**
+(the 14 are the pre-existing TTY/TUI-live + platform skips plus the new
+OpenRouter live test, which skips without RUN_LIVE + OPENROUTER_API_KEY).
+
 **Subtask key canonicalization (2026-10-13).** The subtask-visibility audit
 (2026-10-12) found a real canonical-path divergence: the driver bound the
 subtask tool to `path.resolve(sessionFile)`, but `path.resolve` does NOT

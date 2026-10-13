@@ -33,6 +33,8 @@ export interface MockSse {
   baseUrl: string;
   /** Parsed body of the most recent request, or null. */
   lastRequest: Record<string, unknown> | null;
+  /** Raw headers of the most recent request (lower-cased keys), or null. */
+  lastHeaders: Record<string, string | string[] | undefined> | null;
   close(): Promise<void>;
 }
 
@@ -171,7 +173,10 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 export async function startMockSse(
   scenario: MockSseScenario = "text",
 ): Promise<MockSse> {
-  const state: { lastRequest: Record<string, unknown> | null } = { lastRequest: null };
+  const state: {
+    lastRequest: Record<string, unknown> | null;
+    lastHeaders: Record<string, string | string[] | undefined> | null;
+  } = { lastRequest: null, lastHeaders: null };
 
   const server = http.createServer(async (req, res) => {
     if (req.method !== "POST" || !req.url?.endsWith("/chat/completions")) {
@@ -185,6 +190,7 @@ export async function startMockSse(
     } catch {
       state.lastRequest = null;
     }
+    state.lastHeaders = { ...req.headers };
 
     const frames = framesFor(scenario);
     if ("status" in frames) {
@@ -212,6 +218,9 @@ export async function startMockSse(
     baseUrl: `http://127.0.0.1:${port}`,
     get lastRequest() {
       return state.lastRequest;
+    },
+    get lastHeaders() {
+      return state.lastHeaders;
     },
     close: () =>
       new Promise((resolve, reject) =>

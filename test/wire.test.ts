@@ -401,3 +401,46 @@ test("httpJson: abort during backoff rejects promptly with AbortError (M1)", asy
   assert.equal(mock.calls(), 1);
   mock.restore();
 });
+
+test("model.headers: sent verbatim with the request (OpenRouter attribution)", async () => {
+  const mock = await startMockSse("text");
+  try {
+    const model: ModelConfig = {
+      ...MODEL,
+      baseUrl: mock.baseUrl,
+      apiKey: "test-key",
+      headers: {
+        "X-Title": "tre.",
+        "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent",
+      },
+    };
+    await collectStream(openAiStream, model, noToolsCtx(), {
+      signal: new AbortController().signal,
+    });
+    const h = mock.lastHeaders;
+    assert.ok(h, "mock captured the request headers");
+    assert.equal(h?.["x-title"], "tre.");
+    assert.equal(h?.["http-referer"], "https://github.com/digitalminer26/Tre.-coding-agent");
+    // The default headers are still present (model.headers merges UNDER them,
+    // not replacing the whole header set).
+    assert.equal(h?.["content-type"], "application/json");
+    assert.ok(String(h?.["authorization"] ?? "").startsWith("Bearer test-key"));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("model.headers: absent → no custom headers on the wire", async () => {
+  const mock = await startMockSse("text");
+  try {
+    await collectStream(openAiStream, { ...MODEL, baseUrl: mock.baseUrl }, noToolsCtx(), {
+      signal: new AbortController().signal,
+    });
+    const h = mock.lastHeaders;
+    assert.ok(h, "mock captured the request headers");
+    assert.equal(h?.["x-title"], undefined);
+    assert.equal(h?.["http-referer"], undefined);
+  } finally {
+    await mock.close();
+  }
+});
