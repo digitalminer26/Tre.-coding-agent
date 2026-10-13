@@ -10,7 +10,9 @@ import type {
   ContentBlock,
   SubtaskInfo,
   ToolResultMessage,
+  UserMessage,
 } from "../src/types.js";
+import { SUMMARY_MARKER } from "../src/context/compact.js";
 import {
   approvalAnswer,
   applyEvent,
@@ -20,6 +22,7 @@ import {
   bottomValue,
   BOTTOM_FIELDS,
   compactThreshold,
+  computeMsgSplit,
   contextBreakdown,
   contextReport,
   contextUrgencyColor,
@@ -578,6 +581,141 @@ test("F2: only one section seeded → the split still shows both (0 for the othe
     bottomValue(s, "context"),
     "25k/131.1k (19%) · sys 5k (ctx 2k · skills 0) · msgs 20k · @113.7k",
   );
+});
+
+// docs/07 §7 F1 — the `msgs` number splits into (t tools · m model · u user),
+// computed from the `agent_end` message snapshot and normalized to the
+// usage-derived msgs total; unknown → the bare `msgs N` (never a fake zero).
+
+const f1User = (chars: number): UserMessage => ({ role: "user", content: "x".repeat(chars), timestamp: 0 });
+
+test("F1: agent_end computes the split from the final context, normalized to the usage-derived msgs total", () => {
+  // sys 5000, usage 25000 → contextTokens 25000, msgs total = 25000 − 5000 = 20000.
+  const s0 = makeInitialState("m", {}, 131072, 32768, [], 5000);
+  const user = f1User(400); // est 100
+  const model = asst([
+    { type: "text", text: "y".repeat(800) }, // est 200
+    { type: "thinking", thinking: "z".repeat(400) }, // est 100 → thinking counts as model
+    { type: "toolCall", id: "t1", name: "bash", arguments: { command: "w".repeat(400) } }, // est 104
+  ]); // model est 404
+  const tool = tres("t1", "v".repeat(1200)); // est ceil((1 + 1200) / 4) = 301
+  const s = fold(
+    [
+      { type: "agent_start" },
+      doneEv([{ type: "text", text: "y".repeat(800) }], {
+        usage: { input: 20000, output: 5000, totalTokens: 25000 },
+      }),
+      { type: "agent_end", stopReason: "stop", messages: [user, model, tool] },
+    ],
+    s0,
+  );
+  assert.ok(s.msgSplit !== null, "split known after agent_end");
+  // Normalized, not raw: the user bucket scales from its 100-char/4 estimate
+  // up to a share of the 20000 usage-derived total (raw estimates sum to 805).
+  assert.ok(s.msgSplit!.user > 100, "user bucket scaled to the usage-derived total");
+  // Order follows the raw estimates (model 404 > tools 301 > user 100).
+  assert.ok(s.msgSplit!.model > s.msgSplit!.tools);
+  assert.ok(s.msgSplit!.tools > s.msgSplit!.user);
+  // (6) the three parts sum to the msgs number within ±1 (independent rounding).
+  const sum = s.msgSplit!.tools + s.msgSplit!.model + s.msgSplit!.user;
+  assert.ok(Math.abs(sum - 20000) <= 1, `parts sum ${sum} within ±1 of 20000`);
+});
+
+test("F1: a SUMMARY_MARKER user message is excluded from the user bucket (it is the summary bucket)", () => {
+  const s0 = makeInitialState("m", {}, 131072, 32768, [], 5000);
+  const summary: UserMessage = { role: "user", content: `${SUMMARY_MARKER}\n\nearlier context…`, timestamp: 0 };
+  const user = f1User(400); // est 100 — the ONLY counted message
+  const s = fold(
+    [
+      { type: "agent_start" },
+      doneEv([], { usage: { input: 19000, output: 1000, totalTokens: 20000 } }),
+      { type: "agent_end", stopReason: "stop", messages: [summary, user] },
+    ],
+    s0,
+  );
+  // msgs total = 20000 − 5000 = 15000. Only the user message counts (est 100),
+  // so it takes the ENTIRE total — if the summary leaked into the user bucket,
+  // the est would be larger and the user share strictly smaller.
+  assert.ok(s.msgSplit !== null);
+  assert.equal(s.msgSplit!.user, 15000);
+  assert.equal(s.msgSplit!.tools, 0);
+  assert.equal(s.msgSplit!.model, 0);
+});
+
+test("F1: thinking counts as model (not user, not dropped)", () => {
+  const split = computeMsgSplit([asst([{ type: "thinking", thinking: "a".repeat(400) }])], 100);
+  assert.deepEqual(split, { tools: 0, model: 100, user: 0 });
+});
+
+test("F1: bare `msgs N` before the first split; the split suffix after", () => {
+  const s0 = makeInitialState("m", {}, 131072, 32768, [], 5000);
+  const bare = { ...s0, contextTokens: 25000 }; // msgSplit null (default)
+  assert.equal(
+    bottomValue(bare, "context"),
+    "25k/131.1k (19%) · sys 5k · msgs 20k · @113.7k",
+  );
+  const s = fold(
+    [
+      { type: "agent_start" },
+      doneEv([], { usage: { input: 20000, output: 5000, totalTokens: 25000 } }),
+      { type: "agent_end", stopReason: "stop", messages: [f1User(400), asst([{ type: "text", text: "y".repeat(800) }])] },
+    ],
+    s0,
+  );
+  // tools = 0 renders as bare `t 0` (fmtTokens(0) = "0", no "k").
+  assert.match(bottomValue(s, "context"), /msgs 20k \(t (0|\d+(\.\d)?k) · m \d+(\.\d)?k · u \d+(\.\d)?k\) · @113\.7k/);
+  // The /context report line gains the long-form suffix too (tools = 0
+  // renders as bare `0`, no "k").
+  assert.match(contextReport(s), /  messages: 20k \(tools (0|\d+(\.\d)?k) · model \d+(\.\d)?k · user \d+(\.\d)?k\)/);
+});
+
+test("F1: a history with zero tool results renders `t 0` (real data, not absence)", () => {
+  const s0 = makeInitialState("m", {}, 131072, 32768, [], 5000);
+  const s = fold(
+    [
+      { type: "agent_start" },
+      doneEv([], { usage: { input: 19000, output: 1000, totalTokens: 20000 } }),
+      { type: "agent_end", stopReason: "stop", messages: [f1User(400), asst([{ type: "text", text: "y".repeat(800) }])] },
+    ],
+    s0,
+  );
+  assert.equal(s.msgSplit!.tools, 0);
+  assert.match(bottomValue(s, "context"), /msgs 15k \(t 0 · m/);
+});
+
+test("F1: the three parts sum to the msgs number within ±1 (independent rounding drift)", () => {
+  // Three DISTINCT buckets of est 33 each (estTotal 99) vs a msgs total of
+  // 100 → each part rounds to 33, sum 99 — off by 1, never more (a single
+  // bucket would scale exactly, hiding the drift).
+  const split = computeMsgSplit(
+    [f1User(132), asst([{ type: "text", text: "y".repeat(132) }]), tres("t1", "v".repeat(131))],
+    100,
+  );
+  assert.deepEqual(split, { tools: 33, model: 33, user: 33 });
+  assert.ok(split !== null);
+  assert.ok(Math.abs(split.tools + split.model + split.user - 100) <= 1);
+});
+
+test("F1: context_compacted drops the split to unknown (the event carries no message snapshot)", () => {
+  const s0 = makeInitialState("m", {}, 131072, 32768, [], 5000);
+  const s1 = fold(
+    [
+      { type: "agent_start" },
+      doneEv([], { usage: { input: 20000, output: 5000, totalTokens: 25000 } }),
+      { type: "agent_end", stopReason: "stop", messages: [f1User(400), asst([{ type: "text", text: "y".repeat(800) }])] },
+    ],
+    s0,
+  );
+  assert.ok(s1.msgSplit !== null);
+  const s2 = applyEvent(s1, {
+    type: "context_compacted",
+    tokensBefore: 25000,
+    messagesKept: 3,
+    summaryChars: 4000,
+  });
+  assert.equal(s2.msgSplit, null);
+  // A stale split would misdescribe the new context — the bare `msgs N` renders.
+  assert.match(bottomValue(s2, "context"), /msgs \d+(\.\d)?k · @/);
 });
 
 test("docs/07 item 2: /context report gains the growth line + turns-until-compaction prediction", () => {

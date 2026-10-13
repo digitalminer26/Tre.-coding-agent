@@ -123,12 +123,71 @@ still reflects the current summary; the history line is additive.
 - `npm run build` + `npm test` green. TUI frame check per the self-improve
   protocol (bottom line + `/context` info item).
 
-## 7. Future items (logged, not designed)
+## 7. F1 — Message composition (designed 2026-10-13; implemented this increment)
 
-- **F1 — Message composition.** Split the `messages` bucket into
-  tools / model text / user input (per-message chars/4 estimates tracked in
-  `applyEvent`). Biggest fidelity jump; needs new state tracking, so it is a
-  separate increment.
+Split the `messages` bucket into **tools / model / user**. The split is
+computed from the message snapshot the `agent_end` event carries (the run's
+final context — `agent_end.messages`), so no per-event accumulation is
+needed: the loop emits `agent_end` at every run end, so the split refreshes
+at least once per prompt. Per-message estimates use the loop's own
+estimator (`estimateMessageTokens`, `src/context/compact.ts`, chars/4) so
+the split is consistent with the compaction math. Thinking text counts as
+model — the model emitted it; a compaction summary (the `SUMMARY_MARKER`
+user message) is excluded — it is already the `summary` bucket; user input =
+user messages that are NOT the summary.
+
+**State.** The three buckets are session-CUMULATIVE splits of the context's
+message tokens, kept in proportion rather than as absolute sums (the context
+itself shrinks on compaction — absolute sums would drift upward forever):
+
+- `msgSplit: { tools: number; model: number; user: number } | null` — the
+  CURRENT breakdown of `contextTokens − systemPromptTokens − summaryTokens`
+  (the `messages` bucket), estimated from the message snapshot the last
+  `agent_end` carried. null = unknown (no turn yet, or the estimator has no
+  data). Mid-run `done`s keep the PREVIOUS split (they carry no full
+  snapshot the state machine uses for this).
+- On `agent_end`: recompute the split from `ev.messages` (the final
+  context), normalized against the CURRENT breakdown's `msgs` number
+  (`contextTokens − sys − summary` — the `done` that preceded `agent_end`
+  already refreshed `contextTokens`, so the basis is current, not stale).
+- On `context_compacted`: the split drops to null — the event carries only
+  counts (`messagesKept`, `summaryChars`), no message snapshot, so the old
+  split would misdescribe the new [summary, …kept] context; the next
+  `agent_end` recomputes it.
+
+**Normalization.** `est = estTools + estModel + estUser`; the raw buckets
+sum to the message-history estimate, but the displayed `messages` number is
+`contextTokens − sys − summary` (usage-derived, more accurate). The state
+scales each bucket by `messages / est` and rounds each part independently,
+so the three displayed parts sum to the `msgs` number the breakdown already
+shows within ±1 per bucket (rounding drift). `est = 0` (empty history) →
+split stays null.
+
+**Display.**
+
+- Bottom `context` field: `msgs 38.1k` becomes
+  `msgs 38.1k (t 22.3k · m 11.4k · u 4.4k)` — always the three-way split
+  (t=tools, m=model, u=user) once known; the bare `msgs N` renders before
+  the first split (unknown → never a fake zero).
+- `/context` report: the `messages:` line gains the same suffix
+  (`messages: 38.1k (tools 22.3k · model 11.4k · user 4.4k)`).
+
+**Edge cases.** Compaction: the recomputed split on the next `agent_end`
+naturally reflects the new [summary, …kept] context (the summary message is
+excluded from the user bucket, so the `summary` bucket never double-counts
+it). A history with zero tool results → `t 0` shown (that is real data, not
+absence). Split unknown (no message snapshot yet) → both displays omit the
+split (byte-identical to today's rendering).
+
+**Exit criteria.** `test/tui-state.test.ts`: (1) split computed from the
+`agent_end` message snapshot and normalized to the usage-derived msgs total;
+(2) user bucket excludes a `SUMMARY_MARKER` message; (3) thinking counts as
+model; (4) bare `msgs N` before the first split, split suffix after;
+(5) zero-tool history renders `t 0`; (6) the three parts sum to the `msgs`
+number within ±1 per bucket. `npm run build` + `npm test` green; TUI frame
+check (bottom line + `/context` info item).
+
+## 8. Future items (logged, not designed)
 - **F2 — System-prompt section split.** The driver measures the prompt's
   sections (identity/tools, guidelines, project-context files, skills index,
   cwd) at build time; the `sys` number becomes `sys 4.2k (ctx 1.8k · skills
@@ -136,4 +195,6 @@ still reflects the current summary; the history line is additive.
 - **Rejected for now:** cost tracking (no pricing fields in `models.json`;
   the design deliberately omits cost — a scope decision, not a display one);
   per-message token counts (belongs in a `/history`-style command, not the
-  bottom line — the TUI state machine stays lean).
+  bottom line — the TUI state machine stays lean). F2 was resolved 2026-10-11
+  (see the `sys (ctx · skills)` suffix); F1 was designed in §7 and implemented
+  (2026-10-13).
