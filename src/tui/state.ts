@@ -7,8 +7,8 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
-import { DEFAULT_COMPACTION_RESERVE } from "../context/compact.js";
+import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
+import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
 import wrapAnsi from "wrap-ansi";
@@ -247,6 +247,19 @@ export interface TuiState {
     summaryChars: number;
     degraded: boolean;
   } | null;
+  /**
+   * docs/07 §7 F1 — how the CURRENT context's message tokens break down by
+   * origin: `tools` = tool results, `model` = assistant text + thinking +
+   * tool-call arguments, `user` = user input (compaction summaries excluded
+   * — they are the `summary` bucket). Each number is the char/4 estimate
+   * (estimateMessageTokens, the same estimator the compaction trigger uses)
+   * SCALED so the three parts sum exactly to the breakdown's `msgs` number
+   * (contextTokens − sys − summary) — the raw estimates sum to the
+   * char/4 history estimate, which is less accurate than the usage-derived
+   * msgs total, so the split is normalized to it. null = unknown (no
+   * message snapshot yet — the bare `msgs N` renders without the suffix).
+   */
+  msgSplit: { tools: number; model: number; user: number } | null;
   /** Static labels the driver supplies (cwd, session, …). */
   info: Record<string, string>;
   /**
@@ -348,6 +361,7 @@ export function makeInitialState(
     deltaHistory: [],
     compactionCount: 0,
     lastCompaction: null,
+    msgSplit: null,
     info,
     viewTop: null,
     models,
@@ -434,12 +448,19 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         state.guardRetryRunFired > 0 && ev.stopReason === "stop"
           ? state.guardRetry.recovered + 1
           : state.guardRetry.recovered;
+      // docs/07 §7 F1: `agent_end` carries the run's FINAL context — the
+      // authoritative message snapshot the split recomputes from (mid-run
+      // `done`s keep the previous split; this refreshes it at least once per
+      // prompt). The split is normalized against the CURRENT breakdown's
+      // msgs number (contextTokens − sys − summary).
+      const msgsTotal = Math.max(0, state.contextTokens - state.systemPromptTokens - state.summaryTokens);
       return {
         ...state,
         busy: false,
         runStartedAt: null,
         approval: null,
         items,
+        msgSplit: computeMsgSplit(ev.messages, msgsTotal),
         guardRetry: { ...state.guardRetry, recovered },
         guardRetryRunFired: 0,
       };
@@ -683,6 +704,12 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // messages. Estimate from the summary's char count (chars/4, the
         // same estimator the loop uses).
         summaryTokens: Math.ceil(ev.summaryChars / 4),
+        // docs/07 §7 F1: the compaction REPLACED the message history — the
+        // old split is stale, and the event carries no kept-messages
+        // snapshot (only counts), so the split drops to unknown until the
+        // next `agent_end` recomputes it from the new context. A stale
+        // split would misdescribe the new context; unknown renders bare.
+        msgSplit: null,
         // The compaction REPLACES the context content (older messages are
         // summarized away) — the selection's anchors would point into
         // content that no longer exists in the context, so the selection is
@@ -1709,6 +1736,13 @@ export interface ContextBreakdown {
   headroom: number;
 }
 
+/** docs/07 §7 F1 — the msgs bucket split by origin (see computeMsgSplit). */
+export interface MsgSplit {
+  tools: number;
+  model: number;
+  user: number;
+}
+
 export function contextBreakdown(state: TuiState): ContextBreakdown {
   const total = state.contextTokens;
   const system = state.systemPromptTokens;
@@ -1721,6 +1755,48 @@ export function contextBreakdown(state: TuiState): ContextBreakdown {
   const reserve = state.compactionReserve ?? DEFAULT_COMPACTION_RESERVE;
   const threshold = compactThreshold(state.contextWindow, reserve);
   return { system, summary, messages, total, threshold, headroom: threshold - total };
+}
+
+/**
+ * docs/07 §7 F1 — the message-composition split: classify one message's
+ * char/4 estimate by origin. Tool results → `tools`; assistant content
+ * (text + thinking + tool-call arguments) → `model`; user messages → `user`
+ * EXCEPT compaction summaries (SUMMARY_MARKER) — they are the breakdown's
+ * separate `summary` bucket and must not double-count here.
+ */
+function classifyMessageTokens(m: AgentMessage): "tools" | "model" | "user" | null {
+  if (m.role === "toolResult") return "tools";
+  if (m.role === "assistant") return "model";
+  if (m.role === "user") return m.content.startsWith(SUMMARY_MARKER) ? null : "user";
+  return null;
+}
+
+/**
+ * docs/07 §7 F1 — the raw per-bucket char/4 estimates over a message
+ * snapshot, then SCALED so the three parts sum exactly to `msgsTotal` (the
+ * breakdown's usage-derived `messages` number — more accurate than the raw
+ * estimate's own sum). `msgsTotal <= 0` or `estTotal <= 0` (nothing to
+ * normalize against — an empty/summary-only history) → null (the split is
+ * unknown; the displays render bare `msgs N`, never fake zeros).
+ */
+export function computeMsgSplit(
+  messages: AgentMessage[],
+  msgsTotal: number,
+): { tools: number; model: number; user: number } | null {
+  const raw = { tools: 0, model: 0, user: 0 };
+  for (const m of messages) {
+    const bucket = classifyMessageTokens(m);
+    if (bucket === null) continue;
+    raw[bucket] += estimateMessageTokens(m);
+  }
+  const estTotal = raw.tools + raw.model + raw.user;
+  if (msgsTotal <= 0 || estTotal <= 0) return null;
+  const scale = msgsTotal / estTotal;
+  return {
+    tools: Math.round(raw.tools * scale),
+    model: Math.round(raw.model * scale),
+    user: Math.round(raw.user * scale),
+  };
 }
 
 /**
@@ -1742,7 +1818,14 @@ export function contextReport(state: TuiState): string {
     `  system prompt: ${fmtTokens(bd.system)} (fixed floor)`,
   ];
   if (bd.summary > 0) lines.push(`  summary: ${fmtTokens(bd.summary)}`);
-  lines.push(`  messages: ${fmtTokens(bd.messages)}`);
+  // docs/07 §7 F1: the messages bucket split by origin (tools / model /
+  // user), when the message snapshot has been seen (unknown → the bare
+  // line, never a fake zero split).
+  const split =
+    state.msgSplit !== null && bd.messages > 0
+      ? ` (tools ${fmtTokens(state.msgSplit.tools)} · model ${fmtTokens(state.msgSplit.model)} · user ${fmtTokens(state.msgSplit.user)})`
+      : "";
+  lines.push(`  messages: ${fmtTokens(bd.messages)}${split}`);
   // docs/07 item 1: the last call's in/out split + how much of the input
   // came from the endpoint's prompt cache, and the session-cumulative
   // cache traffic. Omitted entirely when the endpoint reports no cache
@@ -1888,7 +1971,14 @@ export function bottomValue(state: TuiState, field: BottomField): string {
             : ""
         }`,
         ...(bd.summary > 0 ? [`sum ${fmtTokens(bd.summary)}`] : []),
-        `msgs ${fmtTokens(bd.messages)}`,
+        // docs/07 §7 F1: the msgs number gains its origin split (t=tools,
+        // m=model, u=user) once the message snapshot has been seen; before
+        // that, the bare `msgs N` (unknown → never a fake zero).
+        `msgs ${fmtTokens(bd.messages)}${
+          state.msgSplit !== null && bd.messages > 0
+            ? ` (t ${fmtTokens(state.msgSplit.tools)} · m ${fmtTokens(state.msgSplit.model)} · u ${fmtTokens(state.msgSplit.user)})`
+            : ""
+        }`,
       ];
       if (bd.threshold > 0) {
         parts.push(bd.headroom > 0 ? `@${fmtTokens(bd.threshold)}` : "DUE");
