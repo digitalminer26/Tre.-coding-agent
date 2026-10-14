@@ -590,6 +590,42 @@ test("main one-shot: prompt → streamed text → exit 0, session persisted, fin
   assert.deepEqual(replayed.model, { id: MODEL.id, provider: "fake" });
 });
 
+test("main one-shot: a HUNG background pricing fetch is aborted on exit (can't hold the process open)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const home = await fakeHome(t); // isolated home → no pre-existing price cache → the fetch is attempted
+  const S = mkSinks();
+  // A fetch that hangs until its signal aborts (a hung connection). A real
+  // fetch REJECTS on abort, so the mock must too (otherwise the promise
+  // would stay pending and keep the test process alive).
+  let aborted = false;
+  const hang: typeof fetch = (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const s = init?.signal;
+      if (!s) return; // no signal → hang forever (the bug this test guards against)
+      // The abort is observed either at start (signal already aborted) or
+      // mid-flight (listener fires) — both mean main() aborted the fetch.
+      const onAbort = (): void => { aborted = true; reject(new Error("aborted")); };
+      if (s.aborted) { onAbort(); return; }
+      s.addEventListener("abort", onAbort, { once: true });
+    });
+  const code = await main(["run", "hi", "--tools", "none", "--models", models], {
+    streamFn: fakeStream([{ type: "text", text: "ok" }]),
+    sinks: S.sinks,
+    home,
+    workerDir: join(dir, "workers"),
+    pricesFetch: hang,
+  });
+  assert.equal(code, 0);
+  // The pricing fetch is fire-and-forget (an un-awaited import().then), so it
+  // may not have started by the time main() returns. The abort already fired in
+  // main()'s finally, so the fetch starts (or would start) with an aborted
+  // signal — poll a few event-loop ticks for that outcome to surface.
+  for (let i = 0; i < 100 && !aborted; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.equal(aborted, true, "main() aborts the background pricing fetch on exit");
+});
+
 test("--session-auto + --session → exit 2 conflict, no session file created (D20)", async (t) => {
   const { dir, models } = await workspace(t);
   const S = mkSinks();

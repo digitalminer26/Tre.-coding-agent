@@ -1084,6 +1084,11 @@ export interface MainDeps {
   workerDir?: string;
   /** Injectable home dir (tests); default: os.homedir(). */
   home?: string;
+  /** Injectable fetch for the background pricing warm-up (tests): lets a
+   *  test HANG the fetch to prove main() aborts it on exit (a hung
+   *  connection must not hold the process open). undefined = the real
+   *  global fetch. */
+  pricesFetch?: typeof fetch;
 }
 
 /**
@@ -1579,6 +1584,27 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // context; the behavior summary is for the human).
   for (const line of behavior) sinks.err.write(line + "\n");
 
+  // OpenRouter pricing cache (TTL file at ~/.tre/tre/openrouter-prices.json):
+  // refreshed on EVERY run so the TUI's /models picker shows current prices.
+  // The TUI branch above does its own (it reads the resolved map into state);
+  // here the plain CLI has no picker, so this is fire-and-forget — it warms
+  // the cache for the next TUI launch. Fail-open: resolveModelPrices never
+  // throws, and a background rejection is swallowed (prices are decoration,
+  // never a blocker). The fetch is bounded by a 10s timeout AND aborted in
+  // the finally block below (every exit path — one-shot return, REPL return,
+  // or an error), so a hung connection can't hold the process open past the
+  // run even if the entry point's process.exit is ever removed.
+  const pricesAbort = new AbortController();
+  void import("../tui/model-prices.js")
+    .then(({ priceCachePath, resolveModelPrices }) =>
+      resolveModelPrices({
+        file: priceCachePath(deps.home ?? homedir()),
+        fetchImpl: deps.pricesFetch,
+        signal: pricesAbort.signal,
+      }),
+    )
+    .catch(() => undefined);
+
   // ── Telegram background driver (plain CLI: one-shot + REPL) ─────────────
   // Long-polls the bot in the background (one getUpdates per cycle, blocking
   // up to 15s). A message STEERS the in-flight turn (if any) or runs a turn
@@ -1933,6 +1959,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 0;
   } finally {
     process.off("SIGINT", onSigint);
+    // Abort the background pricing fetch — an in-flight request (socket or
+    // timeout timer) must not keep the process alive after the run.
+    pricesAbort.abort();
     // Stop the background Telegram driver (kills the in-flight poll child and
     // wakes any backoff sleep) so the process can exit cleanly.
     if (telegramBridge.enabled) telegramDriver?.stop();

@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { render } from "ink";
 import { App } from "./app.js";
+import { priceCachePath, resolveModelPrices } from "./model-prices.js";
 import { restartCommand } from "./restart.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
 import { isHighFrequencyStreamEvent, makeInputHandlers, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
@@ -327,6 +328,20 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     model.compactionReserve,
   );
   state = { ...state, modelUsage: opts.historicalModelUsage ?? {} };
+  // OpenRouter pricing for the /models picker + list (model-prices.ts):
+  // resolved in the BACKGROUND — a fresh TTL cache (24h) is served without a
+  // network round-trip, otherwise one GET refreshes the cache file (so the
+  // cache "updates every time tre. runs"). Fail-open: on any failure the
+  // last fresh cache (or nothing) is used, so the picker renders exactly as
+  // before. The resolved map lands in state.modelPrices via setStateNow
+  // (a no-op repaint when the map is empty — e.g. no OpenRouter catalog).
+  const pricesAbort = new AbortController();
+  void resolveModelPrices({ file: priceCachePath(opts.home ?? homedir()), signal: pricesAbort.signal })
+    .then((prices) => {
+      if (pricesAbort.signal.aborted || !mounted) return;
+      setStateNow({ ...state, modelPrices: prices });
+    })
+    .catch(() => undefined); // fail-open: prices are decoration, never a blocker
   // The startup behavior-settings summary — a single multi-line INFO item
   // (the ℹ gutter + dim text, wrapped at width−2) so the user sees the
   // current approval/sandbox behavior and the optional flags before the
@@ -491,6 +506,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     exitCode = code;
     mounted = false;
     coalescer.cancel(); // a pending deferred paint must not fire post-unmount
+    pricesAbort.abort(); // a quit mid-pricing-fetch must not outlive the app
     app.unmount();
   };
 

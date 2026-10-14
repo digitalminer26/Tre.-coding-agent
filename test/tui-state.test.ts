@@ -924,6 +924,41 @@ test("modelsListReport: one line per model, active marked with *", () => {
   assert.equal(modelsListReport(makeInitialState("m")), "models: (no catalog supplied)");
 });
 
+test("modelsListReport: OpenRouter rows append the shared price suffix (free models keep the $0.00/M shape)", () => {
+  const OR: ModelOption[] = [
+    { id: "openrouter/a", provider: "openrouter", contextWindow: 200000, maxTokens: 8192 },
+    { id: "openrouter/free", provider: "openrouter", contextWindow: 1000000, maxTokens: 8192 },
+    { id: "small", provider: "p", contextWindow: 32768, maxTokens: 4096 },
+  ];
+  const s = {
+    ...makeInitialState("openrouter/a", {}, 200000, 8192),
+    models: OR,
+    modelPrices: {
+      "openrouter/a": { in: 0.1, out: 0.5 },
+      "openrouter/free": { in: 0, out: 0 },
+    },
+  };
+  assert.equal(
+    modelsListReport(s),
+    [
+      "models (3) — * = active:",
+      "* openrouter/a  [openrouter]  window 200k  $0.10/M in · $0.50/M out",
+      "  openrouter/free  [openrouter]  window 1M  $0.00/M in · $0.00/M out",
+      "  small  [p]  window 32.8k",
+    ].join("\n"),
+  );
+  // No resolved prices → every row renders exactly as before (fail-open shape).
+  assert.equal(
+    modelsListReport({ ...s, modelPrices: {} }),
+    [
+      "models (3) — * = active:",
+      "* openrouter/a  [openrouter]  window 200k",
+      "  openrouter/free  [openrouter]  window 1M",
+      "  small  [p]  window 32.8k",
+    ].join("\n"),
+  );
+});
+
 test("applyModelSwitch: re-seeds label + context field; null on unknown id", () => {
   const s = { ...makeInitialState("small", {}, 32768, 4096), models: CATALOG };
   const toBig = applyModelSwitch(s, "big");
@@ -1017,6 +1052,45 @@ test("modelPickerMenu: one line per model, highlighted row marked, hidden when c
   // an approval pending hides the picker (the input is locked then anyway)
   const appr = setApproval(s, "run rm -rf?", () => {});
   assert.deepEqual(modelPickerMenu(appr, 80), []);
+});
+
+test("modelPickerMenu: OpenRouter rows append the price suffix; narrow widths clip it (unchanged truncation)", () => {
+  const OR: ModelOption[] = [
+    { id: "openrouter/a", provider: "openrouter", contextWindow: 200000, maxTokens: 8192 },
+    { id: "openrouter/free", provider: "openrouter", contextWindow: 1000000, maxTokens: 8192 },
+  ];
+  const s = {
+    ...makeInitialState("openrouter/a", {}, 200000, 8192),
+    models: OR,
+    modelPicker: 0,
+    modelPrices: {
+      "openrouter/a": { in: 0.1, out: 0.5 },
+      "openrouter/free": { in: 0, out: 0 },
+    },
+  };
+  // wide enough → the full row with the shared suffix (same shape as /models)
+  assert.deepEqual(
+    modelPickerMenu(s, 80).map((l) => l.line),
+    [
+      "> openrouter/a  [openrouter]  window 200k  $0.10/M in · $0.50/M out",
+      "  openrouter/free  [openrouter]  window 1M  $0.00/M in · $0.00/M out",
+    ],
+  );
+  // narrow → the existing end-truncation clips the price FIRST (the window
+  // stays visible); the truncation behavior itself is unchanged. The row
+  // prefix (`> openrouter/a  [openrouter]  window 200k`) is exactly 41
+  // cells, so a 42-cell width keeps the whole window and clips the entire
+  // price suffix.
+  const narrow = modelPickerMenu(s, 42).map((l) => l.line);
+  const first = narrow[0] ?? "";
+  assert.ok(first.endsWith("…"), "narrow rows are truncated");
+  assert.ok(first.includes("window 200k"), "the window survives a narrow width");
+  assert.ok(!first.includes("$"), "the price is what gets clipped");
+  // no prices resolved → rows render exactly as before (fail-open)
+  assert.deepEqual(
+    modelPickerMenu({ ...s, modelPrices: {} }, 80).map((l) => l.line),
+    ["> openrouter/a  [openrouter]  window 200k", "  openrouter/free  [openrouter]  window 1M"],
+  );
 });
 
 test("C38: input is locked while the model picker is open", () => {

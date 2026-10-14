@@ -11,6 +11,7 @@ import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type AgentMessa
 import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
+import { OPENROUTER_PROVIDER } from "./model-prices.js";
 import wrapAnsi from "wrap-ansi";
 import cliTruncate from "cli-truncate";
 import stringWidth from "string-width";
@@ -120,6 +121,16 @@ export interface TuiState {
    * re-resolves on a switch. Empty when no catalog was supplied.
    */
   models: ModelOption[];
+  /**
+   * OpenRouter pricing for the catalog rows (model id → $/1M tokens),
+   * resolved by the DRIVER (model-prices.ts — a TTL cache file + fail-open
+   * fetch; the state machine never does I/O). Rendered as a row suffix on
+   * the OpenRouter entries of the model picker + the `/models` list report
+   * (priceSuffix); empty/absent → the rows render exactly as before (no
+   * suffix). Never part of ModelOption — the catalog mirrors models.json,
+   * and prices are not in models.json.
+   */
+  modelPrices: Record<string, { in: number; out: number }>;
   /** D15: field keys shown in the reserved bottom lines, in order.
    *  C32: seeded from the persisted config (~/.tre/tui.json) and saved
    *  back by the driver after every `/display-bottom` change. */
@@ -365,6 +376,7 @@ export function makeInitialState(
     bottom,
     suggestIdx: null,
     modelPicker: null,
+    modelPrices: {},
     bottomFields: null,
     totalTokens: 0,
     modelUsage: {},
@@ -1718,6 +1730,38 @@ function fmtTokens(t: number): string {
 }
 
 /**
+ * USD per 1M tokens, rendered readably: 0 → "$0.00/M" (a free model — the
+ * SAME shape as a priced one, by design), 0.1 → "$0.10/M", 14 → "$14.00/M".
+ * Two decimals: OpenRouter's per-token values are 1e-8-scale, so $/M carries
+ * at most two meaningful digits.
+ */
+function fmtUsdPerM(usdPerM: number): string {
+  if (!Number.isFinite(usdPerM) || usdPerM <= 0) return "$0.00/M";
+  return "$" + usdPerM.toFixed(2) + "/M";
+}
+
+/**
+ * The price suffix for a catalog row — the model picker and the `/models`
+ * list report share the row shape, so they share this. Empty string when
+ * the model is not OpenRouter-priced (no suffix — the row renders exactly
+ * as before); otherwise `  $0.10/M in · $0.50/M out` (two leading spaces,
+ * the row's field separator). Free models ($0 in + $0 out) keep the same
+ * shape with $0.00/M — consistency over a "free" label (user decision).
+ * The suffix sits at the END of the row, so on a narrow terminal the
+ * existing width truncation clips the price first (unchanged behavior).
+ */
+export function priceSuffix(
+  provider: string,
+  id: string,
+  prices: Record<string, { in: number; out: number }>,
+): string {
+  if (provider !== OPENROUTER_PROVIDER) return "";
+  const p = prices[id];
+  if (p === undefined) return "";
+  return `  ${fmtUsdPerM(p.in)} in · ${fmtUsdPerM(p.out)} out`;
+}
+
+/**
  * The compaction trigger threshold — the value of `contextTokens` at which
  * compact.ts's `shouldCompact` fires: `totalTokens + reserve + slack >
  * window`, i.e. `totalTokens > window − reserve − slack` (slack 1024). The
@@ -2409,15 +2453,17 @@ export function statsLoopGuardLine(state: TuiState): string {
  * C34 — the multi-line report `/models` (no arg) appends as an info item:
  * one line per model in the catalog, the ACTIVE one marked with `*`. Each
  * line shows id + provider + window (so a switch's effect on the context
- * field is visible before it happens). An empty catalog reports the bare
- * "no models" note (the driver seeds the catalog, so this only happens if
- * it supplied none).
+ * field is visible before it happens); an OpenRouter entry with a resolved
+ * price (state.modelPrices, driver-fetched) appends the priceSuffix
+ * (`  $0.10/M in · $0.50/M out`) — the same suffix the picker rows use.
+ * An empty catalog reports the bare "no models" note (the driver seeds the
+ * catalog, so this only happens if it supplied none).
  */
 export function modelsListReport(state: TuiState): string {
   if (state.models.length === 0) return "models: (no catalog supplied)";
   const lines = state.models.map((m) => {
     const active = m.id === state.modelLabel ? "* " : "  ";
-    return `${active}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}`;
+    return `${active}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}${priceSuffix(m.provider, m.id, state.modelPrices)}`;
   });
   return `models (${state.models.length}) — * = active:\n` + lines.join("\n");
 }
@@ -2606,14 +2652,18 @@ export function bottomFieldsMenu(
  * The picker lines the frame renders above the top separator ("" → no
  * picker). One row per model: `> id  [provider]  window Nk` (highlighted)
  * or two leading spaces (not) — the same line shape modelsListReport uses
- * for its info item, so the modal and the list read identically. Hidden
- * while an approval is pending (the input is locked then anyway).
+ * for its info item, so the modal and the list read identically. OpenRouter
+ * entries with a resolved price (state.modelPrices) append the priceSuffix
+ * at the row's END, so the existing width truncation clips the price first
+ * on a narrow terminal (the window stays visible; the behavior is unchanged
+ * for non-OpenRouter rows). Hidden while an approval is pending (the input
+ * is locked then anyway).
  */
 export function modelPickerMenu(state: TuiState, width: number): { line: string; selected: boolean }[] {
   if (state.modelPicker === null || state.approval !== null) return [];
   const sel = Math.min(state.modelPicker, state.models.length - 1);
   return state.models.map((m, i) => {
-    const full = `${i === sel ? "> " : "  "}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}`;
+    const full = `${i === sel ? "> " : "  "}${m.id}  [${m.provider}]  window ${fmtTokens(m.contextWindow)}${priceSuffix(m.provider, m.id, state.modelPrices)}`;
     return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i === sel };
   });
 }
