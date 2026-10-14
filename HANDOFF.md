@@ -1,5 +1,30 @@
 # Current project status (2026-10-14)
 
+**MCP scope re-audit (WS12/D29) — docs committed, implementation NOT started
+(2026-10-14).** Second audit of `docs/10-mcp-scope.md` against the code; the
+design gaps are fixed in the doc (commit `d49f962`): `sandbox:true` now has an
+explicit platform split (darwin Seatbelt via `generateBashSandboxPolicy`, linux
+bwrap via `buildBwrapArgs` invoked directly with the merged MCP env, fail-closed
+when the backend is unavailable — never an unsandboxed fallback); the sandbox
+markers get a dedicated owner, `markerEnv()` in `src/mcp/spawn.ts`
+(`TRE_SANDBOX=1` only for directly-sandboxed or inherited-sandbox children,
+`GIT_CONFIG_NOSYSTEM=1` always, `TMPDIR=/tmp` only for linux sandboxed
+children); size estimates are consistent (`client.ts` ≈600–800, total ≈2–2.5k
+incl. tests); the test layout is pinned (tests are `test/mcp-*.test.ts`, mock
+servers are plain `.mjs` in `test/fixtures/mcp/` so the `dist/test/*.test.js`
+glob never runs them); third-party attribution is stated (no code adapted; spec
+text cited, not copied); `inheritEnv` is in the §8.4 example; D13 is marked
+superseded (current mode is `ask`/`yes`/`no`, default `yes`). **NOT DONE, in
+order:** (1) the approval branch for untrusted MCP tools — the doc's §5.3 table
+says untrusted tools prompt in `yes` mode, but `makeSafetyHooks` in `yes`
+returns allow and only `ask` calls `confirm`, so the spec needs its own branch
+(prompt in `yes`, block when no `ask` callback exists, e.g. one-shot/Telegram)
+and it lives in guardrail-protected `src/tools/safety.ts` → human commit with
+`GUARDRAIL_BYPASS=1`; (2) the `sandbox:true` + `npx` spike (still unverified);
+(3) all implementation (WS12 tiers 1–3) — nothing in `src/mcp/` exists yet.
+The doc's protocol claims are against the 2026-07-28 spec text, which has no
+retained copy in the repo and was not re-verified this cycle.
+
 **OpenRouter Anthropic prompt caching — `compat.promptCaching` (2026-10-14).**
 Anthropic models via OpenRouter never cache implicitly (the ONLY automatic
 option is an explicit breakpoint), so tre.'s requests — which sent no
