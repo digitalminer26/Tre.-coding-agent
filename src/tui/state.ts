@@ -135,6 +135,28 @@ export interface TuiState {
    * exactly like a pending approval.
    */
   modelPicker: number | null;
+  /**
+   * The `/display-bottom` field picker (the bottomFields modal): the
+   * highlighted row index into BOTTOM_FIELDS (null = closed). Same modal
+   * treatment as the model picker: while open the input is locked, ↑/↓
+   * move the highlight (bottomFieldsNav), space toggles the highlighted
+   * field's selection (bottomFieldsToggle), enter applies the selection
+   * (bottomFieldsConfirm), esc closes without applying
+   * (bottomFieldsClose). The picker renders above the top separator
+   * (bottomFieldsMenu) — one row per field, checked when selected, with a
+   * leading `*` on the row the current selection starts with.
+   */
+  bottomFields: number | null;
+  /**
+   * The `subtasks` field's EXPIRED flag (the settle-to-"none" behavior —
+   * see subtasksExpired): true when the list has settled (all done/failed)
+   * and no subtask has changed within the settle window, so the field
+   * shows "none" until the next subtask activity. The driver's expiry
+   * poller flips it (the list itself is never cleared — only the display);
+   * applyEvent resets it to false on any subtask activity (a fresh
+   * create/mark/list re-arms the field immediately).
+   */
+  subtasksExpired: boolean;
   /** Cumulative Usage.totalTokens across assistant `done` events. */
   totalTokens: number;
   /** Session token usage, accumulated separately by provider/model id. */
@@ -343,6 +365,7 @@ export function makeInitialState(
     bottom,
     suggestIdx: null,
     modelPicker: null,
+    bottomFields: null,
     totalTokens: 0,
     modelUsage: {},
     toolCalls: 0,
@@ -375,6 +398,7 @@ export function makeInitialState(
     // results (details.subtasks on tool_execution_end) — same purity
     // contract as `workers` (the state machine never reads the disk).
     subtasks: [],
+    subtasksExpired: false,
   };
 }
 
@@ -655,13 +679,24 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // The `subtask` tool returns its FULL list in `details.subtasks` on
       // every successful action (create/list/mark) — the TUI mirrors it into
       // state.subtasks so the `subtasks` bottom field re-renders. Error
-      // results carry no details (the list is unchanged) — skipped.
+      // results carry no details (the list is unchanged) — skipped. Any
+      // activity also UN-EXPIRES the field (subtasksExpired → false): the
+      // settle window restarts from this write, so a fresh create/mark
+      // re-arms the display immediately without waiting for the poller.
       let subtasks: SubtaskInfo[] | null = null;
+      let subtaskActivity = false;
       if (ev.result.toolName === "subtask" && ev.result.isError !== true) {
         const d = ev.result.details;
         if (d !== undefined && Array.isArray(d.subtasks)) {
           const norm = normalizeSubtaskList(d.subtasks);
-          if (norm !== null) subtasks = norm; // null is unreachable: Array.isArray above
+          if (norm !== null) {
+            subtasks = norm; // null is unreachable: Array.isArray above
+            // `list` is observational; it does not update the tool file's
+            // updatedAt and must not extend the display's settle window.
+            // Missing action preserves compatibility with older/custom
+            // subtask tools that only returned {subtasks}.
+            subtaskActivity = d.action !== "list";
+          }
         }
       }
       const ended = withRunningTool(
@@ -669,7 +704,9 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         (t) => ({ ...t, running: false, resultText: text, isError: ev.result.isError === true }),
         ev.toolCallId,
       );
-      return subtasks === null ? ended : { ...ended, subtasks };
+      return subtasks === null
+        ? ended
+        : { ...ended, subtasks, ...(subtaskActivity ? { subtasksExpired: false } : {}) };
     }
     case "context_compacted": {
       // docs/07 item 2: the compaction SHRINKS the context — the delta is
@@ -780,6 +817,7 @@ const clampCursor = (pos: number, len: number): number =>
 export function inputChar(s: TuiState, ch: string): TuiState {
   if (s.approval) return s; // input locked while an approval is pending
   if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
+  if (s.bottomFields !== null) return s; // input locked while the display-bottom picker is open
   const pos = clampCursor(s.cursorPos, s.input.length);
   const input = s.input.slice(0, pos) + ch + s.input.slice(pos);
   return { ...s, input, cursorPos: pos + ch.length, historyIdx: null };
@@ -788,6 +826,7 @@ export function inputChar(s: TuiState, ch: string): TuiState {
 export function inputBackspace(s: TuiState): TuiState {
   if (s.approval) return s;
   if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
+  if (s.bottomFields !== null) return s; // input locked while the display-bottom picker is open
   const pos = clampCursor(s.cursorPos, s.input.length);
   if (pos === 0) return s; // nothing before the cursor to delete
   const input = s.input.slice(0, pos - 1) + s.input.slice(pos);
@@ -803,6 +842,7 @@ export function inputBackspace(s: TuiState): TuiState {
 export function inputMove(s: TuiState, dir: -1 | 1): TuiState {
   if (s.approval) return s;
   if (s.modelPicker !== null) return s; // C38: input locked while the model picker is open
+  if (s.bottomFields !== null) return s; // input locked while the display-bottom picker is open
   const pos = clampCursor(s.cursorPos, s.input.length) + dir;
   if (pos < 0 || pos > s.input.length) return s;
   return { ...s, cursorPos: pos };
@@ -829,7 +869,7 @@ export function inputHistory(s: TuiState, dir: -1 | 1): TuiState {
  * only handles the idle case (a fresh prompt starts a new run).
  */
 export function submitInput(s: TuiState): { state: TuiState; prompt: string } | null {
-  if (s.approval !== null || s.modelPicker !== null || s.busy) return null; // C38: picker open = enter confirms the picker, not a submit
+  if (s.approval !== null || s.modelPicker !== null || s.bottomFields !== null || s.busy) return null; // C38: picker open = enter confirms the picker, not a submit
   const prompt = s.input.trim();
   if (prompt === "") return null;
   return {
@@ -1567,7 +1607,7 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "compact", summary: "manually compact the context now (summarize older messages)" },
   { name: "context", summary: "context breakdown: system/summary/messages + compaction trigger" },
-  { name: "display-bottom", summary: "set/clear the bottom display fields" },
+  { name: "display-bottom", summary: "pick the bottom display fields (↑/↓ + space + enter) / /display-bottom f1 f2 … sets" },
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "models", summary: "pick the active model (↑/↓ + enter) / /models <id> switches" },
   { name: "usage", summary: "historical token totals by model across local sessions" },
@@ -2022,7 +2062,10 @@ export function bottomValue(state: TuiState, field: BottomField): string {
       // `done`; the only remaining item failed → `(failed)`. The fraction is
       // done/total (a failed item is not done). Empty list → "none" (the
       // agent has not broken the work down yet). bottomLines truncates the
-      // name to the terminal width.
+      // name to the terminal width. The line is colored PER SEGMENT in the
+      // frame (subtasksLineAnsi): the fraction is dim, the name is tinted
+      // by the shown subtask's status (in-progress → green, queued →
+      // yellow, done → gray, failed → red), and "none" is dim.
       return subtasksBottomValue(state.subtasks);
   }
 }
@@ -2057,6 +2100,26 @@ function workersBottomValue(workers: WorkerStatus[]): string {
 }
 
 /**
+ * One subtask's status → the color of its name in the `subtasks` bottom
+ * line (the progress at a glance): in-progress → "green" (the agent is
+ * working on it RIGHT NOW), queued → "yellow" (next up — worth a glance),
+ * done → "gray" (finished — dimmed, like a finished worker), failed →
+ * "red" (something died — the only status that demands attention).
+ */
+export function subtaskStatusColor(status: SubtaskInfo["status"]): string {
+  switch (status) {
+    case "in-progress":
+      return "green";
+    case "queued":
+      return "yellow";
+    case "done":
+      return "gray";
+    case "failed":
+      return "red";
+  }
+}
+
+/**
  * The `subtasks` field's one-liner, split out of bottomValue's switch to
  * keep the case readable (same pure contract: state in, string out).
  * Format: `done/total <name>` — see the `subtasks` case for the selection
@@ -2077,6 +2140,97 @@ export function subtasksBottomValue(subtasks: SubtaskInfo[]): string {
   // subtask died.
   const failed = byId.find((s) => s.status === "failed");
   return failed !== undefined ? `${done}/${total} ${failed.name} (failed)` : `${done}/${total}`;
+}
+
+/**
+ * The `subtasks` bottom line as an ANSI string, exactly ONE row: a dim
+ * `subtasks: ` prefix, the dim `done/total ` fraction, and the shown
+ * subtask's name tinted by its status (subtaskStatusColor — in-progress
+ * green, queued yellow, done gray, failed red). "none" (no subtasks yet)
+ * is fully dim. The SGR codes match Ink's palette (green = \x1b[32m,
+ * yellow = \x1b[33m, gray = \x1b[90m, red = \x1b[31m, dim = \x1b[2m —
+ * chalk's named colors) so the line renders identically to the JSX the
+ * rest of the chrome uses. The whole line is truncated to one row at
+ * `width` (cli-truncate is ANSI-aware — SGR codes survive, so the frame
+ * stays exactly `rows` tall).
+ */
+export function subtasksLineAnsi(subtasks: SubtaskInfo[], width: number): string {
+  const dim = (s: string): string => `\u001b[2m${s}\u001b[0m`;
+  const paint = (s: string, color: string): string => {
+    const code =
+      color === "green" ? "32" : color === "yellow" ? "33" : color === "red" ? "31" : "90";
+    return `\u001b[${code}m${s}\u001b[0m`;
+  };
+  if (subtasks.length === 0) {
+    return cliTruncate(dim("subtasks: none"), Math.max(1, width), { position: "end" });
+  }
+  const total = subtasks.length;
+  const done = subtasks.filter((s) => s.status === "done").length;
+  const byId = [...subtasks].sort((a, b) => a.id - b.id);
+  // The same selection rules as subtasksBottomValue (active → all-done →
+  // next → failed) — kept here so the colored line and the plain one-liner
+  // can never disagree about WHICH subtask is shown.
+  const active = byId.find((s) => s.status === "in-progress");
+  if (active !== undefined) {
+    return cliTruncate(
+      dim("subtasks: ") + dim(`${done}/${total} `) + paint(active.name, subtaskStatusColor("in-progress")),
+      Math.max(1, width),
+      { position: "end" },
+    );
+  }
+  if (done === total) {
+    return cliTruncate(
+      dim("subtasks: ") + dim(`${done}/${total} `) + paint("done", subtaskStatusColor("done")),
+      Math.max(1, width),
+      { position: "end" },
+    );
+  }
+  const next = byId.find((s) => s.status === "queued");
+  if (next !== undefined) {
+    return cliTruncate(
+      dim("subtasks: ") + dim(`${done}/${total} `) + paint(`${next.name} (next)`, subtaskStatusColor("queued")),
+      Math.max(1, width),
+      { position: "end" },
+    );
+  }
+  const failed = byId.find((s) => s.status === "failed");
+  if (failed !== undefined) {
+    return cliTruncate(
+      dim("subtasks: ") + dim(`${done}/${total} `) + paint(`${failed.name} (failed)`, subtaskStatusColor("failed")),
+      Math.max(1, width),
+      { position: "end" },
+    );
+  }
+  return cliTruncate(dim(`subtasks: ${done}/${total}`), Math.max(1, width), { position: "end" });
+}
+
+/**
+ * The `subtasks` field's EXPIRY (the same "settle to none" behavior the
+ * `workers` field gets from pruneWorkerDir): the list is a live workstream
+ * indicator — once it has SETTLED (every subtask done or failed) and no
+ * subtask has changed within `staleMs` (the file's `updatedAt` — refreshed
+ * by every create/mark), the field shows "none" until the NEXT subtask
+ * activity. The rules, in order:
+ *  - empty list → "none" (nothing to expire);
+ * - any item still queued/in-progress → LIVE (never expires — the work is
+ *   not over; a long tool call between marks must not blank the field);
+ * - settled (all done/failed) and `updatedAt` within `staleMs` → still
+ *   shown (the settle just happened — the user wants to see the final
+ *   state, e.g. `5/5 done`, for a moment);
+ * - settled and `updatedAt` older than `staleMs` → "none".
+ * Pure (the driver reads the file's `updatedAt` and passes it in); `now`
+ * is injectable for tests.
+ */
+export function subtasksExpired(
+  subtasks: SubtaskInfo[],
+  updatedAt: number,
+  now: number,
+  staleMs: number,
+): boolean {
+  if (subtasks.length === 0) return true;
+  const live = subtasks.some((s) => s.status === "queued" || s.status === "in-progress");
+  if (live) return false;
+  return now - updatedAt > staleMs;
 }
 
 /**
@@ -2339,6 +2493,105 @@ export function modelPickerClose(s: TuiState): TuiState | null {
   return { ...s, modelPicker: null };
 }
 
+// ───────────────────────── /display-bottom field picker ─────────────────────
+// The bottomFields modal — the same modal treatment as the model picker
+// (C38), one row per BOTTOM_FIELDS entry. The highlight (state.bottomFields)
+// starts on the row the CURRENT selection begins with (bottomFieldsInitialIndex;
+// first row when the selection is empty). Space toggles the highlighted
+// field in/out of the pending selection (bottomFieldsToggle — the pending
+// selection IS state.bottom while the picker is open, so a space-toggle is
+// immediately visible in the reserved lines below); enter applies (the
+// current state.bottom, unchanged by the nav/toggle semantics — it already
+// IS the applied selection) and closes (bottomFieldsConfirm); esc closes
+// without applying (bottomFieldsClose — the pending toggles are discarded
+// by restoring the selection the picker opened with, carried in the
+// driver's open-time baseline snapshot).
+
+/**
+ * The row the picker opens on: the index of the first selected field in
+ * BOTTOM_FIELDS order (the selection's starting point), or 0 when nothing
+ * is selected.
+ */
+export function bottomFieldsInitialIndex(s: TuiState): number {
+  for (let i = 0; i < BOTTOM_FIELDS.length; i++) {
+    if (s.bottom.includes(BOTTOM_FIELDS[i]!)) return i;
+  }
+  return 0;
+}
+
+/** Open the picker: highlight the selection's starting row. */
+export function bottomFieldsOpen(s: TuiState): TuiState {
+  return { ...s, bottomFields: bottomFieldsInitialIndex(s) };
+}
+
+/** ↑/↓ while the picker is open: move the highlight (wrap-around). Null when closed. */
+export function bottomFieldsNav(s: TuiState, dir: -1 | 1): TuiState | null {
+  if (s.bottomFields === null) return null;
+  const n = BOTTOM_FIELDS.length;
+  const cur = Math.min(s.bottomFields, n - 1);
+  return { ...s, bottomFields: (cur + dir + n) % n };
+}
+
+/**
+ * Space while the picker is open: toggle the highlighted field in/out of
+ * the pending selection (state.bottom — order of FIRST selection is
+ * preserved, duplicates impossible by construction). Null when closed.
+ */
+export function bottomFieldsToggle(s: TuiState): TuiState | null {
+  if (s.bottomFields === null) return null;
+  const field = BOTTOM_FIELDS[Math.min(s.bottomFields, BOTTOM_FIELDS.length - 1)]!;
+  const has = s.bottom.includes(field);
+  const bottom = has ? s.bottom.filter((f) => f !== field) : [...s.bottom, field];
+  return { ...s, bottom };
+}
+
+/**
+ * Enter while the picker is open: apply the pending selection (already in
+ * state.bottom — the toggles edited it live) and close. Null when closed.
+ */
+export function bottomFieldsConfirm(s: TuiState): TuiState | null {
+  if (s.bottomFields === null) return null;
+  return { ...s, bottomFields: null };
+}
+
+/**
+ * Esc while the picker is open: close WITHOUT applying — restore the
+ * selection the picker opened with (the baseline snapshot the driver took
+ * at open time, passed in so this stays pure over state alone). Null when
+ * closed.
+ */
+export function bottomFieldsClose(s: TuiState, baseline: string[]): TuiState | null {
+  if (s.bottomFields === null) return null;
+  return { ...s, bottomFields: null, bottom: baseline };
+}
+
+/**
+ * The picker lines the frame renders above the top separator ("" → no
+ * picker). One row per field: `> [x] name` (highlighted + selected) /
+ * `  [x] name` (selected) / `> [ ] name` (highlighted) / `  [ ] name` —
+ * plus a leading `*` (after the highlight marker) on the row the CURRENT
+ * selection starts with, so the order of the selected fields is visible
+ * at a glance. Hidden while an approval is pending (the input is locked
+ * then anyway).
+ */
+export function bottomFieldsMenu(
+  state: TuiState,
+  width: number,
+): { line: string; selected: boolean; on: boolean }[] {
+  if (state.bottomFields === null || state.approval !== null) return [];
+  const sel = Math.min(state.bottomFields, BOTTOM_FIELDS.length - 1);
+  const firstIdx = state.bottom.length > 0 ? BOTTOM_FIELDS.indexOf(state.bottom[0] as BottomField) : -1;
+  return (BOTTOM_FIELDS as readonly string[]).map((f, i) => {
+    const on = state.bottom.includes(f);
+    const line = `${i === sel ? "> " : "  "}${on ? "[x]" : "[ ]"}${i === firstIdx ? " *" : ""} ${f}`;
+    return {
+      line: cliTruncate(line, Math.max(1, width), { position: "end" }),
+      selected: i === sel,
+      on,
+    };
+  });
+}
+
 /**
  * The picker lines the frame renders above the top separator ("" → no
  * picker). One row per model: `> id  [provider]  window Nk` (highlighted)
@@ -2381,7 +2634,10 @@ export const startupInfoItem = (text: string): { kind: "info"; text: string; sta
  *   /context                   multi-line info item: the context breakdown
  *                              (system prompt / summary / messages) and the
  *                              compaction trigger + headroom
- *   /display-bottom            report current selection + the field menu
+ *   /display-bottom            opens the interactive field picker (the
+ *                              bottomFields modal: one row per field,
+ *                              checked when selected; ↑/↓ move, space
+ *                              toggles, enter applies, esc closes)
  *   /display-bottom off|none   clear the bottom lines
  *   /display-bottom f1 f2 …    set the fields (deduped, order preserved)
  *   /models                    C38: opens the interactive model picker
@@ -2458,8 +2714,11 @@ export function handleSlashCommand(
   const words = (m[1] ?? "").split(/\s+/).filter((w) => w !== "");
   const menu = BOTTOM_FIELDS.join(" ");
   if (words.length === 0) {
-    const cur = s.bottom.length > 0 ? s.bottom.join(" ") : "(none)";
-    return { state: withInfo(s, `display-bottom: ${cur} — fields: ${menu}`), handled: true };
+    // The bare command opens the interactive field picker (the bottomFields
+    // modal — same treatment as bare /models): ↑/↓ move, space toggles the
+    // highlighted field (live in the reserved lines below), enter applies,
+    // esc closes without applying.
+    return { state: bottomFieldsOpen(s), handled: true };
   }
   if (words.length === 1 && (words[0] === "off" || words[0] === "none")) {
     return { state: withInfo({ ...s, bottom: [] }, "display-bottom: off"), handled: true };

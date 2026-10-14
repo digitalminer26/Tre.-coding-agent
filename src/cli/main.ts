@@ -1556,6 +1556,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // D15: static labels for the TUI's /display-bottom fields.
       cwd: root,
       sessionPath: sessionFile,
+      home: deps.home,
       // The startup behavior-settings summary — seeded as a single multi-line
       // info item so the user sees the current approval/sandbox behavior and
       // the optional flags before the first prompt.

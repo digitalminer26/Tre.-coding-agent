@@ -17,6 +17,12 @@ import {
   approvalAnswer,
   applyEvent,
   applyModelSwitch,
+  bottomFieldsClose,
+  bottomFieldsConfirm,
+  bottomFieldsMenu,
+  bottomFieldsNav,
+  bottomFieldsOpen,
+  bottomFieldsToggle,
   bottomLineColors,
   bottomLines,
   bottomValue,
@@ -52,7 +58,10 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
+  subtaskStatusColor,
   subtasksBottomValue,
+  subtasksExpired,
+  subtasksLineAnsi,
   formatElapsedMs,
   normalizeSubtaskList,
   type ModelOption,
@@ -1714,6 +1723,7 @@ const subEnd = (
   id: string,
   subtasks: unknown,
   isError = false,
+  action?: "create" | "list" | "mark",
 ): AgentEvent => ({
   type: "tool_execution_end",
   toolCallId: id,
@@ -1723,7 +1733,7 @@ const subEnd = (
     toolName: "subtask",
     content: [{ type: "text", text: "ok" }],
     isError,
-    ...(isError ? {} : { details: { subtasks } }),
+    ...(isError ? {} : { details: { subtasks, ...(action === undefined ? {} : { action }) } }),
     timestamp: 0,
   },
 });
@@ -1746,6 +1756,7 @@ test("applyEvent: subtask tool_execution_end mirrors details.subtasks into state
   ]));
   assert.equal(s.subtasks[0]!.status, "done");
   assert.equal(s.subtasks[1]!.status, "in-progress");
+  assert.equal(s.subtasksExpired, false, "create/mark activity re-arms the display");
 });
 
 test("applyEvent: subtask ERROR result does NOT touch state.subtasks", () => {
@@ -1877,6 +1888,191 @@ test("bottomLines: the subtasks line truncates to the width", () => {
   const line = lines[0]!;
   assert.ok(line.length <= 20, `line fits the width: ${JSON.stringify(line)}`);
   assert.ok(line.startsWith("subtasks: 0/2 a"));
+});
+
+// ── subtasks: status colors + expiry (the live-workstream QOL) ─────────────
+
+test("subtaskStatusColor: in-progress green, queued yellow, done gray, failed red", () => {
+  assert.equal(subtaskStatusColor("in-progress"), "green");
+  assert.equal(subtaskStatusColor("queued"), "yellow");
+  assert.equal(subtaskStatusColor("done"), "gray");
+  assert.equal(subtaskStatusColor("failed"), "red");
+});
+
+test("subtasksLineAnsi: per-status color, dim fraction, code-stripped = plain one-liner", () => {
+  const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
+  // in-progress → green name
+  let line = subtasksLineAnsi(
+    [
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "in-progress" },
+    ],
+    80,
+  );
+  assert.equal(strip(line), "subtasks: 1/2 b");
+  assert.ok(line.includes("\u001b[32mb\u001b[0m"), "name is green");
+  assert.ok(line.includes("\u001b[2msubtasks: \u001b[0m"), "prefix is dim");
+  // next queued → yellow name
+  line = subtasksLineAnsi(
+    [
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "queued" },
+    ],
+    80,
+  );
+  assert.equal(strip(line), "subtasks: 1/2 b (next)");
+  assert.ok(line.includes("\u001b[33m"), "name is yellow");
+  // all done → gray "done"
+  line = subtasksLineAnsi(
+    [
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "done" },
+    ],
+    80,
+  );
+  assert.equal(strip(line), "subtasks: 2/2 done");
+  assert.ok(line.includes("\u001b[90mdone\u001b[0m"), "'done' is gray");
+  // failed-only → red name
+  line = subtasksLineAnsi(
+    [
+      { id: 1, name: "a", status: "done" },
+      { id: 2, name: "b", status: "failed" },
+    ],
+    80,
+  );
+  assert.equal(strip(line), "subtasks: 1/2 b (failed)");
+  assert.ok(line.includes("\u001b[31m"), "name is red");
+  // empty → dim "subtasks: none" (the expiry render path)
+  line = subtasksLineAnsi([], 80);
+  assert.equal(strip(line), "subtasks: none");
+  assert.ok(line.startsWith("\u001b[2m"), "fully dim");
+  // truncation is ANSI-aware and keeps ONE row
+  line = subtasksLineAnsi(
+    [{ id: 1, name: "a very long subtask name that will not fit", status: "in-progress" }],
+    20,
+  );
+  assert.ok(strip(line).length <= 20, `stripped fits: ${JSON.stringify(strip(line))}`);
+  assert.ok(!line.includes("\n"), "one row");
+});
+
+test("subtasksExpired: live never expires; settled expires after the quiet window", () => {
+  const done: SubtaskInfo[] = [
+    { id: 1, name: "a", status: "done" },
+    { id: 2, name: "b", status: "failed" },
+  ];
+  const live: SubtaskInfo[] = [
+    { id: 1, name: "a", status: "done" },
+    { id: 2, name: "b", status: "in-progress" },
+  ];
+  const t0 = 1_000_000;
+  // empty list → expired (nothing to show)
+  assert.equal(subtasksExpired([], t0, t0, 90_000), true);
+  // live (queued or in-progress) → never expired, even when ancient
+  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000), false);
+  assert.equal(subtasksExpired([{ id: 1, name: "q", status: "queued" }], t0, t0 + 999_999_999, 90_000), false);
+  // settled + recent activity → still shown (the settle just happened)
+  assert.equal(subtasksExpired(done, t0, t0 + 10_000, 90_000), false);
+  // settled + quiet past the window → expired (the field settles to "none")
+  assert.equal(subtasksExpired(done, t0, t0 + 90_001, 90_000), true);
+  // exactly at the window boundary → still shown (strictly greater)
+  assert.equal(subtasksExpired(done, t0, t0 + 90_000, 90_000), false);
+});
+
+test("applyEvent: create/mark un-expire the field; observational list does not", () => {
+  let s = makeInitialState("m");
+  s = { ...s, subtasksExpired: true }; // the poller settled the field
+  s = applyEvent(s, subEnd("1", [{ id: 1, name: "a", status: "in-progress" }], false, "mark"));
+  assert.equal(s.subtasksExpired, false, "a fresh mark re-arms the display");
+  assert.equal(s.subtasks[0]!.status, "in-progress");
+  s = { ...s, subtasksExpired: true };
+  s = applyEvent(s, subEnd("2", [{ id: 1, name: "a", status: "done" }], false, "list"));
+  assert.equal(s.subtasks[0]!.status, "done", "list still refreshes the displayed snapshot");
+  assert.equal(s.subtasksExpired, true, "list does not re-arm a settled display");
+});
+
+// ── /display-bottom field picker (the bottomFields modal) ──────────────────
+
+test("bottomFieldsOpen: opens on the row the selection starts with (0 when empty)", () => {
+  assert.equal(bottomFieldsOpen(makeInitialState("m")).bottomFields, 0);
+  // selection starts with "subtasks" (the last field) → opens there
+  assert.equal(bottomFieldsOpen({ ...makeInitialState("m"), bottom: ["subtasks"] }).bottomFields, 9);
+  assert.equal(bottomFieldsOpen({ ...makeInitialState("m"), bottom: ["context", "model"] }).bottomFields, 0);
+});
+
+test("bottomFieldsNav: moves the highlight with wrap-around; null when closed", () => {
+  const s = { ...makeInitialState("m"), bottomFields: 0 };
+  assert.equal(bottomFieldsNav(s, 1)!.bottomFields, 1);
+  assert.equal(bottomFieldsNav(s, -1)!.bottomFields, BOTTOM_FIELDS.length - 1); // wraps
+  const last = { ...s, bottomFields: BOTTOM_FIELDS.length - 1 };
+  assert.equal(bottomFieldsNav(last, 1)!.bottomFields, 0); // wraps
+  assert.equal(bottomFieldsNav(last, -1)!.bottomFields, BOTTOM_FIELDS.length - 2);
+  assert.equal(bottomFieldsNav(makeInitialState("m"), 1), null); // closed
+});
+
+test("bottomFieldsToggle: space toggles the highlighted field (order preserved); null when closed", () => {
+  let s: TuiState = { ...makeInitialState("m"), bottomFields: 1 }; // "status"
+  assert.equal(bottomFieldsToggle(makeInitialState("m")), null); // closed
+  s = bottomFieldsToggle(s)!;
+  assert.deepEqual(s.bottom, ["status"]);
+  s = { ...s, bottomFields: 0 }; // "model"
+  s = bottomFieldsToggle(s)!;
+  assert.deepEqual(s.bottom, ["status", "model"], "appended — first-selection order kept");
+  s = { ...s, bottomFields: 1 }; // "status" again
+  s = bottomFieldsToggle(s)!;
+  assert.deepEqual(s.bottom, ["model"], "removed — the rest keep their order");
+});
+
+test("bottomFieldsConfirm: enter applies (keeps the live selection) and closes; null when closed", () => {
+  const s = { ...makeInitialState("m"), bottom: ["subtasks"], bottomFields: 0 };
+  const c = bottomFieldsConfirm(s)!;
+  assert.equal(c.bottomFields, null);
+  assert.deepEqual(c.bottom, ["subtasks"], "the selection is the applied one");
+  assert.equal(bottomFieldsConfirm(makeInitialState("m")), null); // closed
+});
+
+test("bottomFieldsClose: esc restores the open-time baseline (discards toggles); null when closed", () => {
+  const baseline = ["subtasks"];
+  const s = { ...makeInitialState("m"), bottom: ["subtasks", "model"], bottomFields: 0 };
+  const c = bottomFieldsClose(s, baseline)!;
+  assert.equal(c.bottomFields, null);
+  assert.deepEqual(c.bottom, baseline, "the pending toggle is discarded");
+  assert.equal(bottomFieldsClose({ ...makeInitialState("m"), bottomFields: null }, baseline), null); // closed
+});
+
+test("bottomFieldsMenu: one row per field, [x] when selected, * on the first-selected row", () => {
+  const s = { ...makeInitialState("m"), bottom: ["subtasks"], bottomFields: 3 }; // "tokens"
+  const rows = bottomFieldsMenu(s, 80);
+  assert.equal(rows.length, BOTTOM_FIELDS.length);
+  assert.deepEqual(
+    rows.map((r) => r.line),
+    [
+      "  [ ] model",
+      "  [ ] status",
+      "  [ ] turn",
+      "> [ ] tokens",
+      "  [ ] context",
+      "  [ ] cache",
+      "  [ ] cwd",
+      "  [ ] session",
+      "  [ ] workers",
+      "  [x] * subtasks",
+    ],
+  );
+  assert.deepEqual(rows.map((r) => r.selected), [false, false, false, true, false, false, false, false, false, false]);
+  assert.deepEqual(rows.map((r) => r.on), [false, false, false, false, false, false, false, false, false, true]);
+  // closed → no rows (the frame renders nothing)
+  assert.deepEqual(bottomFieldsMenu(makeInitialState("m"), 80), []);
+  // an approval pending hides the picker (the input is locked then anyway)
+  const appr = setApproval(s, "run rm -rf?", () => {});
+  assert.deepEqual(bottomFieldsMenu(appr, 80), []);
+});
+
+test("input is locked while the display-bottom picker is open", () => {
+  const s = { ...makeInitialState("m"), bottomFields: 2 };
+  assert.equal(inputChar(s, "x"), s, "chars are swallowed");
+  assert.equal(inputBackspace(s), s, "backspace is swallowed");
+  assert.equal(inputMove(s, 1), s, "cursor moves are swallowed");
+  assert.equal(submitInput(s), null, "enter confirms the picker, not a submit");
 });
 
 // ── elapsed time (header right-most item) ──────────────────────────────────

@@ -102,6 +102,10 @@ const renderApp = (state: TuiState) =>
       onModelPickerNav: () => {},
       onModelPickerConfirm: () => {},
       onModelPickerClose: () => {},
+      onBottomFieldsNav: () => {},
+      onBottomFieldsToggle: () => {},
+      onBottomFieldsConfirm: () => {},
+      onBottomFieldsClose: () => {},
       onSelectStart: () => {},
       onSelectUpdate: () => {},
       onSelectClear: () => {},
@@ -480,16 +484,16 @@ test("bottomLines: values, order, truncation, unknown keys, padding", () => {
   assert.ok(wrapLineCount(long as string, 80) <= 1);
 });
 
-test("handleSlashCommand: /display-bottom set, clear, report, unknown, passthrough", () => {
+test("handleSlashCommand: /display-bottom open-picker, set, clear, unknown, passthrough", () => {
   const s = makeInitialState("m");
 
-  // report (no args): current selection + menu, state otherwise untouched
+  // bare (no args): opens the interactive field picker (bottomFields modal)
+  // — no info item, the selection is untouched (the picker edits it live).
   const r0 = handleSlashCommand(s, "/display-bottom");
   assert.equal(r0.handled, true);
   assert.deepEqual(r0.state.bottom, []);
-  const info0 = r0.state.items[r0.state.items.length - 1];
-  assert.equal(info0?.kind, "info");
-  assert.match((info0 as { text: string }).text, /display-bottom: \(none\) — fields: model status turn tokens context cache cwd session/);
+  assert.notEqual(r0.state.bottomFields, null);
+  assert.equal(r0.state.items.length, s.items.length); // no info item appended
 
   // set (deduped, order preserved)
   const r1 = handleSlashCommand(s, "/display-bottom status model status");

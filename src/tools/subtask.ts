@@ -524,7 +524,7 @@ export function createSubtaskTool(
           writeLocal(next);
           return {
             content: text(`created ${items.length} subtask(s):\n${formatSubtaskSummary(items)}`),
-            details: { subtasks: items },
+            details: { subtasks: items, action },
           };
         }
         if (action === "list") {
@@ -558,7 +558,7 @@ export function createSubtaskTool(
           writeLocal(next);
           return {
             content: text(`${id}. ${items[idx]!.name} → ${status}\n${formatSubtaskSummary(items)}`),
-            details: { subtasks: items },
+            details: { subtasks: items, action },
           };
         }
         return {

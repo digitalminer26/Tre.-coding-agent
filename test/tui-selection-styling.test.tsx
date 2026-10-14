@@ -40,7 +40,9 @@ const selFrame = (text: string, from: number, to: number): string => {
       onChar: () => {}, onBackspace: () => {}, onScrollBy: () => {}, onScrollToTop: () => {},
       onScrollToBottom: () => {}, onMove: () => {}, onHistory: () => {}, onSubmit: () => {},
       onCtrlC: () => {}, onApproval: () => {}, onQuit: () => {}, onModelPickerNav: () => {},
-      onModelPickerConfirm: () => {}, onModelPickerClose: () => {}, onSelectStart: () => {},
+      onModelPickerConfirm: () => {}, onModelPickerClose: () => {},
+      onBottomFieldsNav: () => {}, onBottomFieldsToggle: () => {}, onBottomFieldsConfirm: () => {},
+      onBottomFieldsClose: () => {}, onSelectStart: () => {},
       onSelectUpdate: () => {}, onSelectEnd: () => {}, onSelectClear: () => {},
     }),
   );

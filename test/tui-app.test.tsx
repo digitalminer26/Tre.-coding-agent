@@ -35,6 +35,10 @@ interface Cbs {
   onModelPickerNav?: (dir: -1 | 1) => void;
   onModelPickerConfirm?: () => void;
   onModelPickerClose?: () => void;
+  onBottomFieldsNav?: (dir: -1 | 1) => void;
+  onBottomFieldsToggle?: () => void;
+  onBottomFieldsConfirm?: () => void;
+  onBottomFieldsClose?: () => void;
   onSelectStart?: (anchor: SelectionAnchor) => void;
   onSelectUpdate?: (anchor: SelectionAnchor) => void;
   onSelectEnd?: () => void;
@@ -64,6 +68,10 @@ const makeApp = (
       onModelPickerNav: (dir: -1 | 1) => cbs?.onModelPickerNav?.(dir),
       onModelPickerConfirm: () => cbs?.onModelPickerConfirm?.(),
       onModelPickerClose: () => cbs?.onModelPickerClose?.(),
+      onBottomFieldsNav: (dir: -1 | 1) => cbs?.onBottomFieldsNav?.(dir),
+      onBottomFieldsToggle: () => cbs?.onBottomFieldsToggle?.(),
+      onBottomFieldsConfirm: () => cbs?.onBottomFieldsConfirm?.(),
+      onBottomFieldsClose: () => cbs?.onBottomFieldsClose?.(),
       onSelectStart: (anchor: SelectionAnchor) => cbs?.onSelectStart?.(anchor),
       onSelectUpdate: (anchor: SelectionAnchor) => cbs?.onSelectUpdate?.(anchor),
       onSelectEnd: () => cbs?.onSelectEnd?.(),
@@ -505,6 +513,39 @@ test("C38: while the picker is open, arrows/enter/esc route to the picker, not t
   await settle();
   app.unmount();
   assert.deepEqual(calls, ["nav:1", "nav:-1", "confirm", "close"]);
+});
+
+test("/display-bottom field picker routes arrows/space/enter/esc and blocks typing", async () => {
+  const calls: string[] = [];
+  const state = { ...makeInitialState("m"), bottom: ["subtasks"], bottomFields: 0 };
+  const app = makeApp(state, {
+    onBottomFieldsNav: (dir: -1 | 1) => calls.push(`nav:${dir}`),
+    onBottomFieldsToggle: () => calls.push("toggle"),
+    onBottomFieldsConfirm: () => calls.push("confirm"),
+    onBottomFieldsClose: () => calls.push("close"),
+    onChar: (ch: string) => calls.push(`char:${ch}`),
+    onHistory: (dir: -1 | 1) => calls.push(`hist:${dir}`),
+    onSubmit: () => calls.push("submit"),
+  });
+  app.stdin.write("\u001b[B"); // down → nav:1
+  await tick();
+  app.stdin.write(" "); // space → toggle
+  await tick();
+  app.stdin.write("\u001b[A"); // up → nav:-1
+  await tick();
+  app.stdin.write("x"); // typed char → ignored
+  await tick();
+  app.stdin.write("\r"); // enter → confirm
+  await tick();
+  // Reopen in the static test state to ensure esc still routes too.
+  app.unmount();
+  const escApp = makeApp({ ...state, bottomFields: 0 }, {
+    onBottomFieldsClose: () => calls.push("close"),
+  });
+  escApp.stdin.write("\u001b");
+  await settle();
+  escApp.unmount();
+  assert.deepEqual(calls, ["nav:1", "toggle", "nav:-1", "confirm", "close"]);
 });
 
 test("C38: the picker frame stays exactly `rows` tall (item budget shrinks by the picker lines)", () => {

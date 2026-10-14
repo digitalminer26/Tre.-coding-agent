@@ -1,4 +1,75 @@
-# Current project status (2026-10-13)
+# Current project status (2026-10-14)
+
+**Subtask bottom field: per-status colors + settle-to-none expiry, and the
+`/display-bottom` interactive field picker (2026-10-14).** Two TUI
+increments on the `subtasks` bottom field and the `/display-bottom` command
+(both pure state + driver, no wire change):
+
+1. **The `subtasks` line is colored per status and settles to "none" like
+   the `workers` field.** `subtaskStatusColor` maps in-progress → green
+   (working on it RIGHT NOW), queued → yellow (next up), done → gray
+   (finished — dimmed, like a finished worker), failed → red (the only
+   status that demands attention); `subtasksLineAnsi` renders the line as
+   an ANSI string (dim `subtasks: ` prefix + dim `done/total ` fraction +
+   the shown subtask's name tinted by its status — the SAME selection rules
+   as the plain `subtasksBottomValue`, so the colored line and the
+   one-liner can never disagree which subtask is shown; "none" is fully
+   dim). The SGR codes match Ink's chalk palette so the line renders
+   identically to the JSX chrome, and cli-truncate is ANSI-aware so the
+   frame stays exactly `rows` tall. The frame (app.tsx) draws the
+   `subtasks` reserved line from `subtasksLineAnsi` directly — the same
+   no-dimColor rule as the `workers` line (a dimColor wrapper would dim the
+   bright-green running name). **Expiry:** `subtasksExpired` (pure; `now`
+   injectable) is the workers field's pruneWorkerDir analog — the list is a
+   LIVE workstream indicator, so once it has SETTLED (every subtask
+   done/failed) and no subtask changed within `SUBTASK_STALE_MS` (90s, the
+   file's `updatedAt`, refreshed by every create/mark), the field shows
+   "none" until the next subtask activity. Any queued/in-progress item
+   NEVER expires (a long tool call between marks must not blank the field);
+   the list itself is never cleared (the tool's file keeps the full
+   history — `list` still shows it), only the display expires. The driver
+   (`run.tsx`) runs a 5s unref'd poller mirroring the workers poller's
+   shape (self-rescheduling, try/catch I3, change-detected by signature)
+   that pushes state only when the expired flag flips or the file changed
+   (so a list edit from another process is mirrored too); sessionless runs
+   (in-memory list) have no file, so the poller is not armed. `applyEvent`
+   UN-EXPIRES the field on any subtask activity — but `list` is
+   observational (it does not touch the file's `updatedAt`) and must not
+   extend the settle window, so the tool now returns `details.action`
+   alongside `details.subtasks` and the state machine re-arms the display
+   only for create/mark (missing `action` preserves compatibility with
+   older/custom subtask tools).
+2. **Bare `/display-bottom` opens an interactive field picker** (the
+   `bottomFields` modal — the same modal treatment as bare `/models` /
+   C38) instead of the old static "current selection + menu" info line.
+   One row per `BOTTOM_FIELDS` entry above the top separator: `> [x] name`
+   (highlighted + selected) / `  [x] name` / `> [ ] name` / `  [ ] name`,
+   plus a `*` on the row the CURRENT selection starts with (the order of
+   the selected fields is visible at a glance). The picker opens on the
+   row the selection starts with (first row when empty). While open the
+   input is locked (typing/backspace/move/submit inert — the same guards
+   as the model picker): ↑/↓ move the highlight (wrap-around), space
+   toggles the highlighted field IN/OUT of the pending selection (live —
+   the reserved lines below re-render immediately), enter applies the
+   selection and closes, esc closes WITHOUT applying. The driver captures
+   an open-time baseline snapshot (the selection the picker opened with):
+   esc restores it (discarding the live space-toggles), and enter persists
+   to `tui.json` ONLY when the applied selection differs from the baseline
+   (the `bottomSet` marker flips on a real change, exactly as the typed
+   `/display-bottom f1 f2 …` path). The picker rows steal item budget in
+   the fit math (like the model picker and the D16 menu), so the frame
+   stays exactly `rows` tall. The typed forms are unchanged:
+   `/display-bottom off|none` clears, `/display-bottom f1 f2 …` sets.
+
+**Gate.** `tsc` clean; full suite **952 tests, 938 pass, 0 fail, 14
+skipped** (the 14 are the pre-existing TTY/TUI-live + platform skips). New
+tests: `test/subtasks-line.test.tsx` (Ink render: per-status colors, dim
+prefix/fraction, expired → dim "none", picker rows); extended:
+`tui-state` (subtaskStatusColor, subtasksLineAnsi, subtasksExpired,
+applyEvent un-expire semantics, the full bottomFields modal block, input
+lock), `tui-app` (key routing: arrows/space/enter/esc + typing blocked),
+`tui-pinned-layout` (bare `/display-bottom` opens the picker, no info
+item), `workers-spans`/`tui-selection-styling` (new App props).
 
 **OpenRouter integration + per-model request headers (2026-10-13).** OpenRouter
 is an OpenAI-compatible `/chat/completions` endpoint, so it runs on the

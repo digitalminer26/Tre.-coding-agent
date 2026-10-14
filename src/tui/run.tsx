@@ -15,7 +15,11 @@
  * D15: `/display-bottom [field …]` configures the reserved bottom lines
  * (pure handler in state.ts: handleSlashCommand); the driver dispatches it
  * before the unknown-command error, and passes static labels (cwd, session)
- * into the state via makeInitialState.
+ * into the state via makeInitialState. Bare `/display-bottom` opens the
+ * interactive field picker (the bottomFields modal — the model picker's
+ * sibling: ↑/↓ move, space toggles, enter applies, esc discards); the
+ * driver keeps an open-time baseline so esc restores and enter persists
+ * only a real change.
  * C32: the bottom selection is PERSISTED — loaded from ~/.tre/tui.json at
  * startup (tui-config.ts) and saved back after every /display-bottom
  * change, so the layout survives between tre. sessions — and slash
@@ -27,6 +31,7 @@ import React from "react";
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { render } from "ink";
 import { App } from "./app.js";
 import { restartCommand } from "./restart.js";
@@ -37,6 +42,10 @@ import { makeElapsedTicker } from "./elapsed-ticker.js";
 import {
   approvalAnswer,
   applyEvent,
+  bottomFieldsClose,
+  bottomFieldsConfirm,
+  bottomFieldsNav,
+  bottomFieldsToggle,
   handleSlashCommand,
   inputBackspace,
   inputChar,
@@ -58,6 +67,7 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
+  subtasksExpired,
   type TuiItem,
   type TuiState,
 } from "./state.js";
@@ -69,6 +79,7 @@ import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
 import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
+import { canonicalSessionPath, readSubtasks, subtaskDir, subtaskKey } from "../tools/subtask.js";
 import { resolveModel, type ModelsFile } from "../config/models.js";
 import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
@@ -236,6 +247,14 @@ export interface TuiRunOptions {
    *  process.argv — restartCommand strips argv[0], the node binary);
    *  absent → /restart reports it is unavailable. */
   restartArgs?: string[];
+  /**
+   * The `subtasks` field's settle window in ms (the expiry poller — the
+   * workers field's WORKER_STALE_MS analog). Defaults to 90_000. Injectable
+   * so tests can drive the settle-to-"none" transition without waiting.
+   */
+  subtasksStaleMs?: number;
+  /** The home directory used by the CLI's subtask tool (test injection). */
+  home?: string;
 }
 
 export async function runTui(opts: TuiRunOptions): Promise<number> {
@@ -260,6 +279,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   // The marker's live value — flipped to true on the first /display-bottom
   // (any selection, including off) and persisted with the selection.
   let tuiConfigBottomSet = tuiConfig.bottomSet;
+  // The bottomFields picker's open-time baseline (the selection it opened
+  // with): captured when the picker transitions null→open, used by the
+  // esc-close to restore (discarding the live space-toggles) and by the
+  // enter-confirm to decide whether the applied selection changed (persist
+  // only on a real change). null when the picker is closed.
+  let bottomPickerBaseline: string[] | null = null;
   // The system prompt is the fixed floor of every turn's context — estimate
   // its size (chars/4, the loop's estimator) so the `context` field can show
   // where the tokens come from (system prompt vs the message history).
@@ -727,6 +752,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           const prevBottom = state.bottom;
           const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
           setStateNow(slash.handled ? slash.state : slashBusy.state);
+          // The picker transitioned null→open (bare /display-bottom while
+          // busy): snapshot the selection it opened with — esc restores it,
+          // enter compares against it (persist only on a real change).
+          if (slash.handled && state.bottomFields === null && slash.state.bottomFields !== null) {
+            bottomPickerBaseline = slashBusy.state.bottom;
+          }
           if (slash.handled && slash.state.bottom !== prevBottom) {
             // Preserve the `mouse` key — the file is the durable mouse
             // setting; /display-bottom must not clobber it. The bottomSet
@@ -794,6 +825,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath));
       if (slash.handled) {
         setStateNow({ ...slash.state, busy: false });
+        // The picker transitioned null→open (bare /display-bottom): snapshot
+        // the selection it opened with — esc restores it, enter compares
+        // against it (persist only on a real change).
+        if (state.bottomFields === null && slash.state.bottomFields !== null) {
+          bottomPickerBaseline = r.state.bottom;
+        }
         // C32: persist the bottom selection — /display-bottom is the only
         // handled command that changes it (the others keep the same array
         // reference, so this fires exactly on a real change). The bottomSet
@@ -833,6 +870,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         if (now - lastInt < SIGINT_GRACE_MS) {
           stopTelegram();
           stopWorkersPoller();
+          stopSubtasksPoller();
           stopElapsedTick();
           restoreMouseMode();
           process.exit(130);
@@ -871,6 +909,42 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     onModelPickerClose: (): void => {
       const closed = modelPickerClose(state);
       if (closed !== null) setStateNow(closed);
+    },
+    // The /display-bottom field picker (bottomFields modal) — the same pure
+    // state transitions as the model picker, plus the driver's bookkeeping:
+    // the open-time baseline (captured on the null→open transition) is what
+    // esc restores and what enter compares against to decide whether the
+    // applied selection changed (persist only on a real change).
+    onBottomFieldsNav: (dir: -1 | 1): void => {
+      const nav = bottomFieldsNav(state, dir);
+      if (nav !== null) setStateNow(nav);
+    },
+    onBottomFieldsToggle: (): void => {
+      const toggled = bottomFieldsToggle(state);
+      if (toggled !== null) setStateNow(toggled);
+    },
+    onBottomFieldsConfirm: (): void => {
+      const confirmed = bottomFieldsConfirm(state);
+      if (confirmed === null) return; // picker closed — nothing to do
+      const baseline = bottomPickerBaseline;
+      bottomPickerBaseline = null;
+      setStateNow(confirmed);
+      // Persist the applied selection when it differs from what the picker
+      // opened with (the toggles edited state.bottom live — confirm only
+      // closes; the change is already in confirmed.bottom).
+      const changed = baseline !== null &&
+        (confirmed.bottom.length !== baseline.length || confirmed.bottom.some((field, i) => field !== baseline[i]));
+      if (changed) {
+        tuiConfigBottomSet = true;
+        saveTuiConfig({ bottom: confirmed.bottom, mouse: tuiConfig.mouse, bottomSet: tuiConfigBottomSet });
+      }
+    },
+    onBottomFieldsClose: (): void => {
+      const closed = bottomFieldsClose(state, bottomPickerBaseline ?? state.bottom);
+      if (closed !== null) {
+        bottomPickerBaseline = null;
+        setStateNow(closed);
+      }
     },
     // C28: output scrollback — pure state transitions (see state.ts).
     onScrollBy: (delta: number, maxScroll: number): void =>
@@ -1023,6 +1097,63 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   };
   workersArm();
 
+  // ── Subtask expiry tick (5s) ────────────────────────────────────────────
+  // The `subtasks` field settles to "none" like the `workers` field does
+  // when its entries go stale (pruneWorkerDir): once every subtask is
+  // done/failed and no subtask has been created/marked within
+  // SUBTASK_STALE_MS, the field shows "none" until the next subtask
+  // activity. The list itself is NOT cleared (the tool's file keeps the
+  // full history — `list` still shows it); only the DISPLAY expires. The
+  // file's `updatedAt` is refreshed by every create/mark, so "settled +
+  // quiet" is exactly "the workstream is over and nobody is watching".
+  //
+  // The poller mirrors the workers poller's shape (self-rescheduling,
+  // unref'd, try/catch I3, change-detected by signature): it only pushes a
+  // new state when the EXPIRED flag flips, so a quiet session costs one
+  // cheap file read per 5s and no re-renders. Sessionless runs (no
+  // session path — the tool then keeps the list in memory only) have no
+  // file to read, so the poller is not armed at all.
+  const SUBTASK_STALE_MS = opts.subtasksStaleMs ?? 90_000; // default = WORKER_STALE_MS
+  let subtasksTimer: NodeJS.Timeout | undefined;
+  let subtasksStopped = false;
+  let subtasksSig: string | null = null; // null = not yet evaluated
+  const stopSubtasksPoller = (): void => {
+    subtasksStopped = true;
+    if (subtasksTimer !== undefined) {
+      clearTimeout(subtasksTimer);
+      subtasksTimer = undefined;
+    }
+  };
+  const subtasksTick = (): void => {
+    try {
+      if (opts.sessionPath === undefined) return; // in-memory list — nothing to expire from
+      const dir = subtaskDir(opts.home ?? homedir());
+      const sid = subtaskKey(canonicalSessionPath(resolve(opts.sessionPath)));
+      const file = readSubtasks(dir, sid); // I3: never throws (missing → empty list)
+      const expired = subtasksExpired(file.items, file.updatedAt, Date.now(), SUBTASK_STALE_MS);
+      const sig = JSON.stringify({ items: file.items, updatedAt: file.updatedAt, expired });
+      if (sig !== subtasksSig) {
+        subtasksSig = sig;
+        // File changes from another process (or a list update) are mirrored
+        // too; the expired flag is evaluated from the same snapshot so the
+        // renderer cannot retain a stale list after the poller's first tick.
+        setStateNow({ ...state, subtasks: file.items, subtasksExpired: expired });
+      }
+    } catch {
+      // I3: the poller must NEVER throw — a read failure is swallowed and
+      // the next tick retries.
+    }
+  };
+  const subtasksArm = (): void => {
+    if (subtasksStopped) return; // a tick in flight at stop time must not re-arm
+    subtasksTimer = setTimeout(() => {
+      subtasksTick();
+      subtasksArm();
+    }, 5000);
+    subtasksTimer.unref?.();
+  };
+  subtasksArm();
+
   // ── Elapsed-time tick (1s, armed only while busy) ───────────────────────
   // The header's right-most item is the RUN's elapsed time (runStartedAt →
   // now). Stream events repaint continuously while the model streams, but a
@@ -1070,6 +1201,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       if (now - lastInt < SIGINT_GRACE_MS) {
         stopTelegram();
         stopWorkersPoller();
+        stopSubtasksPoller();
         stopElapsedTick();
         restoreMouseMode();
         process.exit(130);
@@ -1079,6 +1211,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     } else {
       stopTelegram(); // process.exit skips the finally below
       stopWorkersPoller();
+      stopSubtasksPoller();
       stopElapsedTick();
       restoreMouseMode();
       process.exit(130);
@@ -1090,6 +1223,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   } finally {
     stopTelegram();
     stopWorkersPoller();
+    stopSubtasksPoller();
     stopElapsedTick();
     restoreMouseMode();
     stopPerfSweep();

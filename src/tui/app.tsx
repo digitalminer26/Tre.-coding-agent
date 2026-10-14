@@ -16,6 +16,7 @@ import {
   FIXED_NON_ITEM_LINES,
   RESERVED_BOTTOM_LINES,
   approvalLine,
+  bottomFieldsMenu,
   bottomLineColors,
   bottomLines,
   dispWidth,
@@ -24,6 +25,7 @@ import {
   inputWrap,
   modelPickerMenu,
   selectedRanges,
+  subtasksLineAnsi,
   suggestMenu,
   workersLineAnsi,
 } from "./state.js";
@@ -131,6 +133,14 @@ export interface AppProps {
   onModelPickerConfirm: () => void;
   /** C38: esc — close the picker without switching. */
   onModelPickerClose: () => void;
+  /** The /display-bottom field picker is open — ↑/↓ move the highlight. */
+  onBottomFieldsNav: (dir: -1 | 1) => void;
+  /** The field picker: space — toggle the highlighted field (live). */
+  onBottomFieldsToggle: () => void;
+  /** The field picker: enter — apply the selection + close. */
+  onBottomFieldsConfirm: () => void;
+  /** The field picker: esc — close, discarding the pending toggles. */
+  onBottomFieldsClose: () => void;
   /** Mouse selection: a left-button PRESS in the item viewport (the App
    * mapped the terminal cell to a content anchor). */
   onSelectStart: (anchor: SelectionAnchor) => void;
@@ -170,6 +180,9 @@ export function App(props: AppProps): React.ReactElement {
   const menu = suggestMenu(state, width);
   // C38: the model picker lines (empty when the picker is closed).
   const picker = modelPickerMenu(state, width);
+  // The /display-bottom field picker lines (empty when closed) — the same
+  // modal treatment as the model picker, one row per field.
+  const fieldPicker = bottomFieldsMenu(state, width);
   // The input WRAPS at the terminal width (inputWrap): the extra lines beyond
   // the one the pinned block reserves steal item budget, exactly like the
   // approval line and the menu do — the frame stays exactly `rows` tall.
@@ -179,7 +192,7 @@ export function App(props: AppProps): React.ReactElement {
   // the item area (approval, menu, picker, wrapped input) — the SAME
   // reservation the fit math uses.
   const extra =
-    (state.approval !== null ? 1 : 0) + menu.length + picker.length + (inputLines.length - 1);
+    (state.approval !== null ? 1 : 0) + menu.length + picker.length + fieldPicker.length + (inputLines.length - 1);
   const layout = fitItemsScrollable(state.items, width, rows, extra, state.viewTop);
   // A page = one item-area budget (Shift halves it) — sized in the SAME
   // rows the fit uses, so PgUp/PgDn move exactly one window of content.
@@ -301,6 +314,19 @@ export function App(props: AppProps): React.ReactElement {
       else if (key.downArrow) props.onModelPickerNav(1);
       else if (key.return) props.onModelPickerConfirm();
       else if (key.escape) props.onModelPickerClose();
+      return;
+    }
+    if (state.bottomFields !== null) {
+      // The /display-bottom field picker is open — the input is locked (as
+      // with the model picker): only ↑/↓ (move the highlight), space
+      // (toggle the highlighted field — ink delivers space as input " "),
+      // enter (apply + close) and esc (close, discarding the toggles) mean
+      // anything.
+      if (key.upArrow) props.onBottomFieldsNav(-1);
+      else if (key.downArrow) props.onBottomFieldsNav(1);
+      else if (input === " ") props.onBottomFieldsToggle();
+      else if (key.return) props.onBottomFieldsConfirm();
+      else if (key.escape) props.onBottomFieldsClose();
       return;
     }
     if (key.return) {
@@ -510,6 +536,16 @@ export function App(props: AppProps): React.ReactElement {
           {m.line}
         </Text>
       ))}
+      {/* The /display-bottom field picker — the same grey-menu treatment:
+          one row per field, `[x]` when selected, `> ` highlight, `*` on
+          the row the current selection starts with. Never visible at once
+          with the model picker (each opens from its own slash submit,
+          which clears the input). */}
+      {fieldPicker.map((m, i) => (
+        <Text key={`fieldpicker-${i}`} dimColor={!m.selected} color={m.selected ? "yellow" : undefined}>
+          {m.line}
+        </Text>
+      ))}
       <Text color="gray">{"\u2500".repeat(width)}</Text>
       {/* D15: no 'you' prefix — the input is plain text. The cursor
           (inputWrap) renders at state.cursorPos, so its LOCATION is visible
@@ -524,11 +560,15 @@ export function App(props: AppProps): React.ReactElement {
           (/display-bottom) — blank when nothing is selected. The `context`
           line is tinted by compaction urgency (green → yellow → red); the
           `workers` line is colored PER WORKER (running → green, a model that
-          already ran → gray — see workersLineAnsi); the rest stay dim. The
-          `keys` array mirrors bottomLines' iteration EXACTLY (same skip of
-          unknown keys, same RESERVED_BOTTOM_LINES cap, same padding) so line
-          i's key pairs with line i's text — including when an unknown key
-          would shift indices. */}
+          already ran → gray — see workersLineAnsi); the `subtasks` line is
+          colored PER STATUS (in-progress → green, queued → yellow, done →
+          gray, failed → red — see subtasksLineAnsi) and settles to "none"
+          when the workstream has finished and gone quiet (state.subtasks
+          expired — the workers field's pruneWorkerDir behavior); the rest
+          stay dim. The `keys` array mirrors bottomLines' iteration EXACTLY
+          (same skip of unknown keys, same RESERVED_BOTTOM_LINES cap, same
+          padding) so line i's key pairs with line i's text — including when
+          an unknown key would shift indices. */}
       {(() => {
         const lines = bottomLines(state, width);
         const colors = bottomLineColors(state);
@@ -541,6 +581,7 @@ export function App(props: AppProps): React.ReactElement {
         while (keys.length < RESERVED_BOTTOM_LINES) keys.push(undefined);
         return lines.map((line, i) => {
           const isWorkers = keys[i] === "workers";
+          const isSubtasks = keys[i] === "subtasks";
           // The workers line is an ANSI string that ALREADY carries its own
           // per-worker SGR codes (green/gray/dim), so it must NOT be wrapped
           // in dimColor (that would dim the bright-green running worker).
@@ -550,6 +591,18 @@ export function App(props: AppProps): React.ReactElement {
             return (
               <Text key={`reserved-${i}`}>
                 {workersLineAnsi(state, width)}
+              </Text>
+            );
+          }
+          // The subtasks line is an ANSI string with its own per-status SGR
+          // codes (green/yellow/gray/red/dim — see subtasksLineAnsi), same
+          // no-dimColor rule as workers. When the workstream has settled and
+          // gone quiet (subtasksExpired) it renders the dim "subtasks:
+          // none" — the same settle-to-none the workers field gets.
+          if (isSubtasks) {
+            return (
+              <Text key={`reserved-${i}`}>
+                {subtasksLineAnsi(state.subtasksExpired ? [] : state.subtasks, width)}
               </Text>
             );
           }

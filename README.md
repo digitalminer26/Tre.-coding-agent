@@ -28,8 +28,12 @@ the default; `--ask`, `--yes`, and `--no-approve` are alternatives, with
 sensitive/destructive operations still blocked), deployability (`npm i -g .`
 builds `dist/` on install), loop/stall guards that stop runaway and
 sandbox-wall retry loops, and a session-scoped `subtask` tool (create/list/
-mark) whose progress the TUI renders in a bottom field next to a header
-elapsed-time ticker. See `HANDOFF.md` for the dated change log.
+mark) whose progress the TUI renders in a color-coded bottom field
+(in-progress green, queued yellow, failed red) that settles to `none` once
+the workstream is done and quiet — next to a header elapsed-time ticker.
+The TUI's `/display-bottom` opens an interactive field picker (↑/↓ + space
++ enter/esc) for choosing which fields the bottom lines show. See
+`HANDOFF.md` for the dated change log.
 
 ## Docs
 
