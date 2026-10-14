@@ -114,69 +114,114 @@ result mapping).
    (default is `false` — §5.4). Malformed entries fail startup (exit 2),
    like a bad `extraRoots`.
 2. **Client (dual-era).** Hand-rolled JSON-RPC 2.0 over stdio
-   (newline-delimited JSON — NOT LSP `Content-Length` framing): spawn,
-   then the **era probe** (§5.9): send `server/discover` first — a
-   `DiscoverResult` or a modern error (`-32022` unsupported-version,
-   capabilities response) means MODERN (2026-07-28, stateless — every
-   request then carries version + capabilities in `_meta`); any other
-   response or the probe timeout means LEGACY → `initialize` handshake
-   (2025-11-25 — what the ecosystem ships today) →
-   `notifications/initialized`. The era is cached per server process.
-   Then `tools/list`. id-multiplexed pending-request map (the loop runs
-   tool batches in parallel → concurrent `tools/call` to one server must
-   work), per-call timeout, abort (`notifications/cancelled` referencing
-   the request id), server-death detection. Both eras share the same
-   plumbing (framing, pending map, timeout, abort, death detection) —
-   only the startup path and per-request `_meta` differ. A server that
-   fails BOTH probes (neither modern nor legacy) gets an actionable
-   startup message naming the observed error. ~500 lines, zero
-   dependencies (fits the dep freeze; `@modelcontextprotocol/sdk` would
-   add a runtime dep and is unnecessary for stdio — the v2 line is
-   available as a test oracle, §5.9).
+   (newline-delimited JSON — NOT LSP `Content-Length` framing): spawn →
+   **era probe** (§5.9) → `tools/list`. id-multiplexed pending-request
+   map (the loop runs tool batches in parallel → concurrent `tools/call`
+   to one server must work), per-call timeout, abort
+   (`notifications/cancelled` referencing the request id), server-death
+   detection. Both eras share the same plumbing (framing, pending map,
+   timeout, abort, death detection) — only the startup path and the
+   per-request `_meta` envelope differ.
+
+   **Era probe — exact contract.** The probe is one `server/discover`
+   request carrying the modern envelope: `RequestParams` REQUIRES
+   `_meta`, and `RequestMetaObject` requires
+   `io.modelcontextprotocol/protocolVersion` +
+   `io.modelcontextprotocol/clientCapabilities` (plus the SHOULD
+   `…/clientInfo` {name, version}). The client declares its highest
+   version, `2026-07-28`, on the probe. The response maps to exactly ONE
+   of three outcomes — there is deliberately NO "any other response =
+   legacy" bucket:
+
+   | Probe response | Outcome | Action |
+   |---|---|---|
+   | `result` validating as `DiscoverResult` (`resultType` + `supportedVersions` present) **or** error `-32022` (UnsupportedProtocolVersionError, `data.requested`/`data.supported`) | **MODERN** | pick a mutually supported version from `supported`/`supportedVersions`; cache the era; every later request carries the `_meta` envelope (`protocolVersion` = negotiated, `clientCapabilities`, `clientInfo`) |
+   | error `-32601` (MethodNotFound) **or** the bounded probe timeout (2s) | **LEGACY** | `initialize` handshake → `notifications/initialized` (2025-11-25); cache the era |
+   | anything else — transport failure (process exit, non-JSON stdout, EOF), `-32700` ParseError, any other error code (`-32600`/`-32602`/`-32603`/…), or a `result` that fails `DiscoverResult` validation | **FATAL** | do NOT fall back; report the observed error (server name + what arrived); tools absent |
+
+   Only `-32601` and the probe timeout trigger the legacy fallback; a
+   genuine server fault is surfaced, never masked as "legacy". The era
+   is cached per server process. A server that fails both the probe and
+   `initialize` is reported once with the observed error, its tools
+   absent. ~600 lines, zero dependencies (fits the dep freeze;
+   `@modelcontextprotocol/sdk` would add a runtime dep and is
+   unnecessary for stdio — the v2 line is available as a PINNED test
+   oracle, §4.8/§5.9).
 3. **Adapter.** MCP tool → `Tool`: name sanitized to
    `mcp__<server>__<tool>` (OpenAI completions function names are
    `^[a-zA-Z0-9_-]{1,64}$` — the wire constraint, not MCP's);
    `description` verbatim; `inputSchema` verbatim as `parameters`;
    `execute` = `tools/call` with result mapping: text blocks →
-   `TextBlock[]`; `isError` → `ToolResult.isError`; `structuredContent`
-   (present since the 2025-06-18 revision — legacy servers may return it)
-   → JSON-serialized into a text block (it is server-produced data the
-   model should see; if `content` text is absent or generic, it becomes
-   the primary payload); non-text blocks → descriptive text note (image
-   support is a wire-layer change — out of scope, §5.5).
-4. **Lifecycle.** Spawn at startup (after config load), kill the process
-   group on every exit path (reuse the bash.ts detached-group + SIGKILL
-   pattern; shutdown = close stdin → wait → SIGTERM → SIGKILL); startup
-   timeout (~5s — covers spawn + era probe + `tools/list`); a dead server
-   makes its tool calls fail in-band (`isError`: "MCP server X is not
-   running") — I3, no exceptions. A server that fails both era probes is
-   reported once and its tools are absent.
+   `TextBlock[]`; `isError` → `ToolResult.isError`; non-text blocks
+   (image/audio/resource) → descriptive text note (true support is a
+   wire-layer change — out of scope, §5.5). **`structuredContent` —
+   deterministic rule.** If `content` has ≥1 non-empty text block, the
+   result is `[text blocks…]` then `structuredContent` APPENDED as one
+   final text block (`JSON.stringify`, 2-space indent, header
+   `[structuredContent]`); if `content` is absent/empty/all-blank,
+   `structuredContent` is the SOLE payload (no header). Presence and
+   emptiness decide — there is no "generic text" heuristic.
+4. **Lifecycle.** Per-server isolation: **one server's startup failure
+   never aborts the launch** — each server fails independently (its
+   tools absent, a one-line notice), the others proceed. Spawn at
+   startup (after config load), kill the process group on every exit
+   path (reuse the bash.ts detached-group + SIGKILL pattern). Concrete
+   timeouts: **probe 2s** (§4.2), **startup 5s total** (spawn + probe +
+   `initialize` + `tools/list`), **per-call 60s**, **shutdown grace**:
+   close stdin → wait 2s → SIGTERM → wait 2s → SIGKILL (mirrors the
+   bash kill pattern). A dead server makes its tool calls fail in-band
+   (`isError`: "MCP server X is not running") — I3, no exceptions. State
+   is one of `disabled | starting | ready | failed`, where `failed`
+   carries the observed reason (probe error / handshake error / exit
+   code).
 5. **Safety.** §5.3 — MCP tools default to ASK (prompt in `yes`/`ask`,
    block in `no`) unless the server is `"trust": true`; `readOnlyHint` is
    honored even for untrusted servers.
 6. **CLI.** `--mcp <file>` (explicit config path, tests) and
    `--mcp none` (disable all servers for a launch). `--tools` keeps
    filtering the built-in set; MCP tools are additive from enabled
-   servers (the `--tools` spec is parsed before servers spawn, so it
-   cannot name MCP tools — document this).
+   servers, so `--tools` **cannot name or filter MCP tools** — the
+   per-server `tools` allowlist (§4.1) is the MCP-scoped equivalent.
+   Document this explicitly (it is the one CLI asymmetry).
 7. **`/mcp` status command** (TUI + REPL info line): one line per
-   configured server — `alive (N tools)` / `dead (exit code)` /
-   `disabled` (§8.4). Driver-side, like `/stats`.
+   configured server, reflecting the §4.4 state —
+   `ready (N tools) | starting | failed (<reason>) | disabled`,
+   e.g. `fs — ready (3 tools)`, `db — failed (probe: -32603)`,
+   `remote — disabled`. Driver-side, like `/stats`.
 8. **Tests.** Mock MCP servers as stdlib node scripts speaking
    newline-delimited JSON-RPC on stdio (the `test/mock-sse.ts` pattern):
    a LEGACY server (`initialize` handshake, 2025-11-25 — paginated
    `tools/list`, `tools/call` success / protocol error / `isError`,
    `structuredContent`, crash mid-call, slow call (timeout), concurrent
-   calls) and a MODERN server (answers `server/discover` — the probe must
-   select the modern era, per-request `_meta` must be sent, and the
-   client must NOT send `initialize`). Unit tests for config parse
-   (incl. `disabled`, `trust`, `sandbox`), name sanitization (awkward
-   names: dots, unicode, >64 chars), result mapping (incl.
-   `structuredContent`), and safety classification (trusted vs untrusted
-   × mode matrix). One `e2e.sh` scenario: live model calls a mock-server
-   tool. The official v2 SDK (`@modelcontextprotocol/server`, dev-only —
-   not a runtime dep, so the freeze stays green) is available as a test
-   oracle for the modern path (§5.9).
+   calls) and a MODERN server (answers `server/discover`). **The legacy
+   mock MUST assert it receives the initial `server/discover` probe and
+   reply `-32601`** (the documented fallback trigger) — the fallback is
+   a tested contract, not an accident. **The modern mock MUST assert the
+   exact `_meta` envelope** on `tools/list` and `tools/call`
+   (`protocolVersion` = negotiated, `clientCapabilities` present,
+   `clientInfo`), and assert the client sends NO `initialize`.
+   **Negotiation-failure coverage (the §4.2 table, one test per row):**
+   `-32022` → modern; `-32601` → legacy; probe timeout → legacy; a
+   `DiscoverResult` that fails validation → fatal; `-32603` / other
+   error → fatal; malformed JSON on stdout → fatal; process exit during
+   probe → fatal; `initialize` also rejected after a legacy probe →
+   reported, no crash. **Lifecycle coverage:** per-call timeout, abort
+   (`notifications/cancelled`), a killed `tre.` leaves no server child
+   (the `bash-kill.test.ts` precedent), and one server failing at
+   startup leaves the others ready. Unit tests for config parse (incl.
+   `disabled`, `trust`, `sandbox`), name sanitization (awkward names:
+   dots, unicode, >64 chars), result-mapping (`structuredContent`
+   append-vs-sole rule), and safety classification (trusted vs untrusted
+   × mode matrix, incl. the `readOnlyHint` boundary of §5.3). **One
+   GATED live-model `e2e.sh` scenario** (opt-in like `RUN_LIVE=1`, not
+   in the default gate — it needs credentials and can flake): live model
+   calls a mock-server tool. The **deterministic mock-server tests are
+   the required gate**; the live scenario is optional confirmation.
+   **SDK oracle:** the official v2 SDK (`@modelcontextprotocol/server`)
+   is a **dev-only dependency with a PINNED exact version** — added to
+   `devDependencies` only, never imported by `src/`, so `check-deps.mjs`
+   (which scans `src/`) stays green; used to cross-check the modern path
+   in a dedicated test, not to drive runtime behavior.
 
 **Size: M.** One focused workstream; ~1.5–2.5k lines incl. tests.
 
@@ -266,6 +311,15 @@ result mapping).
    e.g. `tool.mcpAnnotations` / `tool.mcpTrusted` — or a side table in
    main.ts to keep `types.ts` untouched).
 
+   **`readOnlyHint` boundary (important).** Honoring `readOnlyHint` for
+   an untrusted server means only "classify this call as read-only for
+   the APPROVAL POLICY" — it is NOT a grant of filesystem or network
+   access, and it does not relax process permissions. Annotation trust
+   and process confinement are independent axes: a server that lies in
+   its annotations still runs under exactly the same process posture
+   (§5.4: unsandboxed by default, sandboxed only on opt-in). Nothing
+   about `readOnlyHint` changes what the process may touch.
+
 4. **Kernel sandbox for server processes: OFF by default, per-server
    opt-in.** The server is a child of tre.; it runs under the same
    Seatbelt profile as bash (file-confined to workspace + extra roots,
@@ -314,10 +368,10 @@ result mapping).
    SDK line). The spec's own compatibility matrix says a modern-only
    client FAILS against a legacy server — so a client that wants to reach
    the ecosystem MUST handle legacy. Ruling: tier 1 is DUAL-ERA via the
-   spec's stdio probe — `server/discover` first; a `DiscoverResult` or
-   modern error (`-32022` unsupported-version) = modern (per-request
-   `_meta`), anything else or the probe timeout = legacy (`initialize`
-   fallback, 2025-11-25). The era is cached per server process; both eras
+   spec's stdio probe — `server/discover` first (the exact three-way
+   decision table is §4.2: modern on a valid `DiscoverResult`/`-32022`,
+   legacy on `-32601`/timeout, FATAL on anything else); the negotiated
+   version is cached per server process; both eras
    share the same JSON-RPC plumbing (framing, id-multiplexed pending map,
    timeout, abort, death detection). A server failing both probes is
    reported with an actionable message naming the observed error, its
@@ -353,7 +407,19 @@ result mapping).
   exit path (the TUI has several — SIGINT force-exit, `/restart`,
   `process.exit` handlers). Reuse the bash.ts kill pattern; add a test
   that a killed tre. leaves no server child (the `bash-kill.test.ts`
-  precedent).
+  precedent). Scope it honestly: the automated test covers the exit
+  paths it can drive (SIGINT/SIGTERM, clean quit, `/restart`); the
+  `process.exit`-handler paths that a test cannot reach deterministically
+  are covered by construction (a single registered teardown that all
+  paths call) plus a manual check — state which is which in the test.
+- **Era probe is a new startup failure surface.** Every server now gets
+  one extra request before it is usable; a server that answers neither
+  probe (or answers wrongly) is a new class of startup failure. The
+  three-way table (§4.2) is deliberately strict (only `-32601`/timeout
+  fall back; everything else is fatal) so a broken server is named, not
+  silently downgraded. Pin this with the negotiation-failure tests
+  (§4.8) — a regression to "any error = legacy" is the failure mode to
+  guard.
 - **Protocol drift.** Dual-era by design (§5.9): pin the negotiated
   version from the probe result — the `initialize` result in the legacy
   era, the `DiscoverResult` / `_meta` version in the modern era; an
@@ -407,8 +473,9 @@ behavior, and zero changes outside `src/mcp/*`, `safety.ts`,
    about MCP adoption. Shape: `"disabled": true` on the server entry —
    the server is NOT spawned and its tools are absent; `/mcp` (Q4)
    lists it as `disabled`.
-4. **`/mcp` status command: IN tier 1.** One line per server:
-   `name — alive (N tools) | dead (exit 1) | disabled`. It is the only
+4. **`/mcp` status command: IN tier 1.** One line per server, reflecting
+   the §4.4 state: `name — ready (N tools) | starting | failed (<reason>)
+   | disabled`. It is the only
    way to see server health, it reuses the existing slash-command
    plumbing (a `handleSlashCommand` entry like `/stats`, which already
    takes a measured value from the driver), and the driver already

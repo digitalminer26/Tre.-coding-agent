@@ -265,40 +265,62 @@ suggested subagent type (see §5); **size** = rough effort.
   optional `tools` allowlist, `disabled`, `trust`, `sandbox`),
   `src/mcp/client.ts`
   (hand-rolled JSON-RPC 2.0 over stdio: newline-delimited JSON, dual-era
-  startup — `server/discover` probe first (modern error/`DiscoverResult`
-  = modern, per-request `_meta`), `initialize` fallback (2025-11-25) =
-  legacy; era cached per server process; then `tools/list`; id-multiplexed
-  pending map for concurrent `tools/call`, per-call timeout, abort,
-  server-death detection; zero new dependencies — the dep freeze stays
-  green),
+  startup — the `server/discover` era probe with the exact three-way
+  decision table of scope §4.2: a valid `DiscoverResult`/`-32022` =
+  MODERN (per-request `_meta` envelope), `-32601`/probe-timeout = LEGACY
+  (`initialize` fallback, 2025-11-25), anything else = FATAL (reported,
+  no fallback); negotiated version cached per server process; then
+  `tools/list`; id-multiplexed pending map for concurrent `tools/call`,
+  per-call timeout, abort, server-death detection; per-server isolation —
+  one failed server never aborts the launch; concrete timeouts (probe 2s,
+  startup 5s, per-call 60s, shutdown close→2s→SIGTERM→2s→SIGKILL); zero
+  new dependencies — the dep freeze stays green),
   `src/mcp/adapter.ts` (MCP tool → `Tool`: name `mcp__<server>__<tool>`
   sanitized to the wire's function-name constraint, `inputSchema`
   verbatim, text-only result mapping with `isError` propagation +
-  `structuredContent` handling). Wiring in
+  `structuredContent` handling — deterministic append-vs-sole rule, scope
+  §4.3). Wiring in
   `cli/main.ts` (spawn at startup, kill the process group on EVERY exit
   path — the bash.ts detached-group pattern; `--mcp <file>` /
   `--mcp none`), safety classification in `tools/safety.ts` (MCP tools
   DEFAULT TO ASK — prompt in `yes`/`ask`, block in `no` — unless the
-  server is `"trust": true`; `readOnlyHint` honored even when untrusted),
-  the `/mcp` status
-  slash command (TUI + REPL), and the servers run under the kernel
+  server is `"trust": true`; `readOnlyHint` honored even when untrusted,
+  but as an approval-policy classification only — it grants no process
+  access, scope §5.3), the `/mcp` status
+  slash command (TUI + REPL; states `ready`/`starting`/`failed`/`disabled`),
+  and the servers run under the kernel
   sandbox only when `"sandbox": true` (OFF by default — file-confined,
   network-open profile when opted in; verified 2026-10-14).
 - **Exit criteria:** mock stdio MCP servers (stdlib node scripts, the
   `test/mock-sse.ts` pattern): a LEGACY server (`initialize` handshake,
-  2025-11-25 — paginated `tools/list`, `tools/call` success / protocol
-  error / `isError`, `structuredContent`, crash mid-call, slow call
-  (timeout), concurrent calls to one server) and a MODERN server (answers
-  `server/discover` — the probe must select the modern era, per-request
-  `_meta` must be sent, and the client must NOT send `initialize`); unit
+  2025-11-25 — MUST assert it receives the initial `server/discover`
+  probe and replies `-32601`; paginated `tools/list`, `tools/call`
+  success / protocol error / `isError`, `structuredContent`, crash
+  mid-call, slow call (timeout), concurrent calls to one server) and a
+  MODERN server (answers `server/discover` — the probe must select the
+  modern era, the exact `_meta` envelope must be sent on `tools/list` and
+  `tools/call`, and the client must NOT send `initialize`); **one
+  negotiation-failure test per §4.2 row** (`-32022`→modern;
+  `-32601`/timeout→legacy; invalid `DiscoverResult`/`-32603`/other
+  error/malformed JSON/probe-timeout exit→fatal; legacy probe then
+  `initialize` also rejected→reported, no crash); unit
   tests for
   config parse (incl. `disabled`, `trust`, `sandbox`), name
   sanitization (awkward names: dots, unicode, >64 chars), result mapping
-  (incl. `structuredContent`), and safety classification (trusted vs
-  untrusted × mode matrix); an e2e scenario where a live model calls a
+  (incl. the `structuredContent` append-vs-sole rule), and safety
+  classification (trusted vs
+  untrusted × mode matrix, incl. the `readOnlyHint` boundary); a gated
+  live-model e2e scenario (opt-in like `RUN_LIVE=1`, not in the default
+  gate) where a live model calls a
   mock-server tool; a killed
-  `tre.` leaves no server child (the `bash-kill.test.ts` precedent); gate
-  green (quality-check + tsc + full suite).
+  `tre.` leaves no server child (the `bash-kill.test.ts` precedent —
+  covering the exit paths the test can drive, plus a manual check for the
+  `process.exit`-handler paths); the official v2 SDK
+  (`@modelcontextprotocol/server`) as a PINNED dev-only dependency
+  (never imported by `src/`, so `check-deps.mjs` stays green) used as a
+  test oracle for the modern path; gate
+  green (quality-check + tsc + full suite). The deterministic
+  mock-server tests are the required gate; the live scenario is optional.
 - **deps:** WS0 contracts (unchanged), WS3 pipeline, WS7 safety hooks,
   WS11 sandbox spawn, C36 `tre.json` config. Buildable after the
   foundational workstreams (all done). **owner:** `worker`.
