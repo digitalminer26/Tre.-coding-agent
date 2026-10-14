@@ -150,7 +150,9 @@ construction; imports `generateBashSandboxPolicy` read-only when
    hold tokens/keys, so this key carries a documented credential-
    exposure warning). **Final layer — platform/sandbox markers (applied
    LAST, non-overridable):** after the three layers, the marker function
-   `markerEnv(...)` in `src/mcp/spawn.ts` applies the markers, and they WIN
+   `markerEnv(...)` in `src/mcp/config.ts` (alongside the three-layer
+   env-construction function, so the whole construction is one pure,
+   unit-testable module — §4.8) applies the markers, and they WIN
    over any explicit `env` or inherited value of the same name. It is a NEW
    function, separate from `buildBwrapChildEnv` (which is bash-only and
    drops explicit entries). **Owner and conditions, exact:**

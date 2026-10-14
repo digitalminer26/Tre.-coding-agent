@@ -7,7 +7,7 @@ design gaps are fixed in the doc (commit `d49f962`): `sandbox:true` now has an
 explicit platform split (darwin Seatbelt via `generateBashSandboxPolicy`, linux
 bwrap via `buildBwrapArgs` invoked directly with the merged MCP env, fail-closed
 when the backend is unavailable — never an unsandboxed fallback); the sandbox
-markers get a dedicated owner, `markerEnv()` in `src/mcp/spawn.ts`
+markers get a dedicated owner, `markerEnv()` in `src/mcp/config.ts`
 (`TRE_SANDBOX=1` only for directly-sandboxed or inherited-sandbox children,
 `GIT_CONFIG_NOSYSTEM=1` always, `TMPDIR=/tmp` only for linux sandboxed
 children); size estimates are consistent (`client.ts` ≈600–800, total ≈2–2.5k
