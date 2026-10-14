@@ -57,13 +57,14 @@ const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c);
 // ─────────────────────────────── parse ───────────────────────────────
 
 test("parseTreConfig: no extraRoots → empty list", () => {
-  assert.deepEqual(parseTreConfig("{}"), { extraRoots: [] });
-  assert.deepEqual(parseTreConfig('{"extraRoots": []}'), { extraRoots: [] });
+  assert.deepEqual(parseTreConfig("{}"), { extraRoots: [], mcpServers: {} });
+  assert.deepEqual(parseTreConfig('{"extraRoots": []}'), { extraRoots: [], mcpServers: {} });
 });
 
 test("parseTreConfig: a list of dirs is kept in order", () => {
   const c = parseTreConfig('{"extraRoots": ["/a/b", "~/scratch", "rel/dir"]}');
   assert.deepEqual(c.extraRoots, ["/a/b", "~/scratch", "rel/dir"]);
+  assert.deepEqual(c.mcpServers, {});
 });
 
 test("parseTreConfig: malformed extraRoots → descriptive throw", () => {
@@ -73,6 +74,80 @@ test("parseTreConfig: malformed extraRoots → descriptive throw", () => {
   assert.throws(() => parseTreConfig("{ not json"), /JSON/);
 });
 
+// ─────────────────────────────── mcpServers (WS12) ───────────────────────────────
+
+test("parseTreConfig: no mcpServers → empty map (MCP is opt-in)", () => {
+  assert.deepEqual(parseTreConfig("{}").mcpServers, {});
+  assert.deepEqual(parseTreConfig('{"mcpServers": {}}').mcpServers, {});
+});
+
+test("parseTreConfig: a full mcpServers entry is normalized with defaults", () => {
+  const c = parseTreConfig(
+    JSON.stringify({
+      mcpServers: {
+        fs: {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "/path"],
+          env: { FOO: "bar" },
+          cwd: "/path",
+          tools: ["read_file"],
+          trust: true,
+          sandbox: true,
+        },
+      },
+    }),
+  );
+  assert.deepEqual(c.mcpServers.fs!, {
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path"],
+    env: { FOO: "bar" },
+    cwd: "/path",
+    tools: ["read_file"],
+    disabled: false,
+    trust: true,
+    sandbox: true,
+    inheritEnv: false,
+  });
+});
+
+test("parseTreConfig: a minimal mcpServers entry (command only) gets all defaults", () => {
+  const c = parseTreConfig('{"mcpServers": {"fs": {"command": "node"}}}');
+  assert.deepEqual(c.mcpServers.fs!, {
+    command: "node",
+    args: [],
+    env: {},
+    cwd: "",
+    tools: [],
+    disabled: false,
+    trust: false,
+    sandbox: false,
+    inheritEnv: false,
+  });
+});
+
+test("parseTreConfig: mcpServers type errors fail closed with the server name", () => {
+  assert.throws(() => parseTreConfig('{"mcpServers": "nope"}'), /'mcpServers' must be an object/);
+  assert.throws(() => parseTreConfig('{"mcpServers": []}'), /'mcpServers' must be an object/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": "nope"}}'), /mcpServers\["fs"\] must be an object/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {}}}') , /mcpServers\["fs"\]\.command must be a non-empty string/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": 1}}}'), /command must be a non-empty string/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "args": "nope"}}}'), /\.args must be an array/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "args": [1]}}}'), /\.args\[0\] must be a non-empty string/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "env": {"A": 1}}}}'), /\.env\["A"\] must be a string/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "env": []}}}'), /\.env must be an object/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "cwd": 1}}}'), /\.cwd must be a non-empty string/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "tools": "nope"}}}'), /\.tools must be an array/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "disabled": "nope"}}}'), /\.disabled must be a boolean/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "trust": 1}}}'), /\.trust must be a boolean/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "sandbox": "nope"}}}'), /\.sandbox must be a boolean/);
+  assert.throws(() => parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "inheritEnv": "nope"}}}'), /\.inheritEnv must be a boolean/);
+});
+
+test("parseTreConfig: empty-string env values are allowed (a string is a string)", () => {
+  const c = parseTreConfig('{"mcpServers": {"fs": {"command": "npx", "env": {"A": ""}}}}');
+  assert.deepEqual(c.mcpServers.fs!.env, { A: "" });
+});
+
 // ─────────────────────────────── load + find ───────────────────────────────
 
 test("loadTreConfig: reads and parses a file", (t) => {
@@ -80,7 +155,7 @@ test("loadTreConfig: reads and parses a file", (t) => {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const p = path.join(dir, "tre.json");
   fs.writeFileSync(p, '{"extraRoots": ["/x"]}');
-  assert.deepEqual(loadTreConfig(p), { extraRoots: ["/x"] });
+  assert.deepEqual(loadTreConfig(p), { extraRoots: ["/x"], mcpServers: {} });
 });
 
 test("findTreConfig: explicit path wins even if it does not exist", () => {

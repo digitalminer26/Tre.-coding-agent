@@ -1,13 +1,18 @@
 /**
  * C36 — tre.json: durable, per-project configuration.
  *
- * The first (and only, for now) field is `extraRoots` (C35 durability): the
- * explicitly assigned additional read/write roots that today must be re-passed
- * as `--extra-root <dir>` on every launch. tre.json persists them, so a
- * project's boundary is part of the project.
+ * Fields:
+ *   - `extraRoots` (C35 durability): the explicitly assigned additional
+ *     read/write roots that today must be re-passed as `--extra-root <dir>`
+ *     on every launch. tre.json persists them, so a project's boundary is
+ *     part of the project.
+ *   - `mcpServers` (WS12): durable MCP server configs
+ *     (docs/10-mcp-scope.md §4.1) — same walk-up lookup, same fail-closed
+ *     parse posture.
  *
  * tre.json shape:
- *   { "extraRoots": [ "/abs/or/~/relative/dir", ... ] }
+ *   { "extraRoots": [ "/abs/or/~/relative/dir", ... ],
+ *     "mcpServers": { "fs": { "command": "npx", "args": [...], ... } } }
  *
  * Entries may start with `~` or `~/` (expanded against the home dir at
  * startup, like a shell) — e.g. `"~/kubeconfigs"`. `~` alone means the home
@@ -35,25 +40,143 @@ export interface TreConfig {
   /** Durable extra roots (C35). Each entry is validated at startup exactly
    *  like a `--extra-root` value (exists, non-sensitive, under home). */
   extraRoots: string[];
+  /** WS12: durable MCP server configs (docs/10-mcp-scope.md §4.1). Parsed
+   *  leniently (absent → empty map) and validated fail-closed at startup by
+   *  `validateMcpServers` in `src/mcp/config.ts` — the same posture as
+   *  `extraRoots` (a malformed entry refuses startup, never a silent
+   *  ignore). */
+  mcpServers: Record<string, McpServerConfig>;
+}
+
+/** One `mcpServers` entry in tre.json (WS12, scope §4.1). `command` is
+ *  required; every other key is optional with a documented default. */
+export interface McpServerConfig {
+  /** Executable to spawn (resolved via the child's PATH). Required. */
+  command: string;
+  /** argv passed to `command` (default `[]`). */
+  args: string[];
+  /** Explicit env entries (default `{}`). Win over the allowlisted baseline
+   *  and any inherited parent env (scope §4.1 layer 2). */
+  env: Record<string, string>;
+  /** Working directory (default: launch directory). Relative paths resolve
+   *  against the launch directory. Must exist as a directory; NOT added to
+   *  sandbox roots. */
+  cwd: string;
+  /** Optional per-server tool allowlist (default: all tools the server
+   *  exposes). */
+  tools: string[];
+  /** Skip the server entirely — no spawn, no tools (default `false`). */
+  disabled: boolean;
+  /** Opt the server's tools into the default-`yes` approval posture
+   *  (default `false` — untrusted MCP tools prompt in `yes`/`ask` and are
+   *  blocked in `no`, scope §5.3). */
+  trust: boolean;
+  /** Opt the server PROCESS into the kernel sandbox (default `false` —
+   *  scope §5.4). File-confined, network-open, same policy as bash. */
+  sandbox: boolean;
+  /** ADD the full parent environment UNDER the explicit `env` entries
+   *  (default `false` — minimal by default; the parent env may hold
+   *  tokens/keys, so this key carries a documented credential-exposure
+   *  warning, scope §4.1). */
+  inheritEnv: boolean;
 }
 
 /** Parse a tre.json string. Throws a descriptive error on a malformed
  *  `extraRoots` (CLI-level input validation — allowed to throw before any
  *  StreamFn call, like parseModelsFile). */
 export function parseTreConfig(raw: string): TreConfig {
-  const j = JSON.parse(raw) as { extraRoots?: unknown };
-  if (j.extraRoots === undefined) return { extraRoots: [] };
-  if (!Array.isArray(j.extraRoots)) {
-    throw new Error("tre.json: 'extraRoots' must be an array of directory strings");
-  }
+  const j = JSON.parse(raw) as { extraRoots?: unknown; mcpServers?: unknown };
   const extraRoots: string[] = [];
-  for (const [i, v] of j.extraRoots.entries()) {
-    if (typeof v !== "string" || v.trim().length === 0) {
-      throw new Error(`tre.json: extraRoots[${i}] must be a non-empty directory string`);
+  if (j.extraRoots !== undefined) {
+    if (!Array.isArray(j.extraRoots)) {
+      throw new Error("tre.json: 'extraRoots' must be an array of directory strings");
     }
-    extraRoots.push(v);
+    for (const [i, v] of j.extraRoots.entries()) {
+      if (typeof v !== "string" || v.trim().length === 0) {
+        throw new Error(`tre.json: extraRoots[${i}] must be a non-empty directory string`);
+      }
+      extraRoots.push(v);
+    }
   }
-  return { extraRoots };
+  return { extraRoots, mcpServers: parseMcpServers(j.mcpServers) };
+}
+
+/** WS12 — parse + normalize the `mcpServers` field of tre.json (scope §4.1).
+ *  Absent/empty → `{}` (MCP is opt-in — no field, no servers). The field's
+ *  TYPE is validated here (fail-closed, like `extraRoots`); the per-entry
+ *  semantics (cwd existence, etc.) are validated at startup by
+ *  `validateMcpServers` in `src/mcp/config.ts`. Defaults are applied at
+ *  parse time so the rest of the codebase sees fully-normalized entries. */
+function parseMcpServers(v: unknown): Record<string, McpServerConfig> {
+  if (v === undefined) return {};
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    throw new Error("tre.json: 'mcpServers' must be an object mapping server names to configs");
+  }
+  const out: Record<string, McpServerConfig> = {};
+  for (const [name, raw] of Object.entries(v)) {
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw new Error("tre.json: mcpServers: server names must be non-empty strings");
+    }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error(`tre.json: mcpServers["${name}"] must be an object`);
+    }
+    const e = raw as Record<string, unknown>;
+    if (typeof e.command !== "string" || e.command.trim().length === 0) {
+      throw new Error(`tre.json: mcpServers["${name}"].command must be a non-empty string`);
+    }
+    out[name] = {
+      command: e.command,
+      args: parseStringArray(e.args, `mcpServers["${name}"].args`),
+      env: parseStringMap(e.env, `mcpServers["${name}"].env`),
+      cwd: e.cwd === undefined ? "" : (parseString(e.cwd, `mcpServers["${name}"].cwd`) ?? ""),
+      tools: parseStringArray(e.tools, `mcpServers["${name}"].tools`),
+      disabled: parseBool(e.disabled, `mcpServers["${name}"].disabled`, false),
+      trust: parseBool(e.trust, `mcpServers["${name}"].trust`, false),
+      sandbox: parseBool(e.sandbox, `mcpServers["${name}"].sandbox`, false),
+      inheritEnv: parseBool(e.inheritEnv, `mcpServers["${name}"].inheritEnv`, false),
+    };
+  }
+  return out;
+}
+
+function parseString(v: unknown, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || v.trim().length === 0) {
+    throw new Error(`tre.json: ${what} must be a non-empty string`);
+  }
+  return v;
+}
+
+function parseStringArray(v: unknown, what: string): string[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new Error(`tre.json: ${what} must be an array of strings`);
+  const out: string[] = [];
+  for (const [i, x] of v.entries()) {
+    if (typeof x !== "string" || x.trim().length === 0) {
+      throw new Error(`tre.json: ${what}[${i}] must be a non-empty string`);
+    }
+    out.push(x);
+  }
+  return out;
+}
+
+function parseStringMap(v: unknown, what: string): Record<string, string> {
+  if (v === undefined) return {};
+  if (typeof v !== "object" || v === null || Array.isArray(v)) {
+    throw new Error(`tre.json: ${what} must be an object mapping names to string values`);
+  }
+  const out: Record<string, string> = {};
+  for (const [k, x] of Object.entries(v)) {
+    if (typeof x !== "string") throw new Error(`tre.json: ${what}["${k}"] must be a string`);
+    out[k] = x;
+  }
+  return out;
+}
+
+function parseBool(v: unknown, what: string, dflt: boolean): boolean {
+  if (v === undefined) return dflt;
+  if (typeof v !== "boolean") throw new Error(`tre.json: ${what} must be a boolean`);
+  return v;
 }
 
 /** Read + parse a tre.json from disk. */
