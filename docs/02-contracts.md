@@ -295,8 +295,11 @@ the server); `compactionReserve` (optional, default 16384) is the compaction
 trigger's reserved headroom — a SEPARATE knob that sets the leading "start
 compacting now" threshold without touching output capacity. `compat` (per-model
 flags: `maxTokensField`, `supportsUsageInStreaming`,
-`requiresAssistantAfterToolResult`, `extraParams`) is where endpoint quirks
-live, so the wire layer stays one code path. Swapping endpoints = editing
+`requiresAssistantAfterToolResult`, `promptCaching`, `extraParams`) is where
+endpoint quirks live, so the wire layer stays one code path. `promptCaching`
+(true → top-level `cache_control: { type: "ephemeral" }` on every request)
+enables OpenRouter's automatic prompt caching — REQUIRED for Anthropic models,
+which never cache implicitly. Swapping endpoints = editing
 models.json.
 
 ## The invariants, restated

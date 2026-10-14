@@ -385,6 +385,15 @@ export interface ModelCompat {
   supportsUsageInStreaming?: boolean;
   /** Insert a synthetic assistant message after tool results, before a user message. */
   requiresAssistantAfterToolResult?: boolean;
+  /**
+   * true → send a top-level `cache_control: { type: "ephemeral" }` in every
+   * chat/completions request. OpenRouter's automatic prompt caching: the
+   * provider applies the breakpoint to the last cacheable block and advances
+   * it as the conversation grows. REQUIRED for Anthropic models (they never
+   * cache implicitly — without it nothing is written to the cache); harmless
+   * to omit elsewhere. Leave unset for all other endpoints.
+   */
+  promptCaching?: boolean;
   /** Merged verbatim into every request body (e.g. enable_thinking). */
   extraParams?: Record<string, unknown>;
 }

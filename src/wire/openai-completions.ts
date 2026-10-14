@@ -122,6 +122,14 @@ export function buildParams(model: ModelConfig, ctx: LlmContext): Record<string,
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
   }
+  // OpenRouter automatic prompt caching (docs/features/prompt-caching): a
+  // top-level `cache_control` makes the provider apply a breakpoint to the
+  // last cacheable block and advance it as the conversation grows. Anthropic
+  // models NEVER cache implicitly — without this, nothing is ever written to
+  // the cache. Only sent when the model opts in (compat.promptCaching).
+  if (compat.promptCaching) {
+    params.cache_control = { type: "ephemeral" };
+  }
   params[compat.maxTokensField ?? "max_tokens"] = model.maxTokens;
   if (typeof model.temperature === "number") params.temperature = model.temperature;
   if (compat.supportsUsageInStreaming !== false) {
@@ -248,7 +256,7 @@ function mapUsage(u: {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 }): Usage {
   return {
     input: u.prompt_tokens ?? 0,
@@ -256,6 +264,12 @@ function mapUsage(u: {
     totalTokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
     ...(typeof u.prompt_tokens_details?.cached_tokens === "number"
       ? { cacheRead: u.prompt_tokens_details.cached_tokens }
+      : {}),
+    // OpenRouter reports cache writes separately (explicit-caching models,
+    // e.g. Anthropic via `cache_control`); endpoints without explicit
+    // caching simply omit the field.
+    ...(typeof u.prompt_tokens_details?.cache_write_tokens === "number"
+      ? { cacheWrite: u.prompt_tokens_details.cache_write_tokens }
       : {}),
   };
 }
@@ -378,7 +392,10 @@ export const openAiStream: StreamFn = (model, ctx, opts) => {
               prompt_tokens?: number;
               completion_tokens?: number;
               total_tokens?: number;
-              prompt_tokens_details?: { cached_tokens?: number };
+              prompt_tokens_details?: {
+                cached_tokens?: number;
+                cache_write_tokens?: number;
+              };
             }
           | undefined;
         if (u) usage = mapUsage(u);

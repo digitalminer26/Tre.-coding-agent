@@ -320,6 +320,36 @@ test("buildParams: compat flags steer the request body", () => {
 
   const extra = buildParams({ ...MODEL, compat: { extraParams: { enable_thinking: false } } }, ctx);
   assert.equal(extra.enable_thinking, false);
+
+  // OpenRouter automatic prompt caching: opt-in sends a top-level
+  // `cache_control`; unset/absent sends nothing (other endpoints must not
+  // see the field).
+  const cached = buildParams({ ...MODEL, compat: { promptCaching: true } }, ctx);
+  assert.deepEqual(cached.cache_control, { type: "ephemeral" });
+  assert.equal(base.cache_control, undefined);
+  assert.equal(
+    buildParams({ ...MODEL, compat: { promptCaching: false } }, ctx).cache_control,
+    undefined,
+  );
+});
+
+test("cached-usage: cached_tokens and cache_write_tokens map to cacheRead/cacheWrite", async () => {
+  const mock = await startMockSse("cached-usage");
+  const events = await collectStream(
+    openAiStream,
+    { ...MODEL, baseUrl: mock.baseUrl },
+    noToolsCtx(),
+    { signal: new AbortController().signal },
+  );
+  await mock.close();
+  const done = events[events.length - 1] as Extract<AssistantStreamEvent, { type: "done" }>;
+  assert.deepEqual(done.message.usage, {
+    input: 100,
+    output: 10,
+    totalTokens: 110,
+    cacheRead: 80,
+    cacheWrite: 12,
+  });
 });
 
 test("parseToolArgs: salvage cases", () => {

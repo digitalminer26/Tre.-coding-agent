@@ -221,3 +221,32 @@ test("headers: valid object preserved; malformed entries are config errors", (t)
   assert.throws(() => mk("X-Title: tre."), /headers/); // string, not object
   assert.throws(() => mk(null), /headers/); // null
 });
+
+// compat.promptCaching: a boolean opt-in for OpenRouter automatic prompt
+// caching (top-level `cache_control`). A non-boolean is a config error —
+// a typo would otherwise silently disable caching with no visible failure.
+test("compat.promptCaching: boolean preserved; non-boolean is a config error", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-models-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mk = (compat: unknown) => {
+    const p = path.join(dir, `pc-${Math.random().toString(36).slice(2)}.json`);
+    const entry: Record<string, unknown> = {
+      id: "m", provider: "p", baseUrl: "http://x/v1", api: "openai-completions",
+      contextWindow: 131072, maxTokens: 32768,
+    };
+    if (compat !== undefined) entry.compat = compat;
+    fs.writeFileSync(p, JSON.stringify({ default: "m", models: [entry] }));
+    return resolveModel(loadModelsFile(p));
+  };
+  assert.deepEqual(mk({ promptCaching: true }).compat, { promptCaching: true });
+  assert.deepEqual(mk({ promptCaching: false }).compat, { promptCaching: false });
+  // coexists with other compat flags.
+  assert.deepEqual(
+    mk({ promptCaching: true, extraParams: { enable_thinking: false } }).compat,
+    { promptCaching: true, extraParams: { enable_thinking: false } },
+  );
+  assert.equal(mk(undefined).compat, undefined);
+  assert.throws(() => mk({ promptCaching: "true" }), /promptCaching/); // string
+  assert.throws(() => mk({ promptCaching: 1 }), /promptCaching/); // number
+  assert.throws(() => mk({ promptCaching: null }), /promptCaching/); // null
+});

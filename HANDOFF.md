@@ -1,5 +1,49 @@
 # Current project status (2026-10-14)
 
+**OpenRouter Anthropic prompt caching — `compat.promptCaching` (2026-10-14).**
+Anthropic models via OpenRouter never cache implicitly (the ONLY automatic
+option is an explicit breakpoint), so tre.'s requests — which sent no
+`cache_control` — never wrote to the cache; nothing was wrong with the
+endpoints or keys. Fix, per OpenRouter's "automatic caching" mode: a new
+per-model compat opt-in, `compat.promptCaching: true` (`src/types.ts`), makes
+`buildParams` (`src/wire/openai-completions.ts`) send a TOP-LEVEL
+`cache_control: { type: "ephemeral" }` — the provider applies the breakpoint
+to the last cacheable block and advances it as the conversation grows
+(correct shape for an agentic loop; the per-block alternative needs array
+content, which the completions wire deliberately never emits — assistant
+content is a string). `normalizeModel` (`src/config/models.ts`) validates it
+(non-boolean → config error at load; a typo would otherwise silently disable
+caching), and the flag stays completions-wire-only — `openai-responses.ts`
+ignores it (Responses-API caching uses OpenAI's implicit caching +
+`prompt_cache_breakpoint`, not Anthropic-style breakpoints; nothing to
+enable there today). Usage: OpenRouter's separate cache-write accounting
+(`prompt_tokens_details.cache_write_tokens`, present on explicit-caching
+models) now maps to `usage.cacheWrite` alongside `cached_tokens` →
+`cacheRead` (both were already consumed by the TUI/session accounting, which
+treat a write turn's tokens as "new" via `promptCached = min(input,
+cacheRead)` — correct, since OpenRouter includes writes inside
+`prompt_tokens`). Config: the two `anthropic/` entries in the machine-level
+`~/.tre/tre/models.json` carry `compat.promptCaching: true`; other providers
+need nothing (DeepSeek/Z.AI/others cache implicitly; the flag is only
+RESPONDED to where a provider requires it). Operational notes: 5-minute TTL
+default (sticky routing re-homes the conversation within that window),
+per-model minimum cacheable prefix (haiku-5.5/opus-5.5-class: 512 tokens;
+older haiku/opus-4.x: 1–4k) — a prefix below it is silently uncached.
+
+**Gate.** `tsc` clean; full suite **968 tests, 954 pass, 0 fail, 14
+skipped** (the 14 are the pre-existing TTY/TUI-live + platform skips). New
+tests: `test/mock-sse.ts` (a `cached-usage` scenario reporting both
+`cached_tokens` and `cache_write_tokens`), `test/wire.test.ts`
+(`buildParams`: `cache_control` sent only when opted in — unset/false send
+nothing; end-to-end usage mapping → `{cacheRead: 80, cacheWrite: 12}`),
+`test/models.test.ts` (`compat.promptCaching`: true/false preserved, works
+beside other compat flags, absent → compat unset; string/number/null are
+config errors). Live-verified (not part of the gate): two identical
+~718-token prompts through tre's OWN wire path (dist build + real
+models.json) — call 1 `cacheWrite: 714`, call 2 `cacheRead: 714` (cost
+~$9.6e-5 → ~$9.9e-6); a second probe confirmed tool-carrying requests accept
+the top-level field (write `cache_write_tokens: 1070`, finish `tool_calls`).
+
 **Subtask bottom field: per-status colors + settle-to-none expiry, and the
 `/display-bottom` interactive field picker (2026-10-14).** Two TUI
 increments on the `subtasks` bottom field and the `/display-bottom` command

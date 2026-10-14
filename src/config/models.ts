@@ -5,6 +5,11 @@
  *   { "default": "<id>", "models": [ { id, provider, baseUrl, api,
  *     apiKey?, contextWindow, maxTokens, temperature?, compat? } ] }
  *
+ * compat flags: maxTokensField, supportsUsageInStreaming,
+ * requiresAssistantAfterToolResult, promptCaching (true → top-level
+ * `cache_control` for OpenRouter automatic caching — required for Anthropic
+ * models, which never cache implicitly), extraParams.
+ *
  * Swapping endpoints = editing models.json; the wire layer stays one code
  * path (per-model quirks live in `compat`).
  */
@@ -97,6 +102,15 @@ function normalizeModel(m: unknown, i: number): ModelConfig {
   if (typeof o.temperature === "number") model.temperature = o.temperature;
   if (o.auth === "chatgpt-oauth") model.auth = "chatgpt-oauth";
   if (o.compat && typeof o.compat === "object") {
+    // promptCaching: a boolean opt-in (OpenRouter automatic caching). A
+    // non-boolean is a config error — a typo would otherwise silently
+    // disable caching (no `cache_control` sent) with no visible failure.
+    const pc = (o.compat as Record<string, unknown>).promptCaching;
+    if (pc !== undefined && typeof pc !== "boolean") {
+      throw new Error(
+        `models.json: models[${i}].compat.promptCaching must be a boolean (got ${JSON.stringify(pc)})`,
+      );
+    }
     model.compat = o.compat as ModelConfig["compat"];
   }
   return model;

@@ -26,7 +26,8 @@ export type MockSseScenario =
   | "multi-tool"
   | "length"
   | "http-error"
-  | "stream-error";
+  | "stream-error"
+  | "cached-usage";
 
 export interface MockSse {
   /** e.g. http://127.0.0.1:PORT — use as baseUrl, append /chat/completions. */
@@ -144,6 +145,21 @@ function framesFor(scenario: MockSseScenario): SseFrame[] | { status: number; bo
           },
         }),
       };
+    case "cached-usage":
+      // OpenRouter-style usage for an explicit-caching model (Anthropic via
+      // `cache_control`): cached reads + separate cache-write accounting.
+      return [
+        delta(0, { role: "assistant", content: "" }),
+        delta(0, { content: "ok" }),
+        delta(0, {}, "stop"),
+        usageFrame({
+          prompt_tokens: 100,
+          completion_tokens: 10,
+          total_tokens: 110,
+          prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 12 },
+        }),
+        DONE,
+      ];
     case "stream-error":
       return [
         delta(0, { role: "assistant", content: "" }),
