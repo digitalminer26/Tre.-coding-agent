@@ -119,7 +119,7 @@ model you want (the `id` is OpenRouter's `vendor/model` slug, e.g.
   "contextWindow": 200000,
   "maxTokens": 8192,
   "headers": {
-    "X-Title": "tre.",
+    "X-Title": "Tre. Coding Agent",
     "HTTP-Referer": "https://github.com/digitalminer26/Tre.-coding-agent"
   }
 }
