@@ -250,10 +250,15 @@ suggested subagent type (see §5); **size** = rough effort.
   probe; sampling/roots are deprecated). Tier 1 is **dual-era**: the
   client probes `server/discover` first (modern, 2026-07-28) and falls
   back to the `initialize` handshake (legacy, 2025-11-25 — what the
-  ecosystem's published servers still ship; the official v2 SDK line
-  implements the modern era, so a reference implementation exists —
-  §5.9 of the scope doc); a server failing both probes is rejected with
-  an actionable message. The adapter is thin by construction: an MCP
+  ecosystem's published servers still ship; the v2 SDK is REPORTED to
+  implement the modern era — SDK STATUS: UNVERIFIED, see scope §2, the
+  single source of truth for SDK status — so the dual-era ruling stands
+  on the spec's compatibility matrix (§5.9 of the scope doc)). The probe's
+  full `_meta` envelope
+  is mandatory: an envelope-less probe cannot be distinguished from a
+  legacy server's answer, so the envelope is pinned by mock assertion
+  (scope §4.8), not by any SDK observation. A server failing both probes
+  is rejected with an actionable message. The adapter is thin by construction: an MCP
   tool IS a `Tool` (WS0 contract), rides the existing pipeline (validate
   → `beforeToolCall` → execute → `afterToolCall`), its `inputSchema`
   passes through the wire verbatim, and its description flows into the
@@ -262,24 +267,171 @@ suggested subagent type (see §5); **size** = rough effort.
 - **Deliverable:** `src/mcp/config.ts` (parse `mcpServers` from
   `tre.json` — same walk-up + `~/.tre/tre.json` fallback + fail-closed
   posture as `extraRoots`; entry shape: `command`, `args`, `env`, `cwd`,
-  optional `tools` allowlist, `disabled`, `trust`, `sandbox`),
+  optional `tools` allowlist, `disabled`, `trust`, `sandbox`,
+  `inheritEnv` (default false); cwd resolves from launch directory and
+  grants no sandbox access; child env is constructed in three layers
+  per scope §4.1 — (1) `BWRAP_ENV_ALLOWLIST` baseline (import the
+  constant, do not copy it), (2) explicit per-server `env` (wins over
+  baseline; forward-declared keys pass as declared), (3) parent env
+  added only with `inheritEnv: true` UNDER the explicit entries; then a
+  FINAL marker layer applied LAST and non-overridable — `TRE_SANDBOX=1`
+  (whenever the child runs under a kernel policy, directly or
+  inherited, per the WS11/D12 nesting semantics), `GIT_CONFIG_NOSYSTEM=1`,
+  and on Linux `TMPDIR=/tmp` + the `BWRAP_DEFAULT_PATH` fallback when the
+  merged env has no usable PATH — markers WIN over any explicit `env`
+  or inherited value of the same name (a server `env` entry cannot unset
+  or falsify them); the
+  merged env goes to the spawn call AS-IS — for sandboxed Linux
+  children the merged env is passed directly to the bwrap invocation,
+  NOT re-scrubbed through `buildBwrapChildEnv` (that bash-only builder
+  would drop the explicit entries and defeat `inheritEnv`; this is the
+  documented exception to reusing the bash path); NO full parent
+  inheritance by default (secret-leak risk); inherited
+  confinement remains when `sandbox` is false),
   `src/mcp/client.ts`
   (hand-rolled JSON-RPC 2.0 over stdio: newline-delimited JSON, dual-era
   startup — the `server/discover` era probe with the exact three-way
   decision table of scope §4.2: a valid `DiscoverResult`/`-32022` =
-  MODERN (per-request `_meta` envelope), `-32601`/probe-timeout = LEGACY
-  (`initialize` fallback, 2025-11-25), anything else = FATAL (reported,
-  no fallback); negotiated version cached per server process; then
+  MODERN (per-request `_meta` envelope), ANY other JSON-RPC error on a
+  valid frame (`-32601`, `-32602`, implementation-defined) or probe
+  silence = LEGACY
+  (`initialize` fallback, 2025-11-25 — the spec keys the fallback to
+  "not a recognized modern error", NOT to one code), FATAL only on
+  transport death (exit/EOF), an envelope/framing violation (invalid JSON
+  line),
+  or discovery-document validation failure (reported, no fallback);
+  negotiated version cached per server process; then
   `tools/list`; id-multiplexed pending map for concurrent `tools/call`,
   per-call timeout, abort, server-death detection; per-server isolation —
-  one failed server never aborts the launch; concrete timeouts (probe 2s,
-  startup 5s, per-call 60s, shutdown close→2s→SIGTERM→2s→SIGKILL); zero
-  new dependencies — the dep freeze stays green),
-  `src/mcp/adapter.ts` (MCP tool → `Tool`: name `mcp__<server>__<tool>`
-  sanitized to the wire's function-name constraint, `inputSchema`
-  verbatim, text-only result mapping with `isError` propagation +
-  `structuredContent` handling — deterministic append-vs-sole rule, scope
-  §4.3). Wiring in
+  one failed server never aborts the launch; concrete timeouts (probe 2s
+  per request, startup 5s TOTAL — the whole probe+retry+initialize
+  sequence, whichever budget hits first; per-call 60s); clean/handled-signal teardown close→2s→
+  SIGTERM→2s→SIGKILL, plus synchronous group-SIGKILL backstop for
+  immediate exit. No guarantee after uncatchable parent death; zero runtime
+  dependencies. **Framing rule (load-bearing):** the probe is ONE
+  JSON-RPC line — envelope INSIDE `params`, line ends with a single
+  `\n`; no `Content-Length`, no blank line, no multi-line JSON — a
+  multi-line/header-framed probe is misparsed (FATAL) or never answered
+  (2s timeout misclassifies a modern server as LEGACY → `initialize`
+  fails → server wrongly reported dead); the mock parses the probe line
+  as raw JSON and fails the test if it cannot. **Terminal startup
+  failure = full teardown** (reject pending, remove listeners/timers,
+  dispose sandbox policy, kill group — a server alive after a fatal
+  startup response must not linger). **Backpressure bounds with per-limit policy — four exhaustive
+  outbound frame classes:** (1) TOOL REQUEST — admission failure → in-band
+  rejection, server healthy; (2) STARTUP frame (probe, initialize, startup
+  tools/list, any startup-phase frame) — admission failure → startup
+  failure and full teardown; (3) MANDATORY control (`-32601` reply) →
+  terminal transport failure; (4) BEST-EFFORT control
+  (`notifications/cancelled`, legacy `notifications/initialized`) → drop +
+  count, no teardown (dropped `initialized` degrades gracefully).
+  The 1 MiB per-frame limit (UTF-8 bytes including newline) and the 4 MiB
+  queue cap are both checked before enqueue/write; never truncate an echoed
+  id to fit a reply. The 4 MiB queue cap uses the SAME four classes as
+  the frame cap above (TOOL REQUEST → in-band busy; STARTUP frame →
+  startup failure; MANDATORY `-32601` reply over cap → terminal, settling
+  pending calls, replies queued during teardown not guaranteed delivered;
+  BEST-EFFORT control incl. `initialized` over cap → dropped + counted,
+  server stays `ready`). Scope §4.4 is the single source of truth; this
+  entry only names the classes.
+  Two distinct write signals (do not
+  conflate): BYTE ACCOUNTING reserves bytes on enqueue and releases
+  exactly once by TWO normal paths — removal of an UNSENT frame on
+  settlement releases its bytes immediately; a WRITE-STARTED frame
+  releases bytes ONLY on its error-free `onFlush`, not call settlement.
+  Unsent removal is not write progress; cancel the timer if the remaining
+  count drops below threshold. Terminal teardown stops dispatch, clears
+  the queue, resets accounting to zero, and marks reservations released;
+  per-frame release guards + terminal-state guards make late callbacks
+  and drain events inert (no negative count, timer reset, or dispatch).
+  A `drain` event NEVER decrements bytes or advances the queue;
+  the DEADLINE signal (resets the 10s no-progress timer) is an
+  error-free `onFlush` OR a `drain`. At ≥256 KiB a 10s NO-PROGRESS
+  deadline starts; it resets only on a deadline signal (error-free
+  `onFlush` or `drain`) — not byte-count polling — and is cancelled
+  below threshold. A write callback with an error or a stdin `error`
+  event is NEITHER signal: it terminal-fails the server immediately and
+  settles all pending calls. No deadline signal for 10s while at/above
+  threshold terminal-fails the server and settles all pending calls,
+  including active. Writes that keep producing deadline signals do not
+  trip the deadline; the hard queue cap bounds memory. A sub-threshold
+  stalled call is bounded by its 60s timeout without server failure.
+  Unsent request frames are removed on settlement. Cancellation: capture
+  write state, settle in-band EXACTLY ONCE as aborted, then act — UNSENT
+  frames are removed without a `notifications/cancelled`; WRITE-STARTED
+  frames (active or already flushed) get a best-effort
+  `notifications/cancelled` (delivery must not delay settlement) — the
+  active write is never truncated. Concurrent calls capped at 32
+  (request #33 gets immediate in-band busy, server stays ready). Stdout
+  frame >1 MiB/no-newline growth terminal-fails immediately. Diagnostics
+  coalesced to bounded counters + tail. **Incoming server messages — dispatch contract (both eras):**
+  parse JSON and validate the envelope BEFORE shape classification/id
+  lookup (scope §4.2): one non-null object, no batches, `jsonrpc: "2.0"`;
+  request/notification string `method` and no result/error; for a
+  NOTIFICATION, `params` absent or a JSON object (array/by-position params
+  rejected — deliberate narrowing); an inbound REQUEST id and params are never validated — merely echoed
+  in the `-32601` reply (request-id shape and request params are never
+  violations); response has id, no method/params,
+  exactly one own result/error property; error object has integer code +
+  string message, optional data. Terminal envelope violations: non-object
+  line, bad `jsonrpc`, a line with neither `method` nor `id`,
+  present-but-non-string `method`, a request/
+  notification carrying result/error, a notification with array params,
+  and a response with a missing/invalid-type id, BOTH result AND error
+  present, or malformed error. Our OWN outbound ids are monotonically
+  increasing positive integers from 1. Id matching is by type AND value
+  with NO coercion: our integer id matches ONLY an integer response id
+  (never the string form), and a non-match is a late/unknown id (counted,
+  dropped) so the call expires on its 60s timeout — tested, not a hang.
+  Null response id is allowed only for an uncorrelated error, never a
+  pending match. Invalid JSON/envelopes → terminal protocol failure, all
+  pending calls fail in-band + full teardown (probe: FATAL, no fallback);
+  EXCEPT an incoming server request, which is answered `-32601`
+  non-fatally even with `id: null` (echoing it). Malformed responses never
+  resolve calls as success. Result-PAYLOAD validation is a separate, later
+  tier: malformed `tools/call` payload → in-band `isError`; malformed
+  `server/discover`/`initialize`/startup `tools/list` result → startup
+  failure (no in-band channel). Classify valid messages by shape: a
+  response resolves only a matching client pending entry; unknown/late ids
+  are counted and dropped. Notifications are classified with request
+  direction/ownership: server-to-client `notifications/cancelled` may
+  cancel only a server request previously issued in that direction.
+  Envelope-valid notifications with unhandled methods are recorded and
+  ignored (a line failing envelope validation is the terminal case above,
+  not a notification).
+  Tier 1 immediately answers unsupported server requests with `-32601`
+  and retains no pending server request; unmatched cancels are recorded
+  and MUST NOT abort a client-to-server call even on id collision. The
+  legacy spec requires same-direction cancellation; modern servers may
+  send cancellation only for `subscriptions/listen` teardown (none in
+  tier 1). `tools/list_changed` is recorded for tier 2; other
+  notifications are recorded and ignored. Requests with ids get a
+  `-32601` reply while the transport is healthy; replies are never
+  coalesced. Total queued bytes are capped at 4 MiB; queue overflow uses
+  the SAME four frame classes as frame admission above (TOOL REQUEST →
+  in-band busy; STARTUP → startup failure; MANDATORY reply → terminal;
+  BEST-EFFORT control incl. `initialized` → drop + count); queued replies are
+  not guaranteed delivered after teardown. No prompt/model/root
+  disclosure. Legacy `initialize` advertises empty client capabilities
+  and is never cancelled by the client.
+  The stdio bridge (`src/mcp/spawn.ts`) is NEW spawn code: command +
+  argv, persistent piped stdin/stdout/stderr, process-group teardown, and
+  sandbox policy disposal; reuse policy generation/kill patterns, not
+  `spawnSandboxedBash`'s one-shot shell API) — lives in `src/mcp/spawn.ts`,
+  NOT `tools/sandbox.ts` (guardrail zone; the bridge only imports the
+  exported `generateBashSandboxPolicy`),
+  `src/mcp/adapter.ts` (MCP tool → `Tool`: collision-resistant WIRE names
+  from slug + fixed hash of original UTF-8 server/tool identities, plus a
+  non-wire `displayName` = `<server>/<tool>` for TUI/`/mcp`/prompts/logs;
+  preserve originals for `tools/call`; if a residual collision occurs,
+  reject that server's import atomically and continue others. `inputSchema`
+  verbatim, text-only result mapping with `isError` + deterministic
+  `structuredContent` append-vs-sole rule. Modern `input_required` is an
+  in-band unsupported-interaction error (no MRTR retry); require modern
+  `resultType: complete`, allow legacy omission, tolerate cache hints but
+  do not cache; a malformed `tools/call` result type fails that CALL in-band
+  (`isError`) — a payload failure, not an envelope violation, so no
+  teardown; a malformed startup result is a startup failure (§4.3). Wiring in
   `cli/main.ts` (spawn at startup, kill the process group on EVERY exit
   path — the bash.ts detached-group pattern; `--mcp <file>` /
   `--mcp none`), safety classification in `tools/safety.ts` (MCP tools
@@ -290,40 +442,158 @@ suggested subagent type (see §5); **size** = rough effort.
   slash command (TUI + REPL; states `ready`/`starting`/`failed`/`disabled`),
   and the servers run under the kernel
   sandbox only when `"sandbox": true` (OFF by default — file-confined,
-  network-open profile when opted in; verified 2026-10-14).
+  network-open profile when opted in; verified 2026-10-14)). Resolve child
+  `cwd` from launch dir without expanding sandbox roots; child env is the
+  §4.1 construction (baseline + explicit `env`; parent env only with
+  `inheritEnv: true`; plus the final non-overridable marker layer —
+  `TRE_SANDBOX`/`GIT_CONFIG_NOSYSTEM`/`TMPDIR` — applied last); for
+  sandboxed Linux children the merged
+  env is passed to bwrap directly, NOT re-scrubbed through
+  `buildBwrapChildEnv`; `sandbox:false` cannot remove inherited confinement.
 - **Exit criteria:** mock stdio MCP servers (stdlib node scripts, the
   `test/mock-sse.ts` pattern): a LEGACY server (`initialize` handshake,
-  2025-11-25 — MUST assert it receives the initial `server/discover`
-  probe and replies `-32601`; paginated `tools/list`, `tools/call`
-  success / protocol error / `isError`, `structuredContent`, crash
-  mid-call, slow call (timeout), concurrent calls to one server) and a
-  MODERN server (answers `server/discover` — the probe must select the
-  modern era, the exact `_meta` envelope must be sent on `tools/list` and
+  2025-11-25 — paginated `tools/list`, `tools/call` success / protocol
+  error / `isError`, `structuredContent`, crash mid-call, slow call
+  (timeout), concurrent calls to one server — MUST assert it receives
+  the initial `server/discover` probe and reply with a NON-MODERN
+  error (`-32601` by default, plus a `-32602` variant — the fallback
+  is not keyed to one code) and a
+  MODERN server (answers `server/discover` — the mock MUST parse the
+  probe line as raw JSON and assert the exact `_meta` envelope on the
+  probe itself (all three keys, declared `2026-07-28`); the probe must
+  select the modern era, the envelope must be sent on `tools/list` and
   `tools/call`, and the client must NOT send `initialize`); **one
-  negotiation-failure test per §4.2 row** (`-32022`→modern;
-  `-32601`/timeout→legacy; invalid `DiscoverResult`/`-32603`/other
-  error/malformed JSON/probe-timeout exit→fatal; legacy probe then
-  `initialize` also rejected→reported, no crash); unit
-  tests for
-  config parse (incl. `disabled`, `trust`, `sandbox`), name
-  sanitization (awkward names: dots, unicode, >64 chars), result mapping
-  (incl. the `structuredContent` append-vs-sole rule), and safety
-  classification (trusted vs
+  negotiation-failure test per §4.2 row** (`-32022`→modern: ONE bounded
+  probe retry with a `data.supported` version; a SECOND non-success is
+  FATAL, not legacy — no fallback; assert the retry is bounded by the 2s
+  per-request timeout AND counts against the 5s total startup budget);
+  other error on a
+  valid frame (`-32601`, `-32602`, …)→legacy; probe timeout (no
+  reply)→legacy; process EXIT during the probe→fatal; invalid
+  `DiscoverResult`→fatal; malformed JSON→fatal; legacy probe then
+  `initialize` also rejected→reported, no crash; **terminal startup
+  failure teardown**: a mock that answers the probe fatally and stays
+  alive is fully torn down — no live child, pending rejected); **incoming-message
+  dispatch tests** (envelope-validation matrix from scope §4.8: invalid
+  version/object/method, array params, response ids of object/boolean/
+  array/fractional type, a line with neither `method` nor `id`, BOTH
+  result AND error present, malformed
+  error fields → terminal failure, pending calls never succeed; test probe
+  and ready state, plus valid null result, uncorrelated null-id error,
+  numeric/string id distinction (our id echoed with a different JSON type —
+  string form or an out-of-domain magnitude — does not match; we only
+  ever generate small integer ids so exact-integer comparison is safe) →
+  counted late/unknown and the call expires on its 60s timeout
+  (assert timeout, not hang); an incoming server request (any id, incl.
+  present-but-null) is answered `-32601` echoing that id NON-fatally —
+  request-id shape is never fatal;
+  envelope-valid unknown notification is recorded+ignored while an
+  envelope-invalid line is terminal; legacy mock sends a `sampling/createMessage`
+  request with an id → mock asserts it receives `-32601` referencing
+  that id; test asserts NO prompt/model-invocation/root-disclosure, the
+  original call is unaffected, and the connection stays usable;
+  unknown-notification flood → bounded counters, no growth; while a
+  client call is pending, send a server request with the same id and
+  assert `-32601` plus normal client-call resolution; a server-sent
+  `notifications/cancelled` for that id is unmatched and must not abort
+  the client call);
+  unit
+  tests for config parse (incl. `disabled`, `trust`, `sandbox`, `cwd`),
+  collision-resistant naming (awkward names, colliding slugs, >64 chars),
+  result mapping (MRTR rejection, modern result types/cache hints,
+  `structuredContent` append-vs-sole, payload-tier split: malformed
+  `tools/call` result → in-band `isError`; malformed startup
+  `server/discover`/`initialize`/`tools/list` result → startup failure),
+  frame/diagnostic/pagination bounds
+  (1 MiB frame, 64 KiB stderr, 100 pages/10,000 tools, repeated cursors
+  fail), late/unknown response IDs and late discovery after fallback,
+  id collision (a server request carrying a pending client request id is
+  answered `-32601` while the pending call still resolves with its own
+  response), oversized/no-newline output flood, endless valid-small-frame floods,
+  a non-reading server: ≥256 KiB queued and no SUCCESSFUL
+  flush-completion for 10s → terminal failure and pending calls
+  settled; a write callback with an error (or stdin `error` event) →
+  immediate terminal transport failure (not a deadline reset);
+  progressing writes (successful flush-completions) do not trip the
+  timer; sub-threshold stalled call reaches its 60s timeout without
+  terminal failure; hard total queue stays ≤4 MiB; tool-call admission
+  over cap is rejected in-band; MANDATORY `-32601` over cap
+  terminal-fails (queued replies need not be delivered after teardown)
+  while a BEST-EFFORT `notifications/cancelled` over cap is dropped +
+  counted with the server staying `ready`; unsent frames removed on
+  settle; aborting an UNSENT frame sends no `notifications/cancelled`
+  while aborting a WRITE-STARTED frame (active or already flushed)
+  best-effort-queues the notification without truncating the active
+  write; BYTE-ACCOUNTING regression: a backpressured write that emits
+  BOTH a `drain` event and a successful `onFlush` decrements the
+  undrained byte count EXACTLY ONCE (by the frame's byte count) and
+  dispatches the next queued frame EXACTLY ONCE — a `drain` alone never
+  decrements or advances the queue; unsent abort/timeout releases bytes
+  exactly once, restores admission capacity, and cancels the timer below
+  threshold without counting progress; teardown followed by late success/
+  error callbacks and drain events leaves accounting zero with no dispatch
+  or timer restart; timer starts at EXACTLY 256 KiB;
+  request-flood plus non-reading child hits bounded queue policy and
+  teardown without asserting all queued replies were delivered),
+  per-limit policy (oversized
+  outbound tool request rejected before any write; near-limit inbound
+  string id yields mandatory reply >1 MiB → terminal failure, no oversized
+  write/id truncation; oversized cancellation → drop + count; oversized
+  startup frame → startup failure and full teardown; a legacy
+  `notifications/initialized` that cannot be admitted → dropped + counted,
+  legacy session continues (no teardown) (unit-test admission);
+  pin UTF-8 byte limits including newline; 33rd concurrent request
+  rejected "server busy" without killing the server; stdout frame
+  blowout — ONE oversized frame → terminal immediately; post-teardown
+  late callbacks/drain events are inert — accounting stays zero, no
+  dispatch, no timer restart), cwd/env semantics: the four-combo `inheritEnv` × `sandbox` matrix from
+  scope §4.8 (parent secrets NOT leaked unless `inheritEnv: true`;
+  explicit `env` wins over inherited; explicit vars the allowlist would
+  drop survive the sandboxed path — no second scrub; the marker layer is
+  present and non-overridable — `TRE_SANDBOX=1`/`GIT_CONFIG_NOSYSTEM=1`
+  (+ `TMPDIR=/tmp` on Linux) survive an explicit `env` entry that sets
+  them), inherited-sandbox
+  semantics, per-server collision
+  isolation, and safety classification (trusted vs
   untrusted × mode matrix, incl. the `readOnlyHint` boundary); a gated
   live-model e2e scenario (opt-in like `RUN_LIVE=1`, not in the default
   gate) where a live model calls a
   mock-server tool; a killed
-  `tre.` leaves no server child (the `bash-kill.test.ts` precedent —
-  covering the exit paths the test can drive, plus a manual check for the
-  `process.exit`-handler paths); the official v2 SDK
-  (`@modelcontextprotocol/server`) as a PINNED dev-only dependency
-  (never imported by `src/`, so `check-deps.mjs` stays green) used as a
-  test oracle for the modern path; gate
-  green (quality-check + tsc + full suite). The deterministic
-  mock-server tests are the required gate; the live scenario is optional.
+  clean/handled-signal shutdown and synchronous immediate-exit backstop
+  leave no server child (no guarantee claimed after uncatchable parent
+  death such as SIGKILL/kernel crash); the v2 SDK
+  (`@modelcontextprotocol/server`) as a modern-path oracle — CANDIDATE,
+  pending verification: exact version UNPINNED and SDK STATUS UNVERIFIED
+  (scope §2 is the single source of truth; the REQUIRED modern-path
+  tests use the spec-derived mock, the oracle is a to-be-verified
+  cross-check — NOT a gate on implementation: implementation may
+  proceed mock-first without any SDK; the oracle may be used only once
+  verified, at which point RETAIN in the repo — not merely in a commit
+  message — a pinned
+  fixture + the raw wire transcript (e.g. `test/mcp-oracle/`) plus the
+  exact version, its actual imports, and the negotiated protocol
+  version, flipping scope §2 to VERIFIED only with that evidence in the
+  repo and reproducible), conditionally in-tree only after
+  human approval
+  of the `check-deps.mjs` devDependency allowlist change (that gate checks
+  manifests against a closed allowlist; it does not scan `src/`). Use a
+  v1 SDK or a dedicated legacy-only fixture to assert actual fallback:
+  enveloped `server/discover` → `-32601` → `initialize` plus
+  `notifications/initialized`; direct `initialize` against the default
+  dual-era v2 server does not test fallback. Gate green (quality-check +
+  tsc + full suite). Deterministic mocks are required; live e2e is optional.
 - **deps:** WS0 contracts (unchanged), WS3 pipeline, WS7 safety hooks,
-  WS11 sandbox spawn, C36 `tre.json` config. Buildable after the
-  foundational workstreams (all done). **owner:** `worker`.
+  WS11 sandbox spawn, C36 `tre.json` config. Agent may implement/test the
+  isolated client/config/adapter and disabled wiring, but MCP tool
+  registration MUST remain disabled until a human reviews/commits the
+  `tools/safety.ts` approval branch (unknown names currently fall through
+  to allow). The stdio spawn is in `src/mcp/spawn.ts` and needs NO
+  guardrail commit; `tools/sandbox.ts` changes (if ever needed) and
+  `scripts/check-deps.mjs` (if in-tree oracle is approved) require a human
+  commit with `GUARDRAIL_BYPASS=1`.
+  Safe order: isolated core → human-owned safety (and sandbox/deps as
+  needed) → enable MCP CLI registration. **owner:** worker for
+  agent-landable parts; human for guardrail-zone commits.
   **size:** M.
 
 ## 3. Dependency graph
@@ -434,7 +704,7 @@ implemented — ChatGPT-Plus OAuth + token refresh; see `README.md` "ChatGPT Plu
 | 2026-09-12 | D10 Compaction semantics | WS9: auto-compaction runs BETWEEN LLM turns (the loop's `prepareNextTurn`), in the CLI, only when a session exists. Trigger: last assistant usage `totalTokens + maxTokens + 1024 slack > contextWindow` (usage = real prompt+completion ≈ next prompt size). Keep: the recent tail up to ~8192 ESTIMATED tokens (chars/4), snapped to unit boundaries (an assistant toolCall is never split from its ToolResultMessages) and always including the most recent user message. Summary: ONE silent LLM call (no tools, events not surfaced) producing a structured user message `[Compaction summary of earlier context]`; if the context already starts with a summary, the prompt folds it in (iterative). The session gets a `compaction` entry (`firstKeptEntryId` = the kept tail's first message entry), so replay reproduces [summary, …kept] exactly — that is why the CLI persists messages INCREMENTALLY (on `done`/`tool_execution_end`) and tracks message→entry-id. Failure (stream error / empty text) skips compaction for that turn — the run continues uncompacted (I3). UI: a `context_compacted` AgentEvent (CLI-emitted) + a `✂` line on stderr. Off: `--no-compact`. Live-verified 2026-09-12 (27B): two consecutive compactions in one run, summary captured a seeded fact verbatim. |
 | 2026-09-12 | D11 TUI architecture | WS10: the TUI consumes the SAME `AgentEvent` stream the plain CLI prints — no parallel event path. Layering: (1) pure state machine `src/tui/state.ts` (`applyEvent` folds one event into a `TuiState`: items[], input line, prompt history, busy, turn, pending approval; input key handling is small pure functions — char/backspace/history/submit/approval-answer), (2) pure diff renderer `src/tui/diff.ts` (LCS over lines; `+`/`-`/context; splitlines semantics — a trailing newline is not a phantom line; 500-line guard), (3) presentational Ink app `src/tui/app.tsx` (holds NO agent logic; every key maps to a callback; the keybinding table is the ONLY place keys become intents), (4) driver `src/tui/run.tsx` (owns the Ink instance, runs one `runTurn` per submitted prompt — session persistence, compaction, safety hooks all identical to the REPL — with `tap` feeding events into the state machine; TUI sinks are no-ops: it renders the stream, it does not print it). Approval (D8): the safety ask blocks on a promise the TUI resolves on y/n/esc while locking input. Ctrl+c: abort the run when busy (same semantics as the REPL), exit 130 when idle. `/quit` = 0. Why: the testable surface (state + diff) has zero Ink/React imports; Ink quirks (e.g. `\r` inside multi-char chunks arrives as ONE paste-style string) are quarantined in one handler. Live-verified 2026-09-12 (27B): prompt→write→approve→file created; edit diff rendered `- x = 1`/`+ x = 2` under the edit call. |
 | 2026-09-13 | D12 bash kernel sandbox | WS11: the bash child runs under a macOS Seatbelt profile (sandbox-exec) with a GENERATED denylist — reads denied for /etc, /private/etc, /var/root, /private/var/root, /private/var/db, /cores, /Library/Keychains, /System/Volumes/Preboot, /Users; writes denied for /etc, /private/etc, /usr, /bin, /sbin, /System, /Library, /var/root, /private/var/root, /cores, /dev, /Users; then the workspace is re-allowed (both) and /dev/null, /dev/stdout, /dev/stderr for writes. Rationale (empirical, macOS 15 Apple Silicon): (a) DENYLIST, not allowlist — a catchall `file-read-data` deny (path-regex `^/` or `subpath /`) plus re-allowing system prefixes makes the exec'd process SIGABRT even when the exec target IS allowed (the kernel/dyld interaction on this OS version is opaque; targeted denies have no such problem). (b) LAST matching rule wins — a later `allow` re-allows a denied path (verified; this is the workspace escape hatch from the /Users deny). (c) the kernel resolves symlinks BEFORE the MAC check, so /etc and /private/etc are both denied. (d) `file-read*` (not just -data) denies metadata too — `ls /etc` fails, hiding existence. (e) profiles propagate across fork/exec — the shell's children are confined. sandbox-exec location is RESOLVED (/usr/bin vs /usr/sbin — non-standard system trees exist; stock macOS is /usr/sbin). The policy file (0600, random name under the OS temp dir) is read by sandbox-exec BEFORE the profile applies, so it need not be readable under the policy; removed on command close. darwin only; --no-sandbox opts out. Known v1 boundary: /var/folders + /opt stay accessible (runtime temp/tool dirs); commands needing ~/.ssh etc. (git push over ssh) fail under the sandbox by design — run with --no-sandbox for system maintenance. Triggered by e2e s10 (sandbox-escape-block): the read tool was blocked but the model's bash fallback leaked /etc/passwd. Live-verified 2026-09-13: unit OS probe (kernel-level, offline) + tool-level smoke (workspace works, /etc read+write denied, grandchildren confined) + e2e full7. |
-| 2026-09-14 | D13 Workspace-scoped approval (`local` mode, new default) | WS7 refinement of D8's default: the default approval mode is `local` — gated calls scoped to the workspace auto-approve; the human is prompted only when a bash command references a path OUTSIDE the safe locations (workspace + the system surfaces the D12 Seatbelt policy already allows: /usr /bin /sbin /System /Library /opt, /tmp + per-user temp, /dev fakes) or matches a destructive pattern (D8 — now enforced in EVERY mode, including local). Mechanism: a quote-aware static scan of the command string (`bashOutsidePaths`) — tokens that look like paths (leading /, ~, ., $, flag `=`, bare `/`) are resolved ($HOME/$PWD/$TMPDIR, ~, cwd-relative) and checked against the safe prefixes; unresolvable $VAR paths and exotic spellings fail toward the prompt (a prompt, never a silent pass). write/edit auto-approve in local mode because the path sandbox (WS7) already proves they cannot leave the root. Rationale: per-call prompts on every `ls` are the dominant cost of interactive use; the user's rule is "outside the safe locations → my explicit confirmation", and the D12 kernel sandbox remains the security boundary (the scanner is a prompt heuristic, not the boundary — it does not see network operations or dynamically built paths). Flags: `--local` (explicit default), `--ask` (pre-D13 prompt-per-call), `--yes`, `--no-approve` — mutually exclusive. 2026-09-14: unit suite green (246 pass), smoke-verified (workspace + /usr + /tmp quiet; /etc, ~, $VAR prompt with the outside path named; `rm -rf build` still confirms in-workspace; denial → block). |
+| 2026-09-14 | D13 Workspace-scoped approval (`local` mode, new default) | **[SUPERSEDED — historical]:** `local` is NOT a current mode. `src/cli/main.ts` today resolves `noApprove ? "no" : ask ? "ask" : "yes"` (ApprovalMode = `ask`/`yes`/`no`), default `yes`. Original ruling follows: WS7 refinement of D8's default: the default approval mode is `local` — gated calls scoped to the workspace auto-approve; the human is prompted only when a bash command references a path OUTSIDE the safe locations (workspace + the system surfaces the D12 Seatbelt policy already allows: /usr /bin /sbin /System /Library /opt, /tmp + per-user temp, /dev fakes) or matches a destructive pattern (D8 — now enforced in EVERY mode, including local). Mechanism: a quote-aware static scan of the command string (`bashOutsidePaths`) — tokens that look like paths (leading /, ~, ., $, flag `=`, bare `/`) are resolved ($HOME/$PWD/$TMPDIR, ~, cwd-relative) and checked against the safe prefixes; unresolvable $VAR paths and exotic spellings fail toward the prompt (a prompt, never a silent pass). write/edit auto-approve in local mode because the path sandbox (WS7) already proves they cannot leave the root. Rationale: per-call prompts on every `ls` are the dominant cost of interactive use; the user's rule is "outside the safe locations → my explicit confirmation", and the D12 kernel sandbox remains the security boundary (the scanner is a prompt heuristic, not the boundary — it does not see network operations or dynamically built paths). Flags: `--local` (explicit default), `--ask` (pre-D13 prompt-per-call), `--yes`, `--no-approve` — mutually exclusive. 2026-09-14: unit suite green (246 pass), smoke-verified (workspace + /usr + /tmp quiet; /etc, ~, $VAR prompt with the outside path named; `rm -rf build` still confirms in-workspace; denial → block). |
 | 2026-09-29 | D14 WS9 compaction hardening (A1–A6, D) | Refinement of D10 (auto-compaction semantics unchanged: between-turns, session-gated, keep-tail + silent single summarizer call). Four fixes: (A1) the chars/4 token estimate is calibrated from real usage — `calibrateCharsPerToken(usage, context, systemChars)` = `4 × estimated / actual`, clamped [1,4] (the estimate errs only by density; clamping keeps one noisy usage from corrupting the budget); one `cpt` per session lifetime, `compactContext(charsPerToken?)` so the keep window and post-compaction budget are honest for dense content. (A2+A3) transcript hygiene: the summarizer no longer sees thinking blocks (default off, opt-in) and each tool result gets a 2000-char middle-truncation clip; the total transcript budget scales with the model window — `max(24k, contextWindow/4)` instead of fixed 24k. (D) failure escalation: a failed summary call retries once with a shrunken transcript, then falls back to a rule-based shrink (no LLM — keep the recent tail, drop the oldest, placeholder summary) so the context still fits; the event carries `degraded: true` and the ✂ line says so; `prepareNextTurn`'s inline logic moved into a shared `compactNow` (the manual seam). (A6) manual `/compact`: TUI (intercepted before generic slash dispatch — busy → rejected info item, idle → silent `manualCompact` through `compactNow`, no turn) and REPL (`--no-compact` → disabled note; nothing to fold → "nothing to compact"); the TUI slash registry gains `compact`; `main()` gained an injectable REPL `stdin` (`MainDeps.stdin`) so multiple REPL tests can run in one process (the shared `process.stdin` can only be pushed-to once — EOF). 2026-09-29: unit suite green (484 pass / 0 fail / 9 skipped). |
 | 2026-09-29 | D22 Durable extra roots (`tre.json`, C36) | C35's extra roots were flag-only (`--extra-root`, re-passed every launch); the user wanted the writable directory to be DURABLE as part of the feature (the spec's §6 deferred "a future `tre.json`"). Ruling: a new config file `tre.json` with a single field `extraRoots` (array of dir strings) is the durable baseline. Lookup mirrors D19's models.json convention (walk UP from the launch dir for a `tre.json`, then fall back to `~/.tre/tre.json`). Precedence: the CLI flag APPENDS to the config (tre.json = durable baseline, `--extra-root` = per-launch addition); both are validated. Fail-closed guard: every `tre.json` entry is validated at startup EXACTLY like a `--extra-root` value (`validateExtraRoot` — exists, non-sensitive, under home); a malformed file (bad JSON, non-array `extraRoots`, non-string/empty entry) or a refused entry REFUSES the startup (exit 2) — never a silent ignore. A missing `tre.json` = the flag-only C35 behavior. New module `src/config/tre-config.ts` (parse/load/find, mirroring `models.ts`); `main()` resolves the config before the C35 validation loop and appends the flag entries after. `tre.json` is the first durable config surface; `extraRoots` is its first (additive) field. 2026-09-29: unit suite green (498 pass / 0 fail / 9 skipped; +14 new in `test/tre-config.test.ts`). |
 | 2026-09-30 | D24 Tilde expansion for extra roots (C36 refinement) | The user's `tre.json` carried absolute paths (`/Users/xilcilus/…`), which are per-machine — the durable baseline was not actually durable across machines/users, and the spec's own shape example advertised `/abs/or/~/relative/dir` without `~` ever being expanded (a `~/x` entry resolved against the CWD and failed the exists check — fail-closed refusal, the observed "not getting populated" symptom). Ruling: an extra-root entry (config OR flag) may start with `~` or `~/` — expanded against the home dir at startup, shell-style, BEFORE the C35 validation (`expandTilde` in `src/config/tre-config.ts`; `~` alone = the home dir; a bare `~name` is NOT expanded — no user-lookup, it resolves to the literal `~name` path and fails the exists check, fail-closed). Non-`~` entries are unchanged (absolute or cwd-relative). The behavior summary still shows the EXPANDED absolute path (the boundary is what it is). 2026-09-30: unit suite green (see HANDOFF). **Same session, `safety.ts` (guardrail zone):** the user challenged the "sandbox artifact" framing of the test caveat and was right — `tre.json` lists `~/.nvm`, which EXISTS, yet startup refused it as "does not exist". Mechanism: under a stricter sandbox `existsSync('~/.nvm')`→true but `realpathSync('~/.nvm')`→throws `EPERM` (can't `lstat`), and `validateExtraRoot` caught EVERY `realpathSync` failure as "does not exist" (conflating `ENOENT` with `EPERM`). Fix: distinguish the codes — `ENOENT`→"does not exist" (unchanged); other→"cannot be verified (CODE) — the path exists but cannot be resolved; refusing to avoid a symlink/sensitive escape" — still FAIL-CLOSED (an unresolvable root can't be proven not to be a symlink onto a secret surface), but the message is accurate. New `test/safety.test.ts` case (a `chmod 000` parent triggers EPERM hermetically; skipped under root). 2026-09-30: unit suite green (see HANDOFF). |
@@ -443,4 +713,4 @@ implemented — ChatGPT-Plus OAuth + token refresh; see `README.md` "ChatGPT Plu
 | 2026-10-06 | D26 Compaction hardening follow-up (in progress; restart after runaway delegation) | The prior parallel attempt must NOT be resumed by re-launching its fanout: one worker hit the harness's 20-turn ceiling, while the other completed and left uncommitted edits. Telegram polling also reported HTTP 409 because multiple pollers were competing. Current checkout is not clean despite the old plan's stale `clean` baseline: `PLAN.md`, `src/cli/main.ts`, `src/context/compact.ts`, `src/loop/agent-loop.ts`, `test/agent-loop.test.ts`, and `test/compact.test.ts` are modified. Preserve and inspect these edits; do not reset, overwrite, or cherry-pick them. Worker B previously reported 39/39 loop tests passing. Worker A's status is ambiguous (logs show timeout/killed process; `logs/A.rc=124`), not proof of correctness. Recovery is now explicitly bounded and parallel only for independent work: A owns compact.ts + compact tests; B is read-only review of CLI integration, budget, cancellation, replay, and loop ordering. Both endpoint servers were health-checked HTTP 200 (.11 and .13); use at most one worker per endpoint, 12/10 turn caps, zero continuations and ≤600s wall cap. No fanout retries. After wave completion, orchestrator integrates findings serially: (1) build/focused tests; (2) verify file-op evidence, cancellation, fallback shrink termination, and actual next-request estimate including prompt overhead; (3) fix any reviewer findings; (4) full test suite; (5) final review and HANDOFF/status update. Each failure gets one bounded diagnostic; no retry loops. Accept only when repeated fallback attempts terminate and the request estimate fits the configured conservative budget. **AUDIT FOLLOW-UP (2026-10-06):** The earlier resolved claim was premature. Review found estimate-triggered compaction could bypass the inner trigger and degrade without an LLM call; cancellation during retry still fell through to fallback; the fallback could enlarge context; and file-op extraction could match a later reused call ID. Fixes now pass explicit `triggered` authorization, check abort after retry, cap and refuse non-shrinking notices, and match results only in the adjacent result unit. Regression tests cover these cases. **Still open:** fixed prompt overhead is counted in the estimate trigger but is not fully reserved against the kept context; an attempted strict fit guard broke valid current compaction tests and was removed. Do not claim the complete next-request estimate is guaranteed to fit. Full gate after fixes: see latest run in HANDOFF. |
 | 2026-10-06 | D27 Steering/loop integration audit — open recommendations (NOT yet implemented) | Read-only audit of the steering-ordering change in `d4dc284` (steer drained BEFORE `prepareNextTurn`) plus the CLI persistence wiring and the existing runaway guards. No code modified; working tree clean; loop+CLI suites green (108 pass / 0 fail); three in-memory probes reproduced the findings below. **Finding 1 (medium, REGRESSION — fix first):** guidance arriving while the async `prepareNextTurn` hook (auto-compaction) is running misses the next regular LLM request — the queue is drained once, before the hook, and never again (`src/loop/agent-loop.ts` per-turn drain block). Reproduced: guidance queued inside an async hook appeared only in the SECOND request. Pre-hook ordering was chosen so queued messages are visible to the compaction decision; the fix must keep that AND drain newly-arrived guidance a second time AFTER the hook resolves and BEFORE the stream call, persisting those messages through the same `steer` event (message identity → session entry-id map). **Finding 2 (medium, pre-existing):** fresh user guidance does not reset the identical-batch loop guard — `sigHistory` survives steering, so two identical tool batches followed by explicit user instruction to repeat the action still trip `stopReason "loop"` on the third (reproduced: two reads of `a` + "I changed a externally; read it again" → third read blocked). New user input can make a repeated action legitimate. Recommendation: reset the consecutive-batch history when external guidance is delivered; do NOT reset the per-cycle turn budget. **Finding 3 (low, pre-existing):** no `signal.aborted` check after `await prepareNextTurn` — an abort inside the hook still invokes `streamFn` once (the wire layer honors the signal, so no network request or tool execution was demonstrated; the guard is about not starting work after cancellation). Recommendation: check `signal.aborted` after the hook and break with `stopReason "aborted"`. **Coverage gap:** no integration regression test combines steering + compaction where the steer becomes the first kept message + session replay — the case the `d4dc284` identity fix exists for; add it. **Status: IMPLEMENTED 2026-10-06 (`4501a78`).** All three findings + the coverage gap are in `src/loop/agent-loop.ts` (a shared `drainSteers()` helper; a second post-hook drain for F1; `sigHistory` reset on steer delivery for F2; a post-hook `signal.aborted` check for F3). +4 regression tests in `test/agent-loop.test.ts` (F1/F2/F3 + steer-becomes-first-kept-message identity). Gate green: 696 pass / 0 fail / 13 skipped. **AUDITED 2026-10-06 by gpt-6.1-sol** (read-only review of the diff + real source): verdict CORRECT-WITH-MINOR-ISSUES, one low-severity finding (the post-hook drain ran before the abort check, so hook-time guidance was drained + persisted even on abort, contradicting the "abort leaves guidance undrained" policy). **FIXED (`b3a74d4`):** an `if (signal.aborted)` check after applying the hook context and BEFORE the post-hook drain (the F3 check after emitting the steer events is retained — cancellation can occur while the consumer persists them). +1 regression test. Gate green: 697 pass / 0 fail / 13 skipped. **SECOND-PASS AUDIT 2026-10-06 (gpt-6.1-sol, fresh independent review of the current code, not just the diff): verdict HAS-BUGS**, two medium findings the first pass (diff-only) had not seen — both reproduced empirically before fixing: **F1 (medium):** abort protection covered only the post-hook drain; the consumer `await`s event persistence, so a SIGINT abort landing while the generator is suspended at a `yield` let the pre-hook drain (after the `turn_start` yield) and the keep-alive drain (after the `turn_end` yield) still deliver + persist guidance no model request would see (the keep-alive branch even misreported `"stop"` instead of `"aborted"`). **F2 (medium):** the keep-alive drain ran before checking whether another LLM turn was possible — with `maxTurns:1`/`maxContinuations:0` a text-only reply + pending steer was delivered + persisted, then the run exited without ever sending it to the model (violating the "budget exits leave guidance undrained" policy). **FIXED:** `if (signal.aborted)` checks at the top of every `while` iteration (takes precedence over a coincident budget hit), after the `turn_start` yield (before the pre-hook drain), and after the `turn_end` yield (before response handling / keep-alive / the length-nudge `continue`); keep-alive now drains only when a subsequent turn is possible (`turn - cycleStart < maxTurns \|\| continuations < maxContinuations`), leaving the queue untouched and reporting the normal `"stop"` when the runway is exhausted. +3 regression tests. Gate green: 700 pass / 0 fail / 13 skipped. **F1 FOLLOW-UP 2026-10-06 (auditing the `cba725a` fix itself found the regression it introduced):** the new abort checks broke out of the loop after a completed assistant message that may contain tool calls but before those calls got results — violating I3 (every call gets a result) and leaving orphaned `toolCall` blocks (no matching `toolResult`) in context, which the OpenAI serializer forwards as an invalid assistant-with-tool_calls-but-no-tool-response history. Both abort paths were affected (the consumer-side check after the `turn_end` yield, and the stream-side `message.stopReason === "aborted"` break the real wire layer reaches when the signal aborts mid-turn after calls have streamed). **FIXED:** a `failInband(calls, text)` helper (mirrors the length/loop-guard pattern — `tool_execution_start` per call, then a failed `toolResult` in call order, NO execution) runs on both abort paths when the turn produced tool calls, before breaking with `"aborted"`; new exported `ABORTED_CALL_TEXT` tells the model the calls did not run and to re-issue on resume. Text-only aborts untouched. +3 regression tests. Gate green: 703 pass / 0 fail / 13 skipped. |
 | 2026-10-10 | D28 TUI in-app mouse selection + `/copy` | The TUI now owns text selection (does not rely on the terminal's native selection, which SGR mouse reporting disables). Components: a pure SGR mouse parser (`src/tui/mouse.ts` — modes 1000/1002/1003, button/modifier/wheel decoding); a content-coordinate selection model in `src/tui/state.ts` (selectStart/selectUpdate/selectClear, selectedRanges/selectedText/copySelectionText — anchors are item identity + logical offsets so stream appends and rerenders do not shift a selection); App routing + viewport→anchor mapping + a styled highlight that composes with existing ANSI (`src/tui/app.tsx`); an explicit `/copy` action + a safe clipboard adapter (`src/tui/clipboard.ts` — `pbcopy` on macOS, stdin pipe, no shell, bounded, graceful failure; OSC 52 deferred pending security review). Opt-in via `TRE_MOUSE=1`, and the setting is now a persisted config key (`~/.tre/tui.json` `mouse`; `mouseTrackingEnabled` shared by driver and App) with `TRE_NO_MOUSE=1` as the opt-out; mouse modes (1002+1006) are restored on all teardown paths. Driver handlers extracted for testability: `makeMouseGate` (`src/tui/mouse-gate.ts`), `makeResizeHandler` (`src/tui/resize.ts` — resize clears an active selection), and `makeCopySelection` (`src/tui/copy.ts` — deferred copy settles without dropping the selection/viewport/streamed/busy state). Deterministic tests: `test/tui-mouse.test.ts`, `test/tui-selection.test.ts`, `test/tui-clipboard.test.ts`, `test/tui-app.test.tsx`, `test/tui-mouse-gate.test.ts`, `test/tui-resize.test.ts`; PTY mode lifecycle (enable + restore) in `test/e2e.sh`. Rationale: live Terminal.app probes showed drags are reported to the app (not native selection) under SGR modes, so an app-owned selection is the route to keep both wheel scrolling and copy in one session. **Remaining acceptance step:** manual Terminal.app gesture verification (drag creates a visible selection; `/copy` lands the exact text on the macOS clipboard) — needs a real terminal, not a PTY. 2026-10-10: gate green (820 pass / 0 fail / 13 skipped). |
-| 2026-10-14 | D29 MCP support — tier 1 scoped (WS12) | Ruling (scope only; no code): MCP support is a THIN ADAPTER on the existing WS0 contracts — an MCP tool IS a `Tool`, rides the existing tool pipeline (validate → beforeToolCall → execute → afterToolCall), its `inputSchema` passes through the wire verbatim (both wire layers send `t.parameters` as the function schema), and its description flows into the system prompt one-liner. No changes to loop, wire, session, or compaction. **Scoped against protocol revision 2026-07-28** (the current spec, re-checked against the live site 2026-10-14): that revision is a BREAKING overhaul of 2025-11-25 — the `initialize` handshake is REMOVED (stateless protocol; every request carries version + capabilities in `_meta`; servers MUST implement `server/discover`), server-initiated requests (sampling/elicitation/roots) are replaced by the MRTR pattern (`resultType: "input_required"` → client retries with `inputResponses`), results carry a required `resultType` + optional `structuredContent`, and sampling/roots/logging are DEPRECATED (removal eligible 2027-07-28 — we do not implement them). **Dual-era ruling:** the ecosystem's servers are overwhelmingly legacy (2025-11-25 and earlier — every official `@modelcontextprotocol/server-*` package), and the spec's own compatibility matrix says a modern-only client FAILS against a legacy server — so the client supports BOTH eras via the spec's stdio probe: `server/discover` first → `DiscoverResult`/modern error = modern (per-request `_meta`), anything else/timeout = legacy (`initialize` fallback, 2025-11-25); the era is cached per server process; both eras share the same JSON-RPC plumbing (framing, id-multiplexed pending map, timeout, abort, death detection). Tier 1 = local stdio servers, tools only: (1) config — `mcpServers` in `tre.json` (same walk-up + `~/.tre/tre.json` fallback + fail-closed parse as `extraRoots`, C36); entry shape `command`/`args`/`env`/`cwd` + optional `tools` allowlist + `disabled` + `sandbox`; (2) client — hand-rolled JSON-RPC 2.0 over stdio (newline-delimited JSON, NOT LSP framing), dual-era startup as above, id-multiplexed pending map (concurrent `tools/call` — the loop runs batches in parallel), per-call timeout + abort + death detection; zero new dependencies (dep freeze stays green; `@modelcontextprotocol/sdk` rejected); (3) adapter — name `mcp__<server>__<tool>` (double underscore: dots fail real-world OpenAI function-name constraints; the Responses wire's `sanitizeCallId` is the precedent), `inputSchema` verbatim, text-only result mapping (`isError` propagated; `resultType: "input_required"` → in-band error, tier 1 does not drive MRTR; `structuredContent` → JSON text block; image/resource blocks → text note — true image support is a `ContentBlock` contract change, deferred); (4) safety — MCP annotations map onto the EXISTING mode matrix, no new class (`readOnlyHint`→read-only, `destructiveHint`→ws-destructive, none→gated); the spec's own warning that annotations are UNTRUSTED unless from a trusted server is honored by the same trust boundary: "the user configured this server in tre.json", same as an `extraRoot`; (5) sandbox — server processes run under the kernel sandbox by default (per-server `"sandbox": false` opt-out); verified 2026-10-14 that the generated Seatbelt profile is FILE-confined but NETWORK-OPEN (no socket rules; `cat /etc/passwd` denied, HTTPS GET 200 from a sandboxed session) — the right default for a server calling its own APIs; (6) lifecycle — spawn at startup, kill the process group on every exit path (the bash.ts detached-group pattern); a dead server makes calls fail in-band (I3); (7) `/mcp` status slash command (alive/dead/disabled per server) — in tier 1, like the `disabled` flag (both are the cheapest context/health controls). Tier 2 (S–M): resources/prompts, list-changed (we do NOT subscribe to the modern `subscriptions/listen` stream — re-list at run start + `/mcp refresh`). Tier 3 (M+ each): streamable HTTP (stateless, `Mcp-Method`/`Mcp-Name` headers, no SSE resumability) + OAuth 2.1 (PKCE, RFC 9207 `iss` validation, issuer-keyed credentials), MRTR-driven elicitation (opt-in, approval prompt). Risks: context cost (per-tool schema in every request — mitigated by `tools` allowlist + `disabled` + `--mcp none`), third-party code execution (explicit config = consent; sandbox backstop), orphaned servers on the TUI's many exit paths. Full scope doc: `docs/10-mcp-scope.md`. **RE-RULED 2026-10-14 (same day, supersedes the dual-era + sandbox-by-default + annotation-mapping rulings above):** (a) **Legacy-era only.** The official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.1, published 2026-10-05) contains NO modern-era support — no `server/discover`, targets `2025-11-25` — so there is no modern-era server to test against and no reference implementation to validate against. Tier 1 implements the legacy era (`initialize` handshake, 2025-11-25) only; a server that rejects the `initialize` probe (a modern-only server — `initialize` is an unknown method in the 2026-07-28 era) is detected and rejected with an actionable "upgrade tre." message, its tools absent. Modern-era support (per-request `_meta`, `server/discover`, MRTR) is deferred until a reference implementation exists; the JSON-RPC plumbing is era-neutral, so it is a future startup-path change, not a rewrite. (b) **Safety: MCP tools default to ASK.** The mode matrix's `yes`/`no` semantics are about tre.'s own tools; an MCP server is third-party code the model can steer and its annotations are untrusted data (the spec says annotations are only meaningful from a trusted server). Default: prompt in `yes`/`ask`, block in `no`; per-server `"trust": true` opts into the default-`yes` behavior (allow/prompt/block); `readOnlyHint: true` is honored even for untrusted servers. A `mcp__` branch is required in `makeSafetyHooks` — any unknown tool name currently falls through to ALLOW in every mode, including `--no`, so without it MCP tools would bypass the approval gate. (c) **Sandbox: OFF by default, per-server opt-in.** MCP servers routinely read their own state outside the workspace (the filesystem server reads the directories it serves — exactly the paths a user points it at, which may sit outside the roots); sandboxing by default would break the common case on day one. The config entry is the consent to run the process; `trust` controls model-driven calls; `"sandbox": true` is the opt-in backstop (the file-confined/network-open profile verified 2026-10-14). Scope doc updated to match. **RE-AUDITED 2026-10-14 (scope audit of `docs/10-mcp-scope.md` against the live spec + SDK): (a) is SUPERSEDED — the dual-era ruling is RESTORED.** The re-rule's premise was false: it is true that the v1 *package* (`@modelcontextprotocol/sdk` 1.x) is legacy-only, but the official **v2 line** (`@modelcontextprotocol/{core,client,server}` 2.x, stable since 2026-10-05) implements the 2026-07-28 era (era negotiation, `server/discover`, MRTR) — so a reference implementation and a buildable modern test server DO exist, and the spec's own compatibility matrix requires a client to handle legacy to reach the ecosystem. Tier 1 is therefore DUAL-ERA again: `server/discover` probe first → modern (per-request `_meta`), `initialize` fallback → legacy (2025-11-25); era cached per server process; a server failing both probes is rejected with an actionable message. The v2 SDK is available as a dev-only test oracle for the modern path (not a runtime dep — the freeze stays green). (b) safety default-ASK and (c) sandbox opt-in are UNCHANGED — both verified against the code and the spec. Also corrected: the `ContentBlock` enumeration omits `audio` (both eras); the stale §8.5 "no reference implementation" line; and the header/§5.9 contradiction. Scope doc updated to match. |
+| 2026-10-14 | D29 MCP support — tier 1 scoped (WS12) | **Rulings (current; supersedes all earlier D29 text in git history).** (1) Scope: tier 1 = local stdio servers, tools only; resources/prompts tier 2; HTTP+OAuth and MRTR tier 3; sampling/roots not implemented (deprecated 2026-07-28). (2) Protocol: DUAL-ERA client — `server/discover` probe, `initialize` fallback on any non-modern JSON-RPC error or probe silence; FATAL only on transport death, framing violation, or invalid discovery document; `-32022` gets one bounded retry. (3) SDK: the v2 SDK's existence and its modern-era support are UNVERIFIED (scope §2). No SDK is required. Mock-first; an SDK oracle may be used only after its fixture and transcript are retained in-repo. (4) Safety: MCP tools default to ASK (prompt in `yes`/`ask`, block in `no`); per-server `trust:true` opts into `yes`-mode allow; `readOnlyHint` is an approval-policy classification only, granting no process access. (5) Sandbox: OFF by default per server; `sandbox:true` = file-confined, network-open, same Seatbelt/bwrap policy as bash. (6) Env: three layers (allowlist baseline, explicit `env`, `inheritEnv` opt-in) and a non-overridable marker layer. (7) Naming: hashed wire names `mcp__<slug>-<hash>__<slug>-<hash>`; readable `<server>/<tool>` display name in TUI, `/mcp`, prompts, logs. (8) Placement: stdio bridge in `src/mcp/spawn.ts`; `tools/sandbox.ts`, `tools/safety.ts`, `bash.ts` are guardrail-zone — the safety `mcp__` branch needs a human commit. (9) Registration stays DISABLED until the human-committed safety branch exists. Open: SDK status; `sandbox:true` + `npx` cache access (untested); one-shot/Telegram turns with no prompt callback fail closed on `ask`. Historical text below is retained for audit.
