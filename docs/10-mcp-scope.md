@@ -869,16 +869,39 @@ or `buildBwrapChildEnv`, which are bash-only (§4.1). **Fail-closed:** if
 but the backend is absent), that server fails startup with an explicit
 reason. It never falls back to an unsandboxed spawn.
 
-**`sandbox:true` + `npx` — SPIKE (resolved by analysis, 2026-10-14; not
-run empirically).** The open item was whether a sandboxed `npx` server can
-reach its `~/.npm` cache. The policy denies `/Users` (read AND write) and
-re-allows only the workspace + extra roots + per-user temp
-(`/private/var/folders`). The node/npm/npx runtime (e.g. an nvm install at
-`~/.nvm`) and the `~/.npm` cache both sit under `/Users`, so under
-`sandbox:true` **`npx` cannot exec the node runtime nor read/write the
-cache** — the server fails at spawn. (A pre-warmed cache does not help: the
-runtime itself is denied.) This is a real consequence of the file-confined
-policy, not a bug. **Ruling:** `sandbox:true` is for servers whose runtime
+**`sandbox:true` + `npx` — SPIKE (EMPIRICALLY VERIFIED, 2026-10-14,
+no-sandbox mode).** The open item was whether a sandboxed `npx` server can
+reach its `~/.npm` cache. Run empirically in NO-SANDBOX mode (the D12
+nested-sandbox limit that blocked the earlier attempt is absent —
+`TRE_SANDBOX` unset, so `sandbox-exec` applies a fresh policy) using the
+REAL `generateBashSandboxPolicy` from `dist` and the REAL spawn shape
+(`sandbox-exec -f <policy> /bin/bash -c <cmd>`); the reproducible 13-probe
+battery is retained at `test/spike-sandbox-npx.mjs` (run:
+`node test/spike-sandbox-npx.mjs <workspace>`). **The CONCLUSION holds** —
+a sandboxed `npx` server fails at spawn — **but the earlier REASONING was
+wrong.** The node *binary* execs fine under the policy (probe P1:
+`node --version` → `v20.20.2`, rc 0); it is NOT "denied." `npx` fails for
+two independent reasons, both a consequence of the file-confined policy
+(denies `/Users` read AND write; re-allows only workspace + extra roots +
+per-user temp `/private/var/folders`):
+  1. **`npx` is a shell script** (`#!/usr/bin/env node`), not a binary. The
+     kernel's shebang handler must `file-read` the script to find the
+     interpreter; under the `/Users` read-deny that read is `EPERM`, so the
+     exec fails (`/bin/bash: …/npx: Operation not permitted`, rc 126 — probe
+     P4). The same read-deny blocks `file-read` of the node binary itself
+     (P2/P3) — but a binary's *exec* does not need that read, so the runtime
+     still runs (P1).
+  2. **The npx-installed server code can't be loaded.** Even if the script
+     were exec'd, node must `file-read` the installed JS from `~/.npm`
+     (and the nvm runtime's own modules from `~/.nvm`); both are under the
+     denied `/Users` top, so module resolution fails (`Cannot find module` /
+     loader error — probes P6/P7/P8). A pre-warmed cache does not help: the
+     code files themselves are denied.
+The constructive alternative the ruling recommends **works**: a server whose
+runtime + code live in an ALLOWED top (the workspace) runs fine under
+`sandbox:true` (probe P5: `node <workspace>/server.js` → ok), and outbound
+network stays OPEN under the policy (probe P12: `dns.lookup` → ok), matching
+§8.1. **Ruling (unchanged):** `sandbox:true` is for servers whose runtime
 and state live OUTSIDE the denied tops (a system node at `/usr/local`, an
 installed binary, or a server that carries its own runtime). For
 `npx`-launched servers the default (`sandbox:false`) is the working
@@ -886,10 +909,7 @@ configuration — the network-open posture of §8.1 still applies, and the
 `trust` flag (§5.3) is the model-driving backstop. If a sandboxed
 `npx`/`~/.npm` path is ever required, it needs an explicit cache-dir
 allowance in `sandbox.ts` (a guardrail-zone change → human
-`GUARDRAIL_BYPASS` commit). The empirical run was blocked from this session
-by the D12 nested-sandbox limit: the agent runs under an inherited kernel
-policy (`TRE_SANDBOX=1`), and a process already under a policy cannot apply
-a DIFFERENT one (`sandbox_apply` → EPERM, rc 71 — re-verified 2026-10-14).
+`GUARDRAIL_BYPASS` commit).
 
 5. **Result mapping: text only in tier 1.** `ToolResult.content` is
   `TextBlock[]`; image / resource blocks become a one-line text note

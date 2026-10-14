@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import path from "node:path";
 import {
   ancestorMetadataRules,
@@ -417,7 +417,11 @@ test(
         // were all dead under the sandbox.
         const nodeProbeFile = path.join(ws, "probe.js");
         writeFileSync(nodeProbeFile, 'console.log("node-ran")\n');
-        const nodeRun = runSandboxed(policy, `node "${nodeProbeFile}"`, ws);
+        // process.execPath (absolute) — a bare `node` PATH lookup fails when the
+        // runtime lives under a denied top (nvm node under /Users): the lookup
+        // must file-READ the binary, which the /Users deny blocks. Exec of the
+        // absolute path needs no such read, so it works (the SPIKE's P1).
+        const nodeRun = runSandboxed(policy, `"${process.execPath}" "${nodeProbeFile}"`, ws);
         assert.ok(
           nodeRun.ok,
           `running a node FILE under the workspace must succeed: ${nodeRun.out}`,
@@ -501,7 +505,11 @@ test(
     timeout: 60_000,
   },
   () => {
-    const base = mkdtempSync(path.join(tmpdir(), "sb-c35-"));
+    // base under $HOME (a DENIED top — /Users on this machine), NOT under
+    // tmpdir() (/private/var/folders, per-user temp): the policy re-allows
+    // per-user temp, so a base there would make the "sibling is denied"
+    // checks invalid (the sibling sits inside the re-allowed tree).
+    const base = mkdtempSync(path.join(homedir(), ".tre-sb-c35-"));
     try {
       const ws = path.join(base, "ws");
       const er = path.join(base, "extra");
@@ -541,7 +549,10 @@ test(
       // ancestor-metadata re-allows cover its chain too).
       const probe = path.join(er, "probe.js");
       writeFileSync(probe, 'console.log("c35-node-ran")\n');
-      const nodeRun = runSandboxed(policy, `node "${probe}"`, ws);
+      // process.execPath (absolute) — a bare `node` PATH lookup fails when the
+      // runtime lives under a denied top (nvm node under /Users); exec of the
+      // absolute path needs no file-read, so it works (the SPIKE's P1).
+      const nodeRun = runSandboxed(policy, `"${process.execPath}" "${probe}"`, ws);
       assert.ok(nodeRun.ok, `running a node FILE under the extra root must succeed: ${nodeRun.out}`);
       assert.match(nodeRun.out, /c35-node-ran/);
     } finally {

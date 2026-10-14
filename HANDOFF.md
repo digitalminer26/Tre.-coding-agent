@@ -20,7 +20,7 @@ says untrusted tools prompt in `yes` mode, but `makeSafetyHooks` in `yes`
 returns allow and only `ask` calls `confirm`, so the spec needs its own branch
 (prompt in `yes`, block when no `ask` callback exists, e.g. one-shot/Telegram)
 and it lives in guardrail-protected `src/tools/safety.ts` → human commit with
-`GUARDRAIL_BYPASS=1`; (2) the `sandbox:true` + `npx` spike (still unverified);
+`GUARDRAIL_BYPASS=1`; (2) the `sandbox:true` + `npx` spike — **VERIFIED empirically 2026-10-14 (no-sandbox mode)**: the conclusion holds (sandboxed `npx` fails at spawn) but the reasoning was wrong — the node *binary* execs fine under the policy; `npx` fails because it's a shell script the kernel can't `file-read` (shebang) AND node can't read the npx-installed code under `~/.npm`. Runtime+code in an allowed top (workspace) works; network stays open. Retained 13-probe battery at `test/spike-sandbox-npx.mjs`; doc §8.4 updated;
 (3) all implementation (WS12 tiers 1–3) — nothing in `src/mcp/` exists yet.
 The doc's protocol claims are against the 2026-07-28 spec text, which has no
 retained copy in the repo and was not re-verified this cycle.
