@@ -136,6 +136,37 @@
  * treated as DENY (fail-closed). The pipeline turns a block into
  * `Tool "<name>" was blocked: <reason>` — an isError ToolResult the
  * model reads and adapts to (D7).
+ *
+ *   4. MCP TOOLS (WS12, docs/10-mcp-scope.md §5.3) — tools whose wire
+ *      name starts with `mcp__` (the MCP adapter's encoding, §4.3).
+ *      They do NOT inherit the mode-matrix defaults: the matrix's
+ *      yes/no semantics are about tre.'s OWN tools, whose behavior the
+ *      user knows; an MCP server is third-party code the model can steer,
+ *      and its annotations are UNTRUSTED DATA. The adapter stores the
+ *      server's `readOnlyHint`/`destructiveHint` annotations and the
+ *      per-server trust flag on the Tool as non-wire fields
+ *      (`mcpAnnotations` / `mcpTrusted`); the classification is:
+ *
+ *        classification (from the annotations)   trusted server        untrusted server
+ *        ───────────────────────────────────────  ────────────────────  ─────────────────────────
+ *        readOnlyHint: true → read-only           allow (every mode)    allow (every mode)
+ *        destructiveHint: true → destructive      yes: allow            prompt in yes AND ask;
+ *        (no annotations) → gated (mutating)      ask: prompt           block in no
+ *                                                 no: block
+ *
+ *      i.e. a TRUSTED server gets exactly the built-in mutating-tool
+ *      posture (allow in yes, prompt in ask, block in no); an UNTRUSTED
+ *      server is read-only by default — `readOnlyHint: true` is honored
+ *      (a read-only tool doing reads is what the user configured),
+ *      everything else prompts in yes AND ask, and `no` mode blocks it
+ *      (no mode allows no prompts). Honoring `readOnlyHint` means ONLY
+ *      "classify this call as read-only for the APPROVAL POLICY" — it is
+ *      not a grant of filesystem or network access and does not relax
+ *      process permissions (annotation trust and process confinement are
+ *      independent axes; the kernel sandbox, docs §5.4, is the backstop).
+ *      Fail-closed: when no `ask` callback exists (one-shot/Telegram
+ *      turns), an untrusted non-read-only MCP tool is BLOCKED — never
+ *      allowed.
  */
 import os from "node:os";
 import path from "node:path";
@@ -176,6 +207,11 @@ const PATH_TOOLS = new Set(["write", "edit"]);
  *  mode even plain reads are blocked (fail-closed: no human to confirm
  *  anything). */
 const GATED_TOOLS = new Set(["bash", "write", "edit"]);
+/** MCP adapter wire-name prefix (docs/10-mcp-scope.md §4.3):
+ *  `mcp__<server-identity>__<tool-identity>`. Tools with this prefix get
+ *  the MCP safety branch (module header, §4) instead of the built-in
+ *  fall-through-to-allow. */
+const MCP_TOOL_PREFIX = "mcp__";
 
 export type PathCheck =
   | { ok: true; path: string }
@@ -1172,12 +1208,14 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
   };
 
   /**
-   * Gate a call; returns a block reason or undefined (allow).
-   * `sysDestructive` / `sysSensitive` (systemic) are BLOCKED in EVERY mode
-   * (across the board) — the "never, ever" category. `wsDestructive` /
-   * `wsSensitive` (workspace-scoped) prompt in "ask" and are allowed in
-   * "yes". `gated` (mutating bash, write/edit) prompts only in "ask".
-   * `readOnly` is the ONLY class "no" mode allows.
+   * Gate a BUILT-IN call; returns a block reason or undefined (allow).
+   * (`sysDestructive` / `sysSensitive` (systemic) are BLOCKED in EVERY
+   * mode (across the board) — the "never, ever" category.
+   * `wsDestructive` / `wsSensitive` (workspace-scoped) prompt in "ask" and
+   * are allowed in "yes". `gated` (mutating bash, write/edit) prompts only
+   * in "ask". `readOnly` is the ONLY class "no" mode allows. MCP tools do
+   * NOT go through this gate — they have their own branch in the returned
+   * hook, module header §4 / docs/10-mcp-scope.md §5.3.)
    */
   const gate = async (
     toolName: string,
@@ -1242,6 +1280,85 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
 
   return async (tool, call) => {
     const args = call.arguments;
+
+    // 1b. MCP tools (WS12, docs/10-mcp-scope.md §5.3): third-party code
+    //     the model can steer — they do NOT inherit the mode-matrix
+    //     defaults (which would let them through in every mode, including
+    //     --no). Classification comes from the adapter's non-wire fields:
+    //     `mcpAnnotations` (the server's annotations — untrusted data) and
+    //     `mcpTrusted` (the per-server `trust` config flag).
+    if (tool.name.startsWith(MCP_TOOL_PREFIX)) {
+      const annotations = (tool as { mcpAnnotations?: Record<string, unknown> })
+        .mcpAnnotations;
+      const trusted = (tool as { mcpTrusted?: boolean }).mcpTrusted === true;
+      // `readOnlyHint` is an approval-policy classification ONLY — it
+      // grants no filesystem/network access and relaxes no process
+      // permissions (docs §5.3 boundary).
+      const readOnly = annotations?.readOnlyHint === true;
+      const destructive = annotations?.destructiveHint === true;
+
+      // 1. "no" mode: fail-closed — allow ONLY read-only calls, no prompts.
+      if (mode === "no") {
+        if (readOnly) return undefined;
+        return {
+          blocked:
+            `approval is disabled (--no-approve): the MCP tool "${tool.name}" ` +
+            `requires approval — re-run without --no-approve to allow it`,
+        };
+      }
+
+      // 2. Read-only (readOnlyHint honored even for untrusted servers):
+      //    allow in yes and ask — the user configured this server to do
+      //    reads; the prompt would add nothing.
+      if (readOnly) return undefined;
+
+      // 3. Trusted server: the built-in mutating-tool posture — allow in
+      //    "yes", prompt in "ask".
+      if (trusted) {
+        if (mode === "yes") return undefined;
+        const question = approvalQuestion(
+          tool.name,
+          args,
+          destructive ? ["destructiveHint"] : [],
+          [],
+        );
+        const ok = await confirm(question);
+        if (!ok) {
+          return {
+            blocked: `the user denied the MCP tool "${tool.name}" call — do not retry it unchanged`,
+          };
+        }
+        return undefined;
+      }
+
+      // 4. Untrusted server, non-read-only: PROMPT in yes AND ask (default
+      //    posture — configuring a server is consent to RUN it, not to let
+      //    the model drive it unattended). Fail-closed: no ask callback
+      //    (one-shot/Telegram turns) → block, never allow.
+      const question = approvalQuestion(
+        tool.name,
+        args,
+        destructive ? ["destructiveHint"] : [],
+        [],
+      );
+      if (!opts.ask) {
+        return {
+          blocked:
+            `the MCP tool "${tool.name}" belongs to an UNTRUSTED server ` +
+            `(trust: false) and is not read-only — it requires a human ` +
+            `prompt, but no approval callback is available in this run ` +
+            `(one-shot/Telegram); add "trust": true to the server's config ` +
+            `or run with an interactive approval prompt`,
+        };
+      }
+      const ok = await confirm(question);
+      if (!ok) {
+        return {
+          blocked: `the user denied the MCP tool "${tool.name}" call — do not retry it unchanged`,
+        };
+      }
+      return undefined;
+    }
 
     // 1. path sandbox (write/edit)
     if (PATH_TOOLS.has(tool.name)) {

@@ -631,6 +631,191 @@ test("non-gated, non-path tools pass through untouched", async (t) => {
   assert.equal(r, undefined);
 });
 
+// ─────────────────────────── MCP tools (WS12) ───────────────────────────
+// docs/10-mcp-scope.md §5.3: MCP tools (wire name `mcp__<server>__<tool>`)
+// do NOT inherit the mode-matrix defaults. Classification comes from the
+// adapter's non-wire fields `mcpAnnotations` (untrusted server data) and
+// `mcpTrusted` (the per-server `trust` config flag).
+
+/** Build an MCP-shaped tool: wire name + optional non-wire fields. */
+const mcpTool = (
+  name: string,
+  annotations?: Record<string, unknown>,
+  trusted?: boolean,
+): Tool => ({
+  name,
+  description: "mcp stub",
+  parameters: { type: "object", properties: {} },
+  async execute() {
+    return { content: [{ type: "text", text: "ran" }] };
+  },
+  ...(annotations !== undefined ? { mcpAnnotations: annotations } : {}),
+  ...(trusted !== undefined ? { mcpTrusted: trusted } : {}),
+});
+
+test("mcp: UNTRUSTED non-read-only tool is BLOCKED in every mode when no ask callback exists (fail-closed)", async (t) => {
+  const { root } = await ws(t);
+  // yes/ask: the specific fail-closed reason (no approval callback in this
+  // run). no: the generic --no-approve reason (no mode never prompts, so it
+  // never reaches the no-callback branch).
+  for (const mode of ["yes", "ask"] as ApprovalMode[]) {
+    const hooks = makeSafetyHooks({ root, mode }); // no ask
+    const r = await hooks(mcpTool("mcp__fs__write_file"), call("mcp__fs__write_file", { path: "a" }));
+    assert.ok(blockedOf(r), mode);
+    assert.match(blockedOf(r)!, /UNTRUSTED/, mode);
+    assert.match(blockedOf(r)!, /no approval callback/, mode);
+  }
+  const hooksNo = makeSafetyHooks({ root, mode: "no" }); // no ask
+  const rNo = await hooksNo(mcpTool("mcp__fs__write_file"), call("mcp__fs__write_file", { path: "a" }));
+  assert.ok(blockedOf(rNo));
+  assert.match(blockedOf(rNo)!, /no-approve/);
+});
+
+test("mcp: UNTRUSTED tool prompts in YES mode (the mode matrix would have allowed it)", async (t) => {
+  const { root } = await ws(t);
+  let asked = 0;
+  const hooks = makeSafetyHooks({
+    root,
+    mode: "yes",
+    ask: async () => {
+      asked++;
+      return false;
+    },
+  });
+  const r = await hooks(mcpTool("mcp__fs__write_file"), call("mcp__fs__write_file", {}));
+  assert.equal(asked, 1, "yes mode must still prompt for untrusted MCP tools");
+  assert.ok(blockedOf(r));
+  assert.match(blockedOf(r)!, /denied/);
+});
+
+test("mcp: UNTRUSTED tool prompts in ASK mode; deny → block, approve → allow", async (t) => {
+  const { root } = await ws(t);
+  const hooksDeny = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
+  const rDeny = await hooksDeny(mcpTool("mcp__db__query"), call("mcp__db__query", {}));
+  assert.ok(blockedOf(rDeny));
+  assert.match(blockedOf(rDeny)!, /denied/);
+
+  const hooksAllow = makeSafetyHooks({ root, mode: "ask", ask: async () => true });
+  assert.equal(await hooksAllow(mcpTool("mcp__db__query"), call("mcp__db__query", {})), undefined);
+});
+
+test("mcp: UNTRUSTED tool is BLOCKED in NO mode (no prompts, ever)", async (t) => {
+  const { root } = await ws(t);
+  let asked = 0;
+  const hooks = makeSafetyHooks({
+    root,
+    mode: "no",
+    ask: async () => {
+      asked++;
+      return true;
+    },
+  });
+  const r = await hooks(mcpTool("mcp__db__query"), call("mcp__db__query", {}));
+  assert.ok(blockedOf(r));
+  assert.match(blockedOf(r)!, /no-approve/);
+  assert.equal(asked, 0, "no mode never prompts");
+});
+
+test("mcp: readOnlyHint is honored even for UNTRUSTED servers — allow in every mode, no prompt", async (t) => {
+  const { root } = await ws(t);
+  for (const mode of ["yes", "ask", "no"] as ApprovalMode[]) {
+    const hooks = makeSafetyHooks({ root, mode });
+    const r = await hooks(
+      mcpTool("mcp__fs__read_file", { readOnlyHint: true }),
+      call("mcp__fs__read_file", {}),
+    );
+    assert.equal(r, undefined, mode);
+  }
+});
+
+test("mcp: TRUSTED tool — allow in yes (no prompt), prompt in ask, block in no", async (t) => {
+  const { root } = await ws(t);
+  // yes: the built-in mutating-tool posture — auto-approve, never prompt.
+  let asked = 0;
+  const hooksYes = makeSafetyHooks({
+    root,
+    mode: "yes",
+    ask: async () => {
+      asked++;
+      return false;
+    },
+  });
+  assert.equal(
+    await hooksYes(mcpTool("mcp__db__query", undefined, true), call("mcp__db__query", {})),
+    undefined,
+  );
+  assert.equal(asked, 0);
+
+  // ask: prompt; deny → block, approve → allow.
+  const hooksAskDeny = makeSafetyHooks({ root, mode: "ask", ask: async () => false });
+  const rDeny = await hooksAskDeny(
+    mcpTool("mcp__db__query", undefined, true),
+    call("mcp__db__query", {}),
+  );
+  assert.ok(blockedOf(rDeny));
+  assert.match(blockedOf(rDeny)!, /denied/);
+  const hooksAskAllow = makeSafetyHooks({ root, mode: "ask", ask: async () => true });
+  assert.equal(
+    await hooksAskAllow(mcpTool("mcp__db__query", undefined, true), call("mcp__db__query", {})),
+    undefined,
+  );
+
+  // no: block, no prompt.
+  const hooksNo = makeSafetyHooks({ root, mode: "no" });
+  const rNo = await hooksNo(mcpTool("mcp__db__query", undefined, true), call("mcp__db__query", {}));
+  assert.ok(blockedOf(rNo));
+  assert.match(blockedOf(rNo)!, /no-approve/);
+});
+
+test("mcp: destructiveHint — the prompt names it (trusted ask + untrusted yes); classification never changes the mode outcome", async (t) => {
+  const { root } = await ws(t);
+  const seen: string[] = [];
+  const hooksUntrustedYes = makeSafetyHooks({
+    root,
+    mode: "yes",
+    ask: async (q: string) => {
+      seen.push(q);
+      return true;
+    },
+  });
+  assert.equal(
+    await hooksUntrustedYes(
+      mcpTool("mcp__fs__delete_file", { destructiveHint: true }),
+      call("mcp__fs__delete_file", {}),
+    ),
+    undefined,
+    "untrusted destructive in yes: prompt, then allow on approve",
+  );
+  const hooksTrustedAsk = makeSafetyHooks({
+    root,
+    mode: "ask",
+    ask: async (q: string) => {
+      seen.push(q);
+      return true;
+    },
+  });
+  assert.equal(
+    await hooksTrustedAsk(
+      mcpTool("mcp__fs__delete_file", { destructiveHint: true }, true),
+      call("mcp__fs__delete_file", {}),
+    ),
+    undefined,
+  );
+  for (const q of seen) {
+    assert.match(q, /destructiveHint/, q);
+  }
+});
+
+test("mcp: a plain unknown tool (no mcp__ prefix) keeps the built-in fall-through — the MCP branch matches only the prefix", async (t) => {
+  const { root } = await ws(t);
+  const hooks = makeSafetyHooks({ root, mode: "no" }); // no ask
+  // `stub` is not an MCP tool: it still passes through untouched in every
+  // mode (the pre-existing contract), proving the new branch is keyed on
+  // the mcp__ prefix, not on "unknown tool".
+  const r = await hooks(stubTool, call("stub", {}));
+  assert.equal(r, undefined);
+});
+
 
 // ──────────────── read: unrestricted (no sandbox, no gate) ────────────────
 
