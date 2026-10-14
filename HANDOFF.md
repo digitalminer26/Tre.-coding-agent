@@ -1,7 +1,8 @@
 # Current project status (2026-10-14)
 
-**MCP scope re-audit (WS12/D29) — docs committed, implementation NOT started
-(2026-10-14).** Second audit of `docs/10-mcp-scope.md` against the code; the
+**MCP scope re-audit (WS12/D29) — docs committed, safety branch committed,
+implementation NOT started (2026-10-14).** Second audit of
+`docs/10-mcp-scope.md` against the code; the
 design gaps are fixed in the doc (commit `d49f962`): `sandbox:true` now has an
 explicit platform split (darwin Seatbelt via `generateBashSandboxPolicy`, linux
 bwrap via `buildBwrapArgs` invoked directly with the merged MCP env, fail-closed
@@ -14,14 +15,26 @@ incl. tests); the test layout is pinned (tests are `test/mcp-*.test.ts`, mock
 servers are plain `.mjs` in `test/fixtures/mcp/` so the `dist/test/*.test.js`
 glob never runs them); third-party attribution is stated (no code adapted; spec
 text cited, not copied); `inheritEnv` is in the §8.4 example; D13 is marked
-superseded (current mode is `ask`/`yes`/`no`, default `yes`). **NOT DONE, in
-order:** (1) the approval branch for untrusted MCP tools — the doc's §5.3 table
-says untrusted tools prompt in `yes` mode, but `makeSafetyHooks` in `yes`
-returns allow and only `ask` calls `confirm`, so the spec needs its own branch
-(prompt in `yes`, block when no `ask` callback exists, e.g. one-shot/Telegram)
-and it lives in guardrail-protected `src/tools/safety.ts` → human commit with
-`GUARDRAIL_BYPASS=1`; (2) the `sandbox:true` + `npx` spike — **VERIFIED empirically 2026-10-14 (no-sandbox mode)**: the conclusion holds (sandboxed `npx` fails at spawn) but the reasoning was wrong — the node *binary* execs fine under the policy; `npx` fails because it's a shell script the kernel can't `file-read` (shebang) AND node can't read the npx-installed code under `~/.npm`. Runtime+code in an allowed top (workspace) works; network stays open. Retained 13-probe battery at `test/spike-sandbox-npx.mjs`; doc §8.4 updated;
-(3) all implementation (WS12 tiers 1–3) — nothing in `src/mcp/` exists yet.
+superseded (current mode is `ask`/`yes`/`no`, default `yes`). **DONE (2026-10-14):** (1) the approval branch for untrusted MCP tools —
+commit `b417dd0` (human commit with `GUARDRAIL_BYPASS=1`, guardrail-protected
+`src/tools/safety.ts`): `makeSafetyHooks` now has an explicit `mcp__` branch
+implementing the doc's §5.3 table — `readOnlyHint` is honored even for
+untrusted servers (allow in every mode, approval-policy classification only,
+no process access); untrusted non-read-only tools prompt in `yes` AND `ask`
+and are blocked in `no`; trusted servers get the built-in mutating-tool
+posture (allow in `yes`, prompt in `ask`, block in `no`); `destructiveHint`
+only changes the prompt text. Fail-closed addition (not in the spec table,
+accepted 2026-10-14): when no `ask` callback exists (one-shot/Telegram
+turns), an untrusted non-read-only MCP tool is BLOCKED with an actionable
+reason — never allowed. The adapter stores the annotations + trust flag on
+the `Tool` as non-wire fields (`mcpAnnotations` / `mcpTrusted`), so
+`types.ts` and the wire layers stay untouched (the wire serializes only
+`name`/`description`/`parameters`). +8 tests; safety suite 66/66, full suite
+976 tests / 0 fail. (2) the `sandbox:true` + `npx` spike — **VERIFIED empirically 2026-10-14 (no-sandbox mode)**: the conclusion holds (sandboxed `npx` fails at spawn) but the reasoning was wrong — the node *binary* execs fine under the policy; `npx` fails because it's a shell script the kernel can't `file-read` (shebang) AND node can't read the npx-installed code under `~/.npm`. Runtime+code in an allowed top (workspace) works; network stays open. Retained 13-probe battery at `test/spike-sandbox-npx.mjs`; doc §8.4 updated.
+**NOT DONE, in order:** (1) all implementation (WS12 tiers 1–3) — nothing in
+`src/mcp/` exists yet; registration stays DISABLED (D29 ruling 9) until the
+adapter lands, and the adapter MUST name tools with the `mcp__` prefix or the
+safety branch never fires (fall-through-to-allow would bypass the gate).
 The doc's protocol claims are against the 2026-07-28 spec text, which has no
 retained copy in the repo and was not re-verified this cycle.
 
