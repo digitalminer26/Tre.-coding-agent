@@ -1,8 +1,10 @@
 # 10 — MCP support: scope (pre-implementation)
 
-Status: **scope only — no code written.** Scoped against protocol revision
-**2026-07-28** (current; re-checked against the live spec 2026-10-14 — see
-§8.5). Tier 1 is a **dual-era** stdio client: it probes `server/discover`
+Status: **scope only — no code written.** **FROZEN 2026-10-14 (tier 1 is the
+build scope; tiers 2–3 deferred — see §4).** Changes to this doc are made as
+needed when an inconsistency surfaces, not by re-scoping. Scoped against
+protocol revision **2026-07-28** (current; re-checked against the live spec
+2026-10-14 — see §8.5). Tier 1 is a **dual-era** stdio client: it probes `server/discover`
 first (modern, 2026-07-28) and falls back to the `initialize` handshake
 (legacy, 2025-11-25 — what the ecosystem ships today), so it speaks both
 eras (ruling in §5.9, re-audited 2026-10-14). This doc maps MCP (Model
@@ -866,6 +868,28 @@ or `buildBwrapChildEnv`, which are bash-only (§4.1). **Fail-closed:** if
 / `linuxSandboxAvailable()` false, or the nested-marker case needs no wrapper
 but the backend is absent), that server fails startup with an explicit
 reason. It never falls back to an unsandboxed spawn.
+
+**`sandbox:true` + `npx` — SPIKE (resolved by analysis, 2026-10-14; not
+run empirically).** The open item was whether a sandboxed `npx` server can
+reach its `~/.npm` cache. The policy denies `/Users` (read AND write) and
+re-allows only the workspace + extra roots + per-user temp
+(`/private/var/folders`). The node/npm/npx runtime (e.g. an nvm install at
+`~/.nvm`) and the `~/.npm` cache both sit under `/Users`, so under
+`sandbox:true` **`npx` cannot exec the node runtime nor read/write the
+cache** — the server fails at spawn. (A pre-warmed cache does not help: the
+runtime itself is denied.) This is a real consequence of the file-confined
+policy, not a bug. **Ruling:** `sandbox:true` is for servers whose runtime
+and state live OUTSIDE the denied tops (a system node at `/usr/local`, an
+installed binary, or a server that carries its own runtime). For
+`npx`-launched servers the default (`sandbox:false`) is the working
+configuration — the network-open posture of §8.1 still applies, and the
+`trust` flag (§5.3) is the model-driving backstop. If a sandboxed
+`npx`/`~/.npm` path is ever required, it needs an explicit cache-dir
+allowance in `sandbox.ts` (a guardrail-zone change → human
+`GUARDRAIL_BYPASS` commit). The empirical run was blocked from this session
+by the D12 nested-sandbox limit: the agent runs under an inherited kernel
+policy (`TRE_SANDBOX=1`), and a process already under a policy cannot apply
+a DIFFERENT one (`sandbox_apply` → EPERM, rc 71 — re-verified 2026-10-14).
 
 5. **Result mapping: text only in tier 1.** `ToolResult.content` is
   `TextBlock[]`; image / resource blocks become a one-line text note
