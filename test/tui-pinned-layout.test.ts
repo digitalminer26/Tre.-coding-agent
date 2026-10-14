@@ -605,8 +605,8 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // no menu for a plain prompt
   assert.deepEqual(suggestMenu({ ...s, input: "hi" }, 80), []);
 
-  // "/" → all commands (10), but the menu caps at MENU_MAX_LINES (5) —
-  // later commands, including /usage, are hidden; type /u to find it.
+  // "/" → all commands (10); the menu is a 5-row WINDOW — the first 5 are
+  // shown, the rest are reached by scrolling the selection (see below).
   const all = suggestMenu({ ...s, input: "/" }, 80);
   assert.equal(all.length, 5);
   assert.deepEqual(all.map((m) => m.selected), [true, false, false, false, false]);
@@ -619,11 +619,25 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // each line is exactly one row at width
   for (const m of all) assert.ok(wrapLineCount(m.line, 80) <= 1);
 
-  // selection moves with suggestIdx (and clamps when it overruns the cap)
+  // selection moves with suggestIdx (and clamps when it overruns the list)
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 2 }, 80).map((m) => m.selected),
     [false, false, true, false, false]);
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 9 }, 80).map((m) => m.selected),
-    [false, false, false, false, true]); // clamp to last VISIBLE
+    [false, false, false, false, true]); // clamp to last candidate
+
+  // the window SCROLLS with the selection: at idx 7 (/stats) the window is
+  // rows 3..7 (/exit…/stats), marker on the selected row
+  const scrolled = suggestMenu({ ...s, input: "/", suggestIdx: 7 }, 80);
+  assert.equal(scrolled.length, 5);
+  assert.ok(scrolled[0]!.line.startsWith("  /exit — "));
+  assert.ok(scrolled[1]!.line.startsWith("  /models — "));
+  assert.ok(scrolled[2]!.line.startsWith("  /quit — "));
+  assert.ok(scrolled[3]!.line.startsWith("  /restart — "));
+  assert.ok(scrolled[4]!.line.startsWith("> /stats — "));
+  // at the very end (idx 9, /usage) the window is pinned at the tail
+  const tail = suggestMenu({ ...s, input: "/", suggestIdx: 9 }, 80);
+  assert.ok(tail[0]!.line.startsWith("  /quit — "));
+  assert.ok(tail[4]!.line.startsWith("> /usage — "));
 
   // truncated to one row at a narrow width (marker survives)
   const narrow = suggestMenu({ ...s, input: "/" }, 20)[0]!;
@@ -659,16 +673,18 @@ test("menuNav: arrows move the selection with wrap-around, null off-menu", () =>
   assert.equal(menuNav({ ...s, input: "/display-bottom m" }, 1), null);
   assert.equal(menuNav({ ...s, input: "/zz" }, 1), null);
 
-  // on-menu: down from null → 1, up from null → last VISIBLE (wrap). The
-  // menu caps at 5 visible (7 commands), so wrap is within those 5.
+  // on-menu: down from null → 1, up from null → last (wrap). Navigation
+  // spans the FULL candidate list (10 commands) — the window follows.
   const base: TuiState = { ...s, input: "/" };
   assert.equal(menuNav(base, 1)!.suggestIdx, 1);
-  assert.equal(menuNav(base, -1)!.suggestIdx, 4);
-  // wrap at both ends
-  assert.equal(menuNav({ ...base, suggestIdx: 4 }, 1)!.suggestIdx, 0);
-  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 4);
-  // a stale (overrun) index is clamped to the visible cap before moving
+  assert.equal(menuNav(base, -1)!.suggestIdx, 9);
+  // wrap at both ends (across all 10)
   assert.equal(menuNav({ ...base, suggestIdx: 9 }, 1)!.suggestIdx, 0);
+  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 9);
+  // a stale (overrun) index is clamped to the list end before moving
+  assert.equal(menuNav({ ...base, suggestIdx: 99 }, 1)!.suggestIdx, 0);
+  // past the first window: down from idx 4 → 5 (the window scrolls to follow)
+  assert.equal(menuNav({ ...base, suggestIdx: 4 }, 1)!.suggestIdx, 5);
   // state otherwise untouched
   const nav = menuNav(base, 1) as TuiState;
   assert.equal(nav.input, "/");
@@ -694,7 +710,10 @@ test("menuComplete: enter completes the selected word, exact match submits", () 
   const c3 = menuComplete({ ...s, input: "/", suggestIdx: 2 });
   assert.equal(c3!.input, "/display-bottom ");
   const c4 = menuComplete({ ...s, input: "/", suggestIdx: 4 });
-  assert.equal(c4!.input, "/models "); // index 4 = /models (/quit, /stats capped off)
+  assert.equal(c4!.input, "/models "); // index 4 = /models
+  // a selection PAST the first window completes the scrolled-to command
+  const c5 = menuComplete({ ...s, input: "/", suggestIdx: 9 });
+  assert.equal(c5!.input, "/usage "); // idx 9 = /usage (window scrolled to it)
 
   // exact match → null (Enter submits; the completed trailing-space form
   // also has no menu → null)

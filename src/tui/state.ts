@@ -1588,9 +1588,12 @@ export function approvalLine(question: string, width: number): string {
 // D16 — slash-command completion menu. When the input line holds a bare
 // command word (starts with "/", no spaces yet), the frame renders the
 // matching commands GREY above the top separator — alphabetical, filtered by
-// the typed prefix — with the selected one marked. ↑/↓ navigate (wrap),
-// enter completes the word (a second enter submits), anything else just
-// edits the word and the menu recomputes. All pure: the registry, the
+// the typed prefix — with the selected one marked. The menu is a SCROLLING
+// WINDOW of at most MENU_MAX_LINES rows: ↑/↓ navigate across ALL candidates
+// (wrap-around) and the window follows the selection, so every command is
+// reachable by the arrows even when the list is longer than the window.
+// Enter completes the selected word (a second enter submits); anything else
+// just edits the word and the menu recomputes. All pure: the registry, the
 // candidate filter, the nav/complete transitions, and the visible lines —
 // the single source of truth shared by the render and the fitItems budget.
 // ---------------------------------------------------------------------------
@@ -1617,7 +1620,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "stats_loop_guard", summary: "loop-guard telemetry: how often the auto-retry recovered (F2)" },
 ];
 
-/** At most this many lines the menu may take (more candidates → first N). */
+/** At most this many lines the menu may take (more candidates → the window
+    scrolls; the selection is always inside the window). */
 export const MENU_MAX_LINES = 5;
 
 /**
@@ -1639,51 +1643,57 @@ export function slashCandidates(input: string): string[] {
  * input is locked then anyway).
  */
 /**
- * The candidates the menu actually shows: the bare-command prefix filter
- * (slashCandidates) capped to MENU_MAX_LINES. suggestMenu, menuNav and
- * menuComplete all operate on THIS list, so the selection marker is always
- * on a visible line even when the registry grows past the cap (the overflow
- * commands are still reachable by typing them in full).
+ * The candidates the menu actually shows: a SCROLLING WINDOW of at most
+ * MENU_MAX_LINES over the full candidate list (slashCandidates). The
+ * selection (suggestIdx, clamped into the list) is always inside the window —
+ * ↑/↓ move across ALL commands, the window follows the selection, and the
+ * menu never grows past MENU_MAX_LINES rows (the layout budget is fixed).
+ * suggestMenu, menuNav and menuComplete all operate on the list + window.
  */
-function visibleCandidates(input: string): string[] {
-  return slashCandidates(input).slice(0, MENU_MAX_LINES);
+function menuWindow(input: string, selIdx: number | null): { list: string[]; start: number; sel: number } {
+  const list = slashCandidates(input);
+  if (list.length === 0) return { list, start: 0, sel: 0 };
+  const sel = Math.min(selIdx ?? 0, list.length - 1);
+  const start = Math.max(0, Math.min(sel - (MENU_MAX_LINES - 1), list.length - MENU_MAX_LINES));
+  return { list, start, sel };
 }
 
 export function suggestMenu(state: TuiState, width: number): { line: string; selected: boolean }[] {
   if (state.approval !== null) return [];
-  const cands = visibleCandidates(state.input);
-  if (cands.length === 0) return [];
-  const sel = Math.min(state.suggestIdx ?? 0, cands.length - 1);
-  return cands.map((cmd, i) => {
+  const { list, start, sel } = menuWindow(state.input, state.suggestIdx);
+  if (list.length === 0) return [];
+  return list.slice(start, start + MENU_MAX_LINES).map((cmd, i) => {
     const cmdDef = SLASH_COMMANDS.find((c) => "/" + c.name === cmd);
-    const full = `${i === sel ? "> " : "  "}${cmd}${cmdDef ? " — " + cmdDef.summary : ""}`;
-    return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i === sel };
+    const full = `${i + start === sel ? "> " : "  "}${cmd}${cmdDef ? " — " + cmdDef.summary : ""}`;
+    return { line: cliTruncate(full, Math.max(1, width), { position: "end" }), selected: i + start === sel };
   });
 }
 
 /**
- * ↑/↓ while the menu is visible: move the selection (wrap-around). Null
- * when the menu is not visible — the caller falls through to history
- * navigation.
+ * ↑/↓ while the menu is visible: move the selection across the FULL
+ * candidate list (wrap-around) — the visible window follows the selection
+ * (menuWindow). Null when the menu is not visible — the caller falls
+ * through to history navigation.
  */
 export function menuNav(s: TuiState, dir: -1 | 1): TuiState | null {
-  const cands = visibleCandidates(s.input);
-  if (cands.length === 0) return null;
-  const cur = Math.min(s.suggestIdx ?? 0, cands.length - 1);
-  return { ...s, suggestIdx: (cur + dir + cands.length) % cands.length };
+  const list = slashCandidates(s.input);
+  if (list.length === 0) return null;
+  const cur = Math.min(s.suggestIdx ?? 0, list.length - 1);
+  return { ...s, suggestIdx: (cur + dir + list.length) % list.length };
 }
 
 /**
  * Enter while the menu is visible: if the typed word is not yet the exact
  * selected command, complete it (input = chosen + " "; the trailing space
- * hides the menu, so a second enter submits). Null → let the normal submit
- * path run (exact match, or no menu).
+ * hides the menu, so a second enter submits). The selection is the one at
+ * suggestIdx in the FULL list (the window only affects rendering). Null →
+ * let the normal submit path run (exact match, or no menu).
  */
 export function menuComplete(s: TuiState): TuiState | null {
-  const cands = visibleCandidates(s.input);
-  if (cands.length === 0) return null;
-  const sel = Math.min(s.suggestIdx ?? 0, cands.length - 1);
-  const chosen = cands[sel]!;
+  const list = slashCandidates(s.input);
+  if (list.length === 0) return null;
+  const sel = Math.min(s.suggestIdx ?? 0, list.length - 1);
+  const chosen = list[sel]!;
   if (s.input === chosen) return null; // exact → submit
   return { ...s, input: chosen + " ", suggestIdx: null };
 }
