@@ -2,13 +2,13 @@
 
 Status: **scope only — no code written.** Scoped against protocol revision
 **2026-07-28** (current; re-checked against the live spec 2026-10-14 — see
-§8.5). Tier 1 implements the **legacy era (2025-11-25)** — what the
-ecosystem actually ships — and **detects-and-rejects modern-only servers**
-with an upgrade message (ruling in §5.9, re-ruled 2026-10-14 after the
-official SDK was found to have no modern-era support). This doc maps MCP
-(Model Context Protocol) onto tre.'s existing seams, decides the open
-design questions, and splits the work into tiers. It is the input to a
-future PLAN.md workstream entry, not a workstream itself.
+§8.5). Tier 1 is a **dual-era** stdio client: it probes `server/discover`
+first (modern, 2026-07-28) and falls back to the `initialize` handshake
+(legacy, 2025-11-25 — what the ecosystem ships today), so it speaks both
+eras (ruling in §5.9, re-audited 2026-10-14). This doc maps MCP (Model
+Context Protocol) onto tre.'s existing seams, decides the open design
+questions, and splits the work into tiers. It is the input to a future
+PLAN.md workstream entry, not a workstream itself.
 
 ## 1. Bottom line
 
@@ -42,34 +42,36 @@ carries its protocol version + client capabilities in `_meta`
 (`io.modelcontextprotocol/protocolVersion`, `…/clientCapabilities`), and
 servers MUST implement `server/discover` (version/capability/identity probe).
 Versions `2025-11-25` and earlier are "legacy" (handshake-based) — and they
-are what the ecosystem actually ships: the official TypeScript SDK
-(`@modelcontextprotocol/sdk` 1.32.1, published 2026-10-05) contains no
-`server/discover` and targets `2025-11-25`, and the official
-`@modelcontextprotocol/server-*` packages are legacy. **Ruling (§5.9):
-tier 1 implements the legacy era only, and detects-and-rejects modern-only
-servers** (a modern server rejects the `initialize` probe — an unknown
-method in the modern era — which is the detection signal). Modern-era
-support is deferred until there is a reference implementation to test
-against.
+are what the ecosystem's published servers still ship: the official
+`@modelcontextprotocol/server-*` packages depend on the v1 SDK line
+(`@modelcontextprotocol/sdk` 1.x — the *maintenance* line, legacy-only by
+design). The modern era IS implemented by the official SDK: the **v2 line**
+(`@modelcontextprotocol/{core,client,server}` 2.x, stable since 2026-10-05)
+implements 2026-07-28 (era negotiation, `server/discover`, MRTR) — a
+reference implementation and a buildable modern test server both exist.
+**Ruling (§5.9): tier 1 is DUAL-ERA** — the client probes `server/discover`
+first and falls back to `initialize`, so it speaks both eras (the spec's
+own compatibility matrix: a modern-only client FAILS against a legacy
+server, so a client that reaches the ecosystem must handle legacy).
 
 Protocol surface, by relevance to tre. (2026-07-28):
 
 | Area | Methods | Relevance |
 |---|---|---|
 | Tools | `tools/list` (paginated: `nextCursor`), `tools/call` | **the core** |
-| Legacy startup | `initialize` / `notifications/initialized` | 2025-11-25 era — **what tier 1 implements** |
+| Legacy startup | `initialize` / `notifications/initialized` | 2025-11-25 era — tier 1 (probe fallback, §5.9) |
 | Resources | `resources/list`, `resources/read` | read-only context; tier 2 |
 | Prompts | `prompts/list`, `prompts/get` | canned prompts; tier 2 |
 | List changes | `tools/list_changed` (legacy era) | dynamic tool sets — tier 2 (we do NOT subscribe; §4) |
-| Discovery | `server/discover` | modern-era probe — **detection only** in tier 1 (§5.9) |
+| Discovery | `server/discover` | modern-era probe — **era detection** in tier 1 (§5.9) |
 | MRTR | `resultType: "input_required"` + `inputRequests`/`inputResponses` | modern era; replaces server-initiated requests — tier 3 |
 | Elicitation | via MRTR (`elicitation/create` inside `inputRequests`) | server asks the USER for input — tier 3 |
 | Sampling | via MRTR — **DEPRECATED** (removal ≥ 2027-07-28) | do not implement (§4 tier 3) |
 | Roots | `roots/list` — **DEPRECATED** (removal ≥ 2027-07-28) | do not implement (§4 tier 3) |
 
 Tool result shape: `{ content: ContentBlock[], isError? }` where
-`ContentBlock` is `text` | `image` (base64) | `resource_link` |
-`embedded_resource`. Tools carry optional **annotations**:
+`ContentBlock` is `text` | `image` (base64) | `audio` (base64) |
+`resource_link` | `embedded_resource`. Tools carry optional **annotations**:
 `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`.
 
 ## 3. Seam map — where MCP lands in tre.
@@ -88,9 +90,9 @@ Tool result shape: `{ content: ContentBlock[], isError? }` where
 | `tui/*` | **Tiny.** The `/mcp` status command (a slash-registry entry + an info item — the same plumbing as `/stats`); tool items render by name unchanged. |
 
 New modules (proposed): `src/mcp/config.ts`, `src/mcp/client.ts`
-(JSON-RPC stdio, legacy era: `initialize` handshake, 2025-11-25; modern-era
-servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
-→ `Tool` + result mapping).
+(JSON-RPC stdio, dual-era: `server/discover` probe → modern, `initialize`
+fallback → legacy — §5.9), `src/mcp/adapter.ts` (MCP tool → `Tool` +
+result mapping).
 
 ## 4. Tiers
 
@@ -111,20 +113,26 @@ servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
    §5.3); `sandbox` = opt the server PROCESS into the kernel sandbox
    (default is `false` — §5.4). Malformed entries fail startup (exit 2),
    like a bad `extraRoots`.
-2. **Client (legacy era).** Hand-rolled JSON-RPC 2.0 over stdio
+2. **Client (dual-era).** Hand-rolled JSON-RPC 2.0 over stdio
    (newline-delimited JSON — NOT LSP `Content-Length` framing): spawn,
-   `initialize` handshake (2025-11-25 — what the ecosystem ships; the
-   official SDK targets that revision, §5.9), then `tools/list`.
-   id-multiplexed pending-request map (the loop runs tool batches in
-   parallel → concurrent `tools/call` to one server must work), per-call
-   timeout, abort (`notifications/cancelled` referencing the request id),
-   server-death detection. **Era detection:** a server that rejects the
-   `initialize` probe (a modern-only server — `initialize` is an unknown
-   method in the 2026-07-28 era) is NOT retried; startup fails with an
-   actionable message ("server X speaks MCP 2026-07-28; tre. supports up
-   to 2025-11-25 — upgrade tre."). ~400 lines, zero dependencies (fits
-   the dep freeze; `@modelcontextprotocol/sdk` would add a runtime dep
-   and is unnecessary for stdio).
+   then the **era probe** (§5.9): send `server/discover` first — a
+   `DiscoverResult` or a modern error (`-32022` unsupported-version,
+   capabilities response) means MODERN (2026-07-28, stateless — every
+   request then carries version + capabilities in `_meta`); any other
+   response or the probe timeout means LEGACY → `initialize` handshake
+   (2025-11-25 — what the ecosystem ships today) →
+   `notifications/initialized`. The era is cached per server process.
+   Then `tools/list`. id-multiplexed pending-request map (the loop runs
+   tool batches in parallel → concurrent `tools/call` to one server must
+   work), per-call timeout, abort (`notifications/cancelled` referencing
+   the request id), server-death detection. Both eras share the same
+   plumbing (framing, pending map, timeout, abort, death detection) —
+   only the startup path and per-request `_meta` differ. A server that
+   fails BOTH probes (neither modern nor legacy) gets an actionable
+   startup message naming the observed error. ~500 lines, zero
+   dependencies (fits the dep freeze; `@modelcontextprotocol/sdk` would
+   add a runtime dep and is unnecessary for stdio — the v2 line is
+   available as a test oracle, §5.9).
 3. **Adapter.** MCP tool → `Tool`: name sanitized to
    `mcp__<server>__<tool>` (OpenAI completions function names are
    `^[a-zA-Z0-9_-]{1,64}$` — the wire constraint, not MCP's);
@@ -139,10 +147,10 @@ servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
 4. **Lifecycle.** Spawn at startup (after config load), kill the process
    group on every exit path (reuse the bash.ts detached-group + SIGKILL
    pattern; shutdown = close stdin → wait → SIGTERM → SIGKILL); startup
-   timeout (~5s — covers spawn + handshake + `tools/list`); a dead server
+   timeout (~5s — covers spawn + era probe + `tools/list`); a dead server
    makes its tool calls fail in-band (`isError`: "MCP server X is not
-   running") — I3, no exceptions. A modern-only server (rejected at
-   startup, §5.9) is reported once and its tools are absent.
+   running") — I3, no exceptions. A server that fails both era probes is
+   reported once and its tools are absent.
 5. **Safety.** §5.3 — MCP tools default to ASK (prompt in `yes`/`ask`,
    block in `no`) unless the server is `"trust": true`; `readOnlyHint` is
    honored even for untrusted servers.
@@ -159,13 +167,16 @@ servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
    a LEGACY server (`initialize` handshake, 2025-11-25 — paginated
    `tools/list`, `tools/call` success / protocol error / `isError`,
    `structuredContent`, crash mid-call, slow call (timeout), concurrent
-   calls) and a MODERN-ONLY server (rejects `initialize` — the detection
-   path must produce the actionable "upgrade tre." message, no tools, no
-   crash). Unit tests for config parse (incl. `disabled`, `trust`,
-   `sandbox`), name sanitization (awkward names: dots, unicode, >64
-   chars), result mapping (incl. `structuredContent`), and safety
-   classification (trusted vs untrusted × mode matrix). One `e2e.sh`
-   scenario: live model calls a mock-server tool.
+   calls) and a MODERN server (answers `server/discover` — the probe must
+   select the modern era, per-request `_meta` must be sent, and the
+   client must NOT send `initialize`). Unit tests for config parse
+   (incl. `disabled`, `trust`, `sandbox`), name sanitization (awkward
+   names: dots, unicode, >64 chars), result mapping (incl.
+   `structuredContent`), and safety classification (trusted vs untrusted
+   × mode matrix). One `e2e.sh` scenario: live model calls a mock-server
+   tool. The official v2 SDK (`@modelcontextprotocol/server`, dev-only —
+   not a runtime dep, so the freeze stays green) is available as a test
+   oracle for the modern path (§5.9).
 
 **Size: M.** One focused workstream; ~1.5–2.5k lines incl. tests.
 
@@ -295,27 +306,34 @@ servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
    in-house `wire/http.ts` + the OAuth token-store precedent make an SDK
    avoidable.)
 
-9. **Legacy-era client (2026-07-28 ruling, re-ruled 2026-10-14).** The
+9. **Dual-era client (2026-07-28 ruling, re-audited 2026-10-14).** The
    current spec revision removed the `initialize` handshake (stateless,
-   per-request `_meta`, `server/discover`), but the ecosystem's servers
-   are overwhelmingly legacy (2025-11-25 and earlier — every official
-   `@modelcontextprotocol/server-*` package), and the official
-   TypeScript SDK (`@modelcontextprotocol/sdk` 1.32.1, published
-   2026-10-05) has NO modern-era support either — no `server/discover`,
-   targets `2025-11-25`. There is no modern-era server to test against
-   and no reference implementation to validate against. Ruling: tier 1
-   implements the LEGACY era only (`initialize` handshake,
-   2025-11-25), and DETECTS modern-only servers: a server that rejects
-   the `initialize` probe (unknown method in the 2026-07-28 era) is
-   reported with an actionable message ("server X speaks MCP 2026-07-28;
-   tre. supports up to 2025-11-25 — upgrade tre.") and its tools are
-   absent. Modern-era support (per-request `_meta`, `server/discover`,
-   MRTR) is deferred until a reference implementation exists; the JSON-
-   RPC plumbing (framing, id-multiplexed pending map, timeout, abort,
-   death detection) is era-neutral, so adding it later is a startup-path
-   change, not a rewrite. (The earlier dual-era ruling assumed the probe
-   could be validated against real modern servers; it cannot — the SDK
-   gap is why.)
+   per-request `_meta`, `server/discover`), and the ecosystem's published
+   servers are overwhelmingly legacy (2025-11-25 and earlier — every
+   official `@modelcontextprotocol/server-*` package depends on the v1
+   SDK line). The spec's own compatibility matrix says a modern-only
+   client FAILS against a legacy server — so a client that wants to reach
+   the ecosystem MUST handle legacy. Ruling: tier 1 is DUAL-ERA via the
+   spec's stdio probe — `server/discover` first; a `DiscoverResult` or
+   modern error (`-32022` unsupported-version) = modern (per-request
+   `_meta`), anything else or the probe timeout = legacy (`initialize`
+   fallback, 2025-11-25). The era is cached per server process; both eras
+   share the same JSON-RPC plumbing (framing, id-multiplexed pending map,
+   timeout, abort, death detection). A server failing both probes is
+   reported with an actionable message naming the observed error, its
+   tools absent.
+   **Audit correction (2026-10-14).** An earlier same-day re-rule had
+   narrowed this to legacy-only on the premise that "the official
+   TypeScript SDK has no modern-era support — no reference implementation
+   to validate against." That premise was wrong: it is true of the v1
+   *package* (`@modelcontextprotocol/sdk` 1.x — the maintenance line),
+   but the modern era is implemented by the official **v2 line**
+   (`@modelcontextprotocol/{core,client,server}` 2.x, stable since
+   2026-10-05: era negotiation, `server/discover`, MRTR). A reference
+   implementation and a buildable modern test server therefore DO exist,
+   and the dual-era ruling is restored. Modern-era *features* beyond
+   tools (MRTR-driven elicitation, `subscriptions/listen`) remain tier 3
+   on capability grounds, not reference-implementation grounds.
 
 ## 6. Costs and risks
 
@@ -336,10 +354,10 @@ servers are detected and rejected — §5.9), `src/mcp/adapter.ts` (MCP tool
   `process.exit` handlers). Reuse the bash.ts kill pattern; add a test
   that a killed tre. leaves no server child (the `bash-kill.test.ts`
   precedent).
-- **Protocol drift.** Legacy-era by design (§5.9): pin the negotiated
-  version from the `initialize` result; an unknown server version →
-  startup error naming both versions. Modern-era support is a deferred
-  startup-path change (§5.9), not a rewrite.
+- **Protocol drift.** Dual-era by design (§5.9): pin the negotiated
+  version from the probe result — the `initialize` result in the legacy
+  era, the `DiscoverResult` / `_meta` version in the modern era; an
+  unknown server version → startup error naming both versions.
 - **`tools/list` pagination.** Servers with many tools paginate; the
   client must follow `nextCursor` to the end (test with a paginating
   mock).
@@ -421,8 +439,10 @@ behavior, and zero changes outside `src/mcp/*`, `safety.ts`,
    `Mcp-Method`/`Mcp-Name` headers, and drops SSE resumability.
    UNCHANGED: stdio framing (newline-delimited JSON-RPC), id-multiplexed
    concurrency, `tools/call` shape, cancellation, shutdown, and the
-   entire seam analysis (§3 — the adapter is still thin). Ruling (as
-   first written): dual-era client, §5.9. Ruling (2026-10-14, re-ruled):
-   LEGACY-ONLY tier 1 + detect-and-reject modern servers — the official
-   SDK ships no modern-era support, so there is nothing to validate a
-   modern implementation against; §5.9.
+   entire seam analysis (§3 — the adapter is still thin). Ruling:
+   DUAL-ERA tier 1 — `server/discover` probe first, `initialize` fallback
+   (the spec's own compatibility matrix requires a client to handle
+   legacy to reach the ecosystem); §5.9. (A same-day interim re-rule to
+   legacy-only was based on the false premise that the official SDK has
+   no modern-era support; the official v2 line implements 2026-07-28, so
+   the dual-era ruling stands — §5.9.)
