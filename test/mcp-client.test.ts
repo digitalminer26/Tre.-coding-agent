@@ -622,7 +622,31 @@ test("abort: an unsent call is removed and NOT cancelled to the server", async (
   c.close();
 });
 
-test("abort: a write-started call gets a best-effort notifications/cancelled", async () => {
+test("abort signal is scoped to its request when the same tool is concurrent", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  const a = new AbortController();
+  const b = new AbortController();
+  const first = c.callTool("read_file", { n: 1 }, a.signal);
+  const second = c.callTool("read_file", { n: 2 }, b.signal);
+  await tick();
+  const requests = mock.inbound.filter((l) => l.obj.method === "tools/call");
+  assert.equal(requests.length, 2);
+  a.abort();
+  const firstResult = await first;
+  assert.match(firstResult.texts[0] ?? "", /aborted/);
+  const cancelled = mock.inbound.filter((l) => l.obj.method === "notifications/cancelled");
+  assert.equal(cancelled.length, 1);
+  assert.equal(cancelled[0]!.obj.params && (cancelled[0]!.obj.params as {requestId:number}).requestId, requests[0]!.obj.id);
+  const secondId = requests[1]!.obj.id as number;
+  mock.respondResult(secondId, { resultType: "complete", content: [{ type: "text", text: "second survived" }] });
+  assert.deepEqual((await second).texts, ["second survived"]);
+  c.close();
+});
+
+ test("abort: a write-started call gets a best-effort notifications/cancelled", async () => {
   const mock = new MockMcpServer();
   modernMock(mock);
   const c = new McpClient("test", mock.transport, FAST);

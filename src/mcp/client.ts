@@ -147,6 +147,8 @@ interface Pending {
   deferred?: { resolve: (v: unknown) => void; reject: (e: Error) => void };
   /** Probe path: classifies the response (or timeout/fatal). */
   probeResult?: (result: unknown, error: RpcError | null) => void;
+  /** Detach request-scoped abort listener when this pending call settles. */
+  cleanupAbort?: () => void;
   probeTimeout?: () => void;
   probeFatal?: (reason: string) => void;
 }
@@ -559,6 +561,7 @@ export class McpClient {
     params: Record<string, unknown>,
     cls: FrameClass,
     tool?: string,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (this.closed || this.state === "failed") {
       return Promise.reject(
@@ -594,6 +597,17 @@ export class McpClient {
       deferred: d,
     };
     this.pending.set(id, p);
+    if (signal) {
+      const abort = () => this.abortPending(id);
+      signal.addEventListener("abort", abort, { once: true });
+      p.cleanupAbort = () => signal.removeEventListener("abort", abort);
+      // Handle the narrow race where abort happened while registering. Since
+      // no frame has been admitted yet, an abort here must not send it.
+      if (signal.aborted) {
+        abort();
+        return d.promise;
+      }
+    }
     const frame = this.admit({ jsonrpc: "2.0", id, method, params }, cls);
     if (!frame) {
       // admit() already applied the per-class failure policy.
@@ -625,11 +639,15 @@ export class McpClient {
   async callTool(
     name: string,
     args: Record<string, unknown> = {},
+    signal?: AbortSignal,
   ): Promise<McpToolCallResult> {
     let result: unknown;
     try {
       await this.ensureReady();
-      result = await this.request("tools/call", { name, arguments: args }, "tool", name);
+      if (signal?.aborted) {
+        return { texts: [`call ${name} aborted`], isError: true };
+      }
+      result = await this.request("tools/call", { name, arguments: args }, "tool", name, signal);
     } catch (e) {
       if (e instanceof McpCallError && e.rpc) {
         return {
@@ -714,6 +732,29 @@ export class McpClient {
   /** Abort a pending call by tool name. ONE order: (1) capture the write
    *  state, (2) settle exactly once as aborted, (3) act on the write state.
    *  Returns true if a call was aborted. */
+  private abortPending(id: number): boolean {
+    const p = this.pending.get(id);
+    if (!p || p.settled) return false;
+    const f = p.frame;
+    const writeStarted = f ? f.writeStarted : false;
+    this.settle(id, null, new McpCallError(`call ${p.tool ?? "<unknown>"} aborted`));
+    if (f && !writeStarted) {
+      this.removeUnsent(f);
+    } else if (f) {
+      this.admit(
+        {
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: id },
+        },
+        "best-effort",
+      );
+    }
+    return true;
+  }
+
+  /** Legacy tool-name abort retained for direct clients; registry calls use
+   *  request-scoped AbortSignal cancellation to avoid cancelling a sibling. */
   abortCall(tool: string): boolean {
     for (const p of this.pending.values()) {
       if (p.tool === tool && !p.settled) {
@@ -1120,6 +1161,7 @@ export class McpClient {
     if (!p || p.settled) return;
     p.settled = true;
     clearTimeout(p.timer);
+    p.cleanupAbort?.();
     this.pending.delete(id);
     if (p.deferred) {
       if (error) p.deferred.reject(error);
@@ -1173,6 +1215,7 @@ export class McpClient {
       if (p.settled) continue;
       p.settled = true;
       clearTimeout(p.timer);
+      p.cleanupAbort?.();
       this.pending.delete(p.id);
       if (p.probeFatal) {
         p.probeFatal(error.message);

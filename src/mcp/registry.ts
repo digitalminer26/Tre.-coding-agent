@@ -198,19 +198,11 @@ function spawnTransport(spawn: McpSpawn): McpTransport {
 }
 
 /** The adapter's call seam: invoke the server's tool by its ORIGINAL name
- *  and return the client's mapped result. `signal` aborts the call (the
- *  client settles it in-band as aborted). */
+ *  and return the client's mapped result. The abort signal is attached to the
+ *  exact request created for this call (not merely its tool name), so parallel
+ *  invocations of the same tool cannot cancel one another. */
 function makeCallFn(client: McpClient, serverName: string): McpCallFn {
-  return (toolName, args, signal) => {
-    if (signal.aborted) {
-      client.abortCall(toolName);
-    } else {
-      signal.addEventListener("abort", () => client.abortCall(toolName), {
-        once: true,
-      });
-    }
-    return client.callTool(toolName, args);
-  };
+  return (toolName, args, signal) => client.callTool(toolName, args, signal);
 }
 
 function makeDisabledHandle(name: string): McpServerHandle {
