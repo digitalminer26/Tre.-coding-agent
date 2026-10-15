@@ -1,6 +1,6 @@
 # 10 — MCP support: scope (pre-implementation)
 
-Status: **scope only — no code written.** **FROZEN 2026-10-14 (tier 1 is the
+Status: **tier 1 BUILT + ENABLED (2026-10-15); tier 2 item 1 (resources) BUILT (2026-10-15, commit `78052da`); tiers 2 (prompts, list-changed) and 3 deferred.** **FROZEN 2026-10-14 (tier 1 is the
 build scope; tiers 2–3 deferred — see §4).** Changes to this doc are made as
 needed when an inconsistency surfaces, not by re-scoping. Scoped against
 protocol revision **2026-07-28** (current; re-checked against the live spec
@@ -755,6 +755,17 @@ matrices). These are estimates from this scope, not measured.
 - `resources/list` + `resources/read` exposed as a single
   `mcp_resource` tool (`{ server, uri }`) — consistent with "tools are
   the only seam"; no context auto-injection (that fights compaction).
+  **DONE 2026-10-15 (commit `78052da`):** one tool instance when ≥1 server
+  is ready (none when zero); `resources/list` paginated like `tools/list`
+  (100-page / 10000-resource caps, cursor-loop detection) with in-band
+  failures (a malformed result is an `McpCallError`, the server is NOT
+  torn down); `resources/read` is cls "tool" (60 s timeout, abort-aware),
+  text/blob opaque, server-side `isError` surfaced; empty/absent `uri`
+  lists, a non-empty `uri` reads; text → blocks prefixed with the entry's
+  uri, blob → a descriptive block (base64 NOT dumped); BOTH list and read
+  outputs capped at 64 KiB with a truncation note; the name does not start
+  with `mcp__`, so it falls through to allow in every safety mode
+  (read-only; `safety.ts` untouched).
 - `prompts/list` + `prompts/get` as a `/mcp-prompt <server> <name>`
   slash command (expands into the input line) — prompts are user-facing,
   not model-facing.
