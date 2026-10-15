@@ -425,7 +425,10 @@ test("tools/call: text result maps to texts", async () => {
   const c = new McpClient("test", mock.transport, FAST);
   await c.start();
   callMock(mock, (_l, id) =>
-    mock.respondResult(id, { content: [{ type: "text", text: "hello" }] }),
+    mock.respondResult(id, {
+      resultType: "complete",
+      content: [{ type: "text", text: "hello" }],
+    }),
   );
   const r = await c.callTool("read_file", { path: "a" });
   assert.deepEqual(r.texts, ["hello"]);
@@ -440,6 +443,7 @@ test("tools/call: structuredContent appended after text blocks", async () => {
   await c.start();
   callMock(mock, (_l, id) =>
     mock.respondResult(id, {
+      resultType: "complete",
       content: [{ type: "text", text: "note" }],
       structuredContent: { a: 1 },
     }),
@@ -455,7 +459,9 @@ test("tools/call: structuredContent is the sole payload when content is empty", 
   modernMock(mock);
   const c = new McpClient("test", mock.transport, FAST);
   await c.start();
-  callMock(mock, (_l, id) => mock.respondResult(id, { structuredContent: { a: 1 } }));
+  callMock(mock, (_l, id) =>
+    mock.respondResult(id, { resultType: "complete", structuredContent: { a: 1 } }),
+  );
   const r = await c.callTool("read_file", {});
   assert.equal(r.texts.length, 1);
   assert.equal(r.texts[0], JSON.stringify({ a: 1 }, null, 2), "no header");
@@ -471,6 +477,60 @@ test("tools/call: input_required is an in-band isError (never success)", async (
   const r = await c.callTool("read_file", {});
   assert.equal(r.isError, true);
   assert.match(r.texts[0] ?? "", /input_required/);
+  c.close();
+});
+
+test("tools/call: a MODERN result missing resultType is an in-band isError (regression)", async () => {
+  // Scope §5.5: "Modern ordinary results require resultType: 'complete'".
+  // A modern result that omits resultType is a result-payload failure —
+  // in-band isError, NOT an envelope violation (the server is NOT torn down).
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  callMock(mock, (_l, id) =>
+    mock.respondResult(id, { content: [{ type: "text", text: "hello" }] }),
+  );
+  const r = await c.callTool("read_file", {});
+  assert.equal(r.isError, true);
+  assert.match(r.texts[0] ?? "", /resultType/);
+  assert.equal(c.getState().state, "ready", "server stays healthy (not torn down)");
+  c.close();
+});
+
+test("tools/call: a LEGACY result may omit resultType (accepted)", async () => {
+  // Scope §5.5: "legacy results may omit it". The same payload that is an
+  // error in the modern era is a valid success in the legacy era.
+  const mock = new MockMcpServer();
+  legacyMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  callMock(mock, (_l, id) =>
+    mock.respondResult(id, { content: [{ type: "text", text: "hi" }] }),
+  );
+  const r = await c.callTool("ping", {});
+  assert.equal(r.isError, false);
+  assert.deepEqual(r.texts, ["hi"]);
+  c.close();
+});
+
+test("tools/call: a MODERN result with an unknown resultType is an in-band isError", async () => {
+  // Scope §5.5: "a malformed/unknown result type on a tools/call result fails
+  // THAT CALL in-band". Present-but-not-"complete" (and not "input_required").
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  callMock(mock, (_l, id) =>
+    mock.respondResult(id, {
+      resultType: "partial",
+      content: [{ type: "text", text: "x" }],
+    }),
+  );
+  const r = await c.callTool("read_file", {});
+  assert.equal(r.isError, true);
+  assert.match(r.texts[0] ?? "", /unknown resultType/);
+  assert.equal(c.getState().state, "ready", "server stays healthy");
   c.close();
 });
 
@@ -508,7 +568,14 @@ test("concurrent calls: id-multiplexed pending map (parallel tools/call)", async
   let i = 0;
   callMock(mock, (_l, id) => {
     const d = delays[i++ % delays.length];
-    setTimeout(() => mock.respondResult(id, { content: [{ type: "text", text: "n" + id }] }), d);
+    setTimeout(
+      () =>
+        mock.respondResult(id, {
+          resultType: "complete",
+          content: [{ type: "text", text: "n" + id }],
+        }),
+      d,
+    );
   });
   const results = await Promise.all([
     c.callTool("read_file", {}),

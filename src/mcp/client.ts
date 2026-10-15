@@ -658,26 +658,34 @@ export class McpClient {
         isError: true,
       };
     }
-    // resultType: modern requires "complete"; "input_required" is unsupported
-    // (MRTR is tier 3); legacy may omit it. A malformed/unknown type fails
-    // THIS CALL in-band.
-    if (result.resultType !== undefined) {
-      if (result.resultType === "input_required") {
-        return {
-          texts: [
-            "MCP server requested interactive input (input_required) — unsupported in tier 1 (MRTR is tier 3)",
-          ],
-          isError: true,
-        };
-      }
-      if (result.resultType !== "complete") {
-        return {
-          texts: [
-            `MCP tools/call returned an unknown resultType: ${JSON.stringify(result.resultType)}`,
-          ],
-          isError: true,
-        };
-      }
+    // resultType rules (scope §5.5): "input_required" is unsupported (MRTR is
+    // tier 3) in EITHER era; a present-but-unknown type fails the call; and a
+    // MODERN ordinary result REQUIRES resultType: "complete" (legacy may omit
+    // it). All failures are in-band (isError) — a result-payload failure, NOT
+    // an envelope violation (the server is NOT torn down).
+    if (result.resultType === "input_required") {
+      return {
+        texts: [
+          "MCP server requested interactive input (input_required) — unsupported in tier 1 (MRTR is tier 3)",
+        ],
+        isError: true,
+      };
+    }
+    if (result.resultType !== undefined && result.resultType !== "complete") {
+      return {
+        texts: [
+          `MCP tools/call returned an unknown resultType: ${JSON.stringify(result.resultType)}`,
+        ],
+        isError: true,
+      };
+    }
+    if (this.era === "modern" && result.resultType === undefined) {
+      return {
+        texts: [
+          'MCP tools/call returned a modern result missing the required resultType: "complete"',
+        ],
+        isError: true,
+      };
     }
     const texts: string[] = [];
     const content = result.content;
