@@ -240,7 +240,7 @@ suggested subagent type (see §5); **size** = rough effort.
   unsandboxed (approval gate + destructive classifier still apply). Opt out:
   `--no-sandbox`. **owner:** `worker`. **size:** M.
 
-### WS12 — MCP support (tier 1: stdio servers, tools only) — *PLANNED 2026-10-14 (D29); safety branch DONE 2026-10-14 (commit `b417dd0`), implementation NOT started*
+### WS12 — MCP support (tier 1: stdio servers, tools only) — *PLANNED 2026-10-14 (D29); safety branch DONE 2026-10-14 (commit `b417dd0`); ISOLATED CORE DONE 2026-10-15 (config `f87597d`, client `da93ed6`+`37338c6`, spawn+adapter `0b315bb`) — registration still DISABLED; next: `cli/main.ts` wiring (spawn/teardown, `wiredTools` assembly, `--mcp` flags) + `/mcp` status command*
 - **Purpose:** let `tre.` use Model Context Protocol servers as tool
   providers. Scope doc with all design decisions: `docs/10-mcp-scope.md`.
   Tier 1 = local **stdio** servers, **tools only** (resources/prompts =
