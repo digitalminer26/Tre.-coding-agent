@@ -56,15 +56,38 @@ const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c);
 
 // ─────────────────────────────── parse ───────────────────────────────
 
-test("parseTreConfig: no extraRoots → empty list", () => {
-  assert.deepEqual(parseTreConfig("{}"), { extraRoots: [], mcpServers: {} });
-  assert.deepEqual(parseTreConfig('{"extraRoots": []}'), { extraRoots: [], mcpServers: {} });
+test("parseTreConfig: no extraRoots → empty list; no budget keys → undefined", () => {
+  assert.deepEqual(parseTreConfig("{}"), { extraRoots: [], mcpServers: {}, maxTurns: undefined, maxContinuations: undefined });
+  assert.deepEqual(parseTreConfig('{"extraRoots": []}'), { extraRoots: [], mcpServers: {}, maxTurns: undefined, maxContinuations: undefined });
 });
 
 test("parseTreConfig: a list of dirs is kept in order", () => {
   const c = parseTreConfig('{"extraRoots": ["/a/b", "~/scratch", "rel/dir"]}');
   assert.deepEqual(c.extraRoots, ["/a/b", "~/scratch", "rel/dir"]);
   assert.deepEqual(c.mcpServers, {});
+  assert.equal(c.maxTurns, undefined);
+  assert.equal(c.maxContinuations, undefined);
+});
+
+test("parseTreConfig: maxTurns / maxContinuations parse as the durable turn budget", () => {
+  const c = parseTreConfig('{"maxTurns": 2000, "maxContinuations": 9}');
+  assert.equal(c.maxTurns, 2000);
+  assert.equal(c.maxContinuations, 9);
+  // 0 continuations is valid (the C26 legacy hard-stop); maxTurns 0 is not.
+  const zero = parseTreConfig('{"maxContinuations": 0}');
+  assert.equal(zero.maxContinuations, 0);
+  assert.equal(zero.maxTurns, undefined);
+});
+
+test("parseTreConfig: malformed budget keys → descriptive throw (fail-closed)", () => {
+  assert.throws(() => parseTreConfig('{"maxTurns": 0}'), /maxTurns.*positive integer/);
+  assert.throws(() => parseTreConfig('{"maxTurns": -5}'), /maxTurns.*positive integer/);
+  assert.throws(() => parseTreConfig('{"maxTurns": 2.5}'), /maxTurns.*positive integer/);
+  assert.throws(() => parseTreConfig('{"maxTurns": "2000"}'), /maxTurns.*positive integer/);
+  assert.throws(() => parseTreConfig('{"maxTurns": null}'), /maxTurns.*positive integer/);
+  assert.throws(() => parseTreConfig('{"maxContinuations": -1}'), /maxContinuations.*non-negative integer/);
+  assert.throws(() => parseTreConfig('{"maxContinuations": 1.5}'), /maxContinuations.*non-negative integer/);
+  assert.throws(() => parseTreConfig('{"maxContinuations": true}'), /maxContinuations.*non-negative integer/);
 });
 
 test("parseTreConfig: malformed extraRoots → descriptive throw", () => {
@@ -155,7 +178,7 @@ test("loadTreConfig: reads and parses a file", (t) => {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const p = path.join(dir, "tre.json");
   fs.writeFileSync(p, '{"extraRoots": ["/x"]}');
-  assert.deepEqual(loadTreConfig(p), { extraRoots: ["/x"], mcpServers: {} });
+  assert.deepEqual(loadTreConfig(p), { extraRoots: ["/x"], mcpServers: {}, maxTurns: undefined, maxContinuations: undefined });
 });
 
 test("findTreConfig: explicit path wins even if it does not exist", () => {
@@ -342,6 +365,55 @@ test("main: malformed tre.json → refuses startup (exit 2), never a silent igno
   );
   assert.equal(code, 2);
   assert.match(S.err(), /'extraRoots' must be an array/);
+});
+
+test("main: tre.json maxTurns/maxContinuations are the durable baseline; the flags override", async (t) => {
+  const { dir, models } = await workspace(t);
+  const cfg = path.join(dir, "tre.json");
+  fs.writeFileSync(cfg, JSON.stringify({ maxTurns: 777, maxContinuations: 5 }));
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--models", models, "--cwd", dir],
+    { streamFn: fakeStream([{ type: "text", text: "ok" }]), sinks: S.sinks, treConfigPath: cfg },
+  );
+  assert.equal(code, 0, `startup should succeed (stderr: ${S.err()})`);
+  // The behavior summary shows the EFFECTIVE budget (tre.json's values).
+  assert.match(S.err(), /turn budget: 777 turns\/cycle × 6 cycles \(max-continuations 5\)/);
+
+  // The CLI flag WINS over tre.json (per-launch override).
+  const S2 = mkSinks();
+  const code2 = await main(
+    ["run", "x", "--tools", "none", "--models", models, "--cwd", dir, "--max-turns", "42", "--max-continuations", "1"],
+    { streamFn: fakeStream([{ type: "text", text: "ok" }]), sinks: S2.sinks, treConfigPath: cfg },
+  );
+  assert.equal(code2, 0, `startup should succeed (stderr: ${S2.err()})`);
+  assert.match(S2.err(), /turn budget: 42 turns\/cycle × 2 cycles \(max-continuations 1\)/);
+});
+
+test("main: tre.json malformed budget keys → refuses startup (exit 2), fail-closed", async (t) => {
+  const { dir, models } = await workspace(t);
+  const cfg = path.join(dir, "tre.json");
+  fs.writeFileSync(cfg, JSON.stringify({ maxTurns: "lots" }));
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--models", models, "--cwd", dir],
+    { streamFn: fakeStream([{ type: "text", text: "ok" }]), sinks: S.sinks, treConfigPath: cfg },
+  );
+  assert.equal(code, 2);
+  assert.match(S.err(), /'maxTurns' must be a positive integer/);
+});
+
+test("main: no budget keys anywhere → no turn-budget line in the summary (derived default)", async (t) => {
+  const { dir, models } = await workspace(t);
+  const cfg = path.join(dir, "tre.json");
+  fs.writeFileSync(cfg, "{}");
+  const S = mkSinks();
+  const code = await main(
+    ["run", "x", "--tools", "none", "--models", models, "--cwd", dir],
+    { streamFn: fakeStream([{ type: "text", text: "ok" }]), sinks: S.sinks, treConfigPath: cfg },
+  );
+  assert.equal(code, 0, `startup should succeed (stderr: ${S.err()})`);
+  assert.doesNotMatch(S.err(), /turn budget:/);
 });
 
 test(

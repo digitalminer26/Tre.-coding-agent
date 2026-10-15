@@ -28,12 +28,14 @@
  *   --skills <dir>     skills dir (repeatable); defaults: <cwd>/.tre/skills then
  *                      ~/.tre/agent/skills (project skills shadow user skills by name)
  *   --max-turns <n>    per-cycle LLM-turn budget (default: derived from the
- *                      model's contextWindow/maxTokens — see deriveMaxTurns)
+ *                      model's contextWindow/maxTokens — see deriveMaxTurns).
+ *                      Durable in tre.json as "maxTurns" — the flag overrides.
  *   --max-continuations <n>
  *                      C26: how many times the loop auto-continues when a
  *                      cycle's budget is exhausted (default 3 → 4 cycles).
  *                      The runaway-loop guard (3 identical batches in a row)
- *                      is always on, regardless of this value.
+ *                      is always on, regardless of this value. Durable in
+ *                      tre.json as "maxContinuations" — the flag overrides.
  *
  * Behavior:
  *   - Streaming assistant text goes to stdout as deltas; tool lines to stdout;
@@ -1038,9 +1040,17 @@ Options:
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
   --skills <dir>     skills dir (repeatable)
-  --max-turns <n>    per-run LLM-turn cap (default: derived from the model's
+  --max-turns <n>    per-cycle LLM-turn cap (default: derived from the model's
                      contextWindow/maxTokens — hundreds of turns for a large
-                     window; the runaway guard is always on)
+                     window; the runaway guard is always on). Durable in
+                     tre.json as "maxTurns" — the flag overrides it.
+  --max-continuations <n>
+                     how many times the loop auto-continues when a cycle's
+                     budget is exhausted (default 3 → 4 cycles; 0 = stop at
+                     the first budget hit). Durable in tre.json as
+                     "maxContinuations" — the flag overrides it. The
+                     runaway-loop guard (3 identical batches in a row)
+                     is always on, regardless of these values.
   --ask              prompt for SENSITIVE + DESTRUCTIVE (workspace-scoped)
                      and mutating bash; read-only bash, reversible
                      git/npm/filesystem ops, and in-workspace write/edit run
@@ -1190,6 +1200,13 @@ export function behaviorSettingsLines(
   oneShotRoots: string[] = [],
   skills: { name: string; description: string }[] = [],
   implicitRoot?: string,
+  /** The EFFECTIVE per-cycle turn cap after precedence (CLI flag > tre.json
+   *  > the model-derived default). undefined = derived from the model —
+   *  the summary only shows the budget when it is explicitly set. */
+  maxTurns?: number,
+  /** The EFFECTIVE continuation count after precedence (CLI flag >
+   *  tre.json > the loop's default 3). undefined = default — not shown. */
+  maxContinuations?: number,
 ): string[] {
   const approval =
     mode === "yes"
@@ -1229,6 +1246,14 @@ export function behaviorSettingsLines(
     lines.push(
       "  note: --extra-root is one-shot (this launch only) and is NOT written to tre.json — to make a root durable, add it to tre.json",
     );
+  }
+  if (maxTurns !== undefined || maxContinuations !== undefined) {
+    const turnPart = maxTurns !== undefined ? `${maxTurns} turns/cycle` : "derived turn cap";
+    const contPart =
+      maxContinuations !== undefined
+        ? `${maxContinuations + 1} cycles (max-continuations ${maxContinuations})`
+        : "4 cycles (default)";
+    lines.push(`  turn budget: ${turnPart} × ${contPart}  (--max-turns / --max-continuations, or tre.json)`);
   }
   if (skills.length > 0) {
     lines.push(`  skills:   ${skills.length} available`);
@@ -1346,6 +1371,18 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       sinks.err.write(`error: ${treConfigPath}: ${String(err)}\n`);
       return 2;
     }
+  }
+
+  // Durable turn-budget keys (tre.json) — the CLI flag wins, tre.json is the
+  // durable baseline, absent everywhere → the derived default (C24 turn cap
+  // from the model) / the loop's default continuation count (C26). Same
+  // precedence as extraRoots, same fail-closed parse (a malformed value
+  // already refused the startup in loadTreConfig, exit 2).
+  if (args.maxTurns === undefined && treConfig?.maxTurns !== undefined) {
+    args.maxTurns = treConfig.maxTurns;
+  }
+  if (args.maxContinuations === undefined && treConfig?.maxContinuations !== undefined) {
+    args.maxContinuations = treConfig.maxContinuations;
   }
   // C35: validate the explicitly assigned extra roots BEFORE wiring anything
   // (fail-closed: a root that would widen the boundary onto a secret surface
@@ -1603,7 +1640,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const sandboxOn = !args.noSandbox
     ? (bashSandboxAvailable() ? true : "unsupported")
     : false;
-  const behavior = behaviorSettingsLines(mode, sandboxOn, durableRoots, oneShotRoots, skills, implicitRoot);
+  const behavior = behaviorSettingsLines(mode, sandboxOn, durableRoots, oneShotRoots, skills, implicitRoot, args.maxTurns, args.maxContinuations);
 
   // Bare `tre.` (ui "auto"): the Ink TUI on a TTY, the plain REPL when stdin
   // is piped (a pipe has no terminal for raw mode — the REPL is the

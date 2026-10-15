@@ -12,7 +12,8 @@
  *
  * tre.json shape:
  *   { "extraRoots": [ "/abs/or/~/relative/dir", ... ],
- *     "mcpServers": { "fs": { "command": "npx", "args": [...], ... } } }
+ *     "mcpServers": { "fs": { "command": "npx", "args": [...], ... } },
+ *     "maxTurns": 2000, "maxContinuations": 9 }
  *
  * Entries may start with `~` or `~/` (expanded against the home dir at
  * startup, like a shell) — e.g. `"~/kubeconfigs"`. `~` alone means the home
@@ -30,7 +31,11 @@
  * Precedence: the CLI flag wins — `--extra-root` entries are APPENDED after
  * the tre.json entries (both are validated; a bad tre.json entry refuses the
  * startup just like a bad flag). So tre.json is the durable baseline and the
- * flag is the per-launch override/addition.
+ * flag is the per-launch override/addition. The same precedence governs the
+ * turn-budget keys: `maxTurns` / `maxContinuations` in tre.json are the
+ * durable baseline; `--max-turns` / `--max-continuations` override them for
+ * the launch; absent everywhere → the derived default (C24) / the loop's
+ * default continuation count (C26).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -40,6 +45,14 @@ export interface TreConfig {
   /** Durable extra roots (C35). Each entry is validated at startup exactly
    *  like a `--extra-root` value (exists, non-sensitive, under home). */
   extraRoots: string[];
+  /** Durable per-cycle LLM-turn cap (the runaway guard's size). undefined =
+   *  not set in tre.json — the CLI flag wins, else deriveMaxTurns derives it
+   *  from the model (C24). */
+  maxTurns?: number;
+  /** Durable auto-continuation count (C26: how many times the loop
+   *  auto-continues when a cycle's budget is exhausted; undefined = not set
+   *  in tre.json — the CLI flag wins, else the loop's default). */
+  maxContinuations?: number;
   /** WS12: durable MCP server configs (docs/10-mcp-scope.md §4.1). Parsed
    *  leniently (absent → empty map) and validated fail-closed at startup by
    *  `validateMcpServers` in `src/mcp/config.ts` — the same posture as
@@ -85,7 +98,12 @@ export interface McpServerConfig {
  *  `extraRoots` (CLI-level input validation — allowed to throw before any
  *  StreamFn call, like parseModelsFile). */
 export function parseTreConfig(raw: string): TreConfig {
-  const j = JSON.parse(raw) as { extraRoots?: unknown; mcpServers?: unknown };
+  const j = JSON.parse(raw) as {
+    extraRoots?: unknown;
+    mcpServers?: unknown;
+    maxTurns?: unknown;
+    maxContinuations?: unknown;
+  };
   const extraRoots: string[] = [];
   if (j.extraRoots !== undefined) {
     if (!Array.isArray(j.extraRoots)) {
@@ -98,7 +116,35 @@ export function parseTreConfig(raw: string): TreConfig {
       extraRoots.push(v);
     }
   }
-  return { extraRoots, mcpServers: parseMcpServers(j.mcpServers) };
+  return {
+    extraRoots,
+    maxTurns: parsePosInt(j.maxTurns, "maxTurns"),
+    maxContinuations: parseNonNegInt(j.maxContinuations, "maxContinuations"),
+    mcpServers: parseMcpServers(j.mcpServers),
+  };
+}
+
+/** Durable per-cycle turn cap (C24): absent → undefined (the CLI flag wins,
+ *  else deriveMaxTurns derives it from the model); present → a positive
+ *  integer (fail-closed, like a bad `--max-turns`). */
+function parsePosInt(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+    throw new Error(`tre.json: '${what}' must be a positive integer`);
+  }
+  return v;
+}
+
+/** Durable auto-continuation count (C26): absent → undefined (the CLI flag
+ *  wins, else the loop's default); present → a non-negative integer (0 is
+ *  valid — the legacy hard-stop; fail-closed, like a bad
+ *  `--max-continuations`). */
+function parseNonNegInt(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw new Error(`tre.json: '${what}' must be a non-negative integer`);
+  }
+  return v;
 }
 
 /** WS12 — parse + normalize the `mcpServers` field of tre.json (scope §4.1).

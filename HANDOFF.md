@@ -1,5 +1,21 @@
 # Current project status (2026-10-15)
 
+**Durable turn budget in tre.json (2026-10-15).** The C24/C26 turn-budget
+knobs are now durable config, mirroring `extraRoots`' C36 posture: tre.json
+gains `"maxTurns"` (a positive integer — the per-cycle LLM-turn cap) and
+`"maxContinuations"` (a non-negative integer — how many times the loop
+auto-continues when a cycle's budget is exhausted; `0` = the legacy
+hard-stop). Precedence is the same as `extraRoots`: the CLI flag
+(`--max-turns` / `--max-continuations`) overrides tre.json for the launch;
+absent everywhere → the model-derived cap (C24) / the loop's default
+continuation count (C26). Parsing is fail-closed (a malformed value refuses
+the startup, exit 2, like a bad `extraRoots`). The startup behavior summary
+shows the EFFECTIVE budget when it is explicitly set —
+`turn budget: N turns/cycle × M cycles (max-continuations N−1)` — and stays
+silent when everything is derived (no noise for defaults). +7 tests (parse
+happy/malformed paths, CLI precedence + flag-override, summary line, absence
+line); full suite 1080 tests / 0 fail.
+
 **MCP CLI wiring + `/mcp` status — tier 1 ENABLED (2026-10-15).** The isolated
 core (config `f87597d`, client `da93ed6`+`37338c6`, spawn+adapter `0b315bb`)
 and the safety branch (`b417dd0`) land the rest: `cli/main.ts` now spawns the
