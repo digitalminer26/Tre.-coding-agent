@@ -802,3 +802,50 @@ test("outbound ids are never strings (probe, handshake, and calls all use intege
   }
   c.close();
 });
+
+// ── Finding #1: a transport write rejection must settle the pending call ──
+// (in-band isError, no hang), fail the server, and tear the transport down.
+
+test("write rejection: the pending call settles in-band (no hang), server fails, transport killed", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  assert.equal(c.getState().state, "ready");
+
+  // The NEXT stdin write (the tools/call frame) rejects with a transport
+  // error (EPIPE / broken pipe).
+  mock.interceptWrites();
+  mock.failNextWrite = true;
+
+  // This MUST resolve (not hang) — the write-error path must settle the
+  // pending entry in-band.
+  const res = await c.callTool("read_file", { path: "/x" });
+  assert.equal(res.isError, true, "the call fails in-band");
+  assert.ok(res.texts.join(" ").length > 0, "a failure message is present");
+
+  // The server is failed (a write error is a transport failure), the
+  // transport was killed, and no pending entry is left unsettled.
+  assert.equal(c.getState().state, "failed");
+  assert.ok(mock.killed, "the transport was killed (teardown ran)");
+  assert.equal(c.getStats().pending, 0, "no unsettled pending entry");
+
+  // A later call is rejected in-band (the server is not running) — it does
+  // NOT hang either.
+  const again = await c.callTool("read_file", { path: "/y" });
+  assert.equal(again.isError, true);
+  assert.match(again.texts.join(" "), /not running|closed|failed/i);
+});
+
+test("write rejection during STARTUP (the probe frame): start() rejects, no hang, transport killed", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  // The FIRST write (the probe frame) rejects.
+  mock.interceptWrites();
+  mock.failNextWrite = true;
+  await assert.rejects(c.start(), /transport failure|stdin write error/i);
+  assert.equal(c.getState().state, "failed");
+  assert.ok(mock.killed, "the transport was killed");
+  assert.equal(c.getStats().pending, 0, "no unsettled pending entry");
+});

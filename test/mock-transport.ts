@@ -40,6 +40,9 @@ export class MockMcpServer {
   /** When true, stdin writes never call their flush callback (a stalled
    *  pipe). Pair with interceptWrites(). */
   pauseWrites = false;
+  /** When true, the NEXT stdin write calls its flush callback with an error
+   *  (simulates a transport write rejection — EPIPE / broken pipe). */
+  failNextWrite = false;
   private pendingFlushes: Array<() => void> = [];
   private handlers: Array<(l: InboundLine) => void> = [];
   private stdinBuf = "";
@@ -100,6 +103,13 @@ export class MockMcpServer {
     ): boolean => {
       const cb2 = typeof encOrCb === "function" ? encOrCb : cb;
       const enc = typeof encOrCb === "string" ? encOrCb : undefined;
+      if (self.failNextWrite && cb2) {
+        self.failNextWrite = false;
+        // Simulate a transport write rejection (EPIPE / broken pipe): the
+        // flush callback fires WITH an error, on the next tick.
+        setImmediate(() => cb2(new Error("write EPIPE (simulated transport rejection)")));
+        return false;
+      }
       if (self.pauseWrites && cb2) {
         self.pendingFlushes.push(() => cb2());
         return false;
