@@ -36,6 +36,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { priceCachePath, resolveModelPrices } from "./model-prices.js";
 import { restartCommand } from "./restart.js";
+import { mcpStatusLine, type McpServerHandle } from "../mcp/registry.js";
 import { startPerfEntrySweep } from "./perf-sweep.js";
 import { isHighFrequencyStreamEvent, makeInputHandlers, makeRenderCoalescer, makeStateUpdateRouter } from "./render-coalesce.js";
 import { loadTuiConfig, resolveBottomFields, saveTuiConfig, tuiConfigPath } from "./tui-config.js";
@@ -114,6 +115,18 @@ function sessionSizeBytes(sessionPath: string | undefined): number | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * WS12 (scope §7) — the driver side of `/mcp`. Renders one line per MCP
+ * server handle (mcpStatusLine: `ready (N tools) | starting | failed
+ * (<reason>) | disabled`) and joins them with newlines. Returns undefined
+ * when no servers were configured this launch (the handler then reports
+ * "no servers configured"). state.ts stays pure — it receives this string.
+ */
+function mcpStatusText(handles: McpServerHandle[] | undefined): string | undefined {
+  if (!handles || handles.length === 0) return undefined;
+  return handles.map((h) => mcpStatusLine(h)).join("\n");
 }
 
 /**
@@ -256,6 +269,14 @@ export interface TuiRunOptions {
   subtasksStaleMs?: number;
   /** The home directory used by the CLI's subtask tool (test injection). */
   home?: string;
+  /**
+   * WS12 (scope §7): the MCP server handles for the `/mcp` status command.
+   * The driver renders one line per handle (mcpStatusLine) and feeds the
+   * joined string into handleSlashCommand as the `mcpStatus` arg. Absent →
+   * no servers were configured this launch → `/mcp` reports "no servers
+   * configured".
+   */
+  mcpStatus?: McpServerHandle[];
 }
 
 export async function runTui(opts: TuiRunOptions): Promise<number> {
@@ -766,7 +787,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
             return;
           }
           const prevBottom = state.bottom;
-          const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath));
+          const slash = handleSlashCommand(slashBusy.state, slashBusy.line, sessionSizeBytes(opts.sessionPath), mcpStatusText(opts.mcpStatus));
           setStateNow(slash.handled ? slash.state : slashBusy.state);
           // The picker transitioned null→open (bare /display-bottom while
           // busy): snapshot the selection it opened with — esc restores it,
@@ -836,9 +857,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       }
       // D15: slash commands are UI commands, not runs — dispatch through the
       // pure handler, then clear the busy flag submitInput raised. The
-      // driver measures the session file (I/O) for /stats.
+      // driver measures the session file (I/O) for /stats and the MCP
+      // handles for /mcp.
       const prevBottom = state.bottom;
-      const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath));
+      const slash = handleSlashCommand(r.state, prompt, sessionSizeBytes(opts.sessionPath), mcpStatusText(opts.mcpStatus));
       if (slash.handled) {
         setStateNow({ ...slash.state, busy: false });
         // The picker transitioned null→open (bare /display-bottom): snapshot

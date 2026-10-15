@@ -19,6 +19,9 @@
  *   --models <file>    models.json path (default: ~/.tre/tre/models.json)
  *   --tools <list>     comma list of read,write,edit,bash; "all" (default) or "none"
  *   --cwd <dir>        working directory the agent operates in (default: process.cwd())
+ *   --mcp <file|none>  WS12: MCP servers (stdio). tre.json's "mcpServers" is the
+ *                      default; --mcp <file> is an explicit config path (tests);
+ *                      --mcp none disables all servers for this launch.
  *   --session <file>   session file: created if absent, resumed if present
  *   --resume <file>    resume an EXISTING session (error if absent)
  *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -66,7 +69,7 @@ import {
   readActiveModelLenient,
   resolveModel,
 } from "../config/models.js";
-import { expandTilde, findTreConfig, loadTreConfig } from "../config/tre-config.js";
+import { expandTilde, findTreConfig, loadTreConfig, type TreConfig, type McpServerConfig } from "../config/tre-config.js";
 import {
   calibrateCharsPerToken,
   compactContext,
@@ -88,6 +91,15 @@ import { buildSystemPrompt, systemPromptSectionChars } from "../prompt/system-pr
 import { loadSkillsIndex, type SkillIndexEntry } from "../prompt/skills.js";
 import { DEFAULT_TOOLS, canonicalSessionPath, createBashTool, createSubtaskTool, makeToolExecutor } from "../tools/index.js";
 import { bashSandboxAvailable } from "../tools/sandbox.js";
+import {
+  startMcpServers,
+  teardownAll,
+  killAll,
+  mcpStatusLine,
+  type McpStartResult,
+} from "../mcp/registry.js";
+import { spawnMcpServer } from "../mcp/spawn.js";
+import { validateMcpServers } from "../mcp/config.js";
 import {
   makeSafetyHooks,
   makeAskQueue,
@@ -209,6 +221,9 @@ export interface CliOptions {
    *  written to tre.json (the durable baseline; C36). Validated at startup;
    *  a refusal exits 2. */
   extraRoots: string[];
+  /** WS12: --mcp <file> (explicit config path) / --mcp none (disable all
+   *  servers for a launch). undefined = the tre.json `mcpServers` default. */
+  mcp?: string;
 }
 
 export interface ParsedArgs extends CliOptions {
@@ -268,7 +283,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
-               a === "--max-continuations" || a === "--compact-keep" || a === "--extra-root") {
+               a === "--max-continuations" || a === "--compact-keep" || a === "--extra-root" ||
+               a === "--mcp") {
       const v = argv[i + 1];
       if (v === undefined) {
         opts.errors.push(`${a} needs a value`);
@@ -283,6 +299,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (a === "--resume") opts.resumePath = v;
       else if (a === "--skills") opts.skillDirs.push(v);
       else if (a === "--extra-root") opts.extraRoots.push(v);
+      else if (a === "--mcp") opts.mcp = v;
       else if (a === "--max-turns") {
         const n = Number(v);
         if (!Number.isInteger(n) || n <= 0) opts.errors.push("--max-turns must be a positive integer");
@@ -1007,6 +1024,16 @@ Options:
                      appends to it for this launch. Entries (config or flag)
                      may use ~ or ~/ (expanded against your home dir, like a
                      shell) — e.g. ~/kubeconfigs
+  --mcp <file|none>  WS12: MCP servers (stdio). Config home is tre.json
+                     (nearest above the launch dir, then ~/.tre/tre.json) with
+                     { "mcpServers": { "<name>": { "command", "args", ... } } }.
+                     --mcp <file> uses an explicit config path (tests);
+                     --mcp none disables all servers for this launch. Imported
+                     tools are ADDITIVE to the built-in set — --tools filters
+                     the built-ins only and CANNOT name/filter MCP tools (the
+                     per-server "tools" allowlist in tre.json is the MCP-scoped
+                     equivalent). A server's tools default to ASK (prompt in
+                     ask/yes, block in no) unless the server is "trust": true.
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -1310,9 +1337,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   const treConfigPath =
     deps.treConfigPath ?? findTreConfig(undefined, path.resolve(process.cwd()));
   let configExtraRoots: string[] = [];
+  let treConfig: TreConfig | null = null;
   if (treConfigPath !== null) {
     try {
-      configExtraRoots = loadTreConfig(treConfigPath).extraRoots;
+      treConfig = loadTreConfig(treConfigPath);
+      configExtraRoots = treConfig.extraRoots;
     } catch (err) {
       sinks.err.write(`error: ${treConfigPath}: ${String(err)}\n`);
       return 2;
@@ -1379,7 +1408,65 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   }
   const sessionFile = args.resumePath ?? args.sessionPath ?? autoSessionPath;
 
-  const wiredTools = tools.map((t) => {
+  // WS12: MCP servers (scope §4.1/§4.4/§6). Config home is tre.json (the same
+  // walk-up + ~/.tre/tre.json as extraRoots); `--mcp <file>` overrides with an
+  // explicit config path (tests) and `--mcp none` disables all servers for a
+  // launch. Startup is BLOCKING (spawn at startup, §4.4): the imported tools
+  // must be present for the first LLM call, so we await the start before
+  // assembling wiredTools. Per-server isolation (§4.4): one server's failure
+  // never aborts the launch — it is marked `failed` (its tools absent, a
+  // one-line notice), the others proceed. A malformed / missing config
+  // refuses the startup (exit 2), like a bad extraRoots.
+  let mcpResult: McpStartResult | null = null;
+  {
+    let mcpServers: Record<string, McpServerConfig>;
+    let skipValidation = false;
+    if (args.mcp === "none") {
+      // Disable ALL servers for this launch (a clean off switch): no spawn,
+      // no tools, no validation. The configured servers (if any) are reported
+      // as `disabled` by /mcp. A server's broken cwd is NOT a launch error
+      // here — the user explicitly opted out of MCP for this launch.
+      mcpServers = { ...(treConfig?.mcpServers ?? {}) };
+      for (const k of Object.keys(mcpServers)) mcpServers[k]!.disabled = true;
+      skipValidation = true;
+    } else if (args.mcp !== undefined) {
+      // Explicit config path (tests): a tre.json-shaped file. A missing or
+      // malformed file refuses the startup (exit 2), like a bad extraRoots.
+      try {
+        mcpServers = loadTreConfig(args.mcp).mcpServers;
+      } catch (err) {
+        sinks.err.write(`error: --mcp ${args.mcp}: ${String(err)}\n`);
+        return 2;
+      }
+    } else {
+      mcpServers = treConfig?.mcpServers ?? {};
+    }
+    if (Object.keys(mcpServers).length > 0) {
+      if (!skipValidation) {
+        // Validate BEFORE spawning (fail-closed, like a bad extraRoots): a
+        // server whose cwd does not exist refuses the startup.
+        const mcpErrors = validateMcpServers(mcpServers, root);
+        if (mcpErrors.length > 0) {
+          for (const e of mcpErrors) sinks.err.write(`error: ${e}\n`);
+          return 2;
+        }
+      }
+      mcpResult = await startMcpServers(mcpServers, spawnMcpServer, {
+        launchDir: root,
+        workspace: root,
+        extraRoots,
+        parentEnv: { ...process.env },
+        builtinNames: tools.map((t) => t.name),
+      });
+      for (const h of mcpResult.handles) {
+        if (h.state === "failed") {
+          sinks.err.write(`mcp: ${mcpStatusLine(h)}\n`);
+        }
+      }
+    }
+  }
+
+  const builtInWired = tools.map((t) => {
     if (t.name === "bash") {
       return createBashTool(root, { sandbox: !args.noSandbox, extraRoots });
     }
@@ -1410,6 +1497,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
     return t;
   });
+  // WS12: MCP tools are ADDITIVE to the built-in set (§6): `--tools` filters
+  // the built-in set only; the imported tools (from the enabled servers) are
+  // appended here. Each carries its `mcpTrusted`/`mcpAnnotations` side-table
+  // fields, which the approval gate (§5.3) reads to classify the call.
+  const wiredTools: Tool[] = [...builtInWired, ...(mcpResult?.tools ?? [])];
 
   // skills
   const skillDirs = args.skillDirs.length > 0 ? args.skillDirs : defaultSkillDirs(root);
@@ -1562,6 +1654,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       cwd: root,
       sessionPath: sessionFile,
       home: deps.home,
+      // WS12 (scope §7): the live MCP handles for the TUI's /mcp status
+      // command (one line per server, reflecting its §4.4 state). Absent →
+      // no servers configured → /mcp reports "no servers configured".
+      mcpStatus: mcpResult?.handles,
       // The startup behavior-settings summary — seeded as a single multi-line
       // info item so the user sees the current approval/sandbox behavior and
       // the optional flags before the first prompt.
@@ -1575,6 +1671,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         ? [process.argv[0]!, process.argv[1]!, ...process.argv.slice(2).filter((a) => a !== "--session-auto"), "--resume", autoSessionPath]
         : process.argv,
     });
+    if (mcpResult) await teardownAll(mcpResult);
     if (session) await session.close();
     return code;
   }
@@ -1648,11 +1745,15 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const now = Date.now();
       if (now - lastInt < 2000) {
         telegramDriver?.stop();
+        if (mcpResult) killAll(mcpResult); // sync group-SIGKILL backstop (§4.4)
         process.exit(130);
       }
       controller.abort();
       lastInt = now;
-    } else process.exit(130);
+    } else {
+      if (mcpResult) killAll(mcpResult); // sync group-SIGKILL backstop (§4.4)
+      process.exit(130);
+    }
   };
   process.on("SIGINT", onSigint);
 
@@ -1926,6 +2027,17 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         }
         continue;
       }
+      // /mcp — one line per configured server, reflecting its §4.4 state
+      // (ready (N tools) | starting | failed (<reason>) | disabled).
+      // Driver-side, like /stats (scope §7).
+      if (prompt === "/mcp") {
+        if (!mcpResult || mcpResult.handles.length === 0) {
+          sinks.err.write("mcp: no servers configured\n");
+        } else {
+          for (const h of mcpResult.handles) sinks.err.write(mcpStatusLine(h) + "\n");
+        }
+        continue;
+      }
       if (prompt.startsWith("/")) {
         sinks.err.write(`unknown command: ${prompt}\n`);
         continue;
@@ -1965,6 +2077,9 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     // Stop the background Telegram driver (kills the in-flight poll child and
     // wakes any backoff sleep) so the process can exit cleanly.
     if (telegramBridge.enabled) telegramDriver?.stop();
+    // WS12: graceful MCP teardown (idempotent) — every clean exit path. The
+    // synchronous killAll backstop in onSigint covers the immediate-exit path.
+    if (mcpResult) await teardownAll(mcpResult);
     // Cleanup is best-effort: the REPL may already have ended (EOF).
     try {
       rl?.close();

@@ -1609,6 +1609,43 @@ test("handleSlashCommand: /stats appends one info line and touches nothing else"
   assert.equal(r.state.toolCalls, 4);
 });
 
+// ── WS12 (scope §7): /mcp status command ───────────────────────────────────
+
+test("handleSlashCommand: /mcp appends the driver-supplied status as an info item", () => {
+  const s = { ...makeInitialState("m"), input: "left alone" };
+  const status = "fs — ready (3 tools)\ndb — failed (probe: -32603)\nremote — disabled";
+  const r = handleSlashCommand(s, "/mcp", undefined, status);
+  assert.equal(r.handled, true);
+  assert.equal(r.state.items.length, s.items.length + 1, "exactly one item appended");
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.equal((info as { text: string }).text, status);
+  // the rest of the state is untouched
+  assert.equal(r.state.input, "left alone");
+  assert.deepEqual(r.state.bottom, []);
+});
+
+test("handleSlashCommand: /mcp with no status (no servers configured) reports that", () => {
+  const s = makeInitialState("m");
+  const r = handleSlashCommand(s, "/mcp");
+  assert.equal(r.handled, true);
+  const info = r.state.items[r.state.items.length - 1];
+  assert.equal(info?.kind, "info");
+  assert.equal((info as { text: string }).text, "mcp: no servers configured");
+});
+
+test("handleSlashCommand: /mcp is exact-only (/mcpX is not handled)", () => {
+  const s = makeInitialState("m");
+  assert.equal(handleSlashCommand(s, "/mcpX").handled, false);
+});
+
+test("SLASH_COMMANDS: /mcp is registered with a summary", () => {
+  const cmd = SLASH_COMMANDS.find((c) => c.name === "mcp");
+  assert.ok(cmd, "/mcp is in the registry");
+  assert.match(cmd!.summary, /MCP server status/);
+  assert.ok(slashCandidates("/mcp").includes("/mcp"), "the menu prefix-filters it");
+});
+
 // ── F2 (docs/08 §7): loop-guard telemetry — /stats_loop_guard ──────────────
 
 test("F2: guard_retry increments the session fire count and marks the run", () => {

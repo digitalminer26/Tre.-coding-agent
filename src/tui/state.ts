@@ -1625,6 +1625,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "display-bottom", summary: "pick the bottom display fields (↑/↓ + space + enter) / /display-bottom f1 f2 … sets" },
   { name: "exit", summary: "end the session (alias of /quit)" },
   { name: "models", summary: "pick the active model (↑/↓ + enter) / /models <id> switches" },
+  { name: "mcp", summary: "MCP server status: one line per server (ready/starting/failed/disabled)" },
   { name: "usage", summary: "historical token totals by model across local sessions" },
   { name: "quit", summary: "end the session" },
   { name: "restart", summary: "restart tre. in place (same session + settings; no quit/re-invoke)" },
@@ -2708,6 +2709,13 @@ export const startupInfoItem = (text: string): { kind: "info"; text: string; sta
  *   /models <id>               switch the active model (re-seeds modelLabel +
  *                              the context field; the driver re-resolves the
  *                              full ModelConfig by id — see applyModelSwitch)
+ *   /mcp                       WS12 (scope §7): one line per configured MCP
+ *                              server, reflecting its §4.4 state (ready (N
+ *                              tools) | starting | failed (<reason>) |
+ *                              disabled). Driver-side, like /stats — the
+ *                              driver measures the status string from the
+ *                              live handles (this stays pure); undefined →
+ *                              "no servers configured".
  *   /stats                     one info line: turns, tokens, tool calls,
  *                              session file (path + size in bytes)
  *   /stats_loop_guard          F2 (docs/08 §7): loop-guard telemetry — how
@@ -2726,6 +2734,7 @@ export function handleSlashCommand(
   s: TuiState,
   line: string,
   sessionBytes?: number,
+  mcpStatus?: string,
 ): { state: TuiState; handled: boolean } {
   const withInfo = (st: TuiState, text: string): TuiState => ({
     ...st,
@@ -2733,6 +2742,15 @@ export function handleSlashCommand(
   });
   if (line.trim() === "/stats") {
     return { state: withInfo(s, statsLine(s, sessionBytes)), handled: true };
+  }
+  if (line.trim() === "/mcp") {
+    // WS12 (scope §7): one line per configured MCP server, reflecting its
+    // §4.4 state (ready (N tools) | starting | failed (<reason>) | disabled).
+    // Driver-side, like /stats — the driver measures the status string from
+    // the live McpServerHandles (state.ts stays pure); undefined → no servers
+    // were configured this launch (the flag was --mcp none / tre.json had
+    // none), so we report that instead of an empty list.
+    return { state: withInfo(s, mcpStatus ?? "mcp: no servers configured"), handled: true };
   }
   if (line.trim() === "/stats_loop_guard") {
     return { state: withInfo(s, statsLoopGuardLine(s)), handled: true };

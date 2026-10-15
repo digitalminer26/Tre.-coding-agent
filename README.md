@@ -46,6 +46,7 @@ The TUI's `/display-bottom` opens an interactive field picker (↑/↓ + space
 - `docs/07-context-display-fidelity.md` — context display fidelity changes and remaining items
 - `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups
 - `docs/09-linux-sandbox.md` — Linux bash sandbox (Bubblewrap) boundary and mount order (Darwin stays on Seatbelt)
+- `docs/10-mcp-scope.md` — MCP (tier 1: stdio servers, tools only) design + the one CLI asymmetry (`--tools` filters built-ins only; MCP tools are additive, per-server `tools` allowlist is the MCP-scoped equivalent)
 - `docs/tui-mouse-selection/PLAN.md` — TUI in-app mouse selection + `/copy` (implemented)
 - `docs/workstream-input/plan.md` — responsive input during workstreams: stream-render coalescing + immediate interactive paints (implemented)
 - `HANDOFF.md` — dated implementation history (historical statuses may be superseded)

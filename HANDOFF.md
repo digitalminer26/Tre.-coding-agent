@@ -1,4 +1,27 @@
-# Current project status (2026-10-14)
+# Current project status (2026-10-15)
+
+**MCP CLI wiring + `/mcp` status — tier 1 ENABLED (2026-10-15).** The isolated
+core (config `f87597d`, client `da93ed6`+`37338c6`, spawn+adapter `0b315bb`)
+and the safety branch (`b417dd0`) land the rest: `cli/main.ts` now spawns the
+configured servers at startup (blocking — the imported tools must be present for
+the first LLM call), appends their `AdaptedMcpTool`s to `wiredTools` (additive
+to the built-ins; `--tools` filters the built-ins only — the per-server `tools`
+allowlist in tre.json is the MCP-scoped equivalent, scope §6.6), and tears them
+down on EVERY exit path (graceful `teardownAll` in the `finally` + a synchronous
+`killAll` group-SIGKILL backstop in the SIGINT handler). Config home is
+`tre.json` (same walk-up + `~/.tre/tre.json` fallback as `extraRoots`);
+`--mcp <file>` is an explicit config path (tests) and `--mcp none` disables all
+servers for a launch (reported `disabled` by `/mcp`, no validation). A
+malformed/missing config or a server with a broken `cwd` refuses the startup
+(exit 2), like a bad `extraRoots`; a server that fails to start is marked
+`failed` (tools absent, one-line notice) and the others proceed (per-server
+isolation, §4.4). The `/mcp` status command (scope §7) is driver-side in both
+surfaces: one line per configured server reflecting its §4.4 state
+(`ready (N tools) | starting | failed (<reason>) | disabled`) — REPL via the
+plain-REPL prompt loop, TUI via a `SLASH_COMMANDS` registry entry + a
+`handleSlashCommand` case (the driver measures the status string from the live
+handles; `state.ts` stays pure). +10 tests (parseArgs `--mcp`, `/mcp` handler,
+`SLASH_COMMANDS`/menu entries); full suite 1075 tests / 0 fail.
 
 **MCP scope re-audit (WS12/D29) — docs committed, safety branch committed,
 implementation NOT started (2026-10-14).** Second audit of

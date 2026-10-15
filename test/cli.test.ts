@@ -191,6 +191,22 @@ test("parseArgs: tui subcommand", () => {
   assert.equal(parseArgs(["run", "x"]).ui, "auto");
 });
 
+test("parseArgs: WS12 — --mcp <file|none> parses; defaults undefined", () => {
+  // No --mcp → undefined (the tre.json mcpServers default).
+  assert.equal(parseArgs([]).mcp, undefined);
+  assert.equal(parseArgs(["run", "x"]).mcp, undefined);
+  // --mcp <file> → the explicit config path (tests).
+  const a = parseArgs(["run", "x", "--mcp", "/tmp/mcp.json"]);
+  assert.deepEqual(a.errors, []);
+  assert.equal(a.mcp, "/tmp/mcp.json");
+  // --mcp none → the disable-all-servers sentinel (kept verbatim, not a path).
+  const b = parseArgs(["run", "x", "--mcp", "none"]);
+  assert.deepEqual(b.errors, []);
+  assert.equal(b.mcp, "none");
+  // --mcp needs a value.
+  assert.notDeepEqual(parseArgs(["run", "x", "--mcp"]).errors, []);
+});
+
 test("parseArgs: bare launch defaults to ui auto (TTY→TUI, piped→REPL resolved in main)", () => {
   assert.deepEqual(parseArgs([]).errors, []);
   assert.equal(parseArgs([]).ui, "auto");

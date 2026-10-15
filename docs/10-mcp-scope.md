@@ -1070,8 +1070,11 @@ Tier 1 is the shippable unit: after it, `tre.` can use local stdio MCP
 servers with existing safety/TUI/session/compaction behavior. It needs a
 new stdio spawn module in `src/mcp/spawn.ts` (NOT `tools/sandbox.ts` — that
 file is guardrail-protected and the bridge does not need to edit it); an
-approved in-tree SDK oracle also changes `scripts/check-deps.mjs`. MCP registration remains disabled
-until the human-committed `tools/safety.ts` branch is present.
+approved in-tree SDK oracle also changes `scripts/check-deps.mjs`. MCP
+registration is ENABLED (2026-10-15): the `tools/safety.ts` `mcp__` branch
+is committed (`b417dd0`) and the adapter lands the encoded `mcp__` wire
+names, so `cli/main.ts` spawns the servers at startup and appends their
+tools to `wiredTools`.
 
 ## 8. Open questions — RESOLVED (2026-10-14)
 

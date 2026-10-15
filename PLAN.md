@@ -240,7 +240,7 @@ suggested subagent type (see §5); **size** = rough effort.
   unsandboxed (approval gate + destructive classifier still apply). Opt out:
   `--no-sandbox`. **owner:** `worker`. **size:** M.
 
-### WS12 — MCP support (tier 1: stdio servers, tools only) — *PLANNED 2026-10-14 (D29); safety branch DONE 2026-10-14 (commit `b417dd0`); ISOLATED CORE DONE 2026-10-15 (config `f87597d`, client `da93ed6`+`37338c6`, spawn+adapter `0b315bb`) — registration still DISABLED; next: `cli/main.ts` wiring (spawn/teardown, `wiredTools` assembly, `--mcp` flags) + `/mcp` status command*
+### WS12 — MCP support (tier 1: stdio servers, tools only) — *PLANNED 2026-10-14 (D29); safety branch DONE 2026-10-14 (commit `b417dd0`); ISOLATED CORE DONE 2026-10-15 (config `f87597d`, client `da93ed6`+`37338c6`, spawn+adapter `0b315bb`); CLI wiring + `/mcp` status DONE 2026-10-15 (`cli/main.ts`: spawn at startup, `--mcp <file|none>` flags, tre.json `mcpServers` default, `wiredTools` assembly, teardown on every exit path + sync SIGKILL backstop; TUI + REPL `/mcp` status command) — tier 1 registration ENABLED*
 - **Purpose:** let `tre.` use Model Context Protocol servers as tool
   providers. Scope doc with all design decisions: `docs/10-mcp-scope.md`.
   Tier 1 = local **stdio** servers, **tools only** (resources/prompts =
@@ -587,17 +587,18 @@ suggested subagent type (see §5); **size** = rough effort.
   tsc + full suite). Deterministic mocks are required; live e2e is optional.
 - **deps:** WS0 contracts (unchanged), WS3 pipeline, WS7 safety hooks,
   WS11 sandbox spawn, C36 `tre.json` config. Agent may implement/test the
-  isolated client/config/adapter and disabled wiring. MCP tool
-  registration MUST remain disabled until the adapter lands (D29 ruling 9)
-  — the `tools/safety.ts` `mcp__` branch is **committed** (`b417dd0`), but
-  it only fires for `mcp__`-prefixed names: the adapter MUST use the
-  encoded wire names or non-MCP unknown names still fall through to allow.
+  isolated client/config/adapter and the wiring. MCP tool registration is
+  **ENABLED** (2026-10-15): the adapter lands the encoded `mcp__` wire
+  names, so the `tools/safety.ts` `mcp__` branch (committed `b417dd0`)
+  fires for imported MCP tools and non-MCP unknown names no longer fall
+  through to allow. `cli/main.ts` spawns the servers at startup, appends
+  their tools to `wiredTools`, and tears them down on every exit path.
   The stdio spawn is in `src/mcp/spawn.ts` and needs NO
   guardrail commit; `tools/sandbox.ts` changes (if ever needed) and
   `scripts/check-deps.mjs` (if in-tree oracle is approved) require a human
   commit with `GUARDRAIL_BYPASS=1`.
   Safe order: isolated core → (safety branch: DONE `b417dd0`) → enable MCP
-  CLI registration. **owner:** worker for
+  CLI registration (DONE 2026-10-15). **owner:** worker for
   agent-landable parts; human for guardrail-zone commits.
   **size:** M.
 
