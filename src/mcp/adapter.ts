@@ -30,7 +30,15 @@
  */
 import { createHash } from "node:crypto";
 import type { JsonSchema, TextBlock, Tool, ToolResult } from "../types.js";
-import type { McpTool, McpToolCallResult } from "./client.js";
+import {
+  McpBusyError,
+  McpCallError,
+  McpError,
+  type McpClient,
+  type McpState,
+  type McpTool,
+  type McpToolCallResult,
+} from "./client.js";
 
 /** The wire-name constraint (scope §4.3): `mcp__<server>__<tool>` within
  *  `^[a-zA-Z0-9_-]{1,64}$`. */
@@ -142,6 +150,166 @@ export function makeMcpTool(
   };
   if (annotations !== undefined) t.mcpAnnotations = annotations;
   return t;
+}
+
+/**
+ * The single `mcp_resource` tool (scope §Tier 2 — resources): ONE tool that
+ * takes `server` + `uri` as arguments, covering `resources/list` (empty
+ * `uri`) and `resources/read` (non-empty `uri`) across ALL ready servers.
+ *
+ * It is NOT a per-server, server-provided tool: the wire name is tre.'s own
+ * fixed name `mcp_resource` (NOT `mcp__…`), so the per-server `tools`
+ * allowlist does not apply to it, and the safety hooks' `mcp__`
+ * classification branch never matches it — it falls through to allow in
+ * every mode, the correct posture for a read-only resource reader.
+ */
+export interface McpResourceTool extends Tool {
+  displayName: string;
+  mcpTrusted: boolean;
+}
+
+/** A per-server resource lookup (built by the registry from its handles):
+ *  the client to call (READY servers only), plus the server's state +
+ *  reason (so a not-found / not-ready error can list every configured
+ *  server and its state). `null` when the name is not configured at all. */
+export type McpResourceLookup = (
+  serverName: string,
+) => { client: McpClient | null; state: McpState; reason: string } | null;
+
+/** A configured server's summary (name + state + reason) — used to build
+ *  the not-ready / unknown-server error so the model can self-correct. */
+export interface McpResourceServerInfo {
+  name: string;
+  state: McpState;
+  reason: string;
+}
+
+/** The total text cap for a resource read (64 KiB — chars, not bytes). */
+const RESOURCE_OUTPUT_CAP = 64 * 1024;
+
+/** `a (ready), b (failed: reason), c (disabled)` — the configured-server
+ *  list for the not-ready / unknown-server error. */
+function describeServers(servers: McpResourceServerInfo[]): string {
+  return servers
+    .map((s) => s.name + " (" + s.state + (s.reason ? ": " + s.reason : "") + ")")
+    .join(", ");
+}
+
+/** Build the single `mcp_resource` tool. `lookup` resolves a server name to
+ *  its client + state (ready servers only are callable); `servers` is the
+ *  full configured set (listed in the not-ready / unknown-server error so
+ *  the model can self-correct). `execute` NEVER throws — every failure is an
+ *  in-band isError result. */
+export function makeMcpResourceTool(
+  lookup: McpResourceLookup,
+  servers: McpResourceServerInfo[],
+): McpResourceTool {
+  return {
+    name: "mcp_resource",
+    description:
+      "Read a resource from a connected MCP server (read-only). List available resources first by calling this tool with an empty uri — it then returns the server's resource list.",
+    parameters: {
+      type: "object",
+      properties: {
+        server: {
+          type: "string",
+          description: "The MCP server name (as shown by /mcp)",
+        },
+        uri: {
+          type: "string",
+          description:
+            "The resource URI to read. Empty string = list the server's resources instead.",
+        },
+      },
+      required: ["server"],
+      additionalProperties: false,
+    },
+    execute: async (
+      _toolCallId: string,
+      args: Record<string, unknown>,
+      signal: AbortSignal,
+    ): Promise<ToolResult> => {
+      const fail = (text: string): ToolResult => ({
+        content: [{ type: "text", text }],
+        isError: true,
+      });
+      const server = args.server;
+      if (typeof server !== "string" || server.length === 0) {
+        return fail("mcp_resource: `server` must be a non-empty string");
+      }
+      const entry = lookup(server);
+      if (!entry) {
+        return fail(
+          `mcp_resource: unknown MCP server "${server}" — configured servers: ` +
+            describeServers(servers),
+        );
+      }
+      if (entry.state !== "ready" || !entry.client) {
+        return fail(
+          `mcp_resource: MCP server "${server}" is not ready (state: ${entry.state}` +
+            (entry.reason ? ` — ${entry.reason}` : "") +
+            `) — configured servers: ${describeServers(servers)}`,
+        );
+      }
+      const client = entry.client;
+      const uri = typeof args.uri === "string" ? args.uri : "";
+      // Cap the output text at RESOURCE_OUTPUT_CAP; when truncated, append
+      // the note on its own line (N = the PRE-truncation length). Shared by
+      // the list and read paths so both cap identically.
+      const capText = (text: string): string =>
+        text.length > RESOURCE_OUTPUT_CAP
+          ? text.slice(0, RESOURCE_OUTPUT_CAP) +
+            `\n[output truncated to 64 KiB — ${text.length} chars total]`
+          : text;
+      try {
+        if (signal.aborted) {
+          return fail("mcp_resource: aborted before the call was made");
+        }
+        if (uri === "") {
+          const list = await client.listResources();
+          const header = `resources for ${server} (${list.length}):`;
+          const text = list.length === 0
+            ? header
+            : header + "\n" + JSON.stringify(list, null, 2);
+          return { content: [{ type: "text", text: capText(text) }] };
+        }
+        const read = await client.readResource(uri, signal);
+        const blocks: TextBlock[] = [];
+        for (const c of read.contents) {
+          if (typeof c.text === "string") {
+            blocks.push({ type: "text", text: c.uri + "\n" + c.text });
+          } else if (c.blob !== undefined) {
+            const mime = c.mimeType ?? "unknown";
+            // Decoded byte count of the base64 blob (padding-aware; the blob
+            // itself is NOT decoded into memory — only its size is computed).
+            const bytes = Buffer.byteLength(c.blob, "base64");
+            blocks.push({
+              type: "text",
+              text: `[binary resource ${c.uri} (${mime}, ${bytes} bytes base64) — text not available]`,
+            });
+          } else {
+            blocks.push({
+              type: "text",
+              text: `[resource ${c.uri} has no text or blob content]`,
+            });
+          }
+        }
+        const out = capText(blocks.map((b) => b.text).join("\n\n"));
+        const result: ToolResult = {
+          content: [{ type: "text", text: out }],
+        };
+        if (read.isError) result.isError = true;
+        return result;
+      } catch (e) {
+        if (e instanceof McpCallError || e instanceof McpBusyError || e instanceof McpError) {
+          return fail(`mcp_resource: ${e.message}`);
+        }
+        throw e;
+      }
+    },
+    displayName: "mcp_resource",
+    mcpTrusted: true,
+  };
 }
 
 /** One successfully-imported tool (the adapted `Tool` + its original

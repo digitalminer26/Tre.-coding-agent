@@ -38,10 +38,12 @@ import {
 } from "./client.js";
 import {
   importMcpServerTools,
+  makeMcpResourceTool,
   type AdaptedMcpTool,
   type McpCallFn,
 } from "./adapter.js";
 import type { McpSpawn } from "./spawn.js";
+import type { Tool } from "../types.js";
 
 /** A per-server handle: its §4.4 state, its imported tools, and its
  *  teardown handles. `client`/`spawn` are present for a started server
@@ -65,7 +67,10 @@ export interface McpServerHandle {
  *  register (additive to the built-in set). */
 export interface McpStartResult {
   handles: McpServerHandle[];
-  tools: AdaptedMcpTool[];
+  /** The flat list of tools to register (additive to the built-in set): the
+   *  per-server imported tools PLUS, when ≥1 server is ready, the single
+   *  `mcp_resource` tool (tier 2 — resources). */
+  tools: Tool[];
 }
 
 export interface McpStartOptions {
@@ -112,7 +117,7 @@ export async function startMcpServers(
   opts: McpStartOptions,
 ): Promise<McpStartResult> {
   const handles: McpServerHandle[] = [];
-  const tools: AdaptedMcpTool[] = [];
+  const tools: Tool[] = [];
   // Seed `claimed` with the built-in names so an MCP wire name can never
   // shadow a built-in (the atomic-rejection collision set, §4.3).
   const claimed = new Set<string>(opts.builtinNames ?? []);
@@ -179,6 +184,24 @@ export async function startMcpServers(
       continue;
     }
     handles.push(makeHandle(name, state, reason, imported, client, spawn, false));
+  }
+  // The single `mcp_resource` tool (tier 2 — resources): ONE tool for ALL
+  // ready servers, appended ONLY IF at least one server reached `ready`.
+  // It is NOT per-server, so the per-server `tools` allowlist does NOT apply
+  // to it (it is tre.'s own fixed-name tool, not a server-provided one).
+  // The lookup covers EVERY handle (ready for calls; all for the not-found
+  // error message) so the model can self-correct on a wrong server name.
+  if (handles.some((h) => h.state === "ready")) {
+    const lookup = (serverName: string) => {
+      const h = handles.find((x) => x.name === serverName);
+      return h ? { client: h.client, state: h.state, reason: h.reason } : null;
+    };
+    const serverInfo = handles.map((h) => ({
+      name: h.name,
+      state: h.state,
+      reason: h.reason,
+    }));
+    tools.push(makeMcpResourceTool(lookup, serverInfo));
   }
   return { handles, tools };
 }

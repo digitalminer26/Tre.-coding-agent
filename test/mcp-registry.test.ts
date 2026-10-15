@@ -123,6 +123,12 @@ const srv = (over: Partial<McpServerConfig> = {}): McpServerConfig => ({
   ...over,
 });
 
+/** The `mcp_resource` tool(s) in a result's flat tools list (there should be
+ *  at most one — it is a single fixed-name tool, not per-server). */
+function resourceTools(tools: { name: string }[]): { name: string }[] {
+  return tools.filter((t) => t.name === "mcp_resource");
+}
+
 test("modern ready: imports tools, state ready, status line", async () => {
   const mock = new MockMcpServer();
   modernMock(mock, [
@@ -138,12 +144,15 @@ test("modern ready: imports tools, state ready, status line", async () => {
   assert.equal(handles[0]!.name, "fs");
   assert.equal(handles[0]!.state, "ready");
   assert.equal(handles[0]!.reason, "");
-  assert.equal(tools.length, 2);
-  assert.equal(handles[0]!.tools.length, 2);
+  // 2 imported tools + the single `mcp_resource` tool (≥1 ready server).
+  assert.equal(tools.length, 3);
+  assert.equal(handles[0]!.tools.length, 2, "the handle only carries its imported tools");
   // The wire names are the encoded `mcp__` names; the originals are preserved.
   assert.equal(tools[0]!.name, encodeMcpToolName("fs", "read_file"));
-  assert.equal((tools[0] as { mcpServer: string }).mcpServer, "fs");
-  assert.equal((tools[0] as { mcpTool: string }).mcpTool, "read_file");
+  assert.equal((tools[0] as unknown as { mcpServer: string }).mcpServer, "fs");
+  assert.equal((tools[0] as unknown as { mcpTool: string }).mcpTool, "read_file");
+  // The single resource tool is present exactly once.
+  assert.equal(resourceTools(tools).length, 1, "one mcp_resource tool");
   assert.equal(mcpStatusLine(handles[0]!), "fs — ready (2 tools)");
 });
 
@@ -156,8 +165,10 @@ test("legacy ready: the era probe falls back to initialize", async () => {
     baseOpts,
   );
   assert.equal(handles[0]!.state, "ready");
-  assert.equal(tools.length, 1);
+  // 1 imported tool + the single `mcp_resource` tool.
+  assert.equal(tools.length, 2);
   assert.equal(tools[0]!.name, encodeMcpToolName("db", "ping"));
+  assert.equal(resourceTools(tools).length, 1, "one mcp_resource tool");
   assert.equal(mcpStatusLine(handles[0]!), "db — ready (1 tool)");
 });
 
@@ -179,9 +190,10 @@ test("per-server isolation: one failure never aborts the launch", async () => {
   assert.equal(byName.get("bad")!.state, "failed");
   assert.ok(byName.get("bad")!.reason.length > 0, "failure carries a reason");
   assert.equal(byName.get("good")!.state, "ready");
-  // Only the good server's tools register.
-  assert.equal(tools.length, 1);
+  // Only the good server's tools register, plus the single `mcp_resource`.
+  assert.equal(tools.length, 2);
   assert.equal(tools[0]!.name, encodeMcpToolName("good", "ok"));
+  assert.equal(resourceTools(tools).length, 1, "one mcp_resource tool");
 });
 
 test("a spawn rejection fails that server (full teardown), others proceed", async () => {
@@ -201,7 +213,9 @@ test("a spawn rejection fails that server (full teardown), others proceed", asyn
   assert.equal(byName.get("boom")!.state, "failed");
   assert.match(byName.get("boom")!.reason, /ENOENT/);
   assert.equal(byName.get("good")!.state, "ready");
-  assert.equal(tools.length, 1);
+  // The good server's tool + the single `mcp_resource` (≥1 ready).
+  assert.equal(tools.length, 2);
+  assert.equal(resourceTools(tools).length, 1, "one mcp_resource tool");
 });
 
 test("disabled: no spawn, no tools, state disabled", async () => {
@@ -234,8 +248,10 @@ test("per-server tool allowlist: only the named tools import", async () => {
     baseOpts,
   );
   assert.equal(handles[0]!.state, "ready");
-  assert.equal(tools.length, 1);
+  // 1 imported tool (the allowlist) + the single `mcp_resource`.
+  assert.equal(tools.length, 2);
   assert.equal(tools[0]!.name, encodeMcpToolName("fs", "a"));
+  assert.equal(resourceTools(tools).length, 1, "one mcp_resource tool");
 });
 
 test("atomic import rejection: a wire name colliding with a built-in rejects the whole server", async () => {
@@ -308,7 +324,9 @@ test("teardownAll + killAll (top-level wrappers) operate over every server", asy
     baseOpts,
   );
   assert.equal(result.handles.length, 2);
-  assert.equal(result.tools.length, 2);
+  // 2 imported tools (a + b) + the single `mcp_resource`.
+  assert.equal(result.tools.length, 3);
+  assert.equal(resourceTools(result.tools).length, 1, "one mcp_resource tool");
   // Graceful teardown of BOTH.
   await teardownAll(result);
   assert.equal(a.killed, true);
@@ -320,4 +338,100 @@ test("teardownAll + killAll (top-level wrappers) operate over every server", asy
   const r2 = await startMcpServers({ a: srv({ command: "a" }) }, a2f, baseOpts);
   killAll(r2);
   assert.equal(a2.killed, true);
+});
+
+// ── the single `mcp_resource` tool (tier 2 — resources) ────────────────────
+// ONE fixed-name tool across ALL ready servers, appended ONLY IF ≥1 server
+// is ready. It is not per-server, so the per-server `tools` allowlist does
+// not apply to it.
+
+test("mcp_resource: one ready server → exactly ONE resource tool (plus the imported tools)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "read_file", inputSchema: { type: "object" } }]);
+  const { handles, tools } = await startMcpServers(
+    { fs: srv() },
+    mockSpawnFn(mock),
+    baseOpts,
+  );
+  assert.equal(handles[0]!.state, "ready");
+  // 1 imported tool + the single mcp_resource tool.
+  assert.equal(tools.length, 2);
+  assert.equal(tools[0]!.name, encodeMcpToolName("fs", "read_file"));
+  const rt = resourceTools(tools);
+  assert.equal(rt.length, 1, "exactly ONE mcp_resource tool");
+  assert.equal(rt[0]!.name, "mcp_resource");
+  // The resource tool is NOT per-server: it does not appear in the handle's
+  // imported-tools list (that stays the server's own tools).
+  assert.equal(handles[0]!.tools.length, 1, "the handle keeps only its imported tools");
+  assert.equal(mcpStatusLine(handles[0]!), "fs — ready (1 tool)");
+});
+
+test("mcp_resource: two ready servers → STILL exactly ONE resource tool", async () => {
+  const a = new MockMcpServer();
+  modernMock(a, [{ name: "a" }]);
+  const b = new MockMcpServer();
+  modernMock(b, [{ name: "b" }]);
+  const ga = mockSpawnFn(a);
+  const gb = mockSpawnFn(b);
+  const spawnFn: McpSpawnFn = async (cmd, args, o) =>
+    cmd === "a" ? ga(cmd, args, o) : gb(cmd, args, o);
+  const { handles, tools } = await startMcpServers(
+    { a: srv({ command: "a" }), b: srv({ command: "b" }) },
+    spawnFn,
+    baseOpts,
+  );
+  assert.equal(handles.every((h) => h.state === "ready"), true);
+  // 2 imported tools (a + b) + ONE mcp_resource (not two).
+  assert.equal(tools.length, 3);
+  const rt = resourceTools(tools);
+  assert.equal(rt.length, 1, "still exactly ONE mcp_resource tool for two ready servers");
+  assert.equal(rt[0]!.name, "mcp_resource");
+});
+
+test("mcp_resource: zero ready servers (all failed) → NO resource tool", async () => {
+  // `bad` never answers the probe → startup timeout → failed.
+  const bad = new MockMcpServer(); // no handler
+  const { handles, tools } = await startMcpServers(
+    { bad: srv({ command: "bad" }) },
+    mockSpawnFn(bad),
+    baseOpts,
+  );
+  assert.equal(handles[0]!.state, "failed");
+  assert.equal(tools.length, 0, "no tools at all when no server is ready");
+  assert.equal(resourceTools(tools).length, 0, "no mcp_resource tool");
+});
+
+test("mcp_resource: zero ready servers (all disabled) → NO resource tool", async () => {
+  const g = mockSpawnFn(new MockMcpServer());
+  const spawnFn: McpSpawnFn = async (cmd, args, o) => g(cmd, args, o);
+  const { handles, tools } = await startMcpServers(
+    { off: srv({ disabled: true }) },
+    spawnFn,
+    baseOpts,
+  );
+  assert.equal(handles[0]!.state, "disabled");
+  assert.equal(tools.length, 0);
+  assert.equal(resourceTools(tools).length, 0, "no mcp_resource tool");
+});
+
+test("mcp_resource: mixed (one ready, one failed) → exactly ONE resource tool", async () => {
+  const good = new MockMcpServer();
+  modernMock(good, [{ name: "ok" }]);
+  const bad = new MockMcpServer(); // no handler → failed
+  const g = mockSpawnFn(good);
+  const b = mockSpawnFn(bad);
+  const spawnFn: McpSpawnFn = async (cmd, args, o) =>
+    cmd === "bad" ? b(cmd, args, o) : g(cmd, args, o);
+  const { handles, tools } = await startMcpServers(
+    { bad: srv({ command: "bad" }), good: srv({ command: "good" }) },
+    spawnFn,
+    baseOpts,
+  );
+  const byName = new Map(handles.map((h) => [h.name, h]));
+  assert.equal(byName.get("good")!.state, "ready");
+  assert.equal(byName.get("bad")!.state, "failed");
+  // The good server's tool + ONE mcp_resource (the failed server contributes none).
+  assert.equal(tools.length, 2);
+  const rt = resourceTools(tools);
+  assert.equal(rt.length, 1, "exactly ONE mcp_resource tool");
 });

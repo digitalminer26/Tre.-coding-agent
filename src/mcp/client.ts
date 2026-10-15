@@ -102,6 +102,24 @@ export interface McpToolCallResult {
   isError: boolean;
 }
 
+/** A resources/list entry (scope §Tier 2 — resources are read-only context). */
+export interface McpResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** A resources/read result. `contents` entries are opaque: `text` is a
+ *  decoded string, `blob` is a base64 string (the client does NOT decode).
+ *  `isError` surfaces a server-side in-band failure flag (the adapter maps
+ *  it to a ToolResult.isError). */
+export interface McpResourceRead {
+  contents: Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>;
+  /** The server's in-band failure flag (true → the read failed in-band). */
+  isError?: boolean;
+}
+
 interface RpcError {
   code: number;
   message: string;
@@ -631,6 +649,87 @@ export class McpClient {
   async listTools(): Promise<McpTool[]> {
     await this.ensureReady();
     return this.paginateTools(false);
+  }
+
+  /** List the server's resources (ready-state, tier 2). PAGINATED exactly
+   *  like tools/list (100-page / 10000-resource caps, repeated-cursor loop
+   *  detection). A malformed result is an in-band McpCallError — a
+   *  result-payload failure, NOT an envelope violation (the server is NOT
+   *  torn down). */
+  async listResources(): Promise<McpResource[]> {
+    await this.ensureReady();
+    const resources: McpResource[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    const seenCursors = new Set<string>();
+    for (;;) {
+      if (pages >= MCP_MAX_PAGES || resources.length >= MCP_MAX_TOOLS) {
+        throw new McpCallError("resources/list limit exceeded (100 pages / 10000 resources)");
+      }
+      if (cursor !== undefined) {
+        if (seenCursors.has(cursor)) throw new McpCallError("resources/list cursor loop (repeated cursor)");
+        seenCursors.add(cursor);
+      }
+      const params: Record<string, unknown> = {};
+      if (cursor !== undefined) params.cursor = cursor;
+      const result = await this.request("resources/list", params, "tool");
+      if (!isObj(result) || !Array.isArray(result.resources)) {
+        throw new McpCallError("invalid resources/list result (resources array missing)");
+      }
+      const page = result as { resources: unknown[]; nextCursor?: unknown };
+      for (const r of page.resources) {
+        const entry = r as Record<string, unknown>;
+        if (!isObj(r) || typeof entry.uri !== "string") {
+          throw new McpCallError("invalid resources/list entry (uri missing)");
+        }
+        resources.push({
+          uri: entry.uri,
+          name: typeof entry.name === "string" ? entry.name : undefined,
+          description: typeof entry.description === "string" ? entry.description : undefined,
+          mimeType: typeof entry.mimeType === "string" ? entry.mimeType : undefined,
+        });
+        if (resources.length >= MCP_MAX_TOOLS) {
+          throw new McpCallError("resources/list limit exceeded (10000 resources)");
+        }
+      }
+      pages++;
+      const nc = page.nextCursor;
+      if (typeof nc === "string" && nc.length > 0) {
+        cursor = nc;
+        continue;
+      }
+      break;
+    }
+    return resources;
+  }
+
+  /** Read a resource (ready-state, tier 2). cls "tool": in-band failures,
+   *  per-call timeout, abort via signal — exactly like callTool. A malformed
+   *  result is an in-band McpCallError (the server is NOT torn down); text
+   *  and blob are opaque and NOT validated beyond the uri. */
+  async readResource(
+    uri: string,
+    signal?: AbortSignal,
+  ): Promise<McpResourceRead> {
+    await this.ensureReady();
+    const result = await this.request("resources/read", { uri }, "tool", undefined, signal);
+    if (!isObj(result) || !Array.isArray(result.contents)) {
+      throw new McpCallError("invalid resources/read result (contents array missing)");
+    }
+    const contents: McpResourceRead["contents"] = [];
+    for (const c of (result as { contents: unknown[] }).contents) {
+      const entry = c as Record<string, unknown>;
+      if (!isObj(c) || typeof entry.uri !== "string") {
+        throw new McpCallError("invalid resources/read entry (uri missing)");
+      }
+      contents.push({
+        uri: entry.uri,
+        mimeType: typeof entry.mimeType === "string" ? entry.mimeType : undefined,
+        text: typeof entry.text === "string" ? entry.text : undefined,
+        blob: typeof entry.blob === "string" ? entry.blob : undefined,
+      });
+    }
+    return { contents, isError: (result as Record<string, unknown>).isError === true };
   }
 
   /** Call a tool. NEVER throws for a server-side issue — every failure is

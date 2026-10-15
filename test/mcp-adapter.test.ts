@@ -12,9 +12,21 @@ import {
   encodeMcpToolName,
   makeMcpTool,
   importMcpServerTools,
+  makeMcpResourceTool,
 } from "../src/mcp/adapter.js";
-import type { McpTool, McpToolCallResult } from "../src/mcp/client.js";
-import type { AdaptedMcpTool } from "../src/mcp/adapter.js";
+import type {
+  McpClient,
+  McpResourceRead,
+  McpState,
+  McpTool,
+  McpToolCallResult,
+} from "../src/mcp/client.js";
+import type {
+  AdaptedMcpTool,
+  McpResourceLookup,
+  McpResourceServerInfo,
+} from "../src/mcp/adapter.js";
+import { DEFAULT_TOOLS } from "../src/tools/index.js";
 
 const WIRE_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
@@ -169,4 +181,235 @@ test("importMcpServerTools: a duplicate within the same server rejects the serve
   assert.ok(outcome.rejected, "a duplicate within the server is rejected");
   assert.deepEqual(outcome.rejected!.conflicting, ["dup"]);
   assert.equal(outcome.imported.length, 0, "atomic: none register");
+});
+
+// ── makeMcpResourceTool (tier 2 — resources) ───────────────────────────────
+
+/** A fake client exposing only the two resource methods the tool calls. */
+function fakeClient(over: {
+  list?: () => Promise<unknown>;
+  read?: (uri: string, signal?: AbortSignal) => Promise<unknown>;
+}): McpClient {
+  return {
+    listResources: async (): Promise<unknown> => (over.list ? over.list() : []),
+    readResource: async (uri: string, signal?: AbortSignal): Promise<unknown> =>
+      over.read ? over.read(uri, signal) : { contents: [] },
+  } as unknown as McpClient;
+}
+
+/** A lookup + server-info pair for the resource tool. */
+function makeLookup(
+  ready: string[],
+  all: Array<{ name: string; state: McpState; reason?: string }>,
+  clients: Record<string, McpClient>,
+): { lookup: McpResourceLookup; servers: McpResourceServerInfo[] } {
+  const lookup: McpResourceLookup = (n: string) => {
+    const h = all.find((x) => x.name === n);
+    if (!h) return null;
+    return { client: ready.includes(n) ? (clients[n] ?? null) : null, state: h.state, reason: h.reason ?? "" };
+  };
+  const servers: McpResourceServerInfo[] = all.map((x) => ({ name: x.name, state: x.state, reason: x.reason ?? "" }));
+  return { lookup, servers };
+}
+
+test("makeMcpResourceTool: shape (name, displayName, parameters schema)", () => {
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], {});
+  const t = makeMcpResourceTool(lookup, servers);
+  assert.equal(t.name, "mcp_resource", "the fixed wire name");
+  assert.equal(t.displayName, "mcp_resource", "displayName is the name itself");
+  assert.equal(t.mcpTrusted, true, "mcpTrusted is carried");
+  assert.equal((t as { mcpAnnotations?: unknown }).mcpAnnotations, undefined, "no mcpAnnotations");
+  const p = t.parameters;
+  assert.equal(p.type, "object");
+  assert.deepEqual(p.required, ["server"], "server is required");
+  assert.equal(p.additionalProperties, false, "additionalProperties is false");
+  assert.ok(p.properties?.server, "server property present");
+  assert.ok(p.properties?.uri, "uri property present");
+  assert.equal(p.properties?.server?.type, "string");
+  assert.equal(p.properties?.uri?.type, "string");
+});
+
+test("makeMcpResourceTool: the name collides with NO built-in tool", () => {
+  const builtinNames = new Set(DEFAULT_TOOLS.map((t) => t.name));
+  assert.ok(!builtinNames.has("mcp_resource"), "no built-in is named mcp_resource");
+  // And it does NOT carry the mcp__ prefix (it is tre.'s own fixed name).
+  assert.ok(!"mcp_resource".startsWith("mcp__"), "not an mcp__ server tool");
+});
+
+test("makeMcpResourceTool: an unknown server is an isError listing the configured servers", async () => {
+  const { lookup, servers } = makeLookup(
+    ["fs"],
+    [
+      { name: "fs", state: "ready" },
+      { name: "db", state: "failed", reason: "probe timeout" },
+    ],
+    {},
+  );
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "nope" }, new AbortController().signal);
+  assert.equal(res.isError, true, "unknown server is in-band isError (never throws)");
+  const text = res.content[0]!.text;
+  assert.match(text, /unknown MCP server "nope"/);
+  assert.match(text, /fs \(ready\)/, "lists the ready server");
+  assert.match(text, /db \(failed: probe timeout\)/, "lists the failed server + reason");
+});
+
+test("makeMcpResourceTool: a non-ready server is an isError (never throws)", async () => {
+  const { lookup, servers } = makeLookup(
+    ["fs"],
+    [
+      { name: "fs", state: "ready" },
+      { name: "db", state: "failed", reason: "boom" },
+    ],
+    {},
+  );
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "db" }, new AbortController().signal);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0]!.text, /not ready \(state: failed — boom\)/);
+});
+
+test("makeMcpResourceTool: an empty/absent uri returns the resource list (header + JSON)", async () => {
+  const list: unknown[] = [
+    { uri: "file:///a", name: "a" },
+    { uri: "file:///b" },
+  ];
+  const client = fakeClient({ list: async () => list });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs" }, new AbortController().signal);
+  assert.equal(res.isError, undefined, "a successful list is not an error");
+  const text = res.content[0]!.text;
+  assert.match(text, /^resources for fs \(2\):/, "header line with the count");
+  // The body is the JSON of the list.
+  const body = text.slice(text.indexOf("\n") + 1);
+  assert.deepEqual(JSON.parse(body), list, "the body is the JSON list");
+});
+
+test("makeMcpResourceTool: an empty resource list is just the header", async () => {
+  const client = fakeClient({ list: async () => [] });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "" }, new AbortController().signal);
+  assert.equal(res.content[0]!.text, "resources for fs (0):", "no JSON body for an empty list");
+});
+
+test("makeMcpResourceTool: a read maps each text content entry to a uri-prefixed block", async () => {
+  const read: McpResourceRead = {
+    contents: [
+      { uri: "file:///a", text: "alpha" },
+      { uri: "file:///b", text: "beta" },
+    ],
+  };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "file:///a" }, new AbortController().signal);
+  assert.equal(res.isError, undefined);
+  const text = res.content[0]!.text;
+  // Each entry is `<uri>\n<text>`, entries joined by a blank line.
+  assert.equal(text, "file:///a\nalpha\n\nfile:///b\nbeta");
+});
+
+test("makeMcpResourceTool: a blob content entry is a descriptive block", async () => {
+  const read: McpResourceRead = {
+    contents: [{ uri: "file:///img", mimeType: "image/png", blob: "aGVsbG8=" }],
+  };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "file:///img" }, new AbortController().signal);
+  const text = res.content[0]!.text;
+  // base64 "aGVsbG8=" decodes to 5 bytes; the descriptor carries the mime + byte count.
+  assert.match(text, /\[binary resource file:\/\/\/img \(image\/png, 5 bytes base64\) — text not available\]/);
+});
+
+test("makeMcpResourceTool: a blob entry with no mimeType reports 'unknown'", async () => {
+  const read: McpResourceRead = { contents: [{ uri: "u", blob: "AA==" }] };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "u" }, new AbortController().signal);
+  assert.match(res.content[0]!.text, /\(unknown, 1 bytes base64\)/);
+});
+
+test("makeMcpResourceTool: a read over 64 KiB is truncated to the cap + a note", async () => {
+  const big = "x".repeat(70000); // > 64 KiB
+  const read: McpResourceRead = { contents: [{ uri: "big", text: big }] };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "big" }, new AbortController().signal);
+  const text = res.content[0]!.text;
+  assert.match(text, /\[output truncated to 64 KiB — \d+ chars total\]/, "the truncation note is present");
+  // The body is capped at 64 KiB (the note is appended AFTER the cap, on its
+  // own line — so the note's leading newline sits at index `cap`).
+  const cap = 64 * 1024;
+  const noteNewline = text.lastIndexOf("\n[output truncated");
+  assert.equal(noteNewline, cap, "the truncated body is exactly 64 KiB before the note");
+  assert.ok(text.length > cap, "the note makes the total longer than the cap");
+});
+
+test("makeMcpResourceTool: a list over 64 KiB is truncated to the cap + a note", async () => {
+  // A list whose JSON body exceeds the cap (header + JSON > 64 KiB).
+  const list = Array.from({ length: 2000 }, (_, i) => ({
+    uri: `file:///r${i}`,
+    description: "d".repeat(40),
+  }));
+  const client = fakeClient({ list: async () => list });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs" }, new AbortController().signal);
+  assert.equal(res.isError, undefined, "a successful list is not an error");
+  const text = res.content[0]!.text;
+  assert.match(text, /^resources for fs \(2000\):/, "the header line survives the cap");
+  assert.match(text, /\[output truncated to 64 KiB — \d+ chars total\]/, "the truncation note is present");
+  // The body is capped at 64 KiB (the note is appended AFTER the cap, on its
+  // own line — so the note's leading newline sits at index `cap`).
+  const cap = 64 * 1024;
+  const noteNewline = text.lastIndexOf("\n[output truncated");
+  assert.equal(noteNewline, cap, "the truncated body is exactly 64 KiB before the note");
+  assert.ok(text.length > cap, "the note makes the total longer than the cap");
+  assert.ok(text.length <= cap + 100, "the total output is the cap plus the note");
+});
+
+test("makeMcpResourceTool: a server-side isError read sets ToolResult.isError", async () => {
+  const read: McpResourceRead = { isError: true, contents: [{ uri: "e", text: "boom" }] };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "e" }, new AbortController().signal);
+  assert.equal(res.isError, true, "the server-side isError is surfaced");
+  assert.match(res.content[0]!.text, /boom/);
+});
+
+test("makeMcpResourceTool: a protocol error from the client is an in-band isError (never throws)", async () => {
+  const { McpCallError } = await import("../src/mcp/client.js");
+  const client = fakeClient({ read: async () => { throw new McpCallError("MCP protocol error -32602: bad uri"); } });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "x" }, new AbortController().signal);
+  assert.equal(res.isError, true, "the McpCallError is in-band (never throws)");
+  assert.match(res.content[0]!.text, /-32602/);
+});
+
+test("makeMcpResourceTool: a list that throws an McpCallError is an in-band isError", async () => {
+  const { McpCallError } = await import("../src/mcp/client.js");
+  const client = fakeClient({ list: async () => { throw new McpCallError("resources/list limit exceeded (100 pages / 10000 resources)"); } });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs" }, new AbortController().signal);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0]!.text, /limit exceeded/);
+});
+
+test("makeMcpResourceTool: an already-aborted signal returns an in-band result (no throw)", async () => {
+  const client = fakeClient({ read: async () => ({ contents: [] }) });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const ctrl = new AbortController();
+  ctrl.abort(); // aborted BEFORE the call
+  const res = await t.execute("tc1", { server: "fs", uri: "x" }, ctrl.signal);
+  assert.equal(res.isError, true, "an aborted signal is an in-band result");
+  assert.match(res.content[0]!.text, /aborted/);
 });
