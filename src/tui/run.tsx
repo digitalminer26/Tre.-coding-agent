@@ -192,6 +192,36 @@ export function steerTelegramBusy(
   };
 }
 
+/**
+ * /restart — the UNCONFIRMED-teardown abort transition, extracted as a PURE
+ * helper so the decision is unit-testable (the `restartTui` closure is not
+ * exported and cannot be driven from a test without a full TUI render).
+ *
+ * When `teardownMcp()` REJECTS, a process group survived the SIGKILL bound.
+ * Spawning a replacement would run it for the whole child run alongside the
+ * old (still-alive) MCP servers, and the process-exit backstop only fires
+ * when the PARENT exits (after the child). So the restart is ABORTED: this
+ * returns the NEW state with an `error` item telling the user (the servers
+ * will be killed when this process exits; quit and re-run). The caller then
+ * returns WITHOUT spawning. No I/O, no mutation of the input state.
+ */
+export function restartTeardownAborted(
+  state: TuiState,
+  err: unknown,
+): TuiState {
+  const msg = err instanceof Error ? err.message : String(err);
+  return {
+    ...state,
+    items: [
+      ...state.items,
+      {
+        kind: "error",
+        text: `restart aborted: MCP teardown did not confirm every server exited — ${msg} (the servers will be killed when this process exits; quit and re-run tre.)`,
+      },
+    ],
+  };
+}
+
 export interface TuiRunOptions {
   model: ModelConfig;
   systemPrompt: string;
@@ -277,6 +307,17 @@ export interface TuiRunOptions {
    * configured".
    */
   mcpStatus?: McpServerHandle[];
+  /**
+   * WS12: graceful MCP teardown for `/restart` (main.ts provides it).
+   * Awaited BEFORE the replacement TUI is spawned, so THIS process's MCP
+   * servers are reaped before the new one starts. The process-exit backstop
+   * alone cannot provide this ordering: under `spawnSync` the old process
+   * (and its detached MCP servers) stays alive for the whole child run and is
+   * only reaped when the parent finally exits.
+   */
+  teardownMcp?: () => Promise<void>;
+  /** Notify main when the interactive driver acquires/releases SIGINT. */
+  onSigintOwnership?: (owned: boolean) => void;
 }
 
 export async function runTui(opts: TuiRunOptions): Promise<number> {
@@ -444,6 +485,12 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       // M6: the poll was in flight when stopTelegram() ran — a stop happened
       // during the await; do not act on these messages (no steer/run/reply).
       if (telegramStopped) return;
+      // A /restart is in flight (the MCP teardown await is live, before
+      // spawnSync freezes the loop). Do NOT steer into the (already-aborted)
+      // run or start a fresh one against MCP servers that are closing — the
+      // poll's await can land in that window. The messages are dropped (the
+      // user is mid-restart); a re-send after the restart is the recovery.
+      if (restartInFlight || restartFailed) return;
       // Re-check after the await: a run may be in flight either because it
       // was already running when the tick fired (D25: the tick no longer
       // early-returns on busy, so mid-turn messages are picked up here) or
@@ -552,12 +599,55 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
    * again. The parent's Ink app stays mounted during the block, but its event
    * loop is frozen (spawnSync), so it neither re-renders nor steals input.
    */
-  const restartTui = (): void => {
+  // Re-entry guard for /restart: set SYNCHRONOUSLY (before the first await)
+  // so a second /restart during the teardown window is ignored — the event
+  // loop is still live during the teardown await (before spawnSync freezes
+  // it), so input can race it.
+  let restartInFlight = false;
+  // Set when the MCP teardown could NOT confirm every server exited. The
+  // restart is aborted, but the app stays alive: /quit must still work and
+  // /restart may retry the teardown. New runs are refused (they would start
+  // against servers whose state is unknown). Cleared only by a successful
+  // teardown.
+  let restartFailed = false;
+  const restartTui = async (): Promise<void> => {
     const spec = restartCommand(opts.restartArgs ?? [], process.env);
     if (spec === null) {
       setStateNow({ ...state, items: [...state.items, { kind: "info", text: "restart: no relaunch argv available — quit and run tre. again" }] });
       return;
     }
+    if (restartInFlight) return; // a restart is already in flight (teardown or spawnSync)
+    restartInFlight = true;
+    // (A prior failed teardown is retried here — restartFailed is cleared
+    // only when the retry actually confirms the servers are gone.)
+    // WS12: reap THIS process's MCP servers BEFORE the replacement spawns.
+    // The process-exit backstop cannot provide this ordering: under spawnSync
+    // the old process (and its detached MCP servers) stays alive for the
+    // whole child run and is only reaped when the parent finally exits.
+    // Awaiting the teardown here guarantees the old servers are gone before
+    // the new tre. starts.
+    if (opts.teardownMcp) {
+      try {
+        await opts.teardownMcp();
+      } catch (e) {
+        // UNCONFIRMED termination: a process group survived the SIGKILL bound.
+        // Do NOT spawn a replacement — it would run for the whole child run
+        // alongside the old (still-alive) servers, and the exit backstop only
+        // fires when the parent exits (after the child). Abort the restart and
+        // tell the user; the exit backstop will SIGKILL the stragglers when
+        // this process actually exits.
+        restartInFlight = false;
+        restartFailed = true;
+        setStateNow(restartTeardownAborted(state, e));
+        return;
+      }
+    }
+    restartFailed = false;
+    // The app may have quit (unmounted) during the teardown window — the event
+    // loop was live until spawnSync froze it. If so, do NOT spawn a
+    // replacement: the process is already exiting (the exit backstop reaps any
+    // MCP stragglers).
+    if (!mounted) return;
     // The child (the new tre.) owns the terminal and handles its own SIGINT,
     // so drop the parent's handler for the duration — otherwise a Ctrl+C
     // during the child's run would be acted on by the parent too (after
@@ -731,6 +821,33 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   const handlers = {
     ...inputHandlers,
     onSubmit: (): void => {
+      // A /restart is in flight (MCP teardown window, before spawnSync
+      // freezes the loop): the event loop is still live, so swallow ALL
+      // input — a prompt submitted here would start a run mid-teardown (the
+      // restart's controller.abort() already ran, so it would be a stray run).
+      if (restartInFlight) return;
+      if (restartFailed) {
+        // A failed restart leaves the app alive but NOT able to run new turns
+        // against servers of unknown state. /quit exits; /restart retries the
+        // teardown; everything else is refused with a visible notice (never
+        // swallowed silently).
+        const cmd = state.input.trim();
+        if (cmd === "/quit" || cmd === "/exit") {
+          quit(0);
+          return;
+        }
+        if (cmd === "/restart") {
+          setStateNow({ ...state, input: "" });
+          void restartTui();
+          return;
+        }
+        setStateNow({
+          ...state,
+          input: "",
+          items: [...state.items, { kind: "info", text: "restart failed earlier — /quit to exit, or /restart to retry the MCP teardown" }],
+        });
+        return;
+      }
       // D16: enter first completes the selected menu candidate (one more
       // enter submits the completed word).
       const completed = menuComplete(state);
@@ -754,7 +871,11 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // on replay by design), then re-exec.
         if (trimmed === "/restart" && state.busy) {
           controller.abort();
-          restartTui();
+          // Fire-and-forget: onSubmit is sync, but restartTui awaits the MCP
+          // teardown (event loop live) before spawnSync freezes it. The
+          // synchronous restartInFlight guard inside restartTui prevents a
+          // second /restart from racing the teardown window.
+          void restartTui();
           return;
         }
         // C32: slash commands are UI commands — they are handled while a run
@@ -836,7 +957,10 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         return;
       }
       if (prompt === "/restart") {
-        restartTui();
+        // Fire-and-forget (onSubmit is sync): restartTui awaits the MCP
+        // teardown before spawnSync; the restartInFlight guard inside prevents
+        // a second /restart from racing the teardown window.
+        void restartTui();
         return;
       }
       // A6: manual compaction — the driver runs the silent summarizer call
@@ -1256,6 +1380,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     }
   };
   process.on("SIGINT", onSigint);
+  opts.onSigintOwnership?.(true);
   try {
     await app.waitUntilExit();
   } finally {
@@ -1266,6 +1391,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     restoreMouseMode();
     stopPerfSweep();
     process.off("SIGINT", onSigint);
+    opts.onSigintOwnership?.(false);
   }
   return exitCode;
 }

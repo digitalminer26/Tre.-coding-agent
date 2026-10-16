@@ -15,6 +15,7 @@ import {
   teardownAll,
   killAll,
   mcpStatusLine,
+  reapPendingSpawns,
   type McpSpawnFn,
   type McpStartOptions,
 } from "../src/mcp/registry.js";
@@ -43,14 +44,21 @@ function mockSpawnFn(
 ): McpSpawnFn {
   return async () => {
     if (opts.fail) throw new Error("spawn failed (simulated)");
+    // Mirror the REAL spawn's close semantics: one shared chain (repeated
+    // close() calls await the SAME promise, not a double escalation).
+    let closeChain: Promise<void> | null = null;
     const spawn: McpSpawn = {
       child: { pid: undefined } as McpSpawn["child"],
       stdin: mock.stdin,
       stdout: mock.stdout,
       stderr: mock.stderr,
       close: () => {
-        mock.closed = true;
-        return Promise.resolve();
+        if (!closeChain) {
+          closeChain = Promise.resolve().then(() => {
+            mock.closed = true;
+          });
+        }
+        return closeChain;
       },
       kill: () => {
         mock.killed = true;
@@ -270,43 +278,128 @@ test("atomic import rejection: a wire name colliding with a built-in rejects the
   assert.equal(mcpStatusLine(handles[0]!), `fs — failed (tool import rejected: tool)`);
 });
 
-test("teardown (graceful): closes the client + disposes the spawn, idempotent", async () => {
+test("teardown (graceful): graceful close (NOT a kill) + dispose AFTER the close chain, idempotent", async () => {
   const mock = new MockMcpServer();
   modernMock(mock, [{ name: "ok" }]);
   let disposed = 0;
+  let closeCount = 0;
   const base = mockSpawnFn(mock);
   const spawnFn: McpSpawnFn = async (cmd, args, o) => {
     const s = await base(cmd, args, o);
-    return { ...s, dispose: async () => { disposed++; } };
+    // Mirror the real spawn: one shared close chain (the registry's
+    // client.close() AND its spawn.close() await the SAME escalation).
+    let chain: Promise<void> | null = null;
+    return {
+      ...s,
+      close: () => {
+        if (!chain) {
+          chain = Promise.resolve().then(() => {
+            closeCount++;
+            mock.closed = true;
+          });
+        }
+        return chain;
+      },
+      dispose: async () => {
+        disposed++;
+      },
+    };
   };
   const { handles } = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
   const h = handles[0]!;
   await h.teardown();
-  assert.equal(mock.killed, true, "the transport is killed (client.close)");
+  assert.equal(
+    mock.killed,
+    false,
+    "graceful teardown does NOT SIGKILL the transport (the escalation ran instead)",
+  );
+  assert.equal(mock.closed, true, "the transport was closed (graceful arm)");
+  assert.equal(closeCount, 1, "spawn.close awaited exactly once");
   assert.equal(disposed, 1, "the spawn is disposed (sandbox resources released)");
   await h.teardown(); // idempotent
   assert.equal(disposed, 1, "a second teardown is a no-op");
 });
 
-test("killAll (synchronous backstop): kills + disposes without awaiting", async () => {
+test("audit #2: teardown REJECTS when the group survives the kill bound (unconfirmed termination is not a clean shutdown)", async () => {
+  // The spawn's close chain REJECTS (the group did not confirm gone within
+  // the SIGKILL bound). The registry's teardown must PROPAGATE that
+  // rejection (not swallow it), and must NOT dispose (disposal would race a
+  // live group). teardownAll must surface it as a combined failure.
   const mock = new MockMcpServer();
   modernMock(mock, [{ name: "ok" }]);
   let disposed = 0;
   const base = mockSpawnFn(mock);
+  let chain: Promise<void> | null = null;
   const spawnFn: McpSpawnFn = async (cmd, args, o) => {
     const s = await base(cmd, args, o);
-    return { ...s, dispose: async () => { disposed++; } };
+    return {
+      ...s,
+      // Mirror the real spawn: ONE shared close chain (the transport's
+      // fire-and-forget `void spawn.close()` and the registry's `await
+      // spawn.close()` must reference the SAME rejecting promise, so the
+      // rejection is handled exactly once — a fresh reject per call would
+      // leave the transport's `void` call unhandled).
+      close: () => {
+        if (!chain) {
+          chain = Promise.reject(
+            new Error("process group did not exit within the kill bound after SIGKILL"),
+          );
+        }
+        return chain;
+      },
+      dispose: async () => {
+        disposed++;
+      },
+    };
+  };
+  const result = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
+  const h = result.handles[0]!;
+  // The per-server teardown rejects (propagated, not swallowed).
+  await assert.rejects(h.teardown(), /kill bound/);
+  // Disposal did NOT run (a live group must not have its sandbox released).
+  assert.equal(disposed, 0, "no dispose after an unconfirmed termination");
+  // The top-level wrapper surfaces the combined failure.
+  await assert.rejects(teardownAll(result), /did not fully complete/);
+});
+
+test("killAll retains resources until termination is confirmed", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "ok" }]);
+  let disposed = 0;
+  let kills = 0;
+  const base = mockSpawnFn(mock);
+  const spawnFn: McpSpawnFn = async (cmd, args, o) => {
+    const s = await base(cmd, args, o);
+    return {
+      ...s,
+      kill: () => {
+        kills++;
+      },
+      dispose: async () => {
+        disposed++;
+      },
+    };
   };
   const { handles } = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
   const h = handles[0]!;
+  // The handle + the client's transport each send the SIGKILL (defense in
+  // depth — two idempotent sends to the same group). So ONE h.kill() = 2
+  // spawn.kill() calls.
+  // The handle + the client's transport each send the SIGKILL (defense in
+  // depth — idempotent sends to the same group). The FIRST h.kill() = 2
+  // spawn.kill() calls; later ones = 1 (the client is already closed, so its
+  // transport-kill arm is a no-op — the handle's own send is what repeats).
   h.kill(); // synchronous — must not throw, must not await
-  assert.equal(mock.killed, true);
-  // dispose is async (best-effort); give it a tick.
-  await new Promise((r) => setTimeout(r, 10));
-  assert.equal(disposed, 1);
-  h.kill(); // idempotent
-  await new Promise((r) => setTimeout(r, 10));
-  assert.equal(disposed, 1);
+  assert.equal(kills, 2, "the group was SIGKILLed (handle + client arm)");
+  assert.equal(disposed, 0, "a kill alone does NOT dispose (termination unconfirmed)");
+  h.kill(); // REPEATABLE: a second emergency kill still fires
+  assert.equal(kills, 3, "kill is repeatable while unconfirmed");
+  assert.equal(disposed, 0, "still no dispose");
+  // Only a close() that CONFIRMS the group is gone releases the resources.
+  await h.teardown();
+  assert.equal(disposed, 1, "dispose happens on confirmed teardown");
+  h.kill(); // no-op once confirmed
+  assert.equal(kills, 3, "kill is inert after confirmation");
 });
 
 test("teardownAll + killAll (top-level wrappers) operate over every server", async () => {
@@ -327,10 +420,13 @@ test("teardownAll + killAll (top-level wrappers) operate over every server", asy
   // 2 imported tools (a + b) + the single `mcp_resource`.
   assert.equal(result.tools.length, 3);
   assert.equal(resourceTools(result.tools).length, 1, "one mcp_resource tool");
-  // Graceful teardown of BOTH.
+  // Graceful teardown of BOTH (close, NOT kill — the escalation runs inside
+  // the spawn; the mock spawn's close records it).
   await teardownAll(result);
-  assert.equal(a.killed, true);
-  assert.equal(b.killed, true);
+  assert.equal(a.killed, false, "graceful teardown does not SIGKILL");
+  assert.equal(b.killed, false, "graceful teardown does not SIGKILL");
+  assert.equal(a.closed, true, "server a's transport was closed");
+  assert.equal(b.closed, true, "server b's transport was closed");
   // The synchronous backstop over a fresh result.
   const a2 = new MockMcpServer();
   modernMock(a2, [{ name: "a" }]);
@@ -414,6 +510,88 @@ test("mcp_resource: zero ready servers (all disabled) → NO resource tool", asy
   assert.equal(resourceTools(tools).length, 0, "no mcp_resource tool");
 });
 
+// ── Audit regressions ─────────────────────────────────────────────────────
+
+test("audit #1: kill() during an in-flight graceful teardown still SIGKILLs (backstop stays live)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "ok" }]);
+  let killCount = 0;
+  let releaseClose!: () => void;
+  const closeGate = new Promise<void>((r) => (releaseClose = r));
+  const base = mockSpawnFn(mock);
+  const spawnFn: McpSpawnFn = async (cmd, args, o) => {
+    const s = await base(cmd, args, o);
+    return {
+      ...s,
+      close: () => closeGate, // a slow graceful escalation
+      kill: () => {
+        killCount++;
+        mock.killed = true;
+      },
+    };
+  };
+  const { handles } = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
+  const h = handles[0]!;
+  const t = h.teardown(); // graceful — still awaiting the close gate
+  h.kill(); // host exit during shutdown
+  assert.equal(killCount, 1, "kill() is not gated on the in-flight teardown");
+  assert.equal(mock.killed, true);
+  releaseClose();
+  await t;
+});
+
+test("audit #1: repeated teardown() calls share ONE promise (cached)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "ok" }]);
+  let closeCount = 0;
+  const base = mockSpawnFn(mock);
+  const spawnFn: McpSpawnFn = async (cmd, args, o) => {
+    const s = await base(cmd, args, o);
+    return {
+      ...s,
+      close: () => {
+        closeCount++;
+        return Promise.resolve();
+      },
+    };
+  };
+  const { handles } = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
+  const h = handles[0]!;
+  const a = h.teardown();
+  const b = h.teardown();
+  assert.equal(a, b, "the same in-flight teardown promise");
+  await Promise.all([a, b]);
+  // spawn.close is reached via the client's transport.close (1) and the
+  // handle's own spawn.close (1) on the FIRST teardown only — a second
+  // teardown() must not add any close call.
+  const afterFirst = closeCount;
+  await h.teardown();
+  assert.equal(closeCount, afterFirst, "a repeat teardown() adds no close calls");
+});
+
+test("audit #2: /mcp reports a server that died after ready as FAILED (not the stale ready snapshot)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "ok" }]);
+  const { handles } = await startMcpServers({ fs: srv() }, mockSpawnFn(mock), baseOpts);
+  const h = handles[0]!;
+  assert.equal(h.state, "ready", "startup snapshot is ready");
+  mock.closeStdout(); // transport dies after startup → client fail()
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(h.client!.getState().state, "failed");
+  assert.match(mcpStatusLine(h), /^fs — failed \(/);
+});
+
+test("audit #2: a registry-level rejected import still reports failed", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "tool", inputSchema: { type: "object" } }]);
+  const { handles } = await startMcpServers(
+    { fs: srv() },
+    mockSpawnFn(mock),
+    { ...baseOpts, builtinNames: [encodeMcpToolName("fs", "tool")] },
+  );
+  assert.match(mcpStatusLine(handles[0]!), /^fs — failed \(tool import rejected/);
+});
+
 test("mcp_resource: mixed (one ready, one failed) → exactly ONE resource tool", async () => {
   const good = new MockMcpServer();
   modernMock(good, [{ name: "ok" }]);
@@ -434,4 +612,200 @@ test("mcp_resource: mixed (one ready, one failed) → exactly ONE resource tool"
   assert.equal(tools.length, 2);
   const rt = resourceTools(tools);
   assert.equal(rt.length, 1, "exactly ONE mcp_resource tool");
+});
+
+// ── Audit fix: spawns still in startup are reaped by reapPendingSpawns() ──
+// A signal during startup (the spawn exists but no handle owns it yet) must
+// still SIGKILL it. The spawn is registered as pending on creation and only
+// leaves the set once a handle owns it.
+test("reapPendingSpawns: a spawn mid-startup (no handle yet) is killed by the sync backstop", async () => {
+  const mock = new MockMcpServer();
+  // A probe that never answers → startup stays pending (the await is live).
+  let killed = false;
+  const hangingSpawn: McpSpawnFn = async () => ({
+    child: { pid: undefined } as McpSpawn["child"],
+    stdin: mock.stdin,
+    stdout: mock.stdout,
+    stderr: mock.stderr,
+    close: async () => {},
+    kill: () => {
+      killed = true;
+    },
+    dispose: async () => {},
+  });
+  const pending = startMcpServers(
+    { hang: { command: "x", args: [] } as unknown as McpServerConfig },
+    hangingSpawn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: FAST },
+  );
+  // Let the spawn resolve and the client begin its probe.
+  await new Promise((r) => setTimeout(r, 20));
+  reapPendingSpawns();
+  assert.equal(killed, true, "the in-startup spawn was SIGKILLed by the backstop");
+  // Drain the startup (it fails on its own probe timeout) so the test ends clean.
+  await pending.catch(() => {});
+});
+
+// ── Audit fix: multi-server startup window (finding 1) ─────────────────────
+// Server A becomes ready while server B is still starting. A signal in that
+// window must reap A too — it is no longer "pending" but is not yet in any
+// published result either, so the backstop must still reach it.
+test("reapPendingSpawns during a two-server startup reaps the already-READY sibling", async () => {
+  const { reapPendingSpawns } = await import("../src/mcp/registry.js");
+  const ready = new MockMcpServer();
+  modernMock(ready, []);
+  const hang = new MockMcpServer(); // never answers → startup stays in progress
+  const killed: Record<string, boolean> = { ready: false, hang: false };
+  const spawnFn: McpSpawnFn = async (command) => {
+    const which = command === "ready" ? "ready" : "hang";
+    const m = which === "ready" ? ready : hang;
+    return {
+      child: { pid: undefined } as McpSpawn["child"],
+      stdin: m.stdin,
+      stdout: m.stdout,
+      stderr: m.stderr,
+      close: async () => {},
+      kill: () => {
+        killed[which] = true;
+      },
+      dispose: async () => {},
+    };
+  };
+  const starting = startMcpServers(
+    {
+      a: { command: "ready", args: [] } as unknown as McpServerConfig,
+      b: { command: "hang", args: [] } as unknown as McpServerConfig,
+    },
+    spawnFn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: FAST },
+  );
+  // Let A finish startup (ready) while B is still probing.
+  await new Promise((r) => setTimeout(r, 40));
+  reapPendingSpawns();
+  assert.equal(killed.ready, true, "the already-ready sibling was reaped");
+  assert.equal(killed.hang, true, "the still-starting server was reaped");
+  await starting.catch(() => {});
+});
+
+// ── Audit fix: a failed teardown is retryable (finding 3) ──────────────────
+test("a failed teardown is retryable: the next teardownAll re-runs the close chain", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, []);
+  let closeCalls = 0;
+  let fail = true;
+  const spawnFn: McpSpawnFn = async () => ({
+    child: { pid: undefined } as McpSpawn["child"],
+    stdin: mock.stdin,
+    stdout: mock.stdout,
+    stderr: mock.stderr,
+    close: async () => {
+      closeCalls++;
+      if (fail) throw new Error("group survived SIGKILL bound");
+    },
+    kill: () => {},
+    dispose: async () => {},
+  });
+  const result = await startMcpServers(
+    { s: { command: "x", args: [] } as unknown as McpServerConfig },
+    spawnFn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: FAST },
+  );
+  await assert.rejects(teardownAll(result), /did not fully complete/);
+  const afterFirst = closeCalls;
+  assert.ok(afterFirst > 0, "the first attempt invoked the close chain");
+  fail = false; // the group is gone on the retry
+  await teardownAll(result); // must NOT replay the cached rejection
+  assert.ok(closeCalls > afterFirst, "the retry re-invoked the close chain");
+});
+
+// ── Audit fix: a failed final teardown still gets the synchronous kill ─────
+test("killAll after a failed teardown SIGKILLs the unconfirmed group", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, []);
+  let killed = false;
+  const spawnFn: McpSpawnFn = async () => ({
+    child: { pid: undefined } as McpSpawn["child"],
+    stdin: mock.stdin,
+    stdout: mock.stdout,
+    stderr: mock.stderr,
+    close: async () => {
+      throw new Error("group survived SIGKILL bound");
+    },
+    kill: () => {
+      killed = true;
+    },
+    dispose: async () => {},
+  });
+  const result = await startMcpServers(
+    { s: { command: "x", args: [] } as unknown as McpServerConfig },
+    spawnFn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: FAST },
+  );
+  await assert.rejects(teardownAll(result));
+  killAll(result);
+  assert.equal(killed, true, "the unconfirmed group received the synchronous SIGKILL");
+});
+
+// ── Audit fix: confirmed cleanup releases ownership (no stale re-kills) ───
+// After a SUCCESSFUL startup the spawn leaves liveSpawns only when close()
+// confirms the group is gone. A later backstop must not re-kill a cleaned
+// spawn (a recycled group id could then hit an unrelated process).
+test("a confirmed teardown unregisters the spawn (backstop does not re-kill it)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, []);
+  let kills = 0;
+  const spawnFn: McpSpawnFn = async () => ({
+    child: { pid: undefined } as McpSpawn["child"],
+    stdin: mock.stdin,
+    stdout: mock.stdout,
+    stderr: mock.stderr,
+    close: async () => {}, // resolves = group confirmed gone
+    kill: () => {
+      kills++;
+    },
+    dispose: async () => {},
+  });
+  const result = await startMcpServers(
+    { s: { command: "x", args: [] } as unknown as McpServerConfig },
+    spawnFn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: FAST },
+  );
+  await teardownAll(result); // confirmed
+  const before = kills;
+  reapPendingSpawns();
+  assert.equal(kills, before, "a confirmed-clean spawn is NOT re-killed by the backstop");
+});
+
+// ── Audit fix: a FAILED startup stays registered until close() confirms ──
+test("a failed startup whose cleanup unconfirmates stays registered for the backstop", async () => {
+  const mock = new MockMcpServer(); // no handler → the probe times out → failed
+  let kills = 0;
+  let killCalls = 0;
+  const spawnFn: McpSpawnFn = async () => ({
+    child: { pid: undefined } as McpSpawn["child"],
+    stdin: mock.stdin,
+    stdout: mock.stdout,
+    stderr: mock.stderr,
+    close: async () => {
+      throw new Error("group survived SIGKILL bound");
+    },
+    kill: () => {
+      killCalls++;
+      kills = killCalls;
+    },
+    dispose: async () => {},
+  });
+  const result = await startMcpServers(
+    { s: { command: "x", args: [] } as unknown as McpServerConfig },
+    spawnFn,
+    { launchDir: "/tmp", workspace: "/tmp", extraRoots: [], parentEnv: {}, clientOpts: { probeTimeoutMs: 100, startupBudgetMs: 300, callTimeoutMs: 500, stallMs: 50 } },
+  );
+  assert.equal(result.handles[0]!.state, "failed");
+  // The handle was created with alreadyTornDown=false (cleanup unconfirmed),
+  // so teardown() re-runs the close chain — and still fails.
+  await assert.rejects(teardownAll(result), /did not fully complete/);
+  // The spawn is STILL registered: a later backstop can re-kill it.
+  const before = kills;
+  reapPendingSpawns();
+  assert.equal(kills, before + 1, "the unconfirmed spawn remains reachable by the backstop");
 });

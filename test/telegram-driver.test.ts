@@ -295,6 +295,44 @@ test("mutex: two turns run SERIALLY, never concurrently", async () => {
   assert.equal(overlap, false, "two turns must not run concurrently on the shared context");
 });
 
+// ── STOP-AND-DRAIN (restart safety) ─────────────────────────────────────────
+
+test("stopAndDrain: stops polling AND waits for the in-flight turn to settle", async () => {
+  const bridge: TelegramBridge = {
+    enabled: false,
+    pollLong: async () => null,
+    send: async () => {},
+  };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  let turnDone = false;
+  const turn = driver.withTurn(async () => {
+    await sleep(60);
+    turnDone = true;
+  });
+  // Give the turn body a beat to start, then drain from "outside".
+  await sleep(10);
+  const t0 = Date.now();
+  await driver.stopAndDrain();
+  const drainedMs = Date.now() - t0;
+  await turn;
+  assert.equal(turnDone, true, "the turn settled");
+  // The drain must have WAITED for the ~50ms the turn had left, not returned
+  // instantly (a plain stop() would).
+  assert.ok(drainedMs >= 40, `the drain waited for the in-flight turn (${drainedMs}ms)`);
+});
+
+test("stopAndDrain: resolves immediately when nothing is in flight", async () => {
+  const bridge: TelegramBridge = {
+    enabled: false,
+    pollLong: async () => null,
+    send: async () => {},
+  };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  const t0 = Date.now();
+  await driver.stopAndDrain();
+  assert.ok(Date.now() - t0 < 50, "no in-flight turn → the drain resolves fast");
+});
+
 // ── BRIDGE ENABLEMENT (helper resolution across skill roots) ────────────────
 
 test("bridge: enabled when the helper is in the USER agent-skills root (the 2026-10-02 case)", () => {

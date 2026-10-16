@@ -169,9 +169,12 @@ export interface McpResourceTool extends Tool {
 }
 
 /** A per-server resource lookup (built by the registry from its handles):
- *  the client to call (READY servers only), plus the server's state +
+ *  the client to call (READY servers only), plus the server's LIVE state +
  *  reason (so a not-found / not-ready error can list every configured
- *  server and its state). `null` when the name is not configured at all. */
+ *  server and its state). `null` when the name is not configured at all.
+ *  A torn-down client (fail/close ran) cannot serve calls — the lookup
+ *  reports its startup state for the message but the ADAPTER also checks
+ *  liveness itself, so routing matches reality rather than the snapshot. */
 export type McpResourceLookup = (
   serverName: string,
 ) => { client: McpClient | null; state: McpState; reason: string } | null;
@@ -244,9 +247,11 @@ export function makeMcpResourceTool(
             describeServers(servers),
         );
       }
-      if (entry.state !== "ready" || !entry.client) {
+      if (entry.state !== "ready" || !entry.client || entry.client.isClosed()) {
+        const tornDown = entry.client?.isClosed() === true;
         return fail(
           `mcp_resource: MCP server "${server}" is not ready (state: ${entry.state}` +
+            (tornDown ? " — client torn down" : "") +
             (entry.reason ? ` — ${entry.reason}` : "") +
             `) — configured servers: ${describeServers(servers)}`,
         );

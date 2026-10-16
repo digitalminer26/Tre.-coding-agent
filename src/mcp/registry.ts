@@ -16,12 +16,16 @@
  *
  * Teardown (the bash.ts process-group pattern, §4.4):
  *   - `teardown()` — GRACEFUL, async, idempotent: client.close() (settles
- *     pending + kills the transport + starts the graceful close) +
- *     spawn.dispose() (releases the policy file / empty-root dir). Used on
- *     clean shutdown (the `finally` block, every exit path).
- *   - `killAll()` — SYNCHRONOUS, idempotent: client.close() (the synchronous
- *     group-SIGKILL via the transport) + spawn.dispose(). The backstop for
- *     immediate `process.exit` paths — it must not await.
+ *     pending + starts the graceful close) + AWAIT the spawn's close chain
+ *     (confirm the group is gone) + spawn.dispose() (releases the policy
+ *     file / empty-root dir). Resolves when the group is confirmed gone;
+ *     REJECTS if the group survives the SIGKILL bound (unconfirmed
+ *     termination). Used on clean shutdown (the `finally` block, every exit
+ *     path) and /restart.
+ *   - `killAll()` — SYNCHRONOUS, idempotent: client.kill() (settle pending +
+ *     detach + the synchronous group-SIGKILL via the transport) +
+ *     spawn.kill() + spawn.dispose() (best-effort, fire-and-forget). The
+ *     backstop for immediate `process.exit` paths — it must not await.
  *
  * `startMcpServers` takes an INJECTED `spawnFn` (the real `spawnMcpServer`,
  * or a mock in tests) so the whole start/import/teardown lifecycle is
@@ -56,7 +60,10 @@ export interface McpServerHandle {
   tools: AdaptedMcpTool[];
   client: McpClient | null;
   spawn: McpSpawn | null;
-  /** GRACEFUL, async, idempotent (clean shutdown). */
+  /** GRACEFUL, async, idempotent (clean shutdown / restart). Resolves when
+   *  the group is confirmed gone. REJECTS if the group survives the SIGKILL
+   *  bound (an unconfirmed termination) — callers must not treat that as a
+   *  clean shutdown. */
   teardown(): Promise<void>;
   /** SYNCHRONOUS, idempotent (the `process.exit` backstop). */
   kill(): void;
@@ -108,6 +115,36 @@ export type McpSpawnFn = (
   },
 ) => Promise<McpSpawn>;
 
+/** Every spawn created by a startup that has not been torn down yet — BOTH
+ *  the servers still starting AND the ones already ready while a sibling is
+ *  still starting. Module-level so the process backstop (installed before any
+ *  spawn) can reach all of them. A spawn leaves this set only when its
+ *  process group is confirmed gone by close(). Sending a kill is NOT proof
+ *  of termination, so emergency kills retain ownership for later backstops. */
+const liveSpawns = new Set<McpSpawn>();
+
+/** SYNCHRONOUS, idempotent: SIGKILL every live spawn — startup-pending,
+ *  startup-ready, or owned by a not-yet-torn-down result. The process-exit /
+ *  signal backstop. Safe to call with nothing live. */
+export function reapPendingSpawns(): void {
+  for (const s of liveSpawns) {
+    try {
+      s.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/** Kill a failed startup, then confirm termination before releasing ownership
+ *  or sandbox resources. Failure stays registered for the process backstop. */
+async function cleanupFailedSpawn(spawn: McpSpawn): Promise<void> {
+  spawn.kill();
+  await spawn.close();
+  liveSpawns.delete(spawn);
+  await spawn.dispose();
+}
+
 /** Start every configured server (per-server isolation: one failure never
  *  aborts the launch). Returns one handle per server (disabled included) +
  *  the flat list of imported tools. */
@@ -143,6 +180,9 @@ export async function startMcpServers(
         extraRoots: opts.extraRoots,
         inheritedSandbox: opts.parentEnv.TRE_SANDBOX === "1",
       });
+      // Registered as pending the moment it exists: a signal during the
+      // startup await below must still reap it (no handle owns it yet).
+      liveSpawns.add(spawn);
       client = new McpClient(name, spawnTransport(spawn), opts.clientOpts ?? {});
       const allTools: McpTool[] = await client.start();
       // Per-server tool allowlist (§4.1): a non-empty `tools` list restricts
@@ -160,10 +200,16 @@ export async function startMcpServers(
         // failure — the server must not be left running).
         reason = `tool import rejected: ${outcome.rejected.conflicting.join(", ")}`;
         state = "failed";
-        client.close();
-        await spawn.dispose();
+        client.kill(); // a rejected import is a startup FAILURE — kill, don't close gracefully
+        let cleaned = false;
+        try {
+          await cleanupFailedSpawn(spawn);
+          cleaned = true;
+        } catch (e) {
+          reason += `; cleanup unconfirmed: ${e instanceof Error ? e.message : String(e)}`;
+        }
         handles.push(
-          makeHandle(name, state, reason, [], client, spawn, true),
+          makeHandle(name, state, reason, [], client, spawn, cleaned),
         );
         continue;
       }
@@ -175,12 +221,22 @@ export async function startMcpServers(
       // A startup failure (spawn rejection, probe/handshake error, timeout,
       // pagination limit, admission failure). FULL teardown: the client has
       // already rejected its pending + killed the transport (its `fail`);
-      // release the sandbox resources (the client's `fail` does not dispose).
+      // the kill() here is the defensive no-op arm (a client that exists
+      // but never failed — kill it the same way). Release the sandbox
+      // resources (the client's `fail` does not dispose).
       reason = e instanceof Error ? e.message : String(e);
       state = "failed";
-      if (client) client.close();
-      if (spawn) await spawn.dispose();
-      handles.push(makeHandle(name, state, reason, [], client ?? null, spawn ?? null, true));
+      if (client) client.kill();
+      let cleaned = spawn === null;
+      if (spawn) {
+        try {
+          await cleanupFailedSpawn(spawn);
+          cleaned = true;
+        } catch (cleanupError) {
+          reason += `; cleanup unconfirmed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+        }
+      }
+      handles.push(makeHandle(name, state, reason, [], client ?? null, spawn ?? null, cleaned));
       continue;
     }
     handles.push(makeHandle(name, state, reason, imported, client, spawn, false));
@@ -214,7 +270,10 @@ function spawnTransport(spawn: McpSpawn): McpTransport {
     stdout: spawn.stdout,
     stderr: spawn.stderr,
     close: () => {
-      void spawn.close();
+      // Fire-and-forget from the client's graceful close. A FAILED chain
+      // (group survived SIGKILL) must not become an unhandled rejection: the
+      // awaited teardown() path reports it, and the retry re-runs the chain.
+      spawn.close().catch(() => {});
     },
     kill: () => spawn.kill(),
   };
@@ -250,27 +309,72 @@ function makeHandle(
   spawn: McpSpawn | null,
   alreadyTornDown: boolean,
 ): McpServerHandle {
-  let disposed = alreadyTornDown;
-  const teardown = async (): Promise<void> => {
-    if (disposed) return;
-    disposed = true;
-    client?.close();
-    if (spawn) await spawn.dispose();
+  let confirmedGone = alreadyTornDown;
+  // Cached graceful teardown: repeated callers await the SAME in-flight
+  // promise. Crucially, `kill()` is NOT gated on this promise — a host exit
+  // during a graceful shutdown must still SIGKILL the group (the audit's
+  // finding: a `disposed` flag set before the await disabled the backstop).
+  let teardownP: Promise<void> | null = alreadyTornDown ? Promise.resolve() : null;
+  const teardown = (): Promise<void> => {
+    if (teardownP) return teardownP;
+    const attempt: Promise<void> = (async () => {
+      // client.close() is the GRACEFUL arm: it starts the spawn's close chain
+      // (stdin EOF → group exits → SIGTERM → SIGKILL → confirm group gone).
+      // AWAIT that chain BEFORE disposing sandbox resources (the group may
+      // still hold the policy file / empty-root dir open).
+      client?.close();
+      if (spawn) {
+        // The client's transport.close() and this spawn.close() share ONE
+        // chain, so awaiting it here is the same chain — and if it REJECTS
+        // (the group survived the SIGKILL bound — an UNCONFIRMED termination)
+        // we must NOT silently proceed: dispose would race a live group, and
+        // the caller must be told the teardown did not fully succeed.
+        await spawn.close();
+      }
+      confirmedGone = true;
+      if (spawn) liveSpawns.delete(spawn);
+      if (spawn) await spawn.dispose();
+    })();
+    teardownP = attempt;
+    // A FAILED attempt (unconfirmed group) must be retryable: drop the cached
+    // rejection so the next teardown() re-runs the close chain instead of
+    // replaying the old failure. A success stays cached (idempotent).
+    attempt.catch(() => {
+      if (teardownP === attempt) teardownP = null;
+    });
+    return attempt;
   };
   const kill = (): void => {
-    if (disposed) return;
-    disposed = true;
-    client?.close();
-    spawn?.dispose();
+    if (confirmedGone) return;
+    // Synchronous backstop (the `process.exit` path — no await allowed):
+    // SIGKILL NOW, regardless of an in-flight graceful teardown. Every
+    // operation here is idempotent, so a repeat after a completed teardown
+    // is harmless.
+    client?.kill();
+    // Repeatable until close() confirms termination. Do not dispose sandbox
+    // resources or unregister a possibly-live group merely because kill ran.
+    if (spawn) spawn.kill();
   };
   return { name, state, reason, tools, client, spawn, teardown, kill };
 }
 
 /** GRACEFUL, async, idempotent: tear down EVERY server (the clean-shutdown
- *  path — the `finally` block, every exit path). Runs the per-server
- *  teardowns concurrently (each is independent). */
+ *  path — the `finally` block, every exit path, /restart). Runs the
+ *  per-server teardowns concurrently (each is independent) and AWAITs ALL of
+ *  them (every group is reaped, even if one fails). RESOLVES when every group
+ *  is confirmed gone; REJECTS with a combined error if ANY group survived the
+ *  SIGKILL bound (an unconfirmed termination the caller must not treat as a
+ *  clean shutdown). */
 export async function teardownAll(result: McpStartResult): Promise<void> {
-  await Promise.all(result.handles.map((h) => h.teardown()));
+  const results = await Promise.allSettled(
+    result.handles.map((h) => h.teardown()),
+  );
+  const failures = results
+    .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+    .map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)));
+  if (failures.length > 0) {
+    throw new Error(`MCP teardown did not fully complete: ${failures.join("; ")}`);
+  }
 }
 
 /** SYNCHRONOUS, idempotent: kill EVERY server's process group (the
@@ -279,19 +383,28 @@ export function killAll(result: McpStartResult): void {
   for (const h of result.handles) h.kill();
 }
 
-/** The §7 `/mcp` status line for one server:
- *  `ready (N tools) | starting | failed (<reason>) | disabled`. */
+/** The §7 `/mcp` status line for one server. State/reason are read LIVE
+ *  from the client (not the startup snapshot): a server that died after a
+ *  clean ready (stdout EOF → client fail) reports `failed` here — the old
+ *  behavior kept saying `ready` for a dead process. Disabled/disconnected
+ *  handles (no client) report their own state. */
 export function mcpStatusLine(h: McpServerHandle): string {
-  switch (h.state) {
+  // A registry-level failure (rejected import, startup failure) is final and
+  // keeps its reason. Otherwise the client's LIVE state wins: a server that
+  // died after ready (fail() → closed) must read `failed`, not the stale
+  // startup snapshot `ready`.
+  let { state, reason } = h;
+  if (h.state !== "failed" && h.client) ({ state, reason } = h.client.getState());
+  switch (state) {
     case "ready":
       return `${h.name} — ready (${h.tools.length} tool${h.tools.length === 1 ? "" : "s"})`;
     case "starting":
       return `${h.name} — starting`;
     case "failed":
-      return `${h.name} — failed (${h.reason})`;
+      return `${h.name} — failed (${reason || h.reason})`;
     case "disabled":
       return `${h.name} — disabled`;
     default:
-      return `${h.name} — ${h.state}`;
+      return `${h.name} — ${state}`;
   }
 }

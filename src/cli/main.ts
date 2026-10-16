@@ -98,6 +98,7 @@ import {
   teardownAll,
   killAll,
   mcpStatusLine,
+  reapPendingSpawns,
   type McpStartResult,
 } from "../mcp/registry.js";
 import { spawnMcpServer } from "../mcp/spawn.js";
@@ -1275,7 +1276,73 @@ export function behaviorSettingsLines(
  * failures (I3). `deps` is for tests (inject streamFn/sinks); the real entry
  * uses the openAiStream wire layer.
  */
+// SIGINT ownership: how many interactive drivers (TUI / plain REPL) currently
+// own SIGINT in this process. The startup/teardown fallback handler stands
+// down while this is > 0 — including STALE fallbacks left behind by a
+// previous in-process main() invocation whose teardown ended unconfirmed.
+let sigintInteractiveOwners = 0;
+
 export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
+  // Owns the MCP lifecycle for this invocation. Every return path of the body
+  // (early refusals included) funnels through this finally, so a session-open
+  // failure or a non-TTY refusal can no longer leak spawned servers — and the
+  // process-level signal/exit listeners come off only once teardown is done.
+  const mcpHolder: McpHolder = { result: null, installed: false };
+  mcpHolder.warn = (msg) => {
+    (deps.sinks ?? { err: process.stderr }).err.write(msg + "\n");
+  };
+  try {
+    return await mainBody(argv, deps, mcpHolder);
+  } finally {
+    if (mcpHolder.result) {
+      const result = mcpHolder.result;
+      try {
+        await teardownAll(result);
+        mcpHolder.result = null;
+        mcpHolder.unconfirmed = false;
+      } catch (e) {
+        // An UNCONFIRMED group survived the graceful path. Make the final
+        // synchronous SIGKILL attempt NOW (while the result is still held) and
+        // report it — a silent discard would leave a live group unaddressed.
+        killAll(result);
+        mcpHolder.unconfirmed = true;
+        mcpHolder.warn?.(
+          `mcp: cleanup did not confirm every server exited — ${e instanceof Error ? e.message : String(e)} (SIGKILL sent)`,
+        );
+      }
+    }
+    if (mcpHolder.installed && mcpHolder.result === null) {
+      // Keep the process-level backstop when a group could not be confirmed:
+      // the exit listener stays so a later process exit still SIGKILLs it. It
+      // is detached only on a fully confirmed teardown.
+      if (!mcpHolder.unconfirmed) {
+        process.off("exit", mcpHolder.onExit!);
+        process.off("SIGTERM", mcpHolder.onSigterm!);
+        process.off("SIGHUP", mcpHolder.onSighup!);
+        process.off("SIGINT", mcpHolder.onSigint!);
+      }
+    }
+  }
+}
+
+/** Per-invocation MCP lifecycle state, owned by main() and shared with the
+ *  body. `result` is what teardown reaches; the listeners are the process
+ *  backstop installed before any spawn and removed only after teardown. */
+interface McpHolder {
+  result: McpStartResult | null;
+  installed: boolean;
+  /** Set when a teardown could not confirm every group exited (the exit
+   *  backstop is kept). */
+  unconfirmed?: boolean;
+  /** Reports a cleanup failure on the caller's error sink. */
+  warn?: (msg: string) => void;
+  onExit?: () => void;
+  onSigterm?: () => void;
+  onSighup?: () => void;
+  onSigint?: () => void;
+}
+
+async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): Promise<number> {
   const args = parseArgs(argv);
   const sinks: PrintSinks = deps.sinks ?? { out: process.stdout, err: process.stderr };
   if (args.errors.includes("help")) {
@@ -1454,7 +1521,58 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // never aborts the launch — it is marked `failed` (its tools absent, a
   // one-line notice), the others proceed. A malformed / missing config
   // refuses the startup (exit 2), like a bad extraRoots.
-  let mcpResult: McpStartResult | null = null;
+  // The body's view of the MCP result is the holder's: the outer `finally`
+  // in main() tears down whatever is held there on EVERY return path.
+  const mcpRef = {
+    get current(): McpStartResult | null {
+      return mcpHolder.result;
+    },
+    set current(v: McpStartResult | null) {
+      mcpHolder.result = v;
+    },
+  };
+  // WS12 lifecycle — installed BEFORE any MCP spawn so a signal during
+  // startup (while servers are still pending, owned by no handle yet) reaps
+  // them too. Idempotent: reapPendingSpawns() and killAll() are no-ops once
+  // nothing is live. SIGTERM/SIGHUP route through process.exit so the 'exit'
+  // backstop runs (the default would be a bare kill that skips it).
+  const reapAllMcp = (): void => {
+    reapPendingSpawns();
+    if (mcpRef.current) killAll(mcpRef.current);
+  };
+  const onMcpExit = (): void => reapAllMcp();
+  const onMcpSigterm = (): void => process.exit(143);
+  const onMcpSighup = (): void => process.exit(129);
+  // The interactive driver owns SIGINT while its listener is installed.
+  // Before startup and after that listener is removed, this fallback routes
+  // Ctrl+C through process.exit so detached MCP groups are reaped.
+  const onMcpSigint = (): void => {
+    // An interactive driver (TUI / plain REPL) owns SIGINT while running —
+    // the fallback stands down. The module-level counter (not a listener
+    // scan) is what makes a STALE fallback from a previous in-process
+    // main() invocation stand down too.
+    if (sigintInteractiveOwners > 0) return;
+    process.exit(130);
+  };
+  // Ownership handoff: the interactive driver registers as the SIGINT owner;
+  // the fallback is removed while owned and resumes on the last release.
+  const acquireSigint = (): void => {
+    sigintInteractiveOwners++;
+    process.off("SIGINT", onMcpSigint);
+  };
+  const releaseSigint = (): void => {
+    sigintInteractiveOwners = Math.max(0, sigintInteractiveOwners - 1);
+    if (!process.listeners("SIGINT").includes(onMcpSigint)) process.on("SIGINT", onMcpSigint);
+  };
+  process.on("SIGINT", onMcpSigint);
+  process.on("exit", onMcpExit);
+  process.on("SIGTERM", onMcpSigterm);
+  process.on("SIGHUP", onMcpSighup);
+  mcpHolder.installed = true;
+  mcpHolder.onExit = onMcpExit;
+  mcpHolder.onSigterm = onMcpSigterm;
+  mcpHolder.onSighup = onMcpSighup;
+  mcpHolder.onSigint = onMcpSigint;
   {
     let mcpServers: Record<string, McpServerConfig>;
     let skipValidation = false;
@@ -1488,14 +1606,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
           return 2;
         }
       }
-      mcpResult = await startMcpServers(mcpServers, spawnMcpServer, {
+      mcpRef.current = await startMcpServers(mcpServers, spawnMcpServer, {
         launchDir: root,
         workspace: root,
         extraRoots,
         parentEnv: { ...process.env },
         builtinNames: tools.map((t) => t.name),
       });
-      for (const h of mcpResult.handles) {
+      for (const h of mcpRef.current.handles) {
         if (h.state === "failed") {
           sinks.err.write(`mcp: ${mcpStatusLine(h)}\n`);
         }
@@ -1503,6 +1621,14 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
   }
 
+  // WS12 lifecycle: from the moment the MCP servers exist, the process may
+  // die via process.exit (the TUI's SIGINT double-press / SIGTERM / SIGHUP,
+  // the plain CLI's SIGINT, or an EARLY return such as a session-open failure
+  // below) — none of which run async finally blocks. Install the SYNCHRONOUS
+  // group-SIGKILL backstop NOW so detached children are reaped on EVERY exit
+  // path, including the early returns that precede the per-branch handlers.
+  // Idempotent: a later normal-path teardownAll() nulls mcpRef.current, so this is
+  // a no-op on the clean path.
   const builtInWired = tools.map((t) => {
     if (t.name === "bash") {
       return createBashTool(root, { sandbox: !args.noSandbox, extraRoots });
@@ -1538,7 +1664,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
   // the built-in set only; the imported tools (from the enabled servers) are
   // appended here. Each carries its `mcpTrusted`/`mcpAnnotations` side-table
   // fields, which the approval gate (§5.3) reads to classify the call.
-  const wiredTools: Tool[] = [...builtInWired, ...(mcpResult?.tools ?? [])];
+  const wiredTools: Tool[] = [...builtInWired, ...(mcpRef.current?.tools ?? [])];
 
   // skills
   const skillDirs = args.skillDirs.length > 0 ? args.skillDirs : defaultSkillDirs(root);
@@ -1654,6 +1780,13 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       sinks.err.write(
         "error: `tui` needs an interactive terminal; use `tre. run \"...\"` or `tre. --plain` without one\n",
       );
+      // WS12 lifecycle: MCP servers were ALREADY spawned above — the
+      // non-TTY refusal must tear them down (an early `return` here used to
+      // leak the detached children after the process exits).
+      if (mcpRef.current) {
+        await teardownAll(mcpRef.current);
+        mcpRef.current = null;
+      }
       return 2;
     }
     // C23: dynamic — see the terminal-size-fix import above. Loading ink
@@ -1694,12 +1827,36 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // WS12 (scope §7): the live MCP handles for the TUI's /mcp status
       // command (one line per server, reflecting its §4.4 state). Absent →
       // no servers configured → /mcp reports "no servers configured".
-      mcpStatus: mcpResult?.handles,
+      mcpStatus: mcpRef.current?.handles,
+      // WS12: graceful MCP teardown for /restart — awaited by the TUI BEFORE
+      // it spawns the replacement, so THIS process's MCP servers are reaped
+      // before the new tre. starts (the process-exit backstop alone cannot
+      // provide that ordering: the old process stays alive for the whole child
+      // run under spawnSync). Idempotent: the post-runTui teardown below then
+      // finds every handle already disposed.
+      teardownMcp: mcpRef.current
+        ? async () => {
+            const live = mcpRef.current;
+            if (!live) return;
+            try {
+              await teardownAll(live);
+              mcpRef.current = null; // mirrors the REPL path: the post-run block must not re-teardown
+              mcpHolder.unconfirmed = false;
+            } catch (e) {
+              // Unconfirmed: SIGKILL now (synchronous) so no retry is needed to
+              // stop the stragglers, then re-throw so the TUI locks the session.
+              killAll(live);
+              mcpHolder.unconfirmed = true;
+              throw e;
+            }
+          }
+        : undefined,
       // The startup behavior-settings summary — seeded as a single multi-line
       // info item so the user sees the current approval/sandbox behavior and
       // the optional flags before the first prompt.
       startupInfo: behavior.join("\n"),
       deps: { askApproval: deps.askApproval },
+      onSigintOwnership: (owned) => (owned ? acquireSigint() : releaseSigint()),
       // /restart: re-exec this exact argv (the child resumes the session
       // file automatically). Pass the FULL process.argv — restartCommand
       // strips argv[0] (the node binary); passing a pre-sliced array would
@@ -1708,7 +1865,11 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         ? [process.argv[0]!, process.argv[1]!, ...process.argv.slice(2).filter((a) => a !== "--session-auto"), "--resume", autoSessionPath]
         : process.argv,
     });
-    if (mcpResult) await teardownAll(mcpResult);
+    if (mcpRef.current) {
+      await teardownAll(mcpRef.current);
+      mcpRef.current = null; // the 'exit' backstop must not re-kill post-teardown
+      // (killAll is idempotent anyway — this is hygiene, not correctness).
+    }
     if (session) await session.close();
     return code;
   }
@@ -1782,17 +1943,19 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const now = Date.now();
       if (now - lastInt < 2000) {
         telegramDriver?.stop();
-        if (mcpResult) killAll(mcpResult); // sync group-SIGKILL backstop (§4.4)
+        if (mcpRef.current) killAll(mcpRef.current); // sync group-SIGKILL backstop (§4.4)
         process.exit(130);
       }
       controller.abort();
       lastInt = now;
     } else {
-      if (mcpResult) killAll(mcpResult); // sync group-SIGKILL backstop (§4.4)
+      if (mcpRef.current) killAll(mcpRef.current); // sync group-SIGKILL backstop (§4.4)
       process.exit(130);
     }
   };
   process.on("SIGINT", onSigint);
+  acquireSigint();
+
 
   let rl: Interface | undefined;
   // The REPL's background Telegram driver (declared here so the `finally` can
@@ -1974,6 +2137,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     }
     telegramDriver = td;
     sinks.err.write("tre. REPL — /quit to exit, SIGINT aborts the current run\n");
+    // Set when a /restart could NOT confirm its MCP teardown. The session
+    // stays alive for /quit (and a /restart retry), but no normal turn may run
+    // against servers of unknown state. Telegram was already stopped.
+    let replRestartFailed = false;
     for (;;) {
       // EOF on piped stdin — but only once queued burst lines are drained:
       // stdin can close in the same tick the piped lines arrive (WS10 e2e s8).
@@ -1983,6 +2150,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       const prompt = line.trim();
       if (prompt === "") continue;
       if (prompt === "/quit" || prompt === "/exit") break;
+      if (replRestartFailed && prompt !== "/restart") {
+        sinks.err.write("restart failed earlier — /quit to exit, or /restart to retry the MCP teardown\n");
+        continue;
+      }
       // A6: manual compaction — the same compactNow the auto trigger uses,
       // forced (the trigger check is skipped). The ✂ line prints via the
       // context_compacted event, like the auto path.
@@ -2029,6 +2200,36 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
         if (spec === null || !isDirectInvocation(process.argv[1], entryPath)) {
           sinks.err.write("restart: not available in this launch — quit and run tre. again\n");
         } else {
+          // Stop background Telegram dispatch first: nothing may start a turn
+          // against servers that are about to close.
+          telegramDriver?.stop();
+          controller.abort();
+          // The driver stop only cancels polling. An idle Telegram turn may
+          // still own the session: drain its mutex before closing MCP or
+          // letting the replacement replay the same session file.
+          await telegramDriver?.stopAndDrain();
+          // Reap THIS process's MCP servers BEFORE the replacement spawns —
+          // under spawnSync the old process (and its MCP children) stays alive
+          // for the whole child run otherwise. An UNCONFIRMED teardown aborts
+          // the restart: a replacement would run alongside still-live servers.
+          const liveMcp = mcpRef.current;
+          if (liveMcp) {
+            try {
+              await teardownAll(liveMcp);
+              mcpRef.current = null;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              // Final SIGKILL attempt while the result is still held, then the
+              // session is locked to quit/retry (no normal turns).
+              killAll(liveMcp);
+              replRestartFailed = true;
+              sinks.err.write(
+                `restart aborted: MCP teardown did not confirm every server exited — ${msg} (SIGKILL sent; /quit to exit, /restart to retry)\n`,
+              );
+              continue;
+            }
+          }
+          replRestartFailed = false;
           // The child owns the terminal and handles its own SIGINT; drop the
           // REPL's handler for the duration so a Ctrl+C during the child's
           // run isn't acted on by the REPL too (after spawnSync returns).
@@ -2068,10 +2269,10 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
       // (ready (N tools) | starting | failed (<reason>) | disabled).
       // Driver-side, like /stats (scope §7).
       if (prompt === "/mcp") {
-        if (!mcpResult || mcpResult.handles.length === 0) {
+        if (!mcpRef.current || mcpRef.current.handles.length === 0) {
           sinks.err.write("mcp: no servers configured\n");
         } else {
-          for (const h of mcpResult.handles) sinks.err.write(mcpStatusLine(h) + "\n");
+          for (const h of mcpRef.current.handles) sinks.err.write(mcpStatusLine(h) + "\n");
         }
         continue;
       }
@@ -2108,6 +2309,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     return 0;
   } finally {
     process.off("SIGINT", onSigint);
+    releaseSigint();
     // Abort the background pricing fetch — an in-flight request (socket or
     // timeout timer) must not keep the process alive after the run.
     pricesAbort.abort();
@@ -2116,7 +2318,7 @@ export async function main(argv: string[], deps: MainDeps = {}): Promise<number>
     if (telegramBridge.enabled) telegramDriver?.stop();
     // WS12: graceful MCP teardown (idempotent) — every clean exit path. The
     // synchronous killAll backstop in onSigint covers the immediate-exit path.
-    if (mcpResult) await teardownAll(mcpResult);
+    if (mcpRef.current) await teardownAll(mcpRef.current);
     // Cleanup is best-effort: the REPL may already have ended (EOF).
     try {
       rl?.close();

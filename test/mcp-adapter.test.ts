@@ -185,15 +185,17 @@ test("importMcpServerTools: a duplicate within the same server rejects the serve
 
 // ── makeMcpResourceTool (tier 2 — resources) ───────────────────────────────
 
-/** A fake client exposing only the two resource methods the tool calls. */
+/** A fake client exposing only the methods the tool calls. */
 function fakeClient(over: {
   list?: () => Promise<unknown>;
   read?: (uri: string, signal?: AbortSignal) => Promise<unknown>;
+  closed?: boolean;
 }): McpClient {
   return {
     listResources: async (): Promise<unknown> => (over.list ? over.list() : []),
     readResource: async (uri: string, signal?: AbortSignal): Promise<unknown> =>
       over.read ? over.read(uri, signal) : { contents: [] },
+    isClosed: () => over.closed ?? false,
   } as unknown as McpClient;
 }
 
@@ -267,6 +269,18 @@ test("makeMcpResourceTool: a non-ready server is an isError (never throws)", asy
   const res = await t.execute("tc1", { server: "db" }, new AbortController().signal);
   assert.equal(res.isError, true);
   assert.match(res.content[0]!.text, /not ready \(state: failed — boom\)/);
+});
+
+test("makeMcpResourceTool: a TORN-DOWN client (state ready, client closed) is refused live", async () => {
+  // regression: the startup snapshot says `ready`, but the client was
+  // fail()'d/closed() after startup — the adapter must check liveness
+  // (isClosed) and refuse the call, not route to a dead transport.
+  const client = fakeClient({ closed: true, list: async () => [] });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs" }, new AbortController().signal);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0]!.text, /client torn down/);
 });
 
 test("makeMcpResourceTool: an empty/absent uri returns the resource list (header + JSON)", async () => {

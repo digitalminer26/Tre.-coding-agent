@@ -34,9 +34,12 @@
  *   - `kill()` — SYNCHRONOUS, immediate: SIGKILL the process group, then
  *     the child as fallback. Idempotent. Used on terminal failure and as
  *     the synchronous `process.exit` backstop.
- *   - `close()` — GRACEFUL, async: close stdin → wait 2s → SIGTERM group →
- *     wait 2s → SIGKILL group. Idempotent. Used on clean shutdown /
- *     handled signals.
+ *   - `close()` — GRACEFUL, async: close stdin → wait for the GROUP to exit
+ *     → SIGTERM group → wait → SIGKILL group → CONFIRM the whole group is
+ *     gone. Escalation is on group liveness (a descendant outliving the
+ *     leader is reaped, not leaked). Resolves only when the group is
+ *     confirmed gone; rejects if it survives the kill bound. Idempotent.
+ *     Used on clean shutdown / handled signals / restart.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
@@ -59,6 +62,11 @@ import {
 /** Graceful-close wait between each step (scope §4.4: 2s). */
 const MCP_CLOSE_STEP_MS = 2000;
 
+/** Bound on waiting for the child's exit event after SIGKILL. SIGKILL is
+ *  effectively immediate; this only guards against a child the kernel has
+ *  not yet reaped (or a wedged exit event). */
+const MCP_KILL_WAIT_MS = 2000;
+
 /** A spawned MCP server child + its teardown handles. The client consumes
  *  `stdin`/`stdout`/`stderr` (persistent pipes) and calls `close`/`kill`. */
 export interface McpSpawn {
@@ -69,8 +77,8 @@ export interface McpSpawn {
   stdout: Readable;
   /** The child's stderr (persistent pipe — always present). */
   stderr: Readable;
-  /** Graceful: close stdin → 2s → SIGTERM group → 2s → SIGKILL group.
-   *  Idempotent. */
+  /** Graceful, awaitable: stdin EOF → exit, escalating to SIGTERM/SIGKILL.
+   *  Resolves when the escalation is DONE. Idempotent (one shared chain). */
   close(): Promise<void>;
   /** Immediate: SIGKILL the process group (then the child). Idempotent. */
   kill(): void;
@@ -100,8 +108,10 @@ export interface McpSpawnOptions {
 
 /** Spawn an MCP server child. Resolves once the child is spawned (its pipes
  *  attached); REJECTS on a fail-closed sandbox failure (before any child is
- *  spawned). A spawn-level error (ENOENT/EACCES) surfaces on the child's
- *  `error` event — the client detects it as transport death (stdout EOF). */
+ *  spawned) OR on a spawn-level failure (ENOENT/EACCES — the child's
+ *  `error` event before the `spawn` ack, per-server startup isolation). A
+ *  post-start transport death (the child dies mid-session) is NOT a spawn
+ *  concern — the client detects it (stdout EOF → fail()). */
 export async function spawnMcpServer(
   command: string,
   args: string[],
@@ -145,7 +155,45 @@ export async function spawnMcpServer(
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
+  await attachErrorGuard(child);
   return finish(child, async () => {});
+}
+
+/** Attach the child's `error` listener + await the spawn ack (scope §4.4:
+ *  a spawn-level failure — ENOENT/EACCES — surfaces as the spawn's REJECTION
+ *  (a startup error for THIS server, per-server isolation), never as an
+ *  unhandled 'error' event that crashes the host).
+ *
+ * Two phases, ONE listener:
+ *   - before the `spawn` ack: an `error` event is a spawn failure → the
+ *     promise rejects (and the listener detaches — there is no child to
+ *     watch anymore).
+ *   - after the `spawn` ack: the same listener stays attached for the
+ *     child's lifetime in SWALLOW mode — a post-start spawn error
+ *     (ENOENT at exec time / EPERM delivery) is swallowed, never re-thrown
+ *     (an uncaught rethrow would crash the host, the exact bug this guard
+ *     exists to prevent). Transport death remains the CLIENT's detection
+ *     job (stdout EOF → fail()); this listener is the crash PREVENTION. */
+function attachErrorGuard(child: ChildProcess): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let spawned = false;
+    const onSpawn = (): void => {
+      spawned = true; // the once() listener removes itself
+      resolve(); // the child is up — the guard's job is done (the error
+      // listener STAYS attached in swallow mode for the child's
+      // lifetime: a post-start 'error' event is swallowed, never re-thrown).
+    };
+    const onError = (err: Error): void => {
+      if (spawned) return; // post-start: swallowed, NOT thrown (see above).
+      // Pre-spawn spawn failure: detach and reject — the caller fails THIS
+      // server's startup (per-server isolation, §4.4).
+      child.off("spawn", onSpawn);
+      child.off("error", onError);
+      reject(err);
+    };
+    child.once("spawn", onSpawn);
+    child.on("error", onError);
+  });
 }
 
 /** darwin `sandbox:true`: `sandbox-exec -f <policy> <command> <args…>`. */
@@ -181,6 +229,14 @@ async function spawnDarwinSandboxed(
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
+  try {
+    await attachErrorGuard(child);
+  } catch (e) {
+    // Spawn failed: release the policy file — the sandbox resource must not
+    // outlive a server that never started.
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
   return finish(child, async () => {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   });
@@ -249,6 +305,14 @@ async function spawnLinuxSandboxed(
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
+  try {
+    await attachErrorGuard(child);
+  } catch (e) {
+    // Spawn failed: release the empty-root skeleton — it must not outlive a
+    // server that never started.
+    await rm(emptyRoot, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
   return finish(child, async () => {
     await rm(emptyRoot, { recursive: true, force: true }).catch(() => {});
   });
@@ -261,7 +325,11 @@ function finish(
   dispose: () => Promise<void>,
 ): McpSpawn {
   let disposed = false;
-  let closing = false;
+  // Cached graceful-close chain: repeated close() awaits THE SAME chain
+  // instead of racing step timers (double SIGTERM/SIGKILL mid-flight is
+  // harmless, but awaiting a stale chain could report completion before the
+  // escalation finished).
+  let closeChain: Promise<void> | null = null;
 
   // Synchronous, immediate kill: SIGKILL the process group (the child is
   // detached, so the group id IS the child's pid), then the child as
@@ -282,32 +350,69 @@ function finish(
     }
   };
 
-  const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-  const isAlive = (): boolean => {
+  // A process group has no single "all members exited" event (the leader's
+  // 'exit' fires for the leader only; descendants are reaped independently as
+  // they die). So group liveness is PROBED: `kill(-pid, 0)` succeeds while
+  // ANY member of the group is alive. ESRCH → the whole group is gone;
+  // EPERM → the group exists but we lack permission (treat as alive). Probing
+  // the GROUP (not just the leader's exitCode) is what catches a descendant
+  // that outlives the leader on stdin EOF — the audit's leak.
+  const groupAlive = (): boolean => {
     if (child.pid !== undefined && process.platform !== "win32") {
       try {
         process.kill(-child.pid, 0); // signal 0 = liveness probe (no signal)
         return true;
-      } catch {
-        /* group gone */
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
       }
     }
+    // win32 / no pid: fall back to the leader's exit state.
     return child.exitCode === null && child.signalCode === null;
   };
 
-  // Graceful: close stdin → 2s → SIGTERM group → 2s → SIGKILL group.
-  const close = async (): Promise<void> => {
-    if (closing) return;
-    closing = true;
-    try {
-      child.stdin?.end();
-    } catch {
-      /* already closed */
-    }
-    // Give the child a chance to exit on stdin EOF.
-    await wait(MCP_CLOSE_STEP_MS);
-    if (isAlive()) {
+  // Poll (bounded) until the WHOLE group is gone. Resolves `true` when the
+  // group has fully exited, `false` when the bound expires with the group
+  // still alive. The bound keeps a pathological unkillable group from
+  // hanging shutdown; a `false` result means "could not confirm termination"
+  // (the caller decides how to treat it — close() treats it as a failure,
+  // NOT a success).
+  const waitForGroupGoneBounded = (ms: number): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      if (!groupAlive()) return resolve(true);
+      let settled = false;
+      const done = (gone: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearInterval(iv);
+        clearTimeout(timer);
+        resolve(gone);
+      };
+      const iv = setInterval(() => {
+        if (!groupAlive()) done(true);
+      }, 50);
+      const timer = setTimeout(() => done(!groupAlive()), ms);
+    });
+
+  // Graceful, AWAITABLE, idempotent: close stdin → wait for the group to
+  // exit → SIGTERM the group → wait → SIGKILL the group → CONFIRM the whole
+  // group is gone. Escalation is based on GROUP liveness (not just the
+  // leader's exit) so a descendant that outlives the leader is escalated and
+  // reaped, not leaked. The returned promise RESOLVES only when the group is
+  // confirmed gone; it REJECTS if the group survives the SIGKILL bound (an
+  // unconfirmed termination is a failure, not a silent success). Repeated
+  // calls return the SAME in-flight chain (no double escalation).
+  const close = (): Promise<void> => {
+    if (closeChain) return closeChain;
+    const chain: Promise<void> = (async () => {
+      try {
+        child.stdin?.end();
+      } catch {
+        /* already closed */
+      }
+      // Give the group a chance to exit on stdin EOF (poll up to the step).
+      const exitedOnEof = await waitForGroupGoneBounded(MCP_CLOSE_STEP_MS);
+      if (exitedOnEof) return;
+      // Group still alive (leader or descendants) → SIGTERM the group.
       try {
         if (child.pid !== undefined && process.platform !== "win32") {
           process.kill(-child.pid, "SIGTERM");
@@ -317,9 +422,26 @@ function finish(
       } catch {
         /* already dead */
       }
-      await wait(MCP_CLOSE_STEP_MS);
-    }
-    if (isAlive()) kill();
+      const termGone = await waitForGroupGoneBounded(MCP_CLOSE_STEP_MS);
+      if (termGone) return;
+      // Still alive after SIGTERM → SIGKILL the group, then CONFIRM the whole
+      // group is gone (bounded). If it isn't gone within the bound, reject —
+      // "close resolved" must really mean "group gone".
+      kill();
+      const killedGone = await waitForGroupGoneBounded(MCP_KILL_WAIT_MS);
+      if (!killedGone) {
+        throw new Error(
+          "MCP spawn: process group did not exit within the kill bound after SIGKILL (unconfirmed termination — possible leaked descendants)",
+        );
+      }
+    })();
+    closeChain = chain;
+    // A FAILED chain (the group survived SIGKILL) is not cached: the next
+    // close() re-runs the escalation, so a retry can actually re-confirm.
+    chain.catch(() => {
+      if (closeChain === chain) closeChain = null;
+    });
+    return chain;
   };
 
   const disposeFn = async (): Promise<void> => {

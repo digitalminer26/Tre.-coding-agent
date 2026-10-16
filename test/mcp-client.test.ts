@@ -208,7 +208,7 @@ test("modern era: a second probe failure is FATAL (not legacy)", async () => {
   const c = new McpClient("test", mock.transport, FAST);
   await assert.rejects(c.start());
   assert.equal(c.getState().state, "failed");
-  assert.equal(mock.killed, true, "torn down");
+  assert.equal(mock.killed, true, "failed = torn down (immediate kill; startup has nothing graceful to await)");
   assert.equal(probes, 2, "one retry then fatal");
 });
 
@@ -849,7 +849,8 @@ test("write rejection: the pending call settles in-band (no hang), server fails,
   assert.ok(res.texts.join(" ").length > 0, "a failure message is present");
 
   // The server is failed (a write error is a transport failure), the
-  // transport was killed, and no pending entry is left unsettled.
+  // transport was killed (fail() = immediate kill, not the graceful chain),
+  // and no pending entry is left unsettled.
   assert.equal(c.getState().state, "failed");
   assert.ok(mock.killed, "the transport was killed (teardown ran)");
   assert.equal(c.getStats().pending, 0, "no unsettled pending entry");
@@ -872,4 +873,81 @@ test("write rejection during STARTUP (the probe frame): start() rejects, no hang
   assert.equal(c.getState().state, "failed");
   assert.ok(mock.killed, "the transport was killed");
   assert.equal(c.getStats().pending, 0, "no unsettled pending entry");
+});
+
+test("clean shutdown is GRACEFUL: close() closes (never kills) the transport + suppresses the EOF-is-death echo", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  c.close();
+  assert.equal(mock.closed, true, "the transport got the graceful close");
+  assert.equal(
+    mock.killed,
+    false,
+    "close() must NOT SIGKILL (the escalation stdin EOF → SIGTERM → SIGKILL belongs to the spawn)",
+  );
+});
+
+test("stdout EOF DURING graceful close is not transport death (no fail, no kill)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // The real graceful-close sequence: close() first (stdin EOF sent), THEN
+  // the child exits and its stdout flushes EOF. The EOF must be read as the
+  // echo of our own close, not a transport failure.
+  c.close();
+  mock.closeStdout(); // EOF after close started
+  await tick(30);
+  assert.equal(mock.killed, false, "the EOF echo must not trigger kill()");
+  assert.equal(c.isClosed(), true, "the client is closed");
+});
+
+// ── Finding #1 (audit): a LATE stdin EPIPE after OUR OWN shutdown must not
+//    surface as an unhandled 'error' event that crashes the host. The real
+//    repro: a write in flight when close()/kill() ends the child's stdin
+//    fails with EPIPE. The fix keeps the stdin `error` listener attached
+//    through teardown (it is removed for data/drain but NOT for error) and
+//    makes the handler a no-op once `closed`. Before the fix, teardown()
+//    removed the listener, so the late EPIPE had no handler → uncaught.
+test("late stdin EPIPE after close() is a no-op (listener kept, not unhandled)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  assert.equal(c.getState().state, "ready");
+
+  c.close(); // graceful shutdown: closed=true, state stays "ready"
+  await tick(10);
+
+  // The late EPIPE echo of our own stdin close. With the fix the handler is
+  // still attached and no-ops on `closed`; WITHOUT it, this emit (on a
+  // PassThrough with no error listener) throws synchronously (unhandled).
+  let threw = false;
+  try {
+    mock.stdin.emit("error", new Error("write EPIPE (late, post-close)"));
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "the late EPIPE must not be an unhandled error event");
+  assert.equal(c.getState().state, "ready", "close() is not a failure — state stays ready");
+  assert.equal(c.isClosed(), true, "the client is closed");
+});
+
+test("late stdin EPIPE after kill() is a no-op (listener kept, not unhandled)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  c.kill(); // synchronous exit backstop: closed=true, transport killed
+  await tick(10);
+  let threw = false;
+  try {
+    mock.stdin.emit("error", new Error("write EPIPE (late, post-kill)"));
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "the late EPIPE must not be an unhandled error event");
+  assert.equal(c.isClosed(), true, "the client is closed");
 });

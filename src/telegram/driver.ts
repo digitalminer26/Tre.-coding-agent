@@ -130,6 +130,14 @@ export class TelegramDriver {
     this.abort.abort();
   }
 
+  /** Stop dispatch and wait for all turns already queued/running to settle.
+   *  The caller must first abort its active turn's controller: polling's
+   *  AbortController is deliberately independent of the agent run. */
+  async stopAndDrain(): Promise<void> {
+    this.stop();
+    await this.turnChain;
+  }
+
   private async loop(): Promise<void> {
     const minInterval = this.opts.minIntervalMs ?? TELEGRAM_LONG_POLL_SEC * 1000;
     const failBase = this.opts.failBaseMs ?? 1000;

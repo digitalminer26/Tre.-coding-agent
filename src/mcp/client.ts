@@ -221,6 +221,19 @@ function makeDeferred<T = unknown>(): {
 
 // ── The client ───────────────────────────────────────────────────────────────
 
+/** The `McpClient` class (scope: docs/10-mcp-scope.md §4.2/§4.4).
+ *
+ * Failure taxonomy (the load-bearing part):
+ *   - FAIL (terminal): a transport-layer problem (EOF/framing/byte
+ *     accounting/write error) or a fatal startup failure. The client tears
+ *     down IMMEDIATELY (kill): a broken transport has nothing graceful to
+ *     await. Pending calls settle in-band.
+ *   - CLOSE (graceful): OUR shutdown. Settle pending, detach listeners,
+ *     hand the transport a graceful close (stdin EOF → child exit →
+ *     SIGTERM → SIGKILL escalation inside the spawn) — the escalation chain
+ *     the spawn owns, not an instant SIGKILL. stdout EOF arriving DURING
+ *     the close window is the echo of our own stdin close, not death.
+ */
 export class McpClient {
   private state: McpState = "starting";
   private failReason = "";
@@ -234,6 +247,11 @@ export class McpClient {
   private undrained = 0;
   private stallTimer: NodeJS.Timeout | null = null;
   private budgetTimer: NodeJS.Timeout | null = null;
+  /** Set while OUR graceful shutdown is in flight (close() → the transport
+   *  closes stdin and the child exits on EOF). During this window stdout EOF
+   *  is the EXPECTED echo of our own stdin close — not transport death —
+   *  so the EOF handler must not run fail() and must not kill(). */
+  private closing = false;
   private closed = false;
 
   private stdoutBuf = "";
@@ -251,11 +269,26 @@ export class McpClient {
 
   private onStdoutBound = (c: Buffer | string) => this.onStdout(c);
   private onStderrBound = (c: Buffer | string) => this.onStderr(c);
-  private onStdinErrorBound = (err: Error) =>
+  /** A stdin write error (EPIPE / broken pipe) is transport death — UNLESS
+   *  OUR OWN shutdown is in flight (`closed`): close()/kill() ends the
+   *  child's stdin, and a write still in flight fails with EPIPE as an
+   *  EXPECTED echo of that close, not a failure. The listener is kept
+   *  attached through teardown (NOT removed) precisely so this late echo
+   *  always has a handler — removing it would surface the EPIPE as an
+   *  unhandled 'error' event that crashes the host. */
+  private onStdinErrorBound = (err: Error) => {
+    if (this.closed) return; // our own shutdown — not a transport failure
     this.fail("stdin error: " + err.message);
-  /** EOF on the child's stdout is transport death (the process is gone). */
+  };
+  /** EOF on the child's stdout is transport death (the process is gone) —
+   *  UNLESS our own graceful shutdown is in flight (`closing`): close()
+   *  stops the child's stdin, and the EOF that follows is the EXPECTED echo
+   *  of that close, not a death. In either case the stdout listener comes
+   *  off (teardown already detached it when closing; the fail path detaches
+   *  on its own). */
   private onStdoutEndBound = () => {
     if (this.closed) return;
+    if (this.closing) return;
     this.fail("transport death: stdout closed (EOF)");
   };
   /** A `drain` event is a DEADLINE SIGNAL ONLY — it never changes byte
@@ -281,6 +314,14 @@ export class McpClient {
 
   getState(): { state: McpState; reason: string; era: McpEra | null } {
     return { state: this.state, reason: this.failReason, era: this.era };
+  }
+
+  /** True once the client is torn down (fail() or close() ran) — the
+   *  registry consults this to know when the handle's startup snapshot is
+   *  the only state left (a disconnected client's getState() is meaningless;
+   *  the command the wire carried is gone). */
+  isClosed(): boolean {
+    return this.closed;
   }
 
   getDiagnostics(): Readonly<Diagnostics> {
@@ -1289,12 +1330,16 @@ export class McpClient {
   // ── Teardown ───────────────────────────────────────────────────────────────
 
   /** Terminal failure: settle all pending (in-band transport failure), tear
-   *  down the transport. A server that stays alive after a fatal response
-   *  must not be left running. */
+   *  down the transport. A server that died / misbehaved at the transport
+   *  layer is UNTRUSTWORTHY — the teardown is immediate (kill): there is
+   *  nothing graceful to await from a broken pipe, and the Escalation chain
+   *  (stdin EOF → SIGTERM → SIGKILL) would only add latency to a failure
+   *  path that must signal the caller NOW. */
   fail(reason: string): void {
     if (this.closed) return;
     if (this.state === "failed") return;
     this.state = "failed";
+    this.closing = true; // the EOF/kill echo of our own teardown is not news.
     this.failReason = reason;
     this.settleAll(
       new McpCallError(
@@ -1307,6 +1352,12 @@ export class McpClient {
       ),
     );
     this.teardown();
+    // Terminal failure = UNTRUSTWORTHY transport: SIGKILL NOW (immediate,
+    // synchronous). The graceful escalation (stdin EOF → SIGTERM → SIGKILL)
+    // is for CLEAN shutdown only (close()); a broken pipe has nothing
+    // graceful to await, and the escalation would only add latency to a
+    // failure path that must signal the caller NOW.
+    this.transport.kill();
   }
 
   private settleAll(error: Error): void {
@@ -1324,6 +1375,13 @@ export class McpClient {
     }
   }
 
+  /** Stop dispatching + detach the data listeners WITHOUT touching the
+   *  transport (close() and fail() share this; the transport action differs:
+   *  graceful close vs immediate kill). The stdin `error` listener is
+   *  INTENTIONALLY kept: a write in flight when we close/kill the child's
+   *  stdin fails with EPIPE as an expected echo of our own teardown, and
+   *  removing the listener would surface that as an unhandled 'error' event
+   *  that crashes the host. The handler is a no-op once `closed` (set above). */
   private teardown(): void {
     this.closed = true;
     if (this.stallTimer) {
@@ -1344,18 +1402,37 @@ export class McpClient {
     this.transport.stdout.off("data", this.onStdoutBound);
     this.transport.stdout.off("end", this.onStdoutEndBound);
     this.transport.stderr.off("data", this.onStderrBound);
-    this.transport.stdin.off("error", this.onStdinErrorBound);
+    // NOTE: the stdin `error` listener is deliberately NOT removed here — see
+    // the method doc. The drain listener is inert post-teardown (guarded by
+    // `closed`), so it comes off.
     this.transport.stdin.off("drain", this.onDrainBound);
-    this.transport.kill();
   }
 
-  /** Clean shutdown (idempotent): settle pending, close the transport
-   *  (graceful: close stdin → SIGTERM → SIGKILL, per the transport). */
+  /** Clean shutdown (idempotent): settle pending, detach the listeners, and
+   *  hand the transport a GRACEFUL close (stdin EOF → the child exits →
+   *  SIGTERM → SIGKILL escalation lives in the spawn's close()). The old
+   *  behavior SIGKILLED here — that contradicted the documented escalation
+   *  and left sandbox resources racing the child's exit. fail() still kills
+   *  immediately (a dead transport has nothing graceful to await). */
   close(): void {
     if (this.closed) return;
+    this.closing = true;
     this.settleAll(new McpCallError(`MCP server ${this.serverName} closed`));
     this.readyD?.reject(new McpNotRunningError(`MCP server ${this.serverName} closed`));
     this.teardown();
     this.transport.close();
+  }
+
+  /** SYNCHRONOUS teardown (the `process.exit` backstop): settle pending,
+   *  detach the listeners, SIGKILL the transport NOW — no graceful
+   *  escalation (the host is exiting; the group-SIGKILL IS the teardown).
+   *  Does NOT change state (a host-initiated kill is not a server failure)
+   *  but IS closed (isClosed() → true). Idempotent. */
+  kill(): void {
+    if (this.closed) return;
+    this.settleAll(new McpCallError(`MCP server ${this.serverName} killed`));
+    this.readyD?.reject(new McpNotRunningError(`MCP server ${this.serverName} killed`));
+    this.teardown();
+    this.transport.kill();
   }
 }
