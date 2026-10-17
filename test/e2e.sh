@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 19, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 21, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -697,6 +697,68 @@ scenario_19() { # C35: --extra-root — an assigned sibling is writable (write t
   echo "rc=0, extra root writable (write+bash), non-assigned sibling refused"
 }
 
+scenario_21() { # C32 PICKER path: bare /display-bottom → the field picker
+  # (arrow to the next field, space to toggle it in, enter to apply) → the
+  # selection is persisted to ~/.tre/tui.json AND survives a relaunch (loaded
+  # at startup). Scenario 17 covers the TYPED-args path (`/display-bottom
+  # model turn`); this is the INTERACTIVE path, which goes through the
+  # open-time baseline guard that decides persist-on-change — a regression
+  # there means the confirm never calls saveTuiConfig (no file written → the
+  # phase-2 assert fails). A FRESH HOME seeds the default bottom (["subtasks"]),
+  # so the picker's start state is deterministic: toggle "model" in → expect
+  # ["subtasks","model"] (first-selected first, toggles append).
+  local D="$WORK/21"; mkdir -p "$D/home"
+  cat > "$D/feed.sh" <<'EOF'
+# Phase 1: wait for the idle hint line (the TUI is up, no turn in flight),
+# then open the picker with a BARE /display-bottom (no args → bottomFieldsOpen).
+wait_pattern "$OUT" "enter send" 120 || exit 6
+sleep 1
+printf '/display-bottom\r'
+# The picker opens on the first selected row (the seeded "subtasks"), marked
+# with the leading `*` (only the picker rows carry it).
+wait_pattern "$OUT" "* subtasks" 60 || exit 7
+# Arrow-down moves the highlight to the next row — "subtasks" is the LAST
+# row (BOTTOM_FIELDS index 9), so it WRAPS to row 0 ("model"). Space toggles
+# the highlighted field into the pending selection (state.bottom is edited
+# live: ["subtasks"] → ["subtasks","model"]).
+printf '\033[B'
+sleep 1
+printf ' '
+wait_pattern "$OUT" "[x] model" 60 || exit 8
+# Enter applies + closes → the driver persists (the baseline changed).
+printf '\r'
+# The applied selection renders in the bottom lines.
+wait_pattern "$OUT" "model: Qwen" 60 || exit 9
+quit_retry
+EOF
+  ( export HOME="$D/home"
+    pty_feed 21 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
+      --session "$D/s.jsonl" --cwd "$D" )
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc"; return 1; }
+  # Phase 2: the picker's selection was persisted (order: first-selected
+  # first, toggles append), and the bottomSet marker flipped to true.
+  [ -f "$D/home/.tre/tui.json" ] || { echo "no ~/.tre/tui.json written (picker confirm did not persist)"; return 1; }
+  python3 -c "import json,sys; c=json.load(open('$D/home/.tre/tui.json')); sys.exit(0 if c.get('bottom')==['subtasks','model'] and c.get('bottomSet')==True else 1)" \
+    || { echo "persisted bottom wrong: $(cat "$D/home/.tre/tui.json" 2>/dev/null)"; return 1; }
+  # Phase 3: relaunch — the selection is LOADED from disk (a fresh process
+  # renders the model bottom line before any command is typed).
+  cat > "$D/feed2.sh" <<'EOF'
+printf 'Reply with exactly: PONG-21\r'
+wait_turn_done "$SESS" 440 || true
+sleep 3
+quit_retry
+EOF
+  ( export HOME="$D/home"
+    pty_feed 21 480 "$D/out2.log" "$D/feed2.sh" tui --yes --models "$MODELS" \
+      --session "$D/s2.jsonl" --cwd "$D" )
+  local rc2=$?
+  [ $rc2 -eq 0 ] || { echo "relaunch exit code $rc2"; return 1; }
+  grep -qF "PONG-21" "$D/out2.log" || { echo "no PONG-21 in relaunch frames"; return 1; }
+  grep -qF "model: Qwen" "$D/out2.log" || { echo "no 'model:' bottom line on relaunch — the persisted selection was not loaded"; return 1; }
+  echo "rc=0, picker (arrow+space+enter) persisted bottom to tui.json, relaunch loaded it (C32 picker path)"
+}
+
 
 # ───────────────────────────── runner ─────────────────────────────
 
@@ -723,6 +785,7 @@ run_one() {
     18) name="tui-no-mouse-by-default" ;;
     19) name="extra-root(C35)" ;;
     20) name="tui-mouse-config-key" ;;
+    21) name="tui-display-bottom-picker(C32)" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

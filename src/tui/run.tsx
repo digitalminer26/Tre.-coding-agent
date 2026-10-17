@@ -913,7 +913,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
           // The picker transitioned null→open (bare /display-bottom while
           // busy): snapshot the selection it opened with — esc restores it,
           // enter compares against it (persist only on a real change).
-          if (slash.handled && state.bottomFields === null && slash.state.bottomFields !== null) {
+          if (slash.handled && slashBusy.state.bottomFields === null && slash.state.bottomFields !== null) {
             bottomPickerBaseline = slashBusy.state.bottom;
           }
           if (slash.handled && slash.state.bottom !== prevBottom) {
@@ -990,7 +990,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // The picker transitioned null→open (bare /display-bottom): snapshot
         // the selection it opened with — esc restores it, enter compares
         // against it (persist only on a real change).
-        if (state.bottomFields === null && slash.state.bottomFields !== null) {
+        if (r.state.bottomFields === null && slash.state.bottomFields !== null) {
           bottomPickerBaseline = r.state.bottom;
         }
         // C32: persist the bottom selection — /display-bottom is the only
