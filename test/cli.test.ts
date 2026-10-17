@@ -809,6 +809,11 @@ test("main: turn cap hit → budget note on stderr, exit 3", async (t) => {
 
 test("main: C26 — default auto-continue: budget note on stderr, run continues", async (t) => {
   const { dir, models } = await workspace(t);
+  // Isolate from the machine's tre.json: the assertion is on the DEFAULT
+  // continuation count (4 cycles), so the CWD walk-up must not leak a
+  // personal maxContinuations (or extraRoots) into main().
+  const treConfig = join(dir, "tre.json");
+  await writeFile(treConfig, JSON.stringify({ extraRoots: [] }));
   const S = mkSinks();
   const code = await main(
     ["run", "x", "--tools", "none", "--max-turns", "1", "--models", models],
@@ -819,6 +824,7 @@ test("main: C26 — default auto-continue: budget note on stderr, run continues"
         { type: "text", text: "done after the continuation" },
       ]),
       sinks: S.sinks,
+      treConfigPath: treConfig,
     },
   );
   assert.equal(code, 0, "the run completes past the first budget hit");
