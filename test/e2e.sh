@@ -25,7 +25,7 @@ MODELS="$ROOT/models.json"
 # write-denied but /private/var/folders (the real $TMPDIR) is the v1 allow.
 # WORK also holds the scenario session files the tre. children must write.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/e2e-XXXXXX")"
-FIRST="${1:-1}"; LAST="${2:-16}"
+FIRST="${1:-1}"; LAST="${2:-21}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -579,7 +579,12 @@ wait_turn_done "$SESS" 440 || true
 sleep 3
 quit_retry
 EOF
-  ( export HOME="$D/home"
+  # Process cwd = the scenario dir (NOT the repo root): tre.json discovery
+  # walks up from process.cwd() (not --cwd), so a machine-local repo
+  # tre.json (gitignored, e.g. extraRoots outside this temp home) would
+  # refuse the startup (exit 2) before the scenario could begin.
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
     pty_feed 17 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
       --session "$D/s.jsonl" --cwd "$D" )
   local rc=$?
@@ -620,7 +625,10 @@ wait_turn_done "$SESS" 440 || true
 sleep 3
 quit_retry
 EOF
-  ( export HOME="$D/home"
+  # Process cwd = the scenario dir (NOT the repo root) — see scenario 17:
+  # a machine-local repo tre.json would refuse the startup (exit 2).
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
     unset TRE_MOUSE TRE_NO_MOUSE # inherited env would override the default
     pty_feed 18 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
       --session "$D/s.jsonl" --cwd "$D" )
@@ -648,7 +656,10 @@ wait_turn_done "$SESS" 440 || true
 sleep 3
 quit_retry
 EOF
-  ( export HOME="$D/home"
+  # Process cwd = the scenario dir (NOT the repo root) — see scenario 17:
+  # a machine-local repo tre.json would refuse the startup (exit 2).
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
     unset TRE_MOUSE TRE_NO_MOUSE # the CONFIG KEY must be the enabler
     pty_feed 20 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
       --session "$D/s.jsonl" --cwd "$D" )
@@ -731,7 +742,15 @@ printf '\r'
 wait_pattern "$OUT" "model: Qwen" 60 || exit 9
 quit_retry
 EOF
-  ( export HOME="$D/home"
+  # The TUI child's PROCESS cwd is the scenario dir, not the repo root:
+  # tre.json discovery walks up from process.cwd() (NOT --cwd), and a
+  # machine-local repo tre.json (gitignored, e.g. extraRoots outside this
+  # temp home) would refuse the startup (exit 2) before the picker ever
+  # opens. From $D the walk-up no longer reaches the repo root (the temp
+  # dir's ancestors carry no tre.json, and the fake HOME has no
+  # .tre/tre.json) → clean default config.
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
     pty_feed 21 480 "$D/out.log" "$D/feed.sh" tui --yes --models "$MODELS" \
       --session "$D/s.jsonl" --cwd "$D" )
   local rc=$?
@@ -749,7 +768,8 @@ wait_turn_done "$SESS" 440 || true
 sleep 3
 quit_retry
 EOF
-  ( export HOME="$D/home"
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
     pty_feed 21 480 "$D/out2.log" "$D/feed2.sh" tui --yes --models "$MODELS" \
       --session "$D/s2.jsonl" --cwd "$D" )
   local rc2=$?
