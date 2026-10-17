@@ -239,7 +239,23 @@ export async function startMcpServers(
       handles.push(makeHandle(name, state, reason, [], client ?? null, spawn ?? null, cleaned));
       continue;
     }
-    handles.push(makeHandle(name, state, reason, imported, client, spawn, false));
+    const readyHandle = makeHandle(name, state, reason, imported, client, spawn, false);
+    if (state === "ready" && client) {
+      // Ready-state terminal failure (stdout EOF / write error / framing
+      // violation AFTER startup): the client's fail() kills the transport,
+      // but the REGISTRY must also run its FULL teardown — confirm the group
+      // is gone, release the sandbox policy file / empty-root dir, and drop
+      // the liveSpawns entry. Without this, those stayed owned until the
+      // user quit or /restarts. The handle's teardown() is idempotent (one
+      // cached chain), so this hook and a later teardownAll() share it.
+      // Fire-and-forget: fail() is synchronous; a teardown rejection is
+      // swallowed here (the process-exit backstop still covers an
+      // unconfirmed group).
+      client.onTerminalFailure = () => {
+        void readyHandle.teardown().catch(() => {});
+      };
+    }
+    handles.push(readyHandle);
   }
   // The single `mcp_resource` tool (tier 2 — resources): ONE tool for ALL
   // ready servers, appended ONLY IF at least one server reached `ready`.

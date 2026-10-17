@@ -148,7 +148,13 @@ export function makeMcpTool(
     mcpTool: tool.name,
     mcpTrusted: trusted,
   };
-  if (annotations !== undefined) t.mcpAnnotations = annotations;
+  // Per-tool annotations (from the server's tools/list — the client preserves
+  // them in McpTool.annotations) WIN over the import-level fallback: the
+  // approval gate classifies EACH tool by its own readOnlyHint/destructiveHint.
+  // The old code read only the import-level `annotations` (which the registry
+  // never set), so real imported tools never carried mcpAnnotations.
+  const ann = tool.annotations !== undefined ? tool.annotations : annotations;
+  if (ann !== undefined) t.mcpAnnotations = ann;
   return t;
 }
 

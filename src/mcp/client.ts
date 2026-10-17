@@ -20,6 +20,7 @@
  * process teardown (transport.kill on failure, transport.close on clean
  * shutdown). spawn.ts provides the McpTransport; tests provide a mock.
  */
+import { StringDecoder } from "node:string_decoder";
 
 // ── Constants (fixed values, scope §4.4) ─────────────────────────────────────
 
@@ -50,6 +51,19 @@ export const MCP_STDERR_RING = 64 * 1024; // 64 KiB
 export const MCP_CLIENT_VERSION = "2026-07-28";
 /** The legacy handshake version (2025-11-25 line). */
 export const MCP_LEGACY_VERSION = "2025-11-25";
+/** The protocol versions the client can actually speak: the current modern
+ *  revision (2026-07-28) and the legacy-era revision (2025-11-25). Probe
+ *  negotiation picks the INTERSECTION of the server's advertised list and
+ *  this set — never an arbitrary advertised version (a version the client
+ *  does not implement must not be negotiated; the old behavior took the
+ *  server's first value). */
+export const MCP_SUPPORTED_VERSIONS = [MCP_CLIENT_VERSION, MCP_LEGACY_VERSION];
+/** Modern-era versions the client implements. A legacy `initialize` that
+ *  returns one of these is contradictory (we are in the legacy handshake
+ *  because the server did NOT answer the modern probe) — reject it. */
+export const MCP_MODERN_VERSIONS = [MCP_CLIENT_VERSION];
+/** A well-formed MCP protocol version is a calendar date (YYYY-MM-DD). */
+const MCP_VERSION_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** The recognized modern negotiation error (UnsupportedProtocolVersionError). */
 export const MCP_ERR_UNSUPPORTED_VERSION = -32022;
 /** Method-not-found — the standard reply to any server→client request. */
@@ -92,6 +106,10 @@ export interface McpTool {
   name: string;
   description?: string;
   inputSchema?: unknown;
+  /** Per-tool annotations (readOnlyHint / destructiveHint / …) — the
+   *  approval gate classifies MCP tools by them. Preserved from the server's
+   *  tools/list so the adapter can carry them onto the adapted Tool. */
+  annotations?: unknown;
 }
 
 /** A mapped tools/call result (the adapter turns this into a ToolResult). */
@@ -253,8 +271,27 @@ export class McpClient {
    *  so the EOF handler must not run fail() and must not kill(). */
   private closing = false;
   private closed = false;
+  /** Terminal-failure hook (set by the registry): called from fail() AFTER
+   *  the transport is killed, so a server that dies in the READY state
+   *  (stdout EOF / write error / framing violation mid-session) triggers the
+   *  registry's FULL teardown — confirm the group is gone, release the
+   *  sandbox policy file / empty-root dir, and drop the liveSpawns entry —
+   *  instead of leaving those owned until the user quits or /restarts.
+   *  Must be idempotent + non-throwing (fail() is synchronous; the hook is
+   *  fire-and-forget on the registry side). NOT called on close() (clean
+   *  shutdown is driven by the caller's teardownAll). */
+  onTerminalFailure?: () => void;
 
   private stdoutBuf = "";
+  /** Streaming UTF-8 decoder: a pipe can split a multi-byte code point
+   *  across two chunks; decoding each chunk independently would corrupt the
+   *  character (replacement chars) and corrupt the frame's byte accounting.
+   *  The decoder carries the partial sequence across chunk boundaries. */
+  private stdoutDecoder = new StringDecoder("utf8");
+  /** Raw stderr bytes retained as a 64 KiB BYTES tail (the ring bound is
+   *  bytes, not chars — a char-based cap let a CJK body exceed 64 KiB by
+   *  up to 3×). `diags.stderr` is the decoded view of this tail. */
+  private stderrTail = Buffer.alloc(0);
   private diags: Diagnostics = {
     lateResponses: 0,
     unknownNotifications: 0,
@@ -388,11 +425,18 @@ export class McpClient {
           }
         } else {
           // A valid DiscoverResult — the negotiated version must be one the
-          // server supports.
+          // server supports AND one the client actually speaks. Take the
+          // INTERSECTION with MCP_SUPPORTED_VERSIONS (never an arbitrary
+          // advertised value — the old behavior took sv[0] unchecked, so a
+          // server advertising only "alien-version" would be negotiated).
           const sv = (probe.result as { supportedVersions: string[] })
             .supportedVersions;
           if (!sv.includes(MCP_CLIENT_VERSION)) {
-            retryVersion = sv.length ? sv[0] ?? null : null;
+            const mutual = sv.filter(
+              (v): v is string =>
+                typeof v === "string" && MCP_SUPPORTED_VERSIONS.includes(v),
+            );
+            retryVersion = mutual.length ? mutual[0] ?? null : null;
             if (!retryVersion) {
               throw new McpStartupError(
                 "DiscoverResult supports no client version",
@@ -414,6 +458,21 @@ export class McpClient {
                   : "no result";
             throw new McpStartupError(
               "probe retry failed (server proved modern): " + detail,
+            );
+          }
+          // The retry MUST actually agree on the version we negotiated: its
+          // DiscoverResult must list retryVersion among its supportedVersions.
+          // (The old behavior accepted ANY successful retry result, so a
+          // server that kept advertising an unsupported version would be
+          // treated as ready while claiming a protocol it does not speak.)
+          const retrySv = (retry.result as { supportedVersions?: unknown[] })
+            .supportedVersions;
+          if (
+            !Array.isArray(retrySv) ||
+            !retrySv.includes(retryVersion)
+          ) {
+            throw new McpStartupError(
+              "probe retry did not confirm the negotiated version",
             );
           }
         }
@@ -513,13 +572,27 @@ export class McpClient {
     return d.promise;
   }
 
+  /** Pick a version for the probe retry: the INTERSECTION of the server's
+   *  advertised list and the versions the client actually speaks
+   *  (`MCP_SUPPORTED_VERSIONS`), preferring the client's own version, then
+   *  the highest advertised. Returns null when the intersection is empty —
+   *  an arbitrary advertised version (e.g. "alien-version") must NOT be
+   *  negotiated: the client would then claim a protocol it does not
+   *  implement (the old behavior took `list[0]` unchecked). */
   private pickSupportedVersion(data: unknown): string | null {
     if (!isObj(data)) return null;
     const supported = data.supported;
     if (!Array.isArray(supported)) return null;
     const list = supported.filter((v): v is string => typeof v === "string");
-    if (list.includes(MCP_CLIENT_VERSION)) return MCP_CLIENT_VERSION;
-    return list.length ? list[0] ?? null : null;
+    const mutual = list.filter((v) => MCP_SUPPORTED_VERSIONS.includes(v));
+    if (mutual.includes(MCP_CLIENT_VERSION)) return MCP_CLIENT_VERSION;
+    if (mutual.length) return mutual[0] ?? null;
+    // No mutual version: fall back to the legacy handshake ONLY if the
+    // server's list contains the legacy revision (a legacy-era server that
+    // also answers -32022 is unusual but compatible); otherwise null → the
+    // caller fails startup (no usable version).
+    if (mutual.length === 0 && list.includes(MCP_LEGACY_VERSION)) return MCP_LEGACY_VERSION;
+    return null;
   }
 
   /** Legacy (2025-11-25) handshake: initialize → notifications/initialized. */
@@ -538,6 +611,21 @@ export class McpClient {
         "invalid initialize result (protocolVersion missing)",
       );
     }
+    // The negotiated legacy version must be a well-formed date (YYYY-MM-DD)
+    // and must NOT be a modern-era version: a modern version here is
+    // contradictory (we are in the legacy handshake precisely because the
+    // server did NOT answer the modern probe), so accepting it would claim a
+    // protocol the client does not implement on this path. (The old behavior
+    // accepted ANY string — e.g. "alien-version".)
+    const pv = result.protocolVersion;
+    if (!MCP_VERSION_RE.test(pv) || MCP_MODERN_VERSIONS.includes(pv)) {
+      throw new McpStartupError(
+        `invalid initialize protocolVersion: ${pv} (not a supported legacy version)`,
+      );
+    }
+    // Record the negotiated version (legacy era: no _meta envelope is sent,
+    // but the version is retained for diagnostics / the /mcp line).
+    this.negotiatedVersion = pv;
     // Server capabilities: recorded, not subscribed (tier 1).
     // Best-effort initialized notification (drop + count if it does not fit;
     // a dropped initialized degrades gracefully — the session continues).
@@ -578,15 +666,32 @@ export class McpClient {
       }
       const page = result as { tools: unknown[]; nextCursor?: unknown };
       for (const t of page.tools) {
-        const entry = t as Record<string, unknown>;
-        const name = entry.name;
-        if (!isObj(t) || typeof name !== "string") {
-          throw startup ? new McpStartupError("invalid tools/list entry (name missing)") : new McpCallError("invalid tools/list entry (name missing)");
+        // Validate the entry BEFORE dereferencing any field: a `tools: [null]`
+        // (or a scalar) entry must fail in-band (McpCallError / McpStartupError),
+        // not throw a raw TypeError from `entry.name`.
+        if (!isObj(t)) {
+          throw startup
+            ? new McpStartupError("invalid tools/list entry (not an object)")
+            : new McpCallError("invalid tools/list entry (not an object)");
         }
+        const name = t.name;
+        if (typeof name !== "string") {
+          throw startup
+            ? new McpStartupError("invalid tools/list entry (name missing)")
+            : new McpCallError("invalid tools/list entry (name missing)");
+        }
+        const entry = t;
         tools.push({
           name,
           description: typeof entry.description === "string" ? entry.description : undefined,
           inputSchema: entry.inputSchema,
+          // Per-tool annotations (readOnlyHint/destructiveHint/…): preserved so
+          // the adapter can carry them onto the adapted Tool — the approval
+          // gate (safety.ts) classifies MCP tools by them (read-only → allow
+          // in every mode; destructive → prompt). Dropping them here (the old
+          // behavior) made every imported tool fall through to the default
+          // (prompt) classification.
+          annotations: entry.annotations,
         });
         if (tools.length >= MCP_MAX_TOOLS) {
           fail("tools/list limit exceeded (10000 tools)");
@@ -671,12 +776,15 @@ export class McpClient {
     if (!frame) {
       // admit() already applied the per-class failure policy.
       if (cls === "tool") {
-        // In-band: remove the pending entry and reject busy.
-        this.pending.delete(id);
-        clearTimeout(timer);
-        d.reject(
-          new McpBusyError(`MCP server ${this.serverName} busy (frame not admitted)`),
-        );
+        // In-band: settle the pending entry as busy. settle() detaches the
+        // request-scoped abort listener (p.cleanupAbort) — a direct
+        // pending.delete() here would LEAK that listener on the caller's
+        // signal (the entry is gone before teardown can find it), so a
+        // repeated rejected call on one shared signal accumulates listeners
+        // and retains the client until the signal is released/aborted.
+        // p.frame is null (the frame was rejected, never enqueued), so
+        // settle() does not release any frame.
+        this.settle(id, null, new McpBusyError(`MCP server ${this.serverName} busy (frame not admitted)`));
       }
       // startup/mandatory: fail() already ran — settleAll settled the entry
       // (d rejected with the transport error) and cleared the timer.
@@ -952,7 +1060,11 @@ export class McpClient {
 
   private onStdout(chunk: Buffer | string): void {
     if (this.closed) return;
-    this.stdoutBuf += chunk.toString("utf8");
+    // Decode through the streaming decoder: a multi-byte code point split
+    // across chunks is reassembled (not corrupted), and the decoded text's
+    // byte length matches the real bytes (frame accounting stays correct).
+    const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    this.stdoutBuf += this.stdoutDecoder.write(buf);
     let idx: number;
     while ((idx = this.stdoutBuf.indexOf("\n")) >= 0) {
       const line = this.stdoutBuf.slice(0, idx);
@@ -981,10 +1093,24 @@ export class McpClient {
   }
 
   private onStderr(chunk: Buffer | string): void {
-    this.diags.stderr += chunk.toString("utf8");
-    if (this.diags.stderr.length > MCP_STDERR_RING) {
-      this.diags.stderr = this.diags.stderr.slice(-MCP_STDERR_RING);
-    }
+    // Retain a 64 KiB BYTES tail (the ring bound is bytes, not chars). Keep
+    // the raw bytes so the cap is exact; expose the decoded view. Trim the
+    // tail back to a UTF-8 boundary so it never starts mid-code-point (a
+    // split char would decode to a replacement char, inflating the decoded
+    // byte count past the cap).
+    const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    let tail =
+      this.stderrTail.length + buf.length > MCP_STDERR_RING
+        ? Buffer.concat([this.stderrTail, buf]).subarray(
+            this.stderrTail.length + buf.length - MCP_STDERR_RING,
+          )
+        : Buffer.concat([this.stderrTail, buf]);
+    // Drop a partial leading code point (continuation bytes 0x80–0xBF).
+    let start = 0;
+    while (start < tail.length && (tail[start]! & 0xc0) === 0x80) start++;
+    if (start > 0) tail = tail.subarray(start);
+    this.stderrTail = tail;
+    this.diags.stderr = tail.toString("utf8");
   }
 
   /** Classify by SHAPE first (method + id presence), then by pending state —
@@ -1261,6 +1387,9 @@ export class McpClient {
    *  immediately. Unsent removal is NOT write progress: re-evaluate the
    *  threshold and cancel the timer if below 256 KiB. */
   private removeUnsent(f: Frame): void {
+    // `released` covers the double-release: settle() now releases an unsent
+    // frame on settlement, and abortPending() also calls removeUnsent for an
+    // unsent frame — exactly one of them releases the bytes.
     if (f.writeStarted || f.released) return;
     const i = this.queue.indexOf(f);
     if (i >= 0) this.queue.splice(i, 1);
@@ -1307,6 +1436,17 @@ export class McpClient {
     clearTimeout(p.timer);
     p.cleanupAbort?.();
     this.pending.delete(id);
+    // A request that SETTLED (timeout, protocol error, abort, …) must not
+    // still be sitting in the outbound queue: if its frame has not started
+    // writing, release it NOW. Without this, a request that timed out while
+    // queued behind a stalled write would be SENT to the server once the
+    // pipe recovered — performing the (possibly mutating) call after the
+    // caller already saw the failure. A write-STARTED frame is left alone:
+    // it is already on the wire (the server may execute it; for an abort,
+    // abortPending separately queues the best-effort cancellation).
+    if (p.frame && !p.frame.writeStarted) {
+      this.removeUnsent(p.frame);
+    }
     if (p.deferred) {
       if (error) p.deferred.reject(error);
       else p.deferred.resolve(result);
@@ -1362,6 +1502,16 @@ export class McpClient {
     // graceful to await, and the escalation would only add latency to a
     // failure path that must signal the caller NOW.
     this.transport.kill();
+    // Ready-state terminal failure: hand back to the registry for its FULL
+    // teardown (confirm group gone + release sandbox resources + drop the
+    // liveSpawns entry). Fire-and-forget — fail() is synchronous and the
+    // hook is idempotent + non-throwing on the registry side. Absent (a
+    // client not owned by the registry) → no-op.
+    try {
+      this.onTerminalFailure?.();
+    } catch {
+      /* the hook must never break the terminal failure path */
+    }
   }
 
   private settleAll(error: Error): void {

@@ -72,7 +72,7 @@ function mockSpawnFn(
 /** A mock that answers a modern probe + tools/list (ready in ~2 ticks). */
 function modernMock(
   mock: MockMcpServer,
-  tools: Array<{ name: string; description?: string; inputSchema?: unknown }> = [
+  tools: Array<{ name: string; description?: string; inputSchema?: unknown; annotations?: unknown }> = [
     { name: "read_file", description: "read", inputSchema: { type: "object" } },
   ],
 ): void {
@@ -808,4 +808,75 @@ test("a failed startup whose cleanup unconfirmates stays registered for the back
   const before = kills;
   reapPendingSpawns();
   assert.equal(kills, before + 1, "the unconfirmed spawn remains reachable by the backstop");
+});
+
+// ── Audit cycle 1 (gpt-sol) regressions ──────────────────────────────────────
+
+test("audit F4: per-tool annotations are carried onto the adapted tool (safety classification)", async () => {
+  const mock = new MockMcpServer();
+  // The server advertises per-tool annotations (readOnlyHint / destructiveHint).
+  // The client must preserve them in McpTool.annotations and the adapter must
+  // carry them onto the adapted Tool — the approval gate classifies each tool
+  // by them. The old behavior dropped them, so every imported tool fell
+  // through to the default (prompt) classification.
+  modernMock(mock, [
+    { name: "read_only", description: "ro", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+    { name: "destructive", description: "d", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
+    { name: "plain", description: "p", inputSchema: { type: "object" } },
+  ]);
+  const { tools } = await startMcpServers({ fs: srv() }, mockSpawnFn(mock), baseOpts);
+  const byWire = new Map(tools.map((t) => [t.name, t]));
+  const ro = byWire.get(encodeMcpToolName("fs", "read_only")) as { mcpAnnotations?: unknown } | undefined;
+  const de = byWire.get(encodeMcpToolName("fs", "destructive")) as { mcpAnnotations?: unknown } | undefined;
+  const pl = byWire.get(encodeMcpToolName("fs", "plain")) as { mcpAnnotations?: unknown } | undefined;
+  assert.ok(ro, "the read-only tool imported");
+  assert.deepEqual(ro!.mcpAnnotations, { readOnlyHint: true }, "readOnlyHint carried");
+  assert.deepEqual(de!.mcpAnnotations, { destructiveHint: true }, "destructiveHint carried");
+  assert.equal(pl!.mcpAnnotations, undefined, "a tool with no annotations has none");
+});
+
+test("audit F5: a ready-state terminal failure runs the registry's full teardown (dispose + unregister)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock, [{ name: "ok" }]);
+  // Instrument the spawn: count close() and dispose() calls so we can assert
+  // the registry's FULL teardown ran on the terminal failure (not just the
+  // client's transport.kill).
+  let closeCalls = 0;
+  let disposeCalls = 0;
+  const spawnFn: McpSpawnFn = async () => {
+    let closeChain: Promise<void> | null = null;
+    return {
+      child: { pid: undefined } as McpSpawn["child"],
+      stdin: mock.stdin,
+      stdout: mock.stdout,
+      stderr: mock.stderr,
+      close: () => {
+        closeCalls++;
+        if (!closeChain) closeChain = Promise.resolve();
+        return closeChain;
+      },
+      kill: () => {
+        mock.killed = true;
+      },
+      dispose: () => {
+        disposeCalls++;
+        return Promise.resolve();
+      },
+    };
+  };
+  const { handles } = await startMcpServers({ fs: srv() }, spawnFn, baseOpts);
+  const h = handles[0]!;
+  assert.equal(h.state, "ready");
+  assert.equal(disposeCalls, 0, "no dispose before the failure");
+  // Transport dies after startup → client fail() → the registry's
+  // onTerminalFailure hook must run the handle's full teardown (close +
+  // dispose), not leave the sandbox resources owned until quit.
+  mock.closeStdout();
+  // Give the async teardown a few ticks to run (it is fire-and-forget).
+  for (let i = 0; i < 10 && disposeCalls === 0; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(h.client!.getState().state, "failed", "the server reports failed");
+  assert.ok(closeCalls >= 1, "the spawn's close() ran (graceful teardown)");
+  assert.ok(disposeCalls >= 1, "the sandbox resources were released (dispose ran)");
 });

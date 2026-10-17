@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   McpClient,
+  McpCallError,
   MCP_CLIENT_VERSION,
   MCP_LEGACY_VERSION,
   MCP_ERR_UNSUPPORTED_VERSION,
@@ -950,4 +951,191 @@ test("late stdin EPIPE after kill() is a no-op (listener kept, not unhandled)", 
   }
   assert.equal(threw, false, "the late EPIPE must not be an unhandled error event");
   assert.equal(c.isClosed(), true, "the client is closed");
+});
+
+// ── Audit cycle 1 (gpt-sol) regressions ──────────────────────────────────────
+
+test("audit F1: a multi-byte char split across stdout chunks is not corrupted", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  const p = c.callTool("read_file", {});
+  await tick(40);
+  const call = mock.lineFor("tools/call");
+  assert.ok(call, "the request reached the mock");
+  // A response whose text is CJK + emoji, delivered in TWO chunks with the
+  // split in the MIDDLE of a multi-byte code point (the 2nd byte of 你).
+  // Decoding each chunk independently would corrupt the char (replacement
+  // chars) — the streaming decoder must reassemble it.
+  const line =
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: call.obj.id,
+      result: { resultType: "complete", content: [{ type: "text", text: "你好🙂" }] },
+    }) + "\n";
+  const buf = Buffer.from(line, "utf8");
+  const splitAt = line.indexOf("你") + 1; // byte offset (all prior chars ASCII)
+  mock.stdout.write(buf.subarray(0, splitAt));
+  await tick(20);
+  mock.stdout.write(buf.subarray(splitAt));
+  const r = await p;
+  assert.equal(r.isError, false);
+  assert.equal(r.texts[0], "你好🙂", "the split multi-byte char survived intact");
+  c.close();
+});
+
+test("audit F7: the stderr ring is bounded in UTF-8 BYTES (not chars)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // 65536 CJK chars = 196608 bytes — a char-based cap would retain all of it.
+  mock.stderr.write("漢".repeat(65536));
+  await tick();
+  const d = c.getDiagnostics();
+  assert.ok(
+    Buffer.byteLength(d.stderr, "utf8") <= 64 * 1024,
+    "ring bounded in bytes: " + Buffer.byteLength(d.stderr, "utf8"),
+  );
+  assert.ok(d.stderr.endsWith("漢"), "tail kept");
+  c.close();
+});
+
+test("audit F2: a timed-out QUEUED request is released and NOT re-sent after the pipe recovers", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, {
+    callTimeoutMs: 60,
+    probeTimeoutMs: 300,
+    startupBudgetMs: 2500,
+    stallMs: 200,
+  });
+  await c.start();
+  // Stall the pipe AFTER ready: writes are held (no flush callback returns),
+  // so frame 1 is "write-started" (its flush is pending) and frame 2 is
+  // QUEUED behind it (writeNext is blocked on frame 1).
+  mock.pauseWrites = true;
+  mock.interceptWrites();
+  const p1 = c.callTool("read_file", {}); // frame 1 — write held
+  await tick(20);
+  const p2 = c.callTool("read_file", {}); // frame 2 — queued behind frame 1
+  // Both time out (60ms). Frame 1's frame is write-started (stays); frame 2's
+  // frame is UNSENT — settle() must release it from the queue NOW. Without
+  // this, frame 2 would be written to the server once the pipe recovered —
+  // performing the (possibly mutating) call after the caller already timed out.
+  await tick(150);
+  assert.equal(c.getStats().queued, 0, "the timed-out queued frame was released on timeout");
+  // Recover the pipe: fire the held flush (frame 1) so the client dispatches
+  // the next queued frame. If frame 2 were still queued (the bug), it would be
+  // written to the server here — after the caller already saw the timeout.
+  mock.pauseWrites = false;
+  mock.resumeWrites();
+  await tick(50);
+  const calls = mock.inbound.filter((l) => l.obj.method === "tools/call");
+  assert.equal(calls.length, 0, "the timed-out queued request was NOT re-sent after recovery");
+  const r1 = await p1;
+  const r2 = await p2;
+  assert.match(r1.texts[0] ?? "", /timed out/);
+  assert.match(r2.texts[0] ?? "", /timed out/);
+  c.close();
+});
+
+test("audit F3a: a legacy initialize returning an unknown version is a startup failure", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondError(id, MCP_ERR_METHOD_NOT_FOUND, "unknown method"); // legacy
+    } else if (l.obj.method === "initialize") {
+      mock.respondResult(id, {
+        protocolVersion: "alien-version",
+        capabilities: {},
+        serverInfo: { name: "x", version: "1" },
+      });
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /invalid initialize protocolVersion/);
+  assert.equal(c.getState().state, "failed", "an unsupported version tears the server down");
+});
+
+test("audit F3b: a -32022 advertising only an unsupported version is a startup failure", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    if (l.obj.method === "server/discover") {
+      mock.respondError(l.obj.id as number, MCP_ERR_UNSUPPORTED_VERSION, "unsupported", {
+        requested: MCP_CLIENT_VERSION,
+        supported: ["alien-version"],
+      });
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /no usable supported version/);
+  assert.equal(c.getState().state, "failed");
+});
+
+test("audit F8: a null tools/list entry in ready-state fails in-band (not a raw TypeError)", async () => {
+  const mock = new MockMcpServer();
+  let tl = 0;
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondResult(id, { resultType: "discovery", supportedVersions: [MCP_CLIENT_VERSION] });
+    } else if (l.obj.method === "tools/list") {
+      tl++;
+      if (tl === 1) mock.respondResult(id, { tools: [{ name: "ok" }] }); // startup
+      else mock.respondResult(id, { tools: [null] }); // ready-state re-list
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  assert.equal(c.getState().state, "ready");
+  // A `tools: [null]` entry must reject with McpCallError (the in-band
+  // result-payload failure), NOT throw a raw TypeError from entry.name.
+  let e: unknown;
+  try {
+    await c.listTools();
+  } catch (err) {
+    e = err;
+  }
+  assert.ok(e instanceof McpCallError, "in-band McpCallError, got: " + String(e));
+  assert.equal(c.getState().state, "ready", "a result-payload failure does NOT tear down");
+  c.close();
+});
+
+test("audit F6: a tool frame rejected at admission detaches its abort listener", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // A counting signal (a plain EventTarget standing in for an AbortSignal):
+  // the client attaches an "abort" listener per request and must DETACH it
+  // when the request settles. A tool frame rejected at admission (>1 MiB)
+  // settles via settle() — a direct pending.delete() (the old behavior)
+  // would LEAK the listener on the caller's signal.
+  class CountingSignal extends EventTarget {
+    adds = 0;
+    removes = 0;
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject, opts?: AddEventListenerOptions | boolean): void {
+      this.adds++;
+      super.addEventListener(type, listener, opts);
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject, opts?: EventListenerOptions | boolean): void {
+      this.removes++;
+      super.removeEventListener(type, listener, opts);
+    }
+    get aborted(): boolean {
+      return false;
+    }
+  }
+  const sig = new CountingSignal();
+  const p = c.callTool("read_file", { pad: "x".repeat(1100 * 1024) }, sig as unknown as AbortSignal);
+  await tick(20);
+  const r = await p;
+  assert.equal(r.isError, true);
+  assert.match(r.texts[0] ?? "", /busy/);
+  assert.equal(sig.adds, 1, "one abort listener was attached");
+  assert.equal(sig.removes, 1, "the abort listener was detached on rejection (no leak)");
+  c.close();
 });
