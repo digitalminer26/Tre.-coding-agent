@@ -365,9 +365,11 @@ test `planCompaction: last-user preservation extends the kept suffix by more
 than one unit (bound is a planning target)` in `test/compact.test.ts` pins the
 extension behavior.
 
-**Uncommitted delta (2026-10-11): F2 section split + bwrap env allowlist +
+**Delta (2026-10-11): F2 section split + bwrap env allowlist +
 D25 telegram mid-turn steer.** Three workstreams landed in the working tree
-(not yet committed — pending user review):
+and were committed the same day. **RESOLVED (2026-10-11, `f11f8d9`):** all
+three are in the tree — this section was written while they were uncommitted
+(pending user review); that state is no longer true.
 
 1. **F2 — system-prompt section split (docs/07 §7 F2).** The driver now
    measures the startup prompt's variable sections at build time
@@ -732,7 +734,7 @@ Assets at GitHub release v0.1.5: `tre-coding-agent-0.1.5-offline.tgz`
 The bundle does not touch user config (`~/.tre/tre/models.json`, auth
 files) — re-deploying to the VM keeps its llama.cpp model catalog.
 
-**Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. **RESOLVED (2026-10-11, uncommitted):** the "child env still inherits most caller variables; consider an explicit allowlist separately" item is closed by `BWRAP_ENV_ALLOWLIST` + `buildBwrapChildEnv` in `src/tools/sandbox-linux.ts` (see the top status entry) — the bwrap child now gets only the allowlisted vars + the three markers, not the caller's full environment. Host `/tmp` marker invisibility remains documented as a manual-only check.
+**Linux bwrap write-boundary audit follow-up (2026-10-06).** Added runtime OS canaries to `test/sandbox-linux.test.ts`: writes to `/etc`, `/usr`, `/var`, and `/run` must fail and leave no file; `/tmp` must remain writable. Build + full macOS gate pass (674 pass, 13 platform/live skips, 0 fail). Deployed the updated compiled test to the lab VM and ran `node --test dist/test/sandbox-linux.test.js`: **11/11, zero skips**. This confirms those tested write boundaries on the VM's Ubuntu 24.04 + bwrap 0.9.0; it is not cross-distro evidence. No mount argv change was needed because the current configuration passed the new kernel assertions. Documentation updated at `docs/09-linux-sandbox.md`. Follow-ups: Linux kernel tests can still skip in generic CI (no CI workflow exists in this repo, so no provider-specific workflow was added); add a required Linux runner when CI is established. **RESOLVED (2026-10-11, `f11f8d9` — committed, the "uncommitted" qualifier in the original is stale):** the "child env still inherits most caller variables; consider an explicit allowlist separately" item is closed by `BWRAP_ENV_ALLOWLIST` + `buildBwrapChildEnv` in `src/tools/sandbox-linux.ts` (see the top status entry) — the bwrap child now gets only the allowlisted vars + the three markers, not the caller's full environment. Host `/tmp` marker invisibility remains documented as a manual-only check.
 
 **ChatGPT login now works headless / over SSH (2026-10-06, `d605662`).**
 `tre. login chatgpt` on a machine with no browser (the lab VM, ssh sessions)
@@ -819,8 +821,10 @@ darwin Seatbelt contract. Built via parallel delegation (gpt-6-luna + the
   GUARDRAIL FILE: the agent cannot commit it. The user commits with:
   `git add src/tools/sandbox.ts && GUARDRAIL_BYPASS=1 git commit -m "..."`
   (patch saved at `.tre/delegation/linux-bwrap/guardrail-hunk.patch`).
-**State:** the commits for the new files (module+tests, then docs) are in;
-the guardrail hunk is staged in the working tree (uncommitted). macOS gate
+**State:** the commits for the new files (module+tests, then docs) are in.
+**RESOLVED (`dbbd1a8` — the "staged in the working tree (uncommitted)"
+state below is stale):** the guardrail dispatch hunk landed in the tree.
+macOS gate
 green: 686 tests, 673 pass, 13 skipped, 0 fail; the darwin banner is
 byte-identical (verified live). The VM (192.168.50.154) runs the new build: bwrap 0.9.0
 installed no-root, but Ubuntu 24.04's AppArmor blocks unprivileged
@@ -1553,9 +1557,12 @@ compaction fired in the capture (item 4's `×N` + history line are unit-
 covered). Mock: `.repro/mock-cache.mjs` + `.repro/feed-docs07.sh` (local,
 gitignored).
 
-**Remaining (future, spec §7):** item 3 (message composition — tools/model/
-user split, F1) is still logged, not designed. **Item 5 (system-prompt
-section split, F2) is RESOLVED (2026-10-11, uncommitted)** — `systemPromptSectionChars`
+**Remaining (future, spec §7):** **item 3 (message composition — tools/model/
+user split, F1) is RESOLVED (2026-10-13, `46b25db`)** — designed in §7 and
+implemented (the `msgs` number + `/context` report break down into
+`t/m/u` origins; the "still logged, not designed" state is stale). **Item 5
+(system-prompt section split, F2) is RESOLVED (2026-10-11, `f11f8d9` —
+committed, the "uncommitted" qualifier is stale)** — `systemPromptSectionChars`
 + `systemPromptSections` render the `sys` number as `sys N (ctx X · skills Y)`
 (see the top status entry). docs/08: H2 (same-failure repetition) is
 implemented; H3 (loop visibility) and H4 (checkpoint commits) remain logged,
@@ -1954,8 +1961,8 @@ regions.
 > and the TUI startup line now reads `telegram: polling every 15s (reply via
 > bot)`. The original also **skipped the tick while a run was in flight**
 > (`if (state.busy) return;` — messages accumulated until idle); D25 (2026-10-11,
-> uncommitted) removes that skip so the poll steers into the running turn. See
-> the top status entry.
+> `f11f8d9` — committed, the "uncommitted" qualifier is stale) removes that
+> skip so the poll steers into the running turn. See the top status entry.
 
 **Why.** The telegram skill (always-active, previous increment) told the
 agent to poll "at natural breakpoints," but the agent is TURN-BASED: while
@@ -3234,8 +3241,10 @@ PTY capture (Qwen thinking model, "17 * 24? step by step") confirms the frame:
 
 # HANDOFF — classification fix: cd-prefixed + compound git/npm commands no longer prompt (2026-09-25)
 
-**GUARDRAIL ZONE — pending USER commit.** `src/tools/safety.ts` is in the
-agent's own cage, so this increment is staged in the working tree for the
+**GUARDRAIL ZONE — RESOLVED (`05ce223`; the "pending USER commit" state
+below is stale).**
+`src/tools/safety.ts` is in the
+agent's own cage, so this increment was staged in the working tree for the
 user to commit with `GUARDRAIL_BYPASS=1` (same flow as the 8e66205 gate
 change). Do NOT let an agent commit this file.
 
@@ -3924,14 +3933,18 @@ in test/tui-pinned-layout.test.ts cover all three classes; full suite green.
 
 ---
 
-# HANDOFF — bash group-kill + sed-regex misparse (2026-09-21) — UNCOMMITTED (guardrail zone)
+# HANDOFF — bash group-kill + sed-regex misparse (2026-09-21) — RESOLVED (guardrail zone)
+
+**RESOLVED (`0cd68ab` + `71a4c71`, committed by the human with
+`GUARDRAIL_BYPASS=1`; the "UNCOMMITTED" header state is stale).**
 
 ## Two fixes, both from 2026-09-20 incidents, both in the guardrail zone — committed by the human with `GUARDRAIL_BYPASS=1`
 
 Working tree at handoff: dirty, changes in `src/tools/bash.ts`, `src/tools/safety.ts`,
 `src/tools/sandbox.ts`, `test/safety.test.ts`, new `test/bash-kill.test.ts`. Build + full
 suite green: `npm test` → 317 tests, 310 pass / 0 fail / 7 skip (skips are the pre-existing
-conditional ones). **Commit pending human review** — the files are in the guardrail zone
+conditional ones). **Commit pending human review** (RESOLVED — `0cd68ab` +
+`71a4c71`, see the section header) — the files are in the guardrail zone
 (`bash.ts`, `safety.ts`, `sandbox.ts`); per self-improve protocol the human commits:
 `GUARDRAIL_BYPASS=1 git commit` after reviewing `git diff`.
 
