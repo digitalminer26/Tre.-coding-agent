@@ -8,7 +8,7 @@
 #   - filesystem effects (the agent actually did the work)
 #   - session JSONL (persistence, resume, compaction entries)
 #
-# Usage:  bash test/e2e.sh            (all 21, ~15-25 min on the 27B)
+# Usage:  bash test/e2e.sh            (all 22, ~15-25 min on the 27B)
 #         bash test/e2e.sh 3 6        (scenarios 3..6 only)
 #
 # Per-scenario: own temp dir, own watchdog (kills the pty process group on
@@ -25,7 +25,7 @@ MODELS="$ROOT/models.json"
 # write-denied but /private/var/folders (the real $TMPDIR) is the v1 allow.
 # WORK also holds the scenario session files the tre. children must write.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/e2e-XXXXXX")"
-FIRST="${1:-1}"; LAST="${2:-21}"
+FIRST="${1:-1}"; LAST="${2:-22}"
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -779,6 +779,59 @@ EOF
   echo "rc=0, picker (arrow+space+enter) persisted bottom to tui.json, relaunch loaded it (C32 picker path)"
 }
 
+scenario_22() { # MCP tier-1 acceptance (docs/10-mcp-scope.md): a LIVE model
+  # calls a MOCK-stdio-server tool. Spawns a real MCP server (test/
+  # mcp-mock-server.mjs — legacy-era, one `ping` tool that echoes a marker),
+  # wires it via --mcp, and drives a one-shot run. The DETERMINISTIC proof is
+  # in the session, not the frames: an assistant toolCall to an `mcp__`-named
+  # tool (the server spawned, the tool was registered + exposed to the model,
+  # and the model chose to call it) AND a toolResult whose toolName is that
+  # same `mcp__` name carrying the mock's `MCP-MOCK-OK` echo (the call
+  # round-tripped through the mock server and back). The marker comes from
+  # the mock, not the model, so it is not model-flaky once the call happens.
+  # trust:true so --yes auto-approves (no interactive prompt in a one-shot).
+  local D="$WORK/22"; mkdir -p "$D"
+  local NODE_BIN; NODE_BIN="$(command -v node)"
+  [ -n "$NODE_BIN" ] || { echo "no node on PATH for the MCP child"; return 1; }
+  # A tre.json-shaped MCP config (the --mcp <file> form, scope §6). cwd must
+  # exist (validated fail-closed); point it at the scenario dir.
+  cat > "$D/mcp.json" <<EOF
+{
+  "mcpServers": {
+    "tre-mock": {
+      "command": "$NODE_BIN",
+      "args": ["$ROOT/test/mcp-mock-server.mjs"],
+      "cwd": "$D",
+      "trust": true
+    }
+  }
+}
+EOF
+  # Process cwd = the scenario dir (NOT the repo root): tre.json discovery
+  # walks up from process.cwd() (NOT --cwd), so a machine-local repo
+  # tre.json (gitignored, e.g. extraRoots outside home) would refuse the
+  # startup (exit 2) before the MCP server ever spawned. From $D the walk-up
+  # finds no tre.json → clean default config. (Same isolation as s17-21.)
+  # HOME isolated too: the walk-up's FALLBACK is $HOME/.tre/tre.json, so the
+  # machine's real config (its extraRoots/maxContinuations) must not leak
+  # into this scenario either. A fresh temp HOME has no .tre/tre.json →
+  # clean default config. (Same isolation as s17-21.)
+  mkdir -p "$D/home"
+  ( cd "$D" || exit 1
+    export HOME="$D/home"
+    guarded_run 300 "$D" run \
+      "There is an available tool whose description is 'Echo a marker string back (mock server for e2e scenario 22)'. Call that ONE tool with the argument msg set to exactly hello-22. Then reply with exactly the text that tool returned, and nothing else." \
+      --yes --models "$MODELS" --session "$D/s.jsonl" --cwd "$D" --mcp "$D/mcp.json" )
+  local rc=$?
+  [ $rc -eq 0 ] || { echo "exit code $rc (MCP server spawn/registration failed or run errored)"; return 1; }
+  # The LIVE model called an imported MCP tool (wire name starts with mcp__).
+  grep -q '"toolName":"mcp__' "$D/s.jsonl" || { echo "no mcp__ toolResult in the session — the model did not call the mock tool (live-model flake)"; return 1; }
+  # The call ROUND-TRIPPED through the mock server: the toolResult carries the
+  # mock's deterministic echo (model-independent).
+  grep -q 'MCP-MOCK-OK: hello-22' "$D/s.jsonl" || { echo "no MCP-MOCK-OK echo in the session — the mock server did not answer the call"; return 1; }
+  echo "rc=0, live model called the mock MCP tool and the call round-tripped (MCP tier-1 live acceptance)"
+}
+
 
 # ───────────────────────────── runner ─────────────────────────────
 
@@ -806,6 +859,7 @@ run_one() {
     19) name="extra-root(C35)" ;;
     20) name="tui-mouse-config-key" ;;
     21) name="tui-display-bottom-picker(C32)" ;;
+    22) name="mcp-live-tool-call" ;;
     *) echo "unknown scenario $i"; return 1 ;;
   esac
   note="$(scenario_$(printf '%02d' "$i") 2>&1)"; ok=$?

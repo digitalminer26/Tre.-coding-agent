@@ -53,11 +53,24 @@ stable since 2026-10-05) — **STATUS: UNVERIFIED, single source of truth
 for this status is THIS paragraph.** The claim rests on a temporary
 probe that has since been removed, and that probe produced contradictory
 evidence (its reported latest protocol version and its `serveStdio`
-export did not match the assumptions above). Until re-verified, treat
-the following as UNCONFIRMED: that a v2 line exists and is stable; that
-it implements 2026-07-28 (era negotiation, `server/discover`, MRTR);
-that a modern reference implementation and buildable modern test server
-exist. The spec requirements in this doc stand on the spec itself. The
+export did not match the assumptions above). **PARTIALLY RE-VERIFIED
+(2026-10-17, npm registry + published-tarball inspection, NO install):**
+the v2 line exists and is stable — `@modelcontextprotocol/{core,client,
+server}` all at `2.3.1` (registry `dist-tags.latest`); the published
+`server` 2.3.1 tarball contains `server/discover`, the `2026-07-28`
+protocol version, MRTR (`input_required`/`inputRequests`), and
+`serveStdio` (exported via `./stdio`), and `client` 2.3.1 contains
+`server/discover` + MRTR — this resolves the earlier contradictory probe
+evidence (the `serveStdio` export DOES exist). Still UNVERIFIED: an
+actual wire transcript from a v2 server (era negotiation + the
+`server/discover` round-trip), the exact import surface for a buildable
+modern test server, and the in-repo retained fixture/transcript — the
+verification gate below still applies, and using the SDK additionally
+needs a HUMAN commit (it is not on the dependency-freeze allowlist;
+`scripts/check-deps.mjs` is guardrail zone). STATUS therefore remains
+UNVERIFIED. Until re-verified, treat
+the following as UNCONFIRMED: that a modern reference implementation and
+buildable modern test server exist. The spec requirements in this doc stand on the spec itself. The
 modern path is spec-defined and testable with a spec-derived mock even
 if the SDK claim proves false. **Oracle verification gate (before the
 oracle is used — NOT a gate on implementation):** the REQUIRED
@@ -712,11 +725,14 @@ Zero runtime dependencies (test-only oracle is conditional under §4.8).
    in the default gate — it needs credentials and can flake): live model
    calls a mock-server tool. The **deterministic mock-server tests are
    the required gate**; the live scenario is optional confirmation.
-   **STATUS (2026-10-17): NOT BUILT** — tier 1 was marked DONE/ENABLED
-   on the deterministic mock-server tests (the required gate); the
-   optional live scenario was never added to `test/e2e.sh` (no
-   MCP/RUN_LIVE scenario exists there). Add it if live confirmation is
-   wanted.
+   **STATUS (2026-10-17): BUILT** — `test/e2e.sh` scenario 22
+   (`mcp-live-tool-call`) drives a LIVE model to call a mock stdio server
+   (`test/mcp-mock-server.mjs`, legacy-era, one `ping` tool) wired via
+   `--mcp`; the deterministic proof is in the session (an `mcp__`-named
+   toolCall + a toolResult carrying the mock's echo). It runs in the
+   default e2e range (live-model, like the other scenarios) — the
+   deterministic mock-server unit tests remain the required gate; this is
+   the live confirmation.
    **SDK oracle(s) — CANDIDATE, pending verification.** The oracle is a
    cross-check, not a gate: the REQUIRED modern-path tests run against
    the spec-derived mock (§4.2 framing contract), and the oracle is
