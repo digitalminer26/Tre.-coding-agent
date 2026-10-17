@@ -1,5 +1,21 @@
 # Current project status (2026-10-17)
 
+**D28 mouse selection: manual acceptance PASSED — feature DONE (2026-10-17).**
+The last open acceptance item from the handoff is closed. All 7 steps of the
+checklist in `docs/tui-mouse-selection/PLAN.md` were verified by the user in
+a real terminal (Terminal.app, `TRE_MOUSE=1` mouse-on run + `TRE_NO_MOUSE=1`
+no-mouse run): (1) drag produces a visible tre.-owned highlight with no
+native selection; (2) `/copy` → `pbpaste` is byte-exact including a wrapped
+line and a `◆`/`│` gutter line; (3) empty-selection `/copy` fails safely;
+(4) typing/Enter/history/approval/model-picker/Ctrl+C/`/quit` are not
+hijacked by mouse reporting; (5) resize clears the selection, scroll tracks
+content; (6) 1002/1006 modes are restored on exit (native selection works
+again); (7) no-mouse mode keeps native selection + wheel scroll. The
+checklist + result are recorded in the doc; the stale "remaining acceptance
+step" / "remain unverified" lines in `PLAN.md`, `HANDOFF.md` (D28 section)
+and `PLAN.md` (D28 row) are marked ACCEPTED/RESOLVED. No code change —
+docs-only.
+
 **TUI `/display-bottom` picker persistence fix + e2e hardening (2026-10-17).**
 Three increments:
 
@@ -585,7 +601,7 @@ IMPORT time, so this file sets FORCE_COLOR=3 before importing ink (top-level
 await); the in-test env pattern of tui-app.test.tsx only works for
 text-presence assertions, not ANSI.
 
-**Mouse selection/copy correctness fixes in progress (2026-10-09).** Fixed the app highlight split, stable drag anchor, grapheme display widths and combining clusters, blank-line extraction, /copy input clearing and async state merging, selection rebasing when quiet tools disappear, drag clamping/release, selection clearing on resize, and unmatched quiet-tool completion handling. Build and test suite pass (797 tests: 784 passed, 13 skipped); PTY frame capture verified pinned input/bottom rows. Manual Terminal.app gestures and system clipboard integration remain unverified.
+**Mouse selection/copy correctness fixes in progress (2026-10-09).** Fixed the app highlight split, stable drag anchor, grapheme display widths and combining clusters, blank-line extraction, /copy input clearing and async state merging, selection rebasing when quiet tools disappear, drag clamping/release, selection clearing on resize, and unmatched quiet-tool completion handling. Build and test suite pass (797 tests: 784 passed, 13 skipped); PTY frame capture verified pinned input/bottom rows. Manual Terminal.app gestures and system clipboard integration remain unverified. **RESOLVED (2026-10-17): the manual Terminal.app acceptance passed** — all 7 steps of the checklist in `docs/tui-mouse-selection/PLAN.md` (drag-select, exact `/copy`→`pbpaste` incl. wrapped + gutter lines, empty-selection safety, controls not hijacked, resize/scroll, mode restore, no-mouse repeat) PASS in a real terminal; the D28 mouse-selection feature is DONE.
 
 **TUI input responsiveness: stream paints coalesced, interactive paints immediate.**
 `src/tui/run.tsx` coalesces only high-frequency text/thinking/tool-argument

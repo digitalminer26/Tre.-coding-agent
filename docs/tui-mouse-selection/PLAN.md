@@ -21,8 +21,9 @@ Deterministic tests: `test/tui-mouse.test.ts` (parser), `test/tui-selection.test
 (highlight == `/copy` agreement); the PTY mode lifecycle (enable + restore of
 1002/1006) is in `test/e2e.sh`. Manual Terminal.app gesture verification (drag
 creates a visible selection; `/copy` lands the exact text on the macOS clipboard)
-is the remaining acceptance step — it needs a real terminal, not a PTY
-(see the Manual acceptance checklist below).
+was the remaining acceptance step — it needs a real terminal, not a PTY.
+**ACCEPTED (2026-10-17): all 7 checklist steps PASS** (see the Manual
+acceptance checklist below); the feature is DONE.
 
 ## Goal
 
@@ -93,6 +94,10 @@ Observed probe data and limitations:
 - Build/test/quality gate passes; deterministic tests cover parser/model/render/copy behavior; manual Terminal.app verification is recorded before declaring the feature done.
 
 ## Manual acceptance checklist (needs a real terminal — a PTY cannot do this)
+
+**RESULT (2026-10-17): all 7 steps PASS** (Terminal.app, `TRE_MOUSE=1`
+mouse-on run + `TRE_NO_MOUSE=1` no-mouse run). The D28 mouse-selection
+feature is DONE — no further acceptance steps.
 
 Run in Terminal.app (or iTerm2), NOT through an agent's pty. Enable mouse
 tracking for the session: `TRE_MOUSE=1 tre. tui` (or set `"mouse": true` in
