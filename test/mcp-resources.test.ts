@@ -321,3 +321,28 @@ test("readResource: an abort before the response settles as aborted (in-band, no
   assert.equal(c.getState().state, "ready", "an abort does NOT tear down");
   c.close();
 });
+
+test("listResources: an abort before the response settles as aborted (in-band, no hang)", async () => {
+  const mock = new MockMcpServer();
+  // The mock NEVER answers resources/list — the call must settle via the
+  // abort signal, not the 60s timeout (the signal is threaded to the page
+  // request; without it the list would wait out the full call timeout).
+  resourceMock(mock, {});
+  const c = await readyClient(mock);
+  const ctrl = new AbortController();
+  const p = c.listResources(ctrl.signal);
+  // Let the request frame be written (write-started), then abort.
+  await tick(40);
+  assert.ok(mock.lineFor("resources/list"), "the request reached the mock");
+  ctrl.abort();
+  let e: unknown;
+  try {
+    await p;
+  } catch (err) {
+    e = err;
+  }
+  assert.ok(e instanceof McpCallError, "the aborted list rejects with McpCallError");
+  assert.match((e as Error).message, /aborted/);
+  assert.equal(c.getState().state, "ready", "an abort does NOT tear down");
+  c.close();
+});

@@ -187,8 +187,27 @@ export interface McpResourceServerInfo {
   reason: string;
 }
 
-/** The total text cap for a resource read (64 KiB — chars, not bytes). */
+/** The total output cap for a resource read (64 KiB — UTF-8 BYTES, not
+ *  chars: a char count would let a CJK body exceed the cap by up to 3×). */
 const RESOURCE_OUTPUT_CAP = 64 * 1024;
+
+/** Truncate `text` to at most `RESOURCE_OUTPUT_CAP` UTF-8 bytes WITHOUT
+ *  splitting a multi-byte code point (a code point that would straddle the
+ *  boundary is dropped whole). Returns the text unchanged when it fits.
+ *  O(n) over code points — a resource body is at most a few MB, so a scan
+ *  is fine (no binary search). */
+function capToBytes(text: string): string {
+  if (Buffer.byteLength(text, "utf8") <= RESOURCE_OUTPUT_CAP) return text;
+  let bytes = 0;
+  let out = "";
+  for (const ch of text) {
+    const cb = Buffer.byteLength(ch, "utf8");
+    if (bytes + cb > RESOURCE_OUTPUT_CAP) break;
+    bytes += cb;
+    out += ch;
+  }
+  return out;
+}
 
 /** `a (ready), b (failed: reason), c (disabled)` — the configured-server
  *  list for the not-ready / unknown-server error. */
@@ -258,20 +277,24 @@ export function makeMcpResourceTool(
       }
       const client = entry.client;
       const uri = typeof args.uri === "string" ? args.uri : "";
-      // Cap the output text at RESOURCE_OUTPUT_CAP; when truncated, append
-      // the note on its own line (N = the PRE-truncation length). Shared by
-      // the list and read paths so both cap identically.
+      // Cap the output at RESOURCE_OUTPUT_CAP UTF-8 BYTES (capToBytes never
+      // splits a code point); when truncated, append the note on its own
+      // line (N = the PRE-truncation byte length). Shared by the list and
+      // read paths so both cap identically.
       const capText = (text: string): string =>
-        text.length > RESOURCE_OUTPUT_CAP
-          ? text.slice(0, RESOURCE_OUTPUT_CAP) +
-            `\n[output truncated to 64 KiB — ${text.length} chars total]`
+        Buffer.byteLength(text, "utf8") > RESOURCE_OUTPUT_CAP
+          ? capToBytes(text) +
+            `\n[output truncated to 64 KiB — ${Buffer.byteLength(text, "utf8")} bytes total]`
           : text;
       try {
         if (signal.aborted) {
           return fail("mcp_resource: aborted before the call was made");
         }
         if (uri === "") {
-          const list = await client.listResources();
+          // The caller's signal is threaded: an abort during a (possibly
+          // multi-page) list cancels the in-flight request in-band, matching
+          // the read path.
+          const list = await client.listResources(signal);
           const header = `resources for ${server} (${list.length}):`;
           const text = list.length === 0
             ? header

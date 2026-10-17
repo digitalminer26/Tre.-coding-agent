@@ -697,7 +697,7 @@ export class McpClient {
    *  detection). A malformed result is an in-band McpCallError — a
    *  result-payload failure, NOT an envelope violation (the server is NOT
    *  torn down). */
-  async listResources(): Promise<McpResource[]> {
+  async listResources(signal?: AbortSignal): Promise<McpResource[]> {
     await this.ensureReady();
     const resources: McpResource[] = [];
     let cursor: string | undefined;
@@ -711,9 +711,13 @@ export class McpClient {
         if (seenCursors.has(cursor)) throw new McpCallError("resources/list cursor loop (repeated cursor)");
         seenCursors.add(cursor);
       }
+      // The signal is threaded to EVERY page request: a multi-page list is
+      // cancellable between pages too (an abort while page N is in flight
+      // settles that request in-band as aborted — the same posture as
+      // readResource).
       const params: Record<string, unknown> = {};
       if (cursor !== undefined) params.cursor = cursor;
-      const result = await this.request("resources/list", params, "tool");
+      const result = await this.request("resources/list", params, "tool", undefined, signal);
       if (!isObj(result) || !Array.isArray(result.resources)) {
         throw new McpCallError("invalid resources/list result (resources array missing)");
       }

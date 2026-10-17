@@ -824,11 +824,44 @@ EOF
       --yes --models "$MODELS" --session "$D/s.jsonl" --cwd "$D" --mcp "$D/mcp.json" )
   local rc=$?
   [ $rc -eq 0 ] || { echo "exit code $rc (MCP server spawn/registration failed or run errored)"; return 1; }
-  # The LIVE model called an imported MCP tool (wire name starts with mcp__).
-  grep -q '"toolName":"mcp__' "$D/s.jsonl" || { echo "no mcp__ toolResult in the session — the model did not call the mock tool (live-model flake)"; return 1; }
-  # The call ROUND-TRIPPED through the mock server: the toolResult carries the
-  # mock's deterministic echo (model-independent).
-  grep -q 'MCP-MOCK-OK: hello-22' "$D/s.jsonl" || { echo "no MCP-MOCK-OK echo in the session — the mock server did not answer the call"; return 1; }
+  # The DETERMINISTIC proof, CORRELATED (audit 2026-10-17: two independent
+  # whole-file greps could match a FAILED mcp__ result + a marker the model
+  # typed itself). Parse the session JSONL and require: (1) an assistant
+  # toolCall to an `mcp__` tool (the server spawned, the tool registered, the
+  # model chose it), (2) a SUCCESSFUL (isError != true) toolResult whose
+  # toolName is `mcp__` AND whose text carries the mock's `MCP-MOCK-OK:
+  # hello-22` echo (the call round-tripped through the mock server — the
+  # marker comes from the mock, not the model, and the echo encodes the
+  # argument), and (3) that result ANSWERS one of the mcp__ toolCalls
+  # (toolCallId match — the round-trip is linked, not coincidental).
+  "$NODE_BIN" - "$D/s.jsonl" <<'NODE'
+const fs = require("fs");
+const file = process.argv[2];
+const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+const calls = new Map(); // toolCallId -> toolName (mcp__ calls only)
+let result = null;
+for (const line of lines) {
+  let e;
+  try { e = JSON.parse(line); } catch { continue; }
+  const m = e && e.message;
+  if (!m) continue;
+  if (m.role === "assistant") {
+    for (const b of m.content ?? []) {
+      if (b.type === "toolCall" && typeof b.name === "string" && b.name.startsWith("mcp__")) {
+        calls.set(b.id, b.name);
+      }
+    }
+  } else if (m.role === "toolResult" && typeof m.toolName === "string" && m.toolName.startsWith("mcp__")) {
+    const text = (m.content ?? []).map((c) => (typeof c.text === "string" ? c.text : "")).join("");
+    if (m.isError !== true && text.includes("MCP-MOCK-OK: hello-22")) result = m;
+  }
+}
+if (calls.size === 0) { console.error("no mcp__ toolCall in the session — the model did not call the mock tool (live-model flake)"); process.exit(1); }
+if (!result) { console.error("no SUCCESSFUL mcp__ toolResult carrying MCP-MOCK-OK: hello-22 — the call did not round-trip (or failed)"); process.exit(1); }
+if (!calls.has(result.toolCallId)) { console.error("the successful mcp__ result does not answer any mcp__ toolCall (toolCallId mismatch)"); process.exit(1); }
+NODE
+  local ok=$?
+  [ $ok -eq 0 ] || return 1
   echo "rc=0, live model called the mock MCP tool and the call round-tripped (MCP tier-1 live acceptance)"
 }
 

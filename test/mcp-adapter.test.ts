@@ -14,6 +14,7 @@ import {
   importMcpServerTools,
   makeMcpResourceTool,
 } from "../src/mcp/adapter.js";
+import { McpCallError } from "../src/mcp/client.js";
 import type {
   McpClient,
   McpResourceRead,
@@ -29,6 +30,8 @@ import type {
 import { DEFAULT_TOOLS } from "../src/tools/index.js";
 
 const WIRE_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
 test("encodeMcpToolName: shape is mcp__<server>__<tool> within the wire constraint", () => {
   const name = encodeMcpToolName("fs", "read_file");
@@ -187,12 +190,13 @@ test("importMcpServerTools: a duplicate within the same server rejects the serve
 
 /** A fake client exposing only the methods the tool calls. */
 function fakeClient(over: {
-  list?: () => Promise<unknown>;
+  list?: (signal?: AbortSignal) => Promise<unknown>;
   read?: (uri: string, signal?: AbortSignal) => Promise<unknown>;
   closed?: boolean;
 }): McpClient {
   return {
-    listResources: async (): Promise<unknown> => (over.list ? over.list() : []),
+    listResources: async (signal?: AbortSignal): Promise<unknown> =>
+      over.list ? over.list(signal) : [],
     readResource: async (uri: string, signal?: AbortSignal): Promise<unknown> =>
       over.read ? over.read(uri, signal) : { contents: [] },
     isClosed: () => over.closed ?? false,
@@ -355,13 +359,38 @@ test("makeMcpResourceTool: a read over 64 KiB is truncated to the cap + a note",
   const t = makeMcpResourceTool(lookup, servers);
   const res = await t.execute("tc1", { server: "fs", uri: "big" }, new AbortController().signal);
   const text = res.content[0]!.text;
-  assert.match(text, /\[output truncated to 64 KiB — \d+ chars total\]/, "the truncation note is present");
-  // The body is capped at 64 KiB (the note is appended AFTER the cap, on its
-  // own line — so the note's leading newline sits at index `cap`).
+  assert.match(text, /\[output truncated to 64 KiB — \d+ bytes total\]/, "the truncation note is present");
+  // The body is capped at 64 KiB of UTF-8 BYTES (the note is appended AFTER
+  // the cap, on its own line — so the note's leading newline sits at index
+  // `cap`; ASCII here, so char index == byte offset).
   const cap = 64 * 1024;
   const noteNewline = text.lastIndexOf("\n[output truncated");
   assert.equal(noteNewline, cap, "the truncated body is exactly 64 KiB before the note");
   assert.ok(text.length > cap, "the note makes the total longer than the cap");
+});
+
+test("makeMcpResourceTool: a CJK body is capped in UTF-8 BYTES (not chars) without splitting a code point", async () => {
+  // '漢' is 3 bytes/char: 65536 chars = 196608 bytes — a char-based cap
+  // would have kept 65536 chars (196608 bytes), ~3× over the limit.
+  const cjk = "漢".repeat(65536);
+  const read: McpResourceRead = { contents: [{ uri: "cjk", text: cjk }] };
+  const client = fakeClient({ read: async () => read });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const res = await t.execute("tc1", { server: "fs", uri: "cjk" }, new AbortController().signal);
+  const text = res.content[0]!.text;
+  // The read path prepends `uri + "\n"` (4 bytes) before the body, so the
+  // pre-truncation total is 4 + 196608 = 196612 bytes.
+  assert.match(text, /\[output truncated to 64 KiB — 196612 bytes total\]/, "the note reports the pre-truncation byte length");
+  const cap = 64 * 1024;
+  const noteNewline = text.lastIndexOf("\n[output truncated");
+  assert.equal(Buffer.byteLength(text.slice(0, noteNewline), "utf8"), cap, "the body is exactly 64 KiB of UTF-8 bytes");
+  // After the 4-byte `uri\n` prefix, 65532 bytes remain for the CJK body =
+  // 21844 code points (65532/3). The next code point would straddle the
+  // boundary and is dropped whole (never a half-encoded char).
+  const body = text.slice(0, noteNewline);
+  assert.equal(Buffer.byteLength(body, "utf8"), cap, "body is exactly the cap in bytes");
+  assert.equal(body.length, 4 + 21844, "no code point is split at the boundary");
 });
 
 test("makeMcpResourceTool: a list over 64 KiB is truncated to the cap + a note", async () => {
@@ -377,7 +406,7 @@ test("makeMcpResourceTool: a list over 64 KiB is truncated to the cap + a note",
   assert.equal(res.isError, undefined, "a successful list is not an error");
   const text = res.content[0]!.text;
   assert.match(text, /^resources for fs \(2000\):/, "the header line survives the cap");
-  assert.match(text, /\[output truncated to 64 KiB — \d+ chars total\]/, "the truncation note is present");
+  assert.match(text, /\[output truncated to 64 KiB — \d+ bytes total\]/, "the truncation note is present");
   // The body is capped at 64 KiB (the note is appended AFTER the cap, on its
   // own line — so the note's leading newline sits at index `cap`).
   const cap = 64 * 1024;
@@ -385,6 +414,37 @@ test("makeMcpResourceTool: a list over 64 KiB is truncated to the cap + a note",
   assert.equal(noteNewline, cap, "the truncated body is exactly 64 KiB before the note");
   assert.ok(text.length > cap, "the note makes the total longer than the cap");
   assert.ok(text.length <= cap + 100, "the total output is the cap plus the note");
+});
+
+test("makeMcpResourceTool: the caller's abort signal is threaded to listResources", async () => {
+  // Regression (audit 2026-10-17): the list path used to call
+  // listResources() WITHOUT the signal, so a Ctrl+C during a (multi-page)
+  // list could not cancel the in-flight request. The tool must pass the
+  // caller's signal through.
+  let seen: AbortSignal | undefined;
+  const client = fakeClient({
+    list: (signal) => {
+      seen = signal;
+      return signal
+        ? new Promise<unknown>((_r, reject) =>
+            signal.addEventListener("abort", () =>
+              reject(new McpCallError("call resources/list aborted")),
+            ),
+          )
+        : new Promise<unknown>(() => {}); // never settles — would hang the test
+    },
+  });
+  const { lookup, servers } = makeLookup(["fs"], [{ name: "fs", state: "ready" }], { fs: client });
+  const t = makeMcpResourceTool(lookup, servers);
+  const ctrl = new AbortController();
+  const p = t.execute("tc1", { server: "fs" }, ctrl.signal);
+  await tick(20);
+  assert.ok(seen, "listResources received a signal");
+  assert.equal(seen, ctrl.signal, "it is the CALLER's signal (not a fresh one)");
+  ctrl.abort();
+  const res = await p; // must settle in-band, not hang
+  assert.equal(res.isError, true, "the abort surfaces as an in-band error");
+  assert.match(res.content[0]!.text, /aborted/);
 });
 
 test("makeMcpResourceTool: a server-side isError read sets ToolResult.isError", async () => {
