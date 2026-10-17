@@ -1,4 +1,43 @@
-# Current project status (2026-10-15)
+# Current project status (2026-10-17)
+
+**TUI `/display-bottom` picker persistence fix + e2e hardening (2026-10-17).**
+Three increments:
+
+1. `e49316a` — the picker's open-time baseline guard read the ALREADY-
+   UPDATED shared `state` (reassigned by the `setStateNow` just above), so
+   the null→open transition was never detected, the baseline was never
+   snapshotted, and confirm compared the applied selection against `null`
+   → the interactive picker's confirm never persisted to `tui.json`. Both
+   guards (the busy and the idle slash route) now read the PRE-command
+   state (`slashBusy.state` / `r.state`). New e2e scenario 21
+   `tui-display-bottom-picker(C32)` covers the INTERACTIVE path
+   (scenario 17 covers the typed-args path): fresh HOME (default bottom
+   `["subtasks"]`), bare `/display-bottom` → arrow-down wraps to `model`
+   → space toggles it in → enter applies; asserts `~/.tre/tui.json` is
+   `{"bottom":["subtasks","model"],"bottomSet":true}` and that a relaunch
+   loads the persisted selection. Verified live (27B): PASS.
+2. `2e53a4e` — the C26 "default auto-continue" unit test asserted the
+   DEFAULT continuation count (4 cycles) WITHOUT injecting a config, so it
+   read whatever `tre.json` the CWD walk-up resolved — a personal
+   `maxContinuations` (e.g. 20) broke it whenever the suite ran outside
+   the repo. It now injects a clean `tre.json` via the existing
+   `treConfigPath` dep (the same pattern as the C38 tests). Passes from
+   both the repo root and a neutral CWD.
+3. `fd19b0c` — e2e default range 16 → 21 (the header already said "all
+   21"; the new picker scenario was unreachable by default). The four
+   fresh-HOME scenarios (17, 18, 20, 21) now run the TUI child from the
+   scenario dir (`cd "$D" || exit 1`): `tre.json` discovery walks up from
+   `process.cwd()` (NOT `--cwd`), so a machine-local repo `tre.json`
+   (gitignored, e.g. `extraRoots` outside the scenario's temp home)
+   refused the startup (exit 2) before the scenario could begin —
+   scenario 21's first live run failed exactly this way.
+
+**Gate.** `tsc` clean; full suite **1146 / 0 fail / 14 skip** (neutral
+CWD — from the repo root the same suite shows 33 failures that are a
+sandbox artifact: the repo's gitignored local `tre.json` lists `~/.nvm`,
+which the kernel sandbox cannot resolve (EPERM) and which refuses the
+startup of every in-process `main()` test). Quality-check source scan +
+dependency freeze OK. e2e scenario 21 live PASS (27B).
 
 **MCP tier 2 item 1: `mcp_resource` (resources) — DONE (2026-10-15, commit `78052da`).** The `resources/list` + `resources/read` RPCs are exposed as ONE tool, `mcp_resource { server, uri }` (docs/10-mcp-scope.md §Tier 2): empty/absent `uri` lists the server's resources (header + JSON), a non-empty `uri` reads that resource. Client: `listResources()` is paginated exactly like `tools/list` (100-page / 10000-resource caps, repeated-cursor loop detection) with IN-BAND failures — a malformed result is an `McpCallError`, the server is NOT torn down; `readResource(uri, signal)` is cls "tool" (60 s timeout, abort support), text/blob opaque, server-side `isError` surfaced on the result. Adapter: the tool never throws — unknown/not-ready server → in-band isError listing every configured server + state (per-server isolation); text content → blocks prefixed with the entry's uri; blob → a descriptive block (mime + decoded byte count, base64 NOT dumped); BOTH the list and read outputs are capped at 64 KiB with a truncation note (shared `capText` helper). Registry: exactly ONE `mcp_resource` is appended to `result.tools` when ≥1 server is ready (none when zero); `McpStartResult.tools` widened `AdaptedMcpTool[] → Tool[]`; `main.ts` needed no change (the tool rides the existing `wiredTools` append). Safety posture: the name does NOT start with `mcp__`, so `makeSafetyHooks` lets it fall through to allow in EVERY mode — correct for a read-only resource reader; `src/tools/safety.ts` untouched (guardrail zone). No context auto-injection (model-invoked only). +30 tests (17 client-resource incl. pagination/cursor-loop/caps/malformed/abort, 12 adapter incl. list-cap truncation + unknown-server + blob + isError, 5 registry ready-count gating); full suite 1104 / 0 fail / 14 skip. Delivered via the parallel-delegation workstream `.tre/delegation/mcp-resources/` (worker→audit→fix→audit on the .11 27B endpoint; cycle-1 audit FAILed on the missing list cap + untested resource cap, both fixed and re-audited PASS — see `logs/c1-audit.md`, `logs/c2-audit.md`).
 

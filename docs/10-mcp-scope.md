@@ -712,6 +712,11 @@ Zero runtime dependencies (test-only oracle is conditional under §4.8).
    in the default gate — it needs credentials and can flake): live model
    calls a mock-server tool. The **deterministic mock-server tests are
    the required gate**; the live scenario is optional confirmation.
+   **STATUS (2026-10-17): NOT BUILT** — tier 1 was marked DONE/ENABLED
+   on the deterministic mock-server tests (the required gate); the
+   optional live scenario was never added to `test/e2e.sh` (no
+   MCP/RUN_LIVE scenario exists there). Add it if live confirmation is
+   wanted.
    **SDK oracle(s) — CANDIDATE, pending verification.** The oracle is a
    cross-check, not a gate: the REQUIRED modern-path tests run against
    the spec-derived mock (§4.2 framing contract), and the oracle is
