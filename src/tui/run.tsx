@@ -79,6 +79,7 @@ import { makeResizeHandler } from "./resize.js";
 import { makeMouseGate } from "./mouse-gate.js";
 import { mouseTrackingEnabled } from "./mouse.js";
 import { compactNow, makeInteractiveAsk, runTurn, type PrintSinks } from "../cli/main.js";
+import { ActiveWork } from "./active-work.js";
 import { estimatePromptOverheadTokens } from "../context/compact.js";
 import { pruneWorkerDir, readWorkerStatuses } from "../cli/workers.js";
 import { canonicalSessionPath, readSubtasks, subtaskDir, subtaskKey } from "../tools/subtask.js";
@@ -220,6 +221,110 @@ export function restartTeardownAborted(
       },
     ],
   };
+}
+
+/**
+ * /restart — the ACTIVE-TURN drain, extracted as a PURE helper so the
+ * decision is unit-testable (the `restartTui` closure is not exported).
+ *
+ * A busy /restart aborts the run (a signal, not completion). Before tearing
+ * down MCP + spawning the replacement, the aborted run's async
+ * tool-result/session/event work must settle (it persists the final
+ * result/abort state). This races the turn's promise against a bound so a
+ * run that ignores the abort cannot block the restart forever. Returns
+ * `true` when the turn settled within the bound (safe to proceed), `false`
+ * when it did not (the caller must NOT spawn a replacement against a
+ * still-live turn). No I/O, no mutation.
+ */
+export async function drainTurnBounded(
+  turn: Promise<unknown> | null,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (turn === null) return true; // no active turn — nothing to drain
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((r) => {
+    timer = setTimeout(() => r(false), timeoutMs);
+  });
+  const settled = turn.then(
+    () => true as const,
+    () => true as const, // a settled (rejected) turn is still SETTLED
+  );
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    // Clear the bound on EVERY path: a turn that settled first must not leave
+    // a referenced timer keeping the process alive for the full timeoutMs.
+    clearTimeout(timer);
+  }
+}
+
+/** The ordering decision for a /restart, as data (see runRestartSequence). */
+export type RestartOutcome =
+  | { kind: "drain-timeout" }
+  | { kind: "teardown-failed"; error: unknown }
+  | { kind: "unmounted" }
+  | { kind: "spawned" };
+
+export interface RestartSequenceSteps {
+  /** The active turn at the moment of the restart (null = idle). */
+  activeTurn: () => Promise<unknown> | null;
+  drainTimeoutMs: number;
+  abortTurn: () => void;
+  teardown?: () => Promise<void>;
+  isMounted: () => boolean;
+  spawn: () => void;
+}
+
+/**
+ * The /restart ORDERING, extracted so it is testable without Ink: drain the
+ * active turn (bounded) → tear down MCP (must confirm) → spawn the
+ * replacement. Each later step runs ONLY if the earlier one succeeded:
+ *  - drain timeout  → abort again, NO teardown, NO spawn;
+ *  - teardown throws → NO spawn (old servers may still be alive);
+ *  - unmounted during teardown → NO spawn (the process is exiting).
+ * The caller maps the outcome to UI state and flags.
+ */
+export async function runRestartSequence(
+  steps: RestartSequenceSteps,
+): Promise<RestartOutcome> {
+  // ONE overall deadline across every operation that becomes active during the
+  // drain. A settled operation may be replaced by a newer one (a run or a
+  // compaction started in the gap): the restart must drain that too, never
+  // tear down under it. Ends only when nothing is active, or on the deadline.
+  const deadline = Date.now() + steps.drainTimeoutMs;
+  for (;;) {
+    const drain = steps.activeTurn();
+    if (drain === null) break;
+    // Signal the active work FIRST: the abort is what lets an abort-aware run
+    // or compaction settle. Waiting for the drain bound before aborting would
+    // stall every cancellable operation for the full timeout.
+    try {
+      steps.abortTurn();
+    } catch {
+      /* already aborted */
+    }
+    const settled = await drainTurnBounded(drain, Math.max(0, deadline - Date.now()));
+    // A still-unsettled operation that is STILL the active one is stuck.
+    if (!settled && steps.activeTurn() === drain) {
+      return { kind: "drain-timeout" };
+    }
+    // Settled. Loop again ONLY if a DIFFERENT operation took the slot in the
+    // gap (a replacement); the same already-settled promise means nothing new
+    // is active. If a replacement is still live past the deadline, give up.
+    const next = steps.activeTurn();
+    if (next === null || next === drain) break;
+    if (Date.now() >= deadline) return { kind: "drain-timeout" };
+  }
+  if (steps.teardown) {
+    try {
+      await steps.teardown();
+    } catch (error) {
+      return { kind: "teardown-failed", error };
+    }
+  }
+  if (!steps.isMounted()) return { kind: "unmounted" };
+  steps.spawn();
+  return { kind: "spawned" };
 }
 
 export interface TuiRunOptions {
@@ -620,48 +725,61 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     restartInFlight = true;
     // (A prior failed teardown is retried here — restartFailed is cleared
     // only when the retry actually confirms the servers are gone.)
-    // WS12: reap THIS process's MCP servers BEFORE the replacement spawns.
-    // The process-exit backstop cannot provide this ordering: under spawnSync
-    // the old process (and its detached MCP servers) stays alive for the
-    // whole child run and is only reaped when the parent finally exits.
-    // Awaiting the teardown here guarantees the old servers are gone before
-    // the new tre. starts.
-    if (opts.teardownMcp) {
-      try {
-        await opts.teardownMcp();
-      } catch (e) {
-        // UNCONFIRMED termination: a process group survived the SIGKILL bound.
-        // Do NOT spawn a replacement — it would run for the whole child run
-        // alongside the old (still-alive) servers, and the exit backstop only
-        // fires when the parent exits (after the child). Abort the restart and
-        // tell the user; the exit backstop will SIGKILL the stragglers when
-        // this process actually exits.
-        restartInFlight = false;
-        restartFailed = true;
-        setStateNow(restartTeardownAborted(state, e));
-        return;
-      }
+    // DRAIN the active turn BEFORE tearing down MCP: the busy /restart path
+    // aborted the run (a signal, not completion) — the aborted run still has
+    // async tool-result/session/event work to finish (persisting its final
+    // result/abort state). If we tore down + spawned the replacement before
+    // that settled, spawnSync would freeze the parent mid-flight and the
+    // replacement would replay the session before the parent recorded its
+    // tail (the cycle-2 finding). Bounded: a run that ignores the abort must
+    // not block the restart forever (the force-exit Ctrl+C is the escape).
+    // Ordering (drain → teardown → spawn) lives in runRestartSequence so it
+    // is unit-tested; this closure maps each outcome to UI state and flags.
+    const outcome = await runRestartSequence({
+      activeTurn: () => activeWork.current()?.promise ?? null,
+      drainTimeoutMs: 5000,
+      abortTurn: () => (activeWork.current()?.abort ?? controller).abort(),
+      teardown: opts.teardownMcp,
+      isMounted: () => mounted,
+      spawn: () => {
+        // The child (the new tre.) owns the terminal and handles its own
+        // SIGINT, so drop the parent's handler for the duration.
+        process.off("SIGINT", onSigint);
+        const result = spawnSync(spec.execPath, spec.args, {
+          stdio: "inherit",
+          env: spec.env,
+        });
+        quit(result.error ? 1 : (result.status ?? 0));
+      },
+    });
+    if (outcome.kind === "drain-timeout") {
+      restartInFlight = false;
+      setStateNow({
+        ...state,
+        items: [
+          ...state.items,
+          { kind: "error", text: "restart aborted: the running turn did not settle within 5s after abort — press Ctrl+C twice to force-exit" },
+        ],
+      });
+      return;
+    }
+    if (outcome.kind === "teardown-failed") {
+      // UNCONFIRMED termination: a process group survived the SIGKILL bound.
+      // No replacement; the exit backstop reaps stragglers when this exits.
+      restartInFlight = false;
+      restartFailed = true;
+      setStateNow(restartTeardownAborted(state, outcome.error));
+      return;
     }
     restartFailed = false;
-    // The app may have quit (unmounted) during the teardown window — the event
-    // loop was live until spawnSync froze it. If so, do NOT spawn a
-    // replacement: the process is already exiting (the exit backstop reaps any
-    // MCP stragglers).
-    if (!mounted) return;
-    // The child (the new tre.) owns the terminal and handles its own SIGINT,
-    // so drop the parent's handler for the duration — otherwise a Ctrl+C
-    // during the child's run would be acted on by the parent too (after
-    // spawnSync returns) and clobber the child's exit code.
-    process.off("SIGINT", onSigint);
-    const result = spawnSync(spec.execPath, spec.args, {
-      stdio: "inherit",
-      env: spec.env,
-    });
-    // Unmount + let the main flow exit with the child's status.
-    quit(result.error ? 1 : (result.status ?? 0));
+    if (outcome.kind === "unmounted") {
+      // Quit during the teardown window: the process is already exiting.
+      return;
+    }
+    // outcome.kind === "spawned": spawn() already quit() with the child's status.
   };
 
-  const runPrompt = async (prompt: string): Promise<AgentMessage[] | null> => {
+  const runPromptCore = async (prompt: string): Promise<AgentMessage[] | null> => {
     controller = new AbortController();
     // One steering queue per run — a closure over a plain array (the
     // contract is push/drain; the loop drains, onSubmit pushes).
@@ -719,6 +837,23 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     }
   };
 
+  // The ACTIVE turn's completion promise (a user or telegram run). A /restart
+  // while busy must DRAIN this before tearing down MCP + spawning the
+  // replacement: the abort is a signal, not completion — the aborted run still
+  // has async tool-result/session/event work to finish (persisting its final
+  // result/abort state), and spawnSync would freeze the parent mid-flight,
+  // letting the replacement replay the session before the parent recorded its
+  // tail (the cycle-2 finding). The REPL drains its Telegram turn mutex the
+  // same way; the TUI had no analogous barrier.
+  // The ACTIVE work (a run OR a manual /compact) — see active-work.ts. /restart
+  // reads it through runRestartSequence, so both are signalled and drained.
+  const activeWork = new ActiveWork();
+  const runPrompt = (prompt: string): Promise<AgentMessage[] | null> => {
+    const p = runPromptCore(prompt);
+    activeWork.track(p, controller);
+    return p;
+  };
+
   /**
    * A6 — manual `/compact` (idle only). A silent summarizer call OUTSIDE a
    * run: force:true skips the trigger, the ladder (D) and the session entry
@@ -739,12 +874,13 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       ...s,
       items: [...s.items, { kind: "info", text: "compact: summarizing older messages…" }],
     });
-    void (async () => {
+    const compactAbort = new AbortController();
+    activeWork.track((async () => {
       try {
         const newCtx = await compactNow({
           streamFn: opts.streamFn,
           model,
-          signal: new AbortController().signal,
+          signal: compactAbort.signal,
           context,
           session: opts.session,
           ids: opts.entryIds,
@@ -779,7 +915,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       } catch (err) {
         setStateNow(noteError({ ...state, busy: false }, `compact error: ${String(err)}`));
       }
-    })();
+    })(), compactAbort);
   };
 
   /**
@@ -870,7 +1006,8 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         // already holds every completed message — a torn tail is dropped
         // on replay by design), then re-exec.
         if (trimmed === "/restart" && state.busy) {
-          controller.abort();
+          // restartTui aborts the active work itself (via runRestartSequence),
+          // so a busy compaction is signalled too — not only the run.
           // Fire-and-forget: onSubmit is sync, but restartTui awaits the MCP
           // teardown (event loop live) before spawnSync freezes it. The
           // synchronous restartInFlight guard inside restartTui prevents a

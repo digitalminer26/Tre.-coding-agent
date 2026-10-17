@@ -24,6 +24,10 @@ tre.json
 # Implement-audit skill state (plan, prompts, audit reports, logs, sessions) —
 # local orchestration artifacts, never in git.
 .tre/implement-audit/
+# Audit-cycle orchestration state (auditor prompts, raw reports, stderr logs) —
+# local artifacts, never in git. The consolidated human report (.mcp-audit-*.md)
+# IS committed, matching the cycle-1/2 convention.
+.tre/audit-cycle3/
 # GitHub push token. The machine-level home is ~/.tre/github-token (outside
 # the repo, never in git). This entry is a legacy safety net for the old
 # repo-local location, still honored by the release tooling as a fallback.

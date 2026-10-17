@@ -64,6 +64,99 @@ export const MCP_SUPPORTED_VERSIONS = [MCP_CLIENT_VERSION, MCP_LEGACY_VERSION];
 export const MCP_MODERN_VERSIONS = [MCP_CLIENT_VERSION];
 /** A well-formed MCP protocol version is a calendar date (YYYY-MM-DD). */
 const MCP_VERSION_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** A protocol version that is a well-formed date AND a real calendar date
+ *  (rejects 2099-99-99 — the format regex alone would accept it). */
+function isValidMcpDate(s: string): boolean {
+  if (!MCP_VERSION_RE.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m! - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+/** Keep the NEWEST part of a string within `maxBytes` UTF-8 bytes: a suffix,
+ *  never a code point split at the boundary (a code point that would
+ *  straddle it is dropped whole). Tail semantics — the diagnostic keeps the
+ *  most recent output, which is what a crash report needs. */
+function capUtf8SuffixToBytes(s: string, maxBytes: number): string {
+  if (Buffer.byteLength(s, "utf8") <= maxBytes) return s;
+  let bytes = 0;
+  const chars = [...s];
+  let start = chars.length;
+  while (start > 0) {
+    const cb = Buffer.byteLength(chars[start - 1]!, "utf8");
+    if (bytes + cb > maxBytes) break;
+    bytes += cb;
+    start--;
+  }
+  return chars.slice(start).join("");
+}
+
+/** Decode a retained stderr tail into a clean diagnostic view:
+ *  - skips a leading run of orphaned continuation bytes (the tail may start
+ *    mid-code-point — its lead byte was cut off by the cap);
+ *  - emits each complete code point;
+ *  - emits U+FFFD for a genuinely invalid byte (preserved for diagnostics);
+ *  - STOPS (without emitting a replacement char) at a trailing incomplete
+ *    sequence, so the view never inflates past the tail's byte length.
+ *  The result is capped to the tail's byte length so its re-encoded UTF-8
+ *  size is ≤ the ring bound even in the presence of invalid bytes. */
+function decodeUtf8Tail(buf: Buffer): string {
+  let start = 0;
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start++;
+  let out = "";
+  let i = start;
+  while (i < buf.length) {
+    const b = buf[i]!;
+    let len: number;
+    if (b < 0x80) len = 1;
+    else if (b >= 0xc2 && b <= 0xdf) len = 2;
+    else if (b >= 0xe0 && b <= 0xef) len = 3;
+    else if (b >= 0xf0 && b <= 0xf4) len = 4;
+    else {
+      // Invalid lead byte (0x80–0xc1, 0xf5–0xff): replacement char, advance 1.
+      out += "\uFFFD";
+      i++;
+      continue;
+    }
+    // Check the bytes that ARE present first: an invalid byte proves the
+    // sequence is malformed even when more bytes would be missing (so trailing
+    // valid ASCII is never swallowed as "incomplete"). RFC 3629 restricts the
+    // SECOND byte for some leads (no overlongs E0 80–9F, no surrogates ED A0–BF,
+    // no code points above U+10FFFF: F4 90+, and F0 80–8F); those prefixes can
+    // never become valid, so they are malformed, not incomplete.
+    let valid = true;
+    for (let k = 1; k < len && i + k < buf.length; k++) {
+      const c = buf[i + k]!;
+      const ok =
+        k === 1
+          ? (b === 0xe0 ? c >= 0xa0 && c <= 0xbf
+            : b === 0xed ? c >= 0x80 && c <= 0x9f
+            : b === 0xf0 ? c >= 0x90 && c <= 0xbf
+            : b === 0xf4 ? c >= 0x80 && c <= 0x8f
+            : (c & 0xc0) === 0x80)
+          : (c & 0xc0) === 0x80;
+      if (!ok) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      out += "\uFFFD";
+      i++;
+      continue;
+    }
+    // Only a sequence whose present bytes are all valid continuations but
+    // which is cut off at the end of the tail is genuinely incomplete: stop.
+    if (i + len > buf.length) break;
+    out += buf.subarray(i, i + len).toString("utf8");
+    i += len;
+  }
+  return capUtf8SuffixToBytes(out, buf.length);
+}
 /** The recognized modern negotiation error (UnsupportedProtocolVersionError). */
 export const MCP_ERR_UNSUPPORTED_VERSION = -32022;
 /** Method-not-found — the standard reply to any server→client request. */
@@ -306,6 +399,23 @@ export class McpClient {
 
   private onStdoutBound = (c: Buffer | string) => this.onStdout(c);
   private onStderrBound = (c: Buffer | string) => this.onStderr(c);
+  /** A READ error on the child's stdout is transport death (the pipe is
+   *  broken) — fail the server (in-band for pending calls) UNLESS our own
+   *  shutdown already closed the transport (a late echo). Without a listener
+   *  here, the error is an unhandled EventEmitter 'error' that CRASHES the
+   *  host (the stdin path has an explicit handler; the readable pipes did
+   *  not — the cycle-2 finding). */
+  private onStdoutErrorBound = (err: Error) => {
+    if (this.closed) return;
+    this.fail("stdout read error: " + err.message);
+  };
+  /** A READ error on the child's stderr is NOT terminal: stderr is a
+   *  diagnostic side-channel, and a broken stderr pipe must not tear down an
+   *  otherwise-healthy server. Record it in the retained diagnostics (the
+   *  ring) so it is visible, and swallow it (no unhandled 'error'). */
+  private onStderrErrorBound = (err: Error) => {
+    this.appendStderr(Buffer.from("\n[stderr read error: " + err.message + "]", "utf8"));
+  };
   /** A stdin write error (EPIPE / broken pipe) is transport death — UNLESS
    *  OUR OWN shutdown is in flight (`closed`): close()/kill() ends the
    *  child's stdin, and a write still in flight fails with EPIPE as an
@@ -328,6 +438,14 @@ export class McpClient {
     if (this.closing) return;
     this.fail("transport death: stdout closed (EOF)");
   };
+  /** The readable was closed WITHOUT an EOF `end` (abrupt pipe teardown).
+   *  Same transport death as EOF, with the same guards: our own graceful
+   *  teardown (`closing`) and an already-settled client are not news. */
+  private onStdoutCloseBound = () => {
+    if (this.closed) return;
+    if (this.closing) return;
+    this.fail("transport death: stdout closed");
+  };
   /** A `drain` event is a DEADLINE SIGNAL ONLY — it never changes byte
    *  accounting or advances the frame queue (that is the error-free
    *  flush-completion's job). */
@@ -344,7 +462,10 @@ export class McpClient {
   ) {
     this.transport.stdout.on("data", this.onStdoutBound);
     this.transport.stdout.on("end", this.onStdoutEndBound);
+    this.transport.stdout.on("close", this.onStdoutCloseBound);
+    this.transport.stdout.on("error", this.onStdoutErrorBound);
     this.transport.stderr.on("data", this.onStderrBound);
+    this.transport.stderr.on("error", this.onStderrErrorBound);
     this.transport.stdin.on("error", this.onStdinErrorBound);
     this.transport.stdin.on("drain", this.onDrainBound);
   }
@@ -483,7 +604,24 @@ export class McpClient {
         clearTimeout(this.budgetTimer);
         this.budgetTimer = null;
       }
-      if (this.state === "starting") this.state = "ready";
+      // A terminal failure may have landed in the SAME chunk as the final
+      // tools/list response (e.g. the response + a framing violation
+      // coalesced): listToolsStartup resolved with the valid page, but the
+      // client has since failed (state !== "starting"). Reject in that case
+      // so the registry's catch path tears down + marks the server failed —
+      // instead of returning a "ready" handle whose client is actually dead
+      // (the cycle-1 F5 gap). On the healthy path the state is still
+      // "starting" and we promote it to "ready".
+      // close()/kill() set `closed` WITHOUT changing `state`, so the state
+      // check alone let a client closed in this window be promoted to ready.
+      if (this.closed || this.state !== "starting") {
+        throw new McpStartupError(
+          `startup failed after tools/list (${this.closed ? "closed" : this.state}${
+            this.failReason ? `: ${this.failReason}` : ""
+          })`,
+        );
+      }
+      this.state = "ready";
       this.readyD?.resolve();
       return tools;
     } catch (e) {
@@ -611,14 +749,20 @@ export class McpClient {
         "invalid initialize result (protocolVersion missing)",
       );
     }
-    // The negotiated legacy version must be a well-formed date (YYYY-MM-DD)
-    // and must NOT be a modern-era version: a modern version here is
-    // contradictory (we are in the legacy handshake precisely because the
-    // server did NOT answer the modern probe), so accepting it would claim a
-    // protocol the client does not implement on this path. (The old behavior
-    // accepted ANY string — e.g. "alien-version".)
+    // The negotiated legacy version must be a REAL calendar date (rejects
+    // both "alien-version" and a format-valid-but-impossible "2099-99-99")
+    // and must NOT be a modern-era version the client implements: a modern
+    // version here is contradictory (we are in the legacy handshake because
+    // the server did NOT answer the modern probe). Versions strictly newer
+    // than the modern revision are also rejected (not implemented). The
+    // modern revision itself is caught by the MCP_MODERN_VERSIONS check
+    // (`>=` is kept as an explicit, documented bound).
     const pv = result.protocolVersion;
-    if (!MCP_VERSION_RE.test(pv) || MCP_MODERN_VERSIONS.includes(pv)) {
+    if (
+      !isValidMcpDate(pv) ||
+      pv >= MCP_CLIENT_VERSION ||
+      MCP_MODERN_VERSIONS.includes(pv)
+    ) {
       throw new McpStartupError(
         `invalid initialize protocolVersion: ${pv} (not a supported legacy version)`,
       );
@@ -1084,6 +1228,13 @@ export class McpClient {
         return;
       }
       this.dispatch(obj);
+      // An envelope violation in this line runs fail() (terminal). STOP
+      // processing the rest of the chunk: continuing would dispatch further
+      // lines on a closed client, and their server-request replies would
+      // enqueue frames + restore nonzero byte reservations after teardown
+      // (the cycle-2 finding). (The JSON-syntax and frame-limit branches
+      // already return immediately.)
+      if (this.closed) return;
     }
     // No-newline growth beyond the frame limit (the buffer IS the partial
     // frame).
@@ -1093,24 +1244,41 @@ export class McpClient {
   }
 
   private onStderr(chunk: Buffer | string): void {
+    this.appendStderr(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+  }
+
+  /** Single retention path for stderr data AND error markers: the RAW byte
+   *  tail is bounded (MCP_STDERR_RING), the exposed view is decoded from it
+   *  and bounded by the same byte count. Keeps the latest bytes, so a marker
+   *  appended after data is never silently dropped by the next chunk. */
+  private appendStderr(buf: Buffer): void {
     // Retain a 64 KiB BYTES tail (the ring bound is bytes, not chars). Keep
-    // the raw bytes so the cap is exact; expose the decoded view. Trim the
-    // tail back to a UTF-8 boundary so it never starts mid-code-point (a
-    // split char would decode to a replacement char, inflating the decoded
-    // byte count past the cap).
-    const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-    let tail =
-      this.stderrTail.length + buf.length > MCP_STDERR_RING
-        ? Buffer.concat([this.stderrTail, buf]).subarray(
-            this.stderrTail.length + buf.length - MCP_STDERR_RING,
-          )
-        : Buffer.concat([this.stderrTail, buf]);
-    // Drop a partial leading code point (continuation bytes 0x80–0xBF).
-    let start = 0;
-    while (start < tail.length && (tail[start]! & 0xc0) === 0x80) start++;
-    if (start > 0) tail = tail.subarray(start);
-    this.stderrTail = tail;
-    this.diags.stderr = tail.toString("utf8");
+    // the raw bytes so the cap is exact; expose a clean decoded view.
+    //
+    // Two boundary concerns (the cycle-1 F7 fix addressed only the leading
+    // one):
+    //  1. The tail (last RING bytes) may START mid-code-point — its first
+    //     bytes are continuation bytes (0x80–0xBF) whose lead byte was cut
+    //     off. Decoding them raw would emit a replacement char.
+    //  2. The tail may END mid-code-point — its last bytes are an incomplete
+    //     sequence. Decoding them raw emits a replacement char that RE-ENCODES
+    //     to 3 bytes for 1 input byte, inflating the exposed view PAST the
+    //     cap (e.g. 65535 ASCII + 0xe6 → 65538 bytes).
+    // decodeUtf8Tail trims BOTH boundaries so the exposed view is a clean,
+    // complete UTF-8 string whose re-encoded byte length is ≤ the tail length
+    // (≤ RING). The raw tail retains the boundary bytes, so a code point split
+    // across chunks is reassembled in the NEXT tail (no data lost — it just
+    // is not shown in the current view).
+    let tail = Buffer.concat([this.stderrTail, buf]);
+    if (tail.length > MCP_STDERR_RING) {
+      tail = tail.subarray(tail.length - MCP_STDERR_RING);
+    }
+    // COPY into a bounded allocation: a subarray owns the ENTIRE concatenated
+    // backing buffer (an 8 MiB stderr chunk would leave an 8 MiB allocation
+    // retained behind a 64 KiB logical tail). Buffer.from copies just the
+    // logical slice.
+    this.stderrTail = Buffer.from(tail);
+    this.diags.stderr = decodeUtf8Tail(this.stderrTail);
   }
 
   /** Classify by SHAPE first (method + id presence), then by pending state —
@@ -1284,6 +1452,10 @@ export class McpClient {
     obj: Record<string, unknown>,
     cls: FrameClass,
   ): Frame | null {
+    // A closed/failed client must not enqueue more frames: a late dispatch
+    // (e.g. a server request in the same chunk as an envelope violation)
+    // would otherwise restore nonzero byte reservations after teardown.
+    if (this.closed) return null;
     const line = JSON.stringify(obj) + "\n";
     const bytes = Buffer.byteLength(line, "utf8");
     if (bytes > MCP_FRAME_LIMIT) {
@@ -1429,9 +1601,17 @@ export class McpClient {
 
   // ── Pending settlement ─────────────────────────────────────────────────────
 
-  private settle(id: number, result: unknown, error: Error | null): void {
+  /** Common settlement bookkeeping, shared by the ordinary and probe
+   *  settlement paths: mark settled, clear the timer, detach the
+   *  request-scoped abort listener, remove the pending entry, and release an
+   *  UNSENT frame. Returns the pending entry, or null if it was already
+   *  settled (the caller must no-op). Factored so the probe paths cannot
+   *  bypass the frame-release / listener-cleanup that settle() does (the
+   *  cycle-1 F2 fix originally covered only settle(), leaving a probe that
+   *  timed out while queued behind a stalled write to be sent later). */
+  private beginSettle(id: number): Pending | null {
     const p = this.pending.get(id);
-    if (!p || p.settled) return;
+    if (!p || p.settled) return null;
     p.settled = true;
     clearTimeout(p.timer);
     p.cleanupAbort?.();
@@ -1447,6 +1627,12 @@ export class McpClient {
     if (p.frame && !p.frame.writeStarted) {
       this.removeUnsent(p.frame);
     }
+    return p;
+  }
+
+  private settle(id: number, result: unknown, error: Error | null): void {
+    const p = this.beginSettle(id);
+    if (!p) return;
     if (p.deferred) {
       if (error) p.deferred.reject(error);
       else p.deferred.resolve(result);
@@ -1454,20 +1640,14 @@ export class McpClient {
   }
 
   private settleProbeTimeout(id: number): void {
-    const p = this.pending.get(id);
-    if (!p || p.settled) return;
-    p.settled = true;
-    clearTimeout(p.timer);
-    this.pending.delete(id);
+    const p = this.beginSettle(id);
+    if (!p) return;
     p.probeTimeout?.();
   }
 
   private settleProbe(id: number, error: RpcError | null, result: unknown): void {
-    const p = this.pending.get(id);
-    if (!p || p.settled) return;
-    p.settled = true;
-    clearTimeout(p.timer);
-    this.pending.delete(id);
+    const p = this.beginSettle(id);
+    if (!p) return;
     p.probeResult?.(result, error);
   }
 
@@ -1553,8 +1733,12 @@ export class McpClient {
     this.queue = [];
     this.undrained = 0;
     this.writing = false;
+    // Drop any retained partial frame (up to the 1 MiB frame limit) — it is
+    // dead input on a closed client.
+    this.stdoutBuf = "";
     this.transport.stdout.off("data", this.onStdoutBound);
     this.transport.stdout.off("end", this.onStdoutEndBound);
+    this.transport.stdout.off("close", this.onStdoutCloseBound);
     this.transport.stderr.off("data", this.onStderrBound);
     // NOTE: the stdin `error` listener is deliberately NOT removed here — see
     // the method doc. The drain listener is inert post-teardown (guarded by

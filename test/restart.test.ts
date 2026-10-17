@@ -13,8 +13,9 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDirectInvocation, restartCommand } from "../src/tui/restart.js";
-import { restartTeardownAborted } from "../src/tui/run.js";
+import { drainTurnBounded, restartTeardownAborted, runRestartSequence } from "../src/tui/run.js";
 import { makeInitialState } from "../src/tui/state.js";
+import { ActiveWork } from "../src/tui/active-work.js";
 
 // ── restartCommand: the spawn spec ─────────────────────────────────────────
 
@@ -127,4 +128,267 @@ test("restartTeardownAborted keeps prior items and appends (no state loss)", () 
   const next = restartTeardownAborted(base, new Error("unconfirmed"));
   assert.deepEqual(next.items[0], { kind: "info", text: "earlier" }, "prior items preserved");
   assert.equal(next.items.length, 2);
+});
+
+// ── AUDIT CYCLE 2 — NEW-F3: the active-turn drain barrier ─────────────────
+// A busy /restart aborts the run (a signal, not completion). Before tearing
+// down MCP + spawning the replacement, the aborted run's async
+// tool-result/session/event work must settle. drainTurnBounded races the turn
+// promise against a bound: it returns true when the turn settled (safe to
+// proceed) and false when it did not (the caller must NOT spawn a replacement
+// against a still-live turn). A SETTLED (rejected) turn is still settled — it
+// counts as drained.
+test("drainTurnBounded: null turn → true (nothing to drain)", async () => {
+  assert.equal(await drainTurnBounded(null, 50), true);
+});
+
+test("drainTurnBounded: an already-settled turn → true (immediate)", async () => {
+  const settled = Promise.resolve("done");
+  assert.equal(await drainTurnBounded(settled, 50), true);
+});
+
+test("drainTurnBounded: a turn that settles within the bound → true", async () => {
+  const turn = new Promise((r) => setTimeout(() => r("done"), 20));
+  const t0 = Date.now();
+  const ok = await drainTurnBounded(turn, 500);
+  assert.equal(ok, true);
+  assert.ok(Date.now() - t0 < 400, "resolved as soon as the turn settled, not at the bound");
+});
+
+// AUDIT CYCLE 3 — a turn that settles quickly must not leave its bound timer
+// alive: the helper clears it, so the process can exit without waiting it out.
+test("drainTurnBounded: clears its timeout when the turn settles first", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const code = `import("./dist/src/tui/run.js").then(async (m) => {
+    await m.drainTurnBounded(Promise.resolve(), 3000);
+  });`;
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - t0 < 2500, "process exited without waiting out the 3s bound");
+});
+
+test("drainTurnBounded: a turn that REJECTS is still settled → true", async () => {
+  const turn = new Promise((_r, r) => setTimeout(() => r(new Error("boom")), 20));
+  // A rejected turn is SETTLED — the abort landed; the caller may proceed.
+  assert.equal(await drainTurnBounded(turn, 500), true);
+});
+
+test("drainTurnBounded: a turn that does NOT settle within the bound → false", async () => {
+  // A run that ignores the abort: the promise never settles.
+  const never = new Promise<never>(() => {});
+  const t0 = Date.now();
+  const ok = await drainTurnBounded(never, 40);
+  assert.equal(ok, false, "timed out — the caller must not spawn a replacement");
+  assert.ok(Date.now() - t0 >= 35, "waited out the bound");
+});
+
+// ── AUDIT CYCLE 3 — restart ORDERING (drain → teardown → spawn) ────────────
+// The ordering is the regression surface: removing the drain, reordering the
+// teardown after the spawn, or spawning after a failed/timed-out step would
+// each be caught here (runRestartSequence is the production code path).
+function recorder(over: Partial<Parameters<typeof runRestartSequence>[0]> = {}) {
+  const log: string[] = [];
+  let turn: Promise<unknown> | null = null;
+  const steps = {
+    activeTurn: () => turn,
+    drainTimeoutMs: 40,
+    abortTurn: () => log.push("abort"),
+    teardown: async () => {
+      log.push("teardown");
+    },
+    isMounted: () => true,
+    spawn: () => log.push("spawn"),
+    ...over,
+  };
+  return { log, steps, setTurn: (t: Promise<unknown> | null) => (turn = t) };
+}
+
+test("runRestartSequence: idle → teardown then spawn, in that order", async () => {
+  const r = recorder();
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "spawned" });
+  assert.deepEqual(r.log, ["teardown", "spawn"]);
+});
+
+test("runRestartSequence: waits for the active turn to settle BEFORE teardown", async () => {
+  const r = recorder({ drainTimeoutMs: 500 });
+  r.setTurn(new Promise((res) => setTimeout(() => { r.log.push("turn-settled"); res("ok"); }, 20)));
+  await runRestartSequence(r.steps);
+  // abort is signalled first, then the drain waits for the turn to settle.
+  assert.deepEqual(r.log, ["abort", "turn-settled", "teardown", "spawn"]);
+});
+
+test("runRestartSequence: drain timeout → abort again, NO teardown, NO spawn", async () => {
+  const r = recorder({ drainTimeoutMs: 20 });
+  r.setTurn(new Promise<never>(() => {}));
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "drain-timeout" });
+  assert.deepEqual(r.log, ["abort"]);
+});
+
+// PRODUCTION WIRING (not a stand-in promise): the same ActiveWork tracker run.tsx
+// uses for both runs and manual /compact. A compaction-shaped operation is
+// tracked with its real AbortController, and its "session append" completes
+// only after the signal. A restart must abort it, wait for the persistence,
+// and only then tear down and spawn.
+test("production wiring: tracked compaction is aborted, persisted, then teardown → spawn", async () => {
+  const work = new ActiveWork();
+  const log: string[] = [];
+  const compactAbort = new AbortController();
+  // Session persistence: resolves shortly after the abort (like compactNow's
+  // awaited appendCompaction), never before it.
+  const persisted = new Promise<void>((resolve) => {
+    compactAbort.signal.addEventListener("abort", () => {
+      setTimeout(() => {
+        log.push("compaction-persisted");
+        resolve();
+      }, 15);
+    });
+  });
+  work.track(persisted, compactAbort);
+  const out = await runRestartSequence({
+    activeTurn: () => work.current()?.promise ?? null,
+    drainTimeoutMs: 2000,
+    abortTurn: () => {
+      log.push("abort");
+      (work.current()?.abort ?? new AbortController()).abort();
+    },
+    teardown: async () => { log.push("teardown"); },
+    isMounted: () => true,
+    spawn: () => log.push("spawn"),
+  });
+  assert.deepEqual(out, { kind: "spawned" });
+  assert.deepEqual(log, ["abort", "compaction-persisted", "teardown", "spawn"]);
+  assert.equal(work.current(), null, "the tracker clears once the work settles");
+});
+
+// Settled-then-replaced: the first operation settles, and during that gap a
+// second one starts (a run/compaction began in the window). The restart must
+// drain the SECOND too — abort it, wait, and only then tear down and spawn.
+test("runRestartSequence: an operation started in the gap after a settle is drained before teardown", async () => {
+  const work = new ActiveWork();
+  const log: string[] = [];
+  const first = new AbortController();
+  const second = new AbortController();
+  const firstP = new Promise<void>((res) => first.signal.addEventListener("abort", () => res()));
+  work.track(firstP, first);
+  // When the first settles, a NEW operation takes the slot (not yet settled).
+  void firstP.then(() => {
+    const secondP = new Promise<void>((res) =>
+      second.signal.addEventListener("abort", () => {
+        setTimeout(() => {
+          log.push("second-settled");
+          res();
+        }, 10);
+      }),
+    );
+    work.track(secondP, second);
+  });
+  const out = await runRestartSequence({
+    activeTurn: () => work.current()?.promise ?? null,
+    drainTimeoutMs: 2000,
+    abortTurn: () => {
+      log.push("abort");
+      (work.current()?.abort ?? new AbortController()).abort();
+    },
+    teardown: async () => { log.push("teardown"); },
+    isMounted: () => true,
+    spawn: () => log.push("spawn"),
+  });
+  assert.deepEqual(out, { kind: "spawned" });
+  // The second operation was drained (aborted and settled) before teardown.
+  assert.ok(log.indexOf("second-settled") < log.indexOf("teardown"), "teardown waited for the replacement");
+  assert.equal(log[log.length - 1], "spawn");
+});
+
+// Timed-out-then-replaced: the first operation never settles and is replaced by
+// a second that never settles either. The overall deadline must still block
+// teardown and spawn — no replacement is spawned against live work.
+test("runRestartSequence: a stuck operation replaced by another stuck one → drain-timeout, no teardown", async () => {
+  const work = new ActiveWork();
+  const log: string[] = [];
+  work.track(new Promise<never>(() => {}), new AbortController());
+  // The first operation's abort "replaces" it with a second stuck operation.
+  const out = await runRestartSequence({
+    activeTurn: () => work.current()?.promise ?? null,
+    drainTimeoutMs: 60,
+    abortTurn: () => {
+      log.push("abort");
+      work.track(new Promise<never>(() => {}), new AbortController());
+    },
+    teardown: async () => { log.push("teardown"); },
+    isMounted: () => true,
+    spawn: () => log.push("spawn"),
+  });
+  assert.deepEqual(out, { kind: "drain-timeout" });
+  assert.ok(!log.includes("teardown") && !log.includes("spawn"), "no teardown or spawn against live work");
+});
+
+test("ActiveWork: an OLDER operation's completion does not clear a NEWER one", async () => {
+  const work = new ActiveWork();
+  let finishOld!: () => void;
+  const old = new Promise<void>((r) => (finishOld = r));
+  const newer = new Promise<void>(() => {});
+  work.track(old, null);
+  work.track(newer, null);
+  finishOld();
+  await old;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(work.current()?.promise, newer, "the newer operation is still tracked");
+});
+
+test("ActiveWork: a REJECTED operation also clears its slot", async () => {
+  const work = new ActiveWork();
+  const failing = Promise.reject(new Error("compact failed"));
+  work.track(failing, null);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(work.current(), null);
+});
+
+// Abort-aware active work must settle promptly after the abort (no five-second
+// stall), and the restart proceeds to teardown + spawn.
+test("runRestartSequence: abort-aware active work is aborted FIRST and the restart proceeds", async () => {
+  const ctl = new AbortController();
+  const work = new Promise<void>((res) => ctl.signal.addEventListener("abort", () => res()));
+  const log: string[] = [];
+  const t0 = Date.now();
+  const out = await runRestartSequence({
+    activeTurn: () => work,
+    drainTimeoutMs: 2000,
+    abortTurn: () => { log.push("abort"); ctl.abort(); },
+    teardown: async () => { log.push("teardown"); },
+    isMounted: () => true,
+    spawn: () => log.push("spawn"),
+  });
+  assert.deepEqual(out, { kind: "spawned" });
+  assert.deepEqual(log, ["abort", "teardown", "spawn"]);
+  assert.ok(Date.now() - t0 < 1000, "settled on the abort, not at the drain bound");
+});
+
+test("runRestartSequence: abortTurn is invoked for the active work on drain timeout", async () => {
+  const r = recorder({ drainTimeoutMs: 20 });
+  r.setTurn(new Promise<never>(() => {}));
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "drain-timeout" });
+  assert.equal(r.log.filter((x) => x === "abort").length, 1);
+});
+
+test("runRestartSequence: teardown throws → NO spawn (old servers may be alive)", async () => {
+  const boom = new Error("survivor");
+  const r = recorder({ teardown: async () => { r.log.push("teardown"); throw boom; } });
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "teardown-failed", error: boom });
+  assert.deepEqual(r.log, ["teardown"]);
+});
+
+test("runRestartSequence: unmounted during teardown → NO spawn", async () => {
+  const r = recorder({ isMounted: () => false });
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "unmounted" });
+  assert.deepEqual(r.log, ["teardown"]);
+});
+
+test("runRestartSequence: no teardown hook → spawn directly", async () => {
+  const r = recorder({ teardown: undefined });
+  assert.deepEqual(await runRestartSequence(r.steps), { kind: "spawned" });
+  assert.deepEqual(r.log, ["spawn"]);
 });

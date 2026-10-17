@@ -375,6 +375,295 @@ test("server request: id: null is a request (presence, not truthiness) and is ec
   c.close();
 });
 
+// AUDIT CYCLE 2 — NEW-F2: an envelope violation is TERMINAL (fail()), but the
+// onStdout line loop used to CONTINUE processing the rest of the chunk. The
+// lines AFTER the violation would still be dispatched on a closed client: a
+// server request's mandatory reply would enqueue a frame and restore nonzero
+// byte reservations after teardown was already running. The fix returns
+// immediately after a dispatch that closed the client, AND admit() refuses
+// frames once closed. This pins the coalesced case: one stdout chunk with an
+// invalid envelope line FOLLOWED by a valid server request — the request's
+// reply must NOT be enqueued (queued/undrained stay zero).
+test("NEW-F2: envelope violation stops dispatch of the rest of its chunk (coalesced)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // One coalesced chunk: an invalid envelope line (neither method nor id)
+  // followed by a VALID server→client request. Both in the same data event.
+  mock.stdout.write(
+    '{"jsonrpc":"2.0"}\n' +
+      '{"jsonrpc":"2.0","id":42,"method":"sampling/createMessage","params":{"messages":[]}}\n',
+  );
+  await tick();
+  // The client failed on the first line.
+  assert.equal(c.getState().state, "failed");
+  assert.match(c.getState().reason, /neither method nor id/);
+  // The rest of the chunk was NOT dispatched: no -32601 reply was enqueued
+  // for the server request (id 42), and the queue/reservation accounting is
+  // zero (the pre-fix repro left {undrained:82, queued:1, pending:0}).
+  const stats = c.getStats();
+  assert.equal(stats.queued, 0, "no reply frame enqueued after the terminal violation");
+  assert.equal(stats.undrained, 0, "no byte reservations restored after teardown");
+  assert.equal(stats.pending, 0, "no pending entries");
+  // No reply line was ever sent to the mock for the server request.
+  assert.equal(
+    mock.inbound.some((l) => l.obj.id === 42 && l.obj.error),
+    false,
+    "no -32601 reply was sent for the post-violation server request",
+  );
+});
+
+// AUDIT CYCLE 2 — NEW-F2 (notifications branch): a valid notification in the
+// same chunk AFTER an envelope violation must not change diagnostics either
+// (the loop stops at the violation). Pins the notification side of the fix.
+test("NEW-F2: a notification after an envelope violation in the same chunk is not dispatched", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // Snapshot the NUMBER: getDiagnostics() returns the live object, so
+  // snapshotting the object would alias and the assertion could never fail.
+  const before = c.getDiagnostics().unknownNotifications;
+  // Coalesced: invalid envelope line + a valid unknown notification.
+  mock.stdout.write(
+    '{"jsonrpc":"2.0"}\n' +
+      '{"jsonrpc":"2.0","method":"notifications/unknown_thing"}\n',
+  );
+  await tick();
+  assert.equal(c.getState().state, "failed");
+  const after = c.getDiagnostics();
+  // The notification was NOT dispatched — its unknown-method counter is
+  // unchanged (it would have incremented if the loop had continued).
+  assert.equal(after.unknownNotifications, before);
+});
+
+// AUDIT CYCLE 2 — NEW-F1: a READ error on the child's stdout is transport
+// death (the pipe is broken). Without an 'error' listener on the readable,
+// the error is an UNHANDLED EventEmitter 'error' that crashes the host (the
+// stdin path had an explicit handler; the readable pipes did not). The fix
+// fails the server in-band (pending calls settle, state → failed) instead of
+// throwing out of the stream.
+test("NEW-F1: a stdout read error fails the server in-band (no unhandled 'error')", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // An in-flight call — it must settle (not hang) when the pipe dies.
+  const p = c.callTool("read_file", {});
+  await tick();
+  // Simulate a read error on the stdout readable (EIO / broken pipe).
+  mock.stdout.emit("error", new Error("simulated read EIO"));
+  await tick();
+  assert.equal(c.getState().state, "failed", "a stdout read error is terminal");
+  assert.match(c.getState().reason, /stdout read error/);
+  // The pending call settled in-band (transport failure), not left hanging.
+  const r = await p;
+  assert.equal(r.isError, true);
+  assert.match(r.texts[0] ?? "", /transport failure|stdout read error/i);
+});
+
+// AUDIT CYCLE 2 — NEW-F1 (stderr branch): a READ error on the child's stderr
+// is NOT terminal — stderr is a diagnostic side-channel, and a broken stderr
+// pipe must not tear down an otherwise-healthy server. The fix records it in
+// the retained diagnostics (the ring) and swallows it (no unhandled 'error').
+// AUDIT CYCLE 3 — stderr error marker must respect the byte bound and survive
+// the next data chunk (both go through the one retention path).
+test("audit NEW-F1 (cycle-3): stderr error marker stays within the byte ring and persists after data", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  mock.stderr.write("漢".repeat(21000)); // ~63 KiB of multibyte stderr
+  await tick();
+  mock.stderr.emit("error", new Error("漢".repeat(30000))); // huge multibyte message
+  await tick();
+  // An oversized marker is trimmed to the byte ring (its prefix may be cut).
+  assert.ok(
+    Buffer.byteLength(c.getDiagnostics().stderr, "utf8") <= 64 * 1024,
+    "view stays within the byte ring",
+  );
+  // A normal-size marker is retained whole, and survives the next data chunk.
+  mock.stderr.emit("error", new Error("EIO-short"));
+  await tick();
+  assert.ok(c.getDiagnostics().stderr.includes("stderr read error: EIO-short"), "marker present");
+  mock.stderr.write("NEXT");
+  await tick();
+  assert.ok(c.getDiagnostics().stderr.endsWith("NEXT"), "newest data retained");
+  assert.ok(
+    c.getDiagnostics().stderr.includes("stderr read error: EIO-short"),
+    "the error marker survives the next data chunk",
+  );
+});
+
+// AUDIT CYCLE 3 — an invalid lead byte followed by valid ASCII: the ASCII is
+// kept (the bad byte is proven malformed by the byte after it, not "incomplete").
+test("audit F2 (cycle-3): valid trailing ASCII after an invalid lead byte is not dropped", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  mock.stderr.write(Buffer.from([0x50, 0x52, 0x45, 0xe6, 0x41])); // "PRE" 0xe6 "A"
+  await tick();
+  assert.ok(c.getDiagnostics().stderr.endsWith("A"), "the trailing ASCII is retained");
+});
+
+// AUDIT CYCLE 3 — RFC 3629 second-byte restrictions: E0 80, ED A0, F4 90 can
+// never become valid, so they are MALFORMED (replacement chars), not an
+// "incomplete" suffix that is silently dropped.
+for (const [name, bytes] of [
+  ["overlong E0 80", [0xe0, 0x80]],
+  ["surrogate ED A0", [0xed, 0xa0]],
+  ["above-range F4 90", [0xf4, 0x90]],
+] as const) {
+  test(`audit F2 (cycle-3): impossible prefix ${name} at the END of the buffer is malformed, not incomplete`, async () => {
+    const mock = new MockMcpServer();
+    modernMock(mock);
+    const c = new McpClient("test", mock.transport, FAST);
+    await c.start();
+    // Prefix at the very end: nothing follows it, so only the second-byte
+    // restriction can classify it. The old decoder dropped it to "A".
+    mock.stderr.write(Buffer.from([0x41, ...bytes]));
+    await tick();
+    assert.ok(
+      c.getDiagnostics().stderr.includes("\uFFFD"),
+      "the impossible prefix is shown as a replacement char, not silently dropped",
+    );
+  });
+
+  test(`audit F2 (cycle-3): impossible prefix ${name} followed by ASCII keeps the ASCII`, async () => {
+    const mock = new MockMcpServer();
+    modernMock(mock);
+    const c = new McpClient("test", mock.transport, FAST);
+    await c.start();
+    mock.stderr.write(Buffer.from([0x41, ...bytes, 0x42]));
+    await tick();
+    assert.ok(c.getDiagnostics().stderr.endsWith("B"), "the trailing ASCII is retained");
+  });
+}
+
+test("audit F2 (cycle-3): a genuinely incomplete VALID prefix at the tail end is still suppressed", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  mock.stderr.write(Buffer.from([0x50, 0x52, 0x45, 0xe2, 0x82])); // "PRE" + valid 3-byte prefix, cut off
+  await tick();
+  assert.equal(c.getDiagnostics().stderr, "PRE", "no replacement char for a sequence that could still complete");
+});
+
+// AUDIT CYCLE 3 — invalid UTF-8 must not make the tail drop its newest bytes.
+test("audit F3 (cycle-3): invalid-UTF-8 stderr keeps the newest bytes (tail, not prefix)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  mock.stderr.write(Buffer.concat([Buffer.alloc(65530, 0xff), Buffer.from("TAIL")]));
+  await tick();
+  assert.ok(c.getDiagnostics().stderr.endsWith("TAIL"), "the newest bytes are retained");
+});
+
+// AUDIT CYCLE 3 — a client closed/killed in the window after the final
+// tools/list response must NOT resolve startup as "ready" (close/kill set
+// `closed` without changing `state`).
+for (const how of ["close", "kill"] as const) {
+  test(`audit (cycle-3): ${how}() after the final tools/list response fails startup`, async () => {
+    const mock = new MockMcpServer();
+    let client: McpClient | null = null;
+    mock.onInbound((l) => {
+      const id = l.obj.id as number;
+      if (l.obj.method === "server/discover") {
+        mock.respondError(id, MCP_ERR_METHOD_NOT_FOUND, "unknown method");
+      } else if (l.obj.method === "initialize") {
+        mock.respondResult(id, { protocolVersion: MCP_LEGACY_VERSION, capabilities: {}, serverInfo: { name: "x", version: "1" } });
+      } else if (l.obj.method === "tools/list") {
+        mock.respondResult(id, { tools: [] });
+        // Tear the client down in the window before startup continues.
+        queueMicrotask(() => (how === "close" ? client!.close() : client!.kill()));
+      }
+    });
+    client = new McpClient("test", mock.transport, FAST);
+    await assert.rejects(client.start(), /startup failed after tools\/list/);
+    assert.equal(client.getState().state === "ready", false, "a closed client is never ready");
+  });
+}
+
+// AUDIT CYCLE 3 — a stdout closed WITHOUT end/EOF is transport death too.
+test("audit (cycle-3): stdout closed without EOF fails the server (not left ready)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  mock.stdout.destroy();
+  await tick();
+  assert.equal(c.getState().state, "failed");
+});
+
+test("NEW-F1: a stderr read error is recorded, not terminal (server stays ready)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  const before = c.getDiagnostics().stderr;
+  mock.stderr.emit("error", new Error("simulated stderr EIO"));
+  await tick();
+  // The server is UNTOUCHED — stderr is not a transport.
+  assert.equal(c.getState().state, "ready", "a stderr read error must not tear down the server");
+  // The error was recorded in the retained diagnostics.
+  const after = c.getDiagnostics().stderr;
+  assert.ok(after.includes("stderr read error"), "the stderr read error is recorded");
+  assert.ok(after.includes("simulated stderr EIO"), "the error message is retained");
+  assert.notEqual(after, before, "the diagnostics changed");
+});
+
+// AUDIT CYCLE 2 — NEW-F1 (late echo): a stdout read error that arrives AFTER
+// our own shutdown (close()/kill() ends the child's stdout, and a read still
+// in flight can fail) must be ABSORBED, not re-fail an already-closed client.
+test("NEW-F1: a late stdout read error after close() is absorbed (no re-fail)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  c.close();
+  assert.equal(c.isClosed(), true);
+  // A late echo of our own teardown — must be a no-op (no throw, no state
+  // change, no unhandled 'error').
+  mock.stdout.emit("error", new Error("late EPIPE after close"));
+  await tick();
+  assert.equal(c.isClosed(), true);
+  // close() does not set state to "failed" (a clean shutdown) — it must stay
+  // whatever close() left it, NOT become "failed" from the late echo.
+  assert.notEqual(c.getState().state, "failed", "a late echo must not re-fail the client");
+});
+
+// AUDIT CYCLE 1 — F5 (startup-completion gap): runStartup used to return the
+// tool list even when the client failed AFTER its last tools/list response —
+// e.g. the final valid response and a framing violation coalesced in the SAME
+// stdout chunk. The registry would then publish a "ready" handle whose client
+// is actually dead (exporting a ghost tool). The fix rejects startup when the
+// state is no longer "starting" after listToolsStartup resolves.
+test("cycle-1 F5: a fatal line coalesced with the final tools/list response fails startup", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondResult(id, { resultType: "discovery", supportedVersions: [MCP_CLIENT_VERSION] });
+    } else if (l.obj.method === "tools/list") {
+      // Coalesce the VALID tools/list response with a FATAL line (not-json)
+      // in the SAME stdout chunk. The response resolves listToolsStartup, but
+      // the fatal line runs fail() in the same onStdout pass — so by the time
+      // runStartup resumes, the client has already failed.
+      mock.stdout.write(
+        JSON.stringify({ jsonrpc: "2.0", id, result: { tools: [{ name: "ok" }] } }) + "\n" +
+          "not-json\n",
+      );
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /startup failed after tools\/list/);
+  assert.equal(c.getState().state, "failed", "the coalesced fatal line tears the server down");
+});
+
 test("server→client notifications/cancelled is unmatched and never aborts a call", async () => {
   const mock = new MockMcpServer();
   modernMock(mock);
@@ -1002,6 +1291,58 @@ test("audit F7: the stderr ring is bounded in UTF-8 BYTES (not chars)", async ()
   c.close();
 });
 
+// AUDIT CYCLE 1 — F7 (trailing boundary): the tail may END mid-code-point —
+// its last bytes are an incomplete sequence. Decoding them raw emits a
+// replacement char that RE-ENCODES to 3 bytes for 1 input byte, inflating the
+// exposed view PAST the cap (65535 ASCII + 0xe6 → 65538 bytes). The fix stops
+// at the incomplete sequence, so the exposed view's re-encoded byte length is
+// ≤ the tail's byte length (≤ the ring bound).
+test("audit F7 (cycle-2): a trailing incomplete UTF-8 sequence does not inflate the exposed view", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // 65535 ASCII bytes + a lone 0xe6 (a 3-byte lead with no continuation
+  // bytes). The raw tail is 65536 bytes (exactly the cap).
+  const buf = Buffer.concat([Buffer.from("A".repeat(65535), "utf8"), Buffer.from([0xe6])]);
+  mock.stderr.write(buf);
+  await tick();
+  const d = c.getDiagnostics();
+  const exposed = Buffer.byteLength(d.stderr, "utf8");
+  assert.ok(exposed <= 64 * 1024, "exposed view ≤ the ring bound: " + exposed);
+  assert.ok(exposed <= 65536, "no replacement-char inflation past the tail length: " + exposed);
+  assert.ok(d.stderr.endsWith("A"), "the complete ASCII tail is kept");
+  c.close();
+});
+
+// AUDIT CYCLE 1 — F7 (backing allocation): a subarray of a large concat OWNS
+// the ENTIRE backing buffer — an 8 MiB stderr chunk would leave an 8 MiB
+// allocation retained behind a 64 KiB logical tail. The fix copies the
+// retained tail into a bounded allocation (Buffer.from), so the backing
+// buffer is ~the tail size, not the whole concat.
+test("audit F7 (cycle-2): the retained stderr tail owns a bounded allocation (not the whole concat)", async () => {
+  const mock = new MockMcpServer();
+  modernMock(mock);
+  const c = new McpClient("test", mock.transport, FAST);
+  await c.start();
+  // An inline 8 MiB stderr chunk: the ring retains only the last 64 KiB.
+  const big = Buffer.from("B".repeat(8 * 1024 * 1024), "utf8");
+  mock.stderr.write(big);
+  await tick();
+  const d = c.getDiagnostics();
+  assert.ok(Buffer.byteLength(d.stderr, "utf8") <= 64 * 1024, "diagnostic view bounded");
+  assert.ok(d.stderr.endsWith("B"), "tail kept");
+  // White-box: the retained tail's BACKING allocation must be bounded, not the
+  // 8 MiB concat (a subarray would report buffer.byteLength ≈ 8 MiB).
+  const tail = (c as unknown as { stderrTail: Buffer }).stderrTail;
+  assert.ok(tail.length <= 64 * 1024, "logical tail bounded: " + tail.length);
+  assert.ok(
+    tail.buffer.byteLength <= 128 * 1024,
+    "backing allocation bounded (not the 8 MiB concat): " + tail.buffer.byteLength,
+  );
+  c.close();
+});
+
 test("audit F2: a timed-out QUEUED request is released and NOT re-sent after the pipe recovers", async () => {
   const mock = new MockMcpServer();
   modernMock(mock);
@@ -1041,6 +1382,90 @@ test("audit F2: a timed-out QUEUED request is released and NOT re-sent after the
   c.close();
 });
 
+// AUDIT CYCLE 1 — F2 (probe branch): the cycle-1 fix released an unsent
+// queued frame on settlement via settle(), but the PROBE settlement paths
+// (settleProbeTimeout / settleProbe) bypassed that helper — they deleted the
+// pending entry WITHOUT releasing the queued frame. Reproduction: a
+// server→client request arrives BEFORE start() (its mandatory -32601 reply
+// occupies a stalled active write), then the probe is queued behind it. When
+// the probe times out while queued, its frame must be released NOW — or it
+// would be sent to the server after the pipe recovers (the same original
+// unsent-settlement defect on the probe branch). The fix factors a shared
+// beginSettle() that releases the unsent frame for both paths.
+test("audit F2 (probe): a probe that times out while queued behind a stalled write is released", async () => {
+  const mock = new MockMcpServer();
+  // The mock answers the probe (if it ever gets sent) with a modern
+  // DiscoverResult, the legacy initialize, and tools/list — so whichever
+  // path the startup takes, it can settle.
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondResult(id, { resultType: "discovery", supportedVersions: [MCP_CLIENT_VERSION] });
+    } else if (l.obj.method === "initialize") {
+      mock.respondResult(id, {
+        protocolVersion: MCP_LEGACY_VERSION,
+        capabilities: {},
+        serverInfo: { name: "mock", version: "1" },
+      });
+    } else if (l.obj.method === "tools/list") {
+      mock.respondResult(id, { tools: [{ name: "ok" }] });
+    }
+  });
+  const c = new McpClient("test", mock.transport, {
+    callTimeoutMs: 1500,
+    probeTimeoutMs: 120,
+    startupBudgetMs: 2500,
+    stallMs: 200,
+  });
+  // Stall the pipe BEFORE start(): the first frame written holds its flush
+  // callback (no flush-completion callback), so any later frame is QUEUED
+  // behind it.
+  mock.pauseWrites = true;
+  mock.interceptWrites();
+  // A server→client request arrives before start(). Its mandatory -32601
+  // reply is the first frame — it occupies the stalled active write.
+  mock.sendRequest(99, "sampling/createMessage", { messages: [] });
+  await tick(20);
+  // Now start: the probe (server/discover) is queued BEHIND the mandatory
+  // reply (writing=true on the reply's frame, so the probe's writeNext is
+  // blocked). Let the probe time out while it is still queued (unsent).
+  const p = c.start();
+  await tick(200); // > probeTimeoutMs (120) — the probe expired while queued
+  // The probe's queued frame must have been RELEASED on timeout (the fix).
+  // After the timeout the client falls back to legacy and sends `initialize`
+  // (legitimately queued) — so the queue holds AT MOST that one frame.
+  // WITHOUT the fix the expired probe frame would ALSO still be queued (2).
+  const stats = c.getStats();
+  assert.ok(
+    stats.queued <= 1,
+    "the timed-out queued probe frame was released (queue holds only the legacy initialize): " +
+      stats.queued,
+  );
+  // Recover the pipe: the held mandatory reply flushes. If the expired probe
+  // frame were still queued (the bug), writeNext would send it to the server
+  // AFTER the probe already timed out.
+  mock.pauseWrites = false;
+  mock.resumeWrites();
+  await tick(50);
+  // The point: the expired probe frame was NOT re-sent. No server/discover
+  // was ever written to the mock (it was released before recovery) — the
+  // mock only saw the -32601 reply (and, after recovery, the initialize).
+  const discovers = mock.inbound.filter((l) => l.obj.method === "server/discover");
+  assert.equal(
+    discovers.length,
+    0,
+    "the expired probe frame was NOT re-sent after the pipe recovered",
+  );
+  // The startup itself: the probe timed out → legacy fallback → the mock
+  // (which answers initialize) completes it. Settle the start promise.
+  try {
+    await p;
+  } catch {
+    /* a startup failure is fine — the assertion above is the point */
+  }
+  c.close();
+});
+
 test("audit F3a: a legacy initialize returning an unknown version is a startup failure", async () => {
   const mock = new MockMcpServer();
   mock.onInbound((l) => {
@@ -1072,6 +1497,74 @@ test("audit F3b: a -32022 advertising only an unsupported version is a startup f
   });
   const c = new McpClient("test", mock.transport, FAST);
   await assert.rejects(c.start(), /no usable supported version/);
+  assert.equal(c.getState().state, "failed");
+});
+
+// AUDIT CYCLE 1 — F3 (legacy version validation, cycle-2 completion): the
+// legacy `initialize` protocolVersion must be a REAL calendar date (the
+// format regex alone accepts "2099-99-99") AND in the legacy era the client
+// speaks (at or before the client's modern revision — a version AT/AFTER it
+// is contradictory: we are in the legacy handshake precisely because the
+// server did NOT answer the modern probe). Pre-fix, "2099-99-99" and a
+// future date both reached legacy ready.
+test("audit F3 (cycle-2): a legacy initialize returning an impossible date (2099-99-99) is a startup failure", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondError(id, MCP_ERR_METHOD_NOT_FOUND, "unknown method"); // legacy
+    } else if (l.obj.method === "initialize") {
+      mock.respondResult(id, {
+        protocolVersion: "2099-99-99", // format-valid (YYYY-MM-DD) but not a real date
+        capabilities: {},
+        serverInfo: { name: "x", version: "1" },
+      });
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /invalid initialize protocolVersion/);
+  assert.equal(c.getState().state, "failed");
+});
+
+// AUDIT CYCLE 3 — negotiation regression: the modern revision itself (equality)
+// must be rejected on the legacy path. A `>`-only comparison admitted it.
+test("audit F1 (cycle-3): a legacy initialize returning the modern version (equality) is a startup failure", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondError(id, MCP_ERR_METHOD_NOT_FOUND, "unknown method");
+    } else if (l.obj.method === "initialize") {
+      mock.respondResult(id, {
+        protocolVersion: MCP_CLIENT_VERSION,
+        capabilities: {},
+        serverInfo: { name: "x", version: "1" },
+      });
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /invalid initialize protocolVersion/);
+  assert.equal(c.getState().state, "failed");
+});
+
+test("audit F3 (cycle-2): a legacy initialize returning a version NEWER than the client is a startup failure", async () => {
+  const mock = new MockMcpServer();
+  mock.onInbound((l) => {
+    const id = l.obj.id as number;
+    if (l.obj.method === "server/discover") {
+      mock.respondError(id, MCP_ERR_METHOD_NOT_FOUND, "unknown method"); // legacy
+    } else if (l.obj.method === "initialize") {
+      // A real date, but NEWER than the client's modern revision (2026-07-28):
+      // contradictory on the legacy path — the client does not speak it.
+      mock.respondResult(id, {
+        protocolVersion: "2027-01-01",
+        capabilities: {},
+        serverInfo: { name: "x", version: "1" },
+      });
+    }
+  });
+  const c = new McpClient("test", mock.transport, FAST);
+  await assert.rejects(c.start(), /invalid initialize protocolVersion/);
   assert.equal(c.getState().state, "failed");
 });
 
