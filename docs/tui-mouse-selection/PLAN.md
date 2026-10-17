@@ -21,7 +21,8 @@ Deterministic tests: `test/tui-mouse.test.ts` (parser), `test/tui-selection.test
 (highlight == `/copy` agreement); the PTY mode lifecycle (enable + restore of
 1002/1006) is in `test/e2e.sh`. Manual Terminal.app gesture verification (drag
 creates a visible selection; `/copy` lands the exact text on the macOS clipboard)
-is the remaining acceptance step — it needs a real terminal, not a PTY.
+is the remaining acceptance step — it needs a real terminal, not a PTY
+(see the Manual acceptance checklist below).
 
 ## Goal
 
@@ -90,6 +91,44 @@ Observed probe data and limitations:
 - Selection remains logically correct across redraws, wrapping, clipping, scroll, and normal stream appends, with documented behavior for compaction/resizing.
 - Mouse modes are restored on all supported teardown paths; keyboard scrolling and the current selection-friendly no-mouse mode continue to work.
 - Build/test/quality gate passes; deterministic tests cover parser/model/render/copy behavior; manual Terminal.app verification is recorded before declaring the feature done.
+
+## Manual acceptance checklist (needs a real terminal — a PTY cannot do this)
+
+Run in Terminal.app (or iTerm2), NOT through an agent's pty. Enable mouse
+tracking for the session: `TRE_MOUSE=1 tre. tui` (or set `"mouse": true` in
+`~/.tre/tui.json`). Record PASS/FAIL per step; the feature is DONE when all
+pass and the results are noted here with a date.
+
+1. **Drag selects.** Click-drag across a few lines of streamed output → a
+   visible tre.-owned highlight appears (SEL_BG gray). Terminal.app's native
+   selection does NOT appear at the same time.
+2. **`/copy` is exact.** Type `/copy` (the selection stays highlighted; the
+   input line clears). In a separate shell: `pbpaste` → the clipboard
+   contains EXACTLY the selected text (compare against the rendered lines,
+   including a wrapped line and a line with a `◆`/`│` gutter prefix).
+3. **Empty selection fails safely.** `/copy` with nothing selected → a clear
+   message, no crash, the TUI keeps running.
+4. **Controls are not hijacked.** With mouse tracking on: typing, Enter,
+   ↑/↓ history, an approval prompt (y/n/esc), the model picker, Ctrl+C
+   (abort / quit) and `/quit` all behave as in no-mouse mode.
+5. **Resize + redraw.** Resize the window mid-selection → the selection
+   clears (no stale highlight); scroll the output → the selection tracks the
+   content, not the viewport.
+6. **Modes restored on exit.** `grep -c 
+
+- Terminal mouse protocols deliver cell coordinates, not OS text-selection semantics; tre. must maintain its own mapping from visible cells to content offsets.
+- Terminal rendering includes styled spans, Unicode width complexities, clipped items, and streaming updates; incorrect mapping can highlight or copy the wrong text.
+- macOS Terminal.app may report modifier keys differently from other terminals; do not assume Cmd/Option mappings.
+- Clipboard mechanisms differ locally and over SSH/tmux. `pbcopy` is local-only; OSC 52 has security and intermediary-policy concerns.
+- The current `1002` mode reports held motion and can create event volume during drags. Coalescing visual highlight updates may be required while preserving responsive selection.
+- The exact copy shortcut, selection scope, word/line selection, autoscroll, and OSC 52 support remain product decisions; resolve before implementation increments 3–4.
+\x1b[?1002l'`-style check: after
+   quitting, Terminal.app's native highlight-and-copy works again (the 1002/
+   1006 modes were turned off — the PTY e2e asserts the escape sequences;
+   this step asserts the user-visible effect).
+7. **Repeat in no-mouse mode** (`TRE_NO_MOUSE=1 tre. tui`): native
+   highlight-and-copy works, wheel scrolling still works, no 1002/1006 bytes
+   (e2e scenario 18 pins the bytes; this step is the user-visible check).
 
 ## Risks / open decisions
 
