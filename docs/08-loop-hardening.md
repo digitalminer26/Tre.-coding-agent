@@ -23,7 +23,7 @@ three guards, and the loop walked through the gaps between them:
 | Guard | Where | Catches | Stops on |
 |---|---|---|---|
 | C26 loop guard | `agent-loop.ts` | byte-identical tool-call batch (names + stable-JSON args + order) 3× in a row | `loop` |
-| Stall guard | `pipeline.ts` | same TOOL failing with a PERMISSION signature 3× **consecutively** | `stall` |
+| Stall guard | `pipeline.ts` | same TOOL failing with a PERMISSION signature 3× within the last 8 calls (windowed, NOT consecutive — H1) | `stall` |
 | Turn budget | `agent-loop.ts` | anything, eventually (per-cycle cap + 3 auto-continuations) | `budget` |
 
 The holes:

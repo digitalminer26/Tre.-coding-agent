@@ -114,8 +114,8 @@ sessions live outside the repo for a different reason: D20.)
 
 A helper invocation like `python3 <installed-skill-dir>/telegram/telegram.py
 send out.txt` is classified **mutating** (not read-only, no sensitive paths)
-→ auto-approved in the default `--local` mode when the command stays within
-safe locations, prompted in `--ask`, auto-approved in `--yes`, and blocked in
+→ auto-approved in the default `--yes` mode (mutating bash that stays within
+the sandboxed workspace is allowed), prompted in `--ask`, and blocked in
 `--no-approve`. If a skill's commands must run in fail-closed mode they need
 to be read-only — usually not worth it.
 

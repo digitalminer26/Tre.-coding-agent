@@ -23,9 +23,10 @@ All planned workstreams are complete; the project is in ongoing hardening.
 
 Since the MVP, hardening has added: mid-run steering, a scrollable TUI with
 opt-in mouse tracking, `/models` switching, in-place `/restart` (same session,
-same settings), a context/compaction readout, approval controls (`--local` is
-the default; `--ask`, `--yes`, and `--no-approve` are alternatives, with
-sensitive/destructive operations still blocked), deployability (`npm i -g .`
+same settings), a context/compaction readout, approval controls (`--yes` is
+the default — auto-approve, with only systemic sensitive/destructive
+operations blocked; `--ask` and `--no-approve` are alternatives),
+deployability (`npm i -g .`
 builds `dist/` on install), loop/stall guards that stop runaway and
 sandbox-wall retry loops, and a session-scoped `subtask` tool (create/list/
 mark) whose progress the TUI renders in a color-coded bottom field
@@ -162,10 +163,10 @@ Installing on a target machine (Node ≥ 20; ≥ 22 recommended) is one command 
 download and execute the versioned installer script from the release:
 
 ```bash
-curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/latest/download/install-tre-X.Y.Z.sh | sh
+curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/download/vX.Y.Z/install-tre-X.Y.Z.sh | sh
 ```
 
-Replace `X.Y.Z` with the release version. The script downloads the matching
+Replace `X.Y.Z` with the release version (e.g. `v0.4.1`). The script downloads the matching
 offline bundle, installs it under `~/.tre/tre`, creates the `tre.` symlink,
 updates the shell PATH configuration if needed, and smoke-tests the install.
 Alternatively, download the `.tgz` asset and run its embedded

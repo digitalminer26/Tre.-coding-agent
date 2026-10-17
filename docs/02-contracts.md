@@ -56,8 +56,13 @@ Rules:
   the run stop with `budget`. Independently, the same tool-call batch
   (tool names + stable-JSON arguments, in order) issued 3 times in a row
   is a runaway-loop signature: the third repeat is failed in-band with
-  `LOOP_GUARD_TEXT` (never executed) and the run stops with `loop`.
-  Two identical batches remain allowed (legit retries exist).
+  `LOOP_GUARD_TEXT` (never executed). Before stopping, the loop AUTO-RETRIES
+  ONCE with an approach-changing nudge (`GUARD_RETRY_TEXT`, emitting the
+  `guard_retry` event; bounded by `maxGuardRetries`, default 1 — see
+  `docs/08-loop-hardening.md` H5): the identical-batch history is reset for
+  the retry, and only if the guard fires again (or `maxGuardRetries` is 0)
+  does the run stop with `loop`. Two identical batches remain allowed
+  (legit retries exist).
 - **Stall detection (tool pipeline) — the deterministic-failure guard.**
   The kernel sandbox makes permission denials DETERMINISTIC: the same
   operation fails identically forever ("Operation not permitted" /
@@ -112,9 +117,12 @@ Rules:
 - **C36 — durable extra roots: `tre.json` persists the C35 boundary.** C35's
   extra roots were flag-only (`--extra-root`, re-passed every launch). C36 adds
   a config file `tre.json` with a single field, `extraRoots` (an array of
-  directory strings). **Lookup** mirrors D19's models.json convention: walk UP
-  from the launch directory for a `tre.json` (the same convention as a `.git`
-  dir or a `models.json`), then fall back to `~/.tre/tre.json`. **Precedence:**
+  directory strings). **Lookup:** walk UP from the launch directory for a
+  `tre.json` (the same convention as a `.git` dir), then fall back to
+  `~/.tre/tre.json`. Unlike `models.json` (D19 — deliberately NOT discovered
+  from the working tree, so a project-local `models.json` can't shadow the
+  endpoint config), `tre.json` IS discovered from the working tree.
+  **Precedence:**
   the CLI flag APPENDS to the config — `tre.json` is the durable baseline and
   `--extra-root` is the per-launch addition (both are validated). **Tilde
   (2026-09-30):** an entry (config OR flag) may start with `~` or `~/` — it is
