@@ -602,6 +602,46 @@ suggested subagent type (see §5); **size** = rough effort.
   agent-landable parts; human for guardrail-zone commits.
   **size:** M.
 
+### WS13 — Reviewed preference learning ("personality" as committed config) — *IDEA ONLY, NOT STARTED (D31)*
+
+- **Purpose:** some harnesses track user/session activity and distill it into
+  an implicit "personality" (accumulated traits/preferences that silently
+  shape every response). tre. does **not** do this, deliberately: an
+  activity-formed profile is prompt content the agent writes about itself
+  without review — not diffable, not test-gateable, and a drift/safety
+  surface (it violates the self-improve invariant that every behavior change
+  is one human-reviewable commit). The design stance: the agent's
+  "personality" is just its repo — skills, system prompt, HANDOFF/PLAN — and
+  every change to it goes through a diff a human can read and revert.
+- **The design-respecting shape (if ever built):** a **reviewed skill-file
+  feedback loop**, NOT an implicit profile store.
+  1. A session-end step (or `/suggest-preference` command) reflects on the
+     session and **proposes** at most a small diff: a new/edited SKILL.md
+     section or a project-context file line ("this user prefers terse
+     answers", "always run the gate before reporting done").
+  2. The proposal lands as a **git commit or a pending-patch file** the
+     human accepts or discards — same review posture as the self-improve
+     loop and the guardrail zone.
+  3. Accepted preferences load through the **existing seams**: WS4 skills
+     index + body-on-demand, project-context files in `buildSystemPrompt`.
+     No new prompt-injection path, no hidden state.
+- **Explicitly rejected alternatives:** implicit trait vectors; automatic
+  (unreviewed) writes to any prompt-loaded file; per-user telemetry stores;
+  anything that changes behavior without appearing in `git diff`.
+- **Existing seams it would reuse:** skills loader (WS4), project-context
+  files, HANDOFF.md convention, the session JSONL (the raw material for
+  reflection — already persisted), `sessionHook`-style lifecycle seams (D30)
+  for a session-end hook. None of these need to change to host WS13; the
+  missing piece is only the *proposal* step + the human accept/discard flow.
+- **Prerequisites / open questions:** where a pending proposal lives
+  (repo vs `~/.tre/`); whether proposals are per-project or global; how to
+  keep proposals small (a diff budget) so review stays cheap; interaction
+  with the guardrail zone (a proposal must never touch prompt files inside
+  the guardrail zone).
+- **deps:** WS4 (prompt/skills), WS5 (session JSONL).  **parallel:** n/a —
+  not scheduled.  **owner:** human decides to start; then worker + review.
+  **size:** S (the loop), if it is ever wanted.
+
 ## 3. Dependency graph
 
 ```
@@ -721,3 +761,4 @@ implemented — ChatGPT-Plus OAuth + token refresh; see `README.md` "ChatGPT Plu
 | 2026-10-10 | D28 TUI in-app mouse selection + `/copy` | The TUI now owns text selection (does not rely on the terminal's native selection, which SGR mouse reporting disables). Components: a pure SGR mouse parser (`src/tui/mouse.ts` — modes 1000/1002/1003, button/modifier/wheel decoding); a content-coordinate selection model in `src/tui/state.ts` (selectStart/selectUpdate/selectClear, selectedRanges/selectedText/copySelectionText — anchors are item identity + logical offsets so stream appends and rerenders do not shift a selection); App routing + viewport→anchor mapping + a styled highlight that composes with existing ANSI (`src/tui/app.tsx`); an explicit `/copy` action + a safe clipboard adapter (`src/tui/clipboard.ts` — `pbcopy` on macOS, stdin pipe, no shell, bounded, graceful failure; OSC 52 deferred pending security review). Opt-in via `TRE_MOUSE=1`, and the setting is now a persisted config key (`~/.tre/tui.json` `mouse`; `mouseTrackingEnabled` shared by driver and App) with `TRE_NO_MOUSE=1` as the opt-out; mouse modes (1002+1006) are restored on all teardown paths. Driver handlers extracted for testability: `makeMouseGate` (`src/tui/mouse-gate.ts`), `makeResizeHandler` (`src/tui/resize.ts` — resize clears an active selection), and `makeCopySelection` (`src/tui/copy.ts` — deferred copy settles without dropping the selection/viewport/streamed/busy state). Deterministic tests: `test/tui-mouse.test.ts`, `test/tui-selection.test.ts`, `test/tui-clipboard.test.ts`, `test/tui-app.test.tsx`, `test/tui-mouse-gate.test.ts`, `test/tui-resize.test.ts`; PTY mode lifecycle (enable + restore) in `test/e2e.sh`. Rationale: live Terminal.app probes showed drags are reported to the app (not native selection) under SGR modes, so an app-owned selection is the route to keep both wheel scrolling and copy in one session. **Remaining acceptance step:** manual Terminal.app gesture verification (drag creates a visible selection; `/copy` lands the exact text on the macOS clipboard) — needs a real terminal, not a PTY. **ACCEPTED 2026-10-17: all 7 checklist steps PASS** (`docs/tui-mouse-selection/PLAN.md`); D28 is DONE. 2026-10-10: gate green (820 pass / 0 fail / 13 skipped). |
 | 2026-10-14 | D29 MCP support — tier 1 scoped (WS12) | **Rulings (current; supersedes all earlier D29 text in git history).** (1) Scope: tier 1 = local stdio servers, tools only; resources/prompts tier 2; HTTP+OAuth and MRTR tier 3; sampling/roots not implemented (deprecated 2026-07-28). (2) Protocol: DUAL-ERA client — `server/discover` probe, `initialize` fallback on any non-modern JSON-RPC error or probe silence; FATAL only on transport death, framing violation, or invalid discovery document; `-32022` gets one bounded retry. (3) SDK: the v2 SDK's existence and its modern-era support are UNVERIFIED (scope §2). No SDK is required. Mock-first; an SDK oracle may be used only after its fixture and transcript are retained in-repo. (4) Safety: MCP tools default to ASK (prompt in `yes`/`ask`, block in `no`); per-server `trust:true` opts into `yes`-mode allow; `readOnlyHint` is an approval-policy classification only, granting no process access. (5) Sandbox: OFF by default per server; `sandbox:true` = file-confined, network-open, same Seatbelt/bwrap policy as bash. (6) Env: three layers (allowlist baseline, explicit `env`, `inheritEnv` opt-in) and a non-overridable marker layer. (7) Naming: hashed wire names `mcp__<slug>-<hash>__<slug>-<hash>`; readable `<server>/<tool>` display name in TUI, `/mcp`, prompts, logs. (8) Placement: stdio bridge in `src/mcp/spawn.ts`; `tools/sandbox.ts`, `tools/safety.ts`, `bash.ts` are guardrail-zone — the safety `mcp__` branch needs a human commit. (9) Registration stays DISABLED until the human-committed safety branch exists. Open: SDK status; one-shot/Telegram turns with no prompt callback fail closed on `ask`. **RESOLVED by analysis (2026-10-14, scope §5.4):** `sandbox:true` + `npx` — the file-confined policy denies `/Users` (read+write) and re-allows only workspace + extra roots + per-user temp, so an nvm node runtime and the `~/.npm` cache (both under `/Users`) are unreachable; `npx` servers run unsandboxed by default (`sandbox:false`). Empirical run blocked by the D12 nested-sandbox limit (agent under `TRE_SANDBOX=1`; `sandbox_apply` → EPERM, rc 71). Historical text below is retained for audit.
 | 2026-10-19 | D30 MCP lifecycle testability + non-TTY refusal session-close | (1) **MCP testability seams (`MainDeps`):** `mcpSpawnFn?: McpSpawnFn` — an injectable spawn for `main()` (default: the real `spawnMcpServer`) so tests drive MCP startup/teardown through `main()` with an in-process `MockMcpServer` — no child, no sandbox, deterministic teardown outcomes (a rejecting `close()` = an unconfirmed group). `sessionHook?: (session) => void` — lifecycle seam handed the created/opened Session before the CLI/TUI consumes it (no production caller). (2) **Fix:** the non-TTY TUI refusal now CLOSES the session (`return 2` ran before the plain CLI's try/finally — the FileHandle was GC-only, a hard error on Node >= 26); the teardown+close pair is finally-guarded so a REJECTED teardown neither skips the close nor turns exit 2 into a throw — the holder keeps the result and `main()`'s outer finally re-runs killAll + the unconfirmed-cleanup warning (I3). (3) **Tests (+2, `test/cli.test.ts`):** handle-based closure assertion (append-after-return rejects — no fd counting, no GC timing) and the rejected-teardown path in a subprocess (backstop listeners stay contained; parent-owned temp dir; NO `process.exit` — natural exit asserts nothing holds the event loop). All TTY skip-guards now `t.skip(); return;`. Test isolation: `restart`/`subtask-tool` subprocess imports use absolute `import.meta.url` module URLs (were CWD-relative — only resolved from the repo root). Audited twice (leaked temp dir + listener contamination fixed; then the `process.exit` coverage gap fixed). 2026-10-19: gate green — full suite 1235 pass / 0 fail / 14 skip. |
+| 2026-10-19 | D31 Personality / preference learning — stance + idea recorded (WS13, not started) | Some harnesses form a "personality" by tracking activity into an implicit profile. **Ruling: not part of tre.'s design** — an activity-formed profile is prompt content the agent writes about itself without review: not diffable, not gate-able, drift-prone, and it breaks the self-improve invariant (every behavior change = one human-reviewable commit). The agent's character IS its repo (skills, system prompt, HANDOFF/PLAN), versioned and revertible. If ever wanted, the design-respecting shape is a **reviewed preference-proposal loop**: a session-end step proposes a small SKILL.md / project-context diff; the human accepts or discards; accepted prefs load through the existing WS4 seams — no implicit trait store, no unreviewed prompt writes, no new injection path. Documented as WS13 (idea only, not scheduled). |
