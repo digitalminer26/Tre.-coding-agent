@@ -1,4 +1,86 @@
-# Current project status (2026-10-17)
+# Current project status (2026-10-19)
+
+**MCP testability seam + non-TTY refusal session-close fix (2026-10-19, UNCOMMITTED).**
+Two `MainDeps` seams + one production fix + regression tests, all audited
+(this session; see the audit trail below):
+
+1. **`MainDeps.mcpSpawnFn?: McpSpawnFn`** — injectable MCP spawn for `main()`
+   (defaults to the real `spawnMcpServer`). Tests hand in a fake wrapping an
+   in-process `MockMcpServer` — no child process, no sandbox, deterministic
+   control of the teardown outcome (a `close()` that rejects models an
+   unconfirmed process group).
+2. **`MainDeps.sessionHook?: (session) => void`** — lifecycle seam called
+   with the created/opened Session before the CLI/TUI consumes it, so a test
+   can assert closure deterministically (append-after-return must reject).
+   No production caller.
+3. **Production fix (`main.ts`, non-TTY TUI refusal):** the refusal's
+   `return 2` ran BEFORE the plain CLI's try/finally, so the session
+   FileHandle was only released by the GC (Node >= 26 turns that into a hard
+   error). The refusal now closes the session in a `finally` that also guards
+   the MCP teardown: a REJECTED teardown (unconfirmed group) no longer skips
+   the close and never turns exit 2 into a throw — the holder keeps the
+   result, so `main()`'s outer finally re-runs killAll + the
+   unconfirmed-cleanup warning (I3).
+4. **Tests (`test/cli.test.ts`, +2):** (a) handle-based session-closure
+   assertion for the plain refusal (no fd counting, no GC timing); (b) the
+   REJECTED-teardown path in a SUBPROCESS (the unconfirmed teardown
+   intentionally keeps the process backstop listeners — in-process they leak
+   into every later test). The child creates NO temp dir of its own (the
+   parent's `workspace(t)` owns cleanup) and calls NO `process.exit` —
+   natural process exit is itself the assertion that the rejected teardown
+   left nothing holding the event loop. All four TTY skip-guards now
+   `t.skip(); return;` (the old form fell through to the test body).
+5. **Test isolation (pre-existing latent bugs):** `test/restart.test.ts` +
+   `test/subtask-tool.test.ts` now import via absolute `import.meta.url`
+   module URLs — the CWD-relative `./dist/...` form only resolved when the
+   suite ran from the repo root.
+
+Audited twice: cycle 1 found fd-counting fragility + listener leakage + a
+leaked child temp dir (all fixed above); cycle 2 found the `process.exit(0)`
+coverage gap (fixed — natural exit, verified the spawn-timeout path fails a
+hung child). Gate: `tsc` clean; `cli.test.js` 76/0; cli+restart+subtask-tool
+151/0; full suite **1235 pass / 0 fail / 14 skip** from the repo root.
+
+**MCP audit cycles 1–3 + subtask-rev + releases (2026-10-17, committed).**
+Recorded here retroactively (the commits landed without HANDOFF entries):
+
+- `34c7688` — 2026-10-17 MCP audit findings: abort signal threaded through
+  `resources/list`, e2e scenario-22 `toolCall`→`toolResult` correlation,
+  resource output capped in UTF-8 BYTES (not chars).
+- `541c8d2` — the 8 cycle-1 findings (gpt-sol): streaming UTF-8 stdout decode
+  (`StringDecoder`), byte-bounded stderr ring, release of timed-out queued
+  frames, version-negotiation intersection + legacy version validation,
+  PER-TOOL annotations for safety classification, ready-state
+  terminal-failure registry teardown, abort-listener cleanup on admission
+  rejection.
+- `0ed468d` — the cycle-2/3 findings: readable-pipe error handling, stop
+  dispatch after a terminal envelope violation, byte-bounded UTF-8 stderr
+  tail with RFC 3629 validation, startup close/kill race, legacy version
+  validation, and the busy-restart active-turn drain barrier (new
+  `ActiveWork` tracker).
+  → These closed the four findings the mcp-full-audit status table listed as
+  OPEN on 2026-10-16 (F3 UTF-8, F4 annotations, F6 list cancellation, F8
+  null-entry validation). The table is updated (`ALL EIGHT CLOSED`,
+  re-verified 2026-10-19).
+- `23a1bbf` — 5 stale doc claims fixed (`--local`→`--yes` default, C26 guard
+  auto-retry, stall windowed 3×/8, tre.json vs models.json lookup, tag-pinned
+  install URL).
+- `dd2dd10` — subtasks busy exemption bound to a monotonic per-write revision
+  (write identity separated from the expiry clock): lock wait/refuse for rev
+  allocation, no uncommitted rev published, observational list
+  reconciliation, settled expiry during lagging reads, contention-proven
+  cross-process regression test (delegated workstream
+  `.tre/delegation/subtask-rev/`, 4 workers + 2 audit rounds).
+- `ca0f27c` v0.4.1, `7fe9f74` v0.4.2 — releases; tags `v0.4.1`/`v0.4.2` are
+  on origin (a local clone may need `git fetch --tags`).
+
+**Gate (re-verified 2026-10-19).** `tsc` clean; full suite **1235 / 0 fail /
+14 skip** — run FROM THE REPO ROOT, where the earlier note about ~33
+sandbox-artifact failures (the gitignored local `tre.json` listing `~/.nvm`)
+did NOT reproduce on this machine. If a stricter sandbox cannot resolve an
+extraRoots entry, startup-refusal failures in in-process `main()` tests can
+still happen — the neutral-CWD run remains the canonical gate. Quality-check
+source scan + dependency freeze OK.
 
 **D28 mouse selection: manual acceptance PASSED — feature DONE (2026-10-17).**
 The last open acceptance item from the handoff is closed. All 7 steps of the

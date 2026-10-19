@@ -262,7 +262,10 @@ test("exitCodeFor: stop 0, budget/loop/stall 3, error/length/toolUse 1, aborted 
 test("main: tui without a TTY fails cleanly (exit 2, I3 — no Ink raw-mode dump)", async (t) => {
   // node --test runs with non-TTY stdin; under a real TTY this path can't
   // be reached, so skip there.
-  if (process.stdin.isTTY) t.skip("stdin is a TTY");
+  if (process.stdin.isTTY) {
+    t.skip("stdin is a TTY");
+    return;
+  }
   const { dir, models } = await workspace(t);
   const S = mkSinks();
   const code = await main(["tui", "--tools", "none", "--models", models, "--cwd", dir], {
@@ -274,10 +277,162 @@ test("main: tui without a TTY fails cleanly (exit 2, I3 — no Ink raw-mode dump
   assert.doesNotMatch(S.out(), /unreachable/); // the fake stream was never used
 });
 
+// ── Audit fix (2026-10-19): the non-TTY TUI refusal closes the session ─────
+// Regression coverage for the session-FileHandle leak: the refusal's
+// `return 2` runs BEFORE the plain CLI's try/finally, so without an explicit
+// close the FileHandle is only released by the GC (Node >= 26 turns that into
+// a hard error). Closure is asserted DETERMINISTICALLY on the session handle
+// itself (via the deps.sessionHook seam): an append after main() returns must
+// reject with "session is closed". No process-wide fd counting (unrelated
+// lazy fds skew it), no GC timing. Case 2 drives the MCP-teardown-REJECTION
+// path in a SUBPROCESS: an unconfirmed teardown intentionally KEEPS the
+// process-level backstop listeners (exit/SIGINT/SIGTERM/SIGHUP) — running it
+// in-process would leak those listeners (and the mock) into every later test
+// of the suite. The child also asserts the refusal (exit 2, I3), the
+// killAll escalation, and the unconfirmed-cleanup warning on stderr.
+test("main: non-TTY TUI refusal CLOSES the session (handle-based — no GC/fd timing)", async (t) => {
+  if (process.stdin.isTTY) {
+    t.skip("stdin is a TTY");
+    return;
+  }
+  const { dir, models } = await workspace(t);
+  const S = mkSinks();
+  const sessionFile = join(dir, "refusal.jsonl");
+  let captured: Session | undefined;
+  const code = await main(
+    ["tui", "--tools", "none", "--models", models, "--cwd", dir, "--session", sessionFile],
+    {
+      streamFn: fakeStream([{ type: "text", text: "unreachable" }]),
+      sinks: S.sinks,
+      sessionHook: (s) => {
+        captured = s;
+      },
+    },
+  );
+  assert.equal(code, 2);
+  assert.ok(captured, "the sessionHook captured the created Session");
+  // The refusal must have CLOSED the handle: appends after main() returns
+  // throw "session is closed" (Session.write checks the handle). A leaked
+  // FileHandle would make this append SUCCEED — the deterministic signal.
+  await assert.rejects(
+    () => captured!.appendMessage({ role: "user", content: "after the refusal", timestamp: 1 }),
+    /session is closed/,
+  );
+  // The file exists (created before the refusal) with its flushed header.
+  const raw = await readFile(sessionFile, "utf8");
+  assert.match(raw, /"type":"header"/);
+});
+
+test("main: non-TTY TUI refusal with a REJECTED MCP teardown — session closed, exit 2, unconfirmed cleanup reported (I3; subprocess)", async (t) => {
+  // Subprocess (audit finding 2): the unconfirmed teardown intentionally
+  // keeps the process backstop listeners installed — in-process that leaks
+  // into every later test. The child's stdin is "ignore" (never a TTY), so
+  // this runs identically from an interactive terminal — no skip needed.
+  // The temp dir is created HERE (not in the child): workspace(t)'s
+  // t.after() removes it even if the child fails or times out. The child
+  // does NOT call process.exit — natural process exit is itself the
+  // assertion that the rejected teardown left nothing holding the loop.
+  const { spawnSync } = await import("node:child_process");
+  const { dir, models } = await workspace(t);
+  await writeFile(
+    join(dir, "tre.json"),
+    JSON.stringify({ mcpServers: { fake: { command: "fake-server", args: [] } } }),
+  );
+  // Absolute module URLs (this file compiles to dist/test/).
+  const mainModule = new URL("../src/cli/main.js", import.meta.url).href;
+  const mockModule = new URL("./mock-transport.js", import.meta.url).href;
+  const clientModule = new URL("../src/mcp/client.js", import.meta.url).href;
+  const code = `
+import { main } from ${JSON.stringify(mainModule)};
+import { MockMcpServer } from ${JSON.stringify(mockModule)};
+import { MCP_CLIENT_VERSION } from ${JSON.stringify(clientModule)};
+
+const fail = (msg) => { console.error("CHILD-FAIL: " + msg); process.exit(1); };
+
+// dir + models.json + tre.json were created by the PARENT (its t.after()
+// cleans them up); the child only writes into them.
+const dir = ${JSON.stringify(dir)};
+const models = ${JSON.stringify(models)};
+
+// In-process fake spawn: a ready server whose close() chain PERMANENTLY
+// rejects — models a group that survived the SIGKILL bound.
+const mock = new MockMcpServer();
+mock.onInbound((l) => {
+  const id = l.obj.id;
+  if (l.obj.method === "server/discover") {
+    mock.respondResult(id, { resultType: "discovery", supportedVersions: [MCP_CLIENT_VERSION] });
+  } else if (l.obj.method === "tools/list") {
+    mock.respondResult(id, { tools: [] });
+  }
+});
+const state = { closeCalls: 0, killCalls: 0 };
+let closeChain = null;
+const mcpSpawnFn = async () => ({
+  child: { pid: undefined },
+  stdin: mock.stdin, stdout: mock.stdout, stderr: mock.stderr,
+  close: () => {
+    state.closeCalls++;
+    if (!closeChain) closeChain = Promise.reject(new Error("group survived the SIGKILL bound (simulated)"));
+    return closeChain;
+  },
+  kill: () => { state.killCalls++; },
+  dispose: () => Promise.resolve(),
+});
+
+let captured = null;
+let errBuf = "";
+const sinks = {
+  out: { write: () => true },
+  err: { write: (s) => { errBuf += s; return true; } },
+};
+const sessionFile = ${JSON.stringify(join(dir, "refusal-mcp.jsonl"))};
+const res = await main(
+  ["tui", "--tools", "none", "--models", models, "--cwd", dir, "--session", sessionFile],
+  {
+    streamFn: () => (async function* () {})(),
+    sinks,
+    treConfigPath: ${JSON.stringify(join(dir, "tre.json"))},
+    mcpSpawnFn,
+    sessionHook: (s) => { captured = s; },
+  },
+);
+// The refusal is a clean exit 2 — the rejected teardown is absorbed by
+// main()'s outer finally (killAll + warn), never a throw (I3).
+if (res !== 2) fail("exit code " + res + " !== 2; stderr=" + errBuf);
+if (!/interactive terminal/.test(errBuf)) fail("missing refusal on stderr: " + errBuf);
+if (!/cleanup did not confirm/.test(errBuf)) fail("missing unconfirmed-cleanup warning: " + errBuf);
+if (state.closeCalls < 1) fail("the refusal never attempted the graceful teardown");
+if (state.killCalls < 1) fail("the unconfirmed teardown never escalated to killAll");
+if (!captured) fail("the sessionHook never fired");
+// The session must be CLOSED despite the teardown rejection (finally-guard).
+let appendRejected = false;
+try {
+  await captured.appendMessage({ role: "user", content: "after the refusal", timestamp: 1 });
+} catch (e) {
+  appendRejected = /session is closed/.test(String(e));
+}
+if (!appendRejected) fail("append after the refusal did NOT reject — the session handle leaked");
+// NO process.exit — the child must exit on its own. If the rejected
+// teardown (or the backstop it deliberately keeps installed) held the
+// event loop open, this run would hang until the spawn timeout and FAIL.
+console.log("CHILD-OK");
+`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  assert.equal(r.status, 0, `child failed:\nstderr:\n${r.stderr}\nstdout:\n${r.stdout}`);
+  assert.match(r.stdout, /CHILD-OK/);
+});
+
 test("main: bare launch on piped stdin → plain REPL (ui auto), exits 0 on EOF", async (t) => {
   // node --test runs with non-TTY stdin; under a real TTY the auto resolver
   // would pick the TUI, so skip there.
-  if (process.stdin.isTTY) t.skip("stdin is a TTY");
+  if (process.stdin.isTTY) {
+    t.skip("stdin is a TTY");
+    return;
+  }
   const { dir, models } = await workspace(t);
   const S = mkSinks();
   // Feed one prompt + EOF into the REPL's input — the same burst the e2e
@@ -296,7 +451,10 @@ test("main: bare launch on piped stdin → plain REPL (ui auto), exits 0 on EOF"
 test("REPL: a line typed while a run is in flight STEERS the loop (not queued as the next prompt)", async (t) => {
   // node --test runs with non-TTY stdin; under a real TTY the auto resolver
   // would pick the TUI, so skip there.
-  if (process.stdin.isTTY) t.skip("stdin is a TTY");
+  if (process.stdin.isTTY) {
+    t.skip("stdin is a TTY");
+    return;
+  }
   const { dir, models } = await workspace(t);
   const S = mkSinks();
   // turn 1 (only the seed prompt in context): emit a partial delta, then HANG

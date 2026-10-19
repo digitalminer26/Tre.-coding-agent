@@ -99,6 +99,7 @@ import {
   killAll,
   mcpStatusLine,
   reapPendingSpawns,
+  type McpSpawnFn,
   type McpStartResult,
 } from "../mcp/registry.js";
 import { spawnMcpServer } from "../mcp/spawn.js";
@@ -1127,6 +1128,18 @@ export interface MainDeps {
    *  connection must not hold the process open). undefined = the real
    *  global fetch. */
   pricesFetch?: typeof fetch;
+  /** WS12: injectable MCP spawn function (tests). undefined = the real
+   *  `spawnMcpServer` (a detached child process). A test hands in a fake
+   *  that wraps an in-process mock transport — no child, no sandbox, and
+   *  deterministic control over the teardown outcome (a close() that
+   *  rejects models an unconfirmed process group). */
+  mcpSpawnFn?: McpSpawnFn;
+  /** Lifecycle seam (tests): called with the created/opened Session before
+   *  the CLI/TUI consumes it, so a test can assert the session's lifecycle
+   *  (e.g. that the non-TTY TUI refusal CLOSES the FileHandle — appends
+   *  after main() returns must reject). No production caller. undefined =
+   *  no hook. */
+  sessionHook?: (session: SessionType) => void;
 }
 
 /**
@@ -1606,7 +1619,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
           return 2;
         }
       }
-      mcpRef.current = await startMcpServers(mcpServers, spawnMcpServer, {
+      mcpRef.current = await startMcpServers(mcpServers, deps.mcpSpawnFn ?? spawnMcpServer, {
         launchDir: root,
         workspace: root,
         extraRoots,
@@ -1727,6 +1740,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       sinks.err.write(`error: session: ${String(err)}\n`);
       return 2;
     }
+    // Lifecycle seam (tests): hand the created/opened Session to the test so
+    // it can assert closure (appends after main() returns must reject).
+    if (session) deps.sessionHook?.(session);
   }
 
   // D15: route each LLM call to the wire matching the CURRENT model's `api`
@@ -1780,12 +1796,30 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       sinks.err.write(
         "error: `tui` needs an interactive terminal; use `tre. run \"...\"` or `tre. --plain` without one\n",
       );
-      // WS12 lifecycle: MCP servers were ALREADY spawned above — the
-      // non-TTY refusal must tear them down (an early `return` here used to
-      // leak the detached children after the process exits).
-      if (mcpRef.current) {
-        await teardownAll(mcpRef.current);
-        mcpRef.current = null;
+      // The teardown + session-close pair is FINALLY-guarded: a REJECTED
+      // teardown (an unconfirmed group — teardownAll rejects on the SIGKILL
+      // bound) must not skip the close, and must not turn the refusal
+      // (exit 2) into a thrown error (I3). On rejection the holder KEEPS the
+      // result, so main()'s outer finally re-runs the teardown (killAll +
+      // warn + keeping the process-exit backstop).
+      try {
+        // WS12 lifecycle: MCP servers were ALREADY spawned above — the
+        // non-TTY refusal must tear them down (an early `return` here used
+        // to leak the detached children after the process exits).
+        if (mcpRef.current) {
+          await teardownAll(mcpRef.current);
+          mcpRef.current = null;
+        }
+      } catch {
+        // handled by main()'s finally — see above.
+      } finally {
+        // Same lifecycle as the post-runTui return below: the auto session
+        // file was already CREATED (the TUI default-session block runs
+        // before this check), and this early return is OUTSIDE the plain
+        // CLI's try/finally — without an explicit close the FileHandle is
+        // only released by the GC, which Node >= 26 reports as an error
+        // ("A FileHandle object was closed during garbage collection").
+        if (session) await session.close();
       }
       return 2;
     }

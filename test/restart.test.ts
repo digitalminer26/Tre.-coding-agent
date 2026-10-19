@@ -159,7 +159,10 @@ test("drainTurnBounded: a turn that settles within the bound → true", async ()
 // alive: the helper clears it, so the process can exit without waiting it out.
 test("drainTurnBounded: clears its timeout when the turn settles first", async () => {
   const { spawnSync } = await import("node:child_process");
-  const code = `import("./dist/src/tui/run.js").then(async (m) => {
+  // Absolute module URL (this file compiles to dist/test/) — a CWD-relative
+  // "./dist/..." import only resolves when the suite runs from the repo root.
+  const runModule = new URL("../src/tui/run.js", import.meta.url).href;
+  const code = `import(${JSON.stringify(runModule)}).then(async (m) => {
     await m.drainTurnBounded(Promise.resolve(), 3000);
   });`;
   const t0 = Date.now();

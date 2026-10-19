@@ -745,7 +745,9 @@ test("subtask: concurrent processes writing the same session get DISTINCT revs (
   const runs: ChildRun[] = [];
   try {
     const childSrc = [
-      `import { createSubtaskTool } from ${JSON.stringify(path.join(process.cwd(), "dist/src/tools/subtask.js"))};`,
+      // Absolute module URL (this file compiles to dist/test/) — a
+      // CWD-relative path only resolves when the suite runs from the repo root.
+      `import { createSubtaskTool } from ${JSON.stringify(new URL("../src/tools/subtask.js", import.meta.url).href)};`,
       `const sig = new AbortController().signal;`,
       `let announced = false;`,
       `const t = createSubtaskTool(${JSON.stringify(SESSION_ID)}, ${JSON.stringify(home)}, true, 30_000, () => {`,
