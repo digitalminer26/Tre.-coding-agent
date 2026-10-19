@@ -1,6 +1,6 @@
 # Current project status (2026-10-19)
 
-**MCP testability seam + non-TTY refusal session-close fix (2026-10-19, UNCOMMITTED).**
+**MCP testability seam + non-TTY refusal session-close fix (2026-10-19, committed `e107fc3`, shipped in v0.4.3).**
 Two `MainDeps` seams + one production fix + regression tests, all audited
 (this session; see the audit trail below):
 
