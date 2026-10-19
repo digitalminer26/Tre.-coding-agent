@@ -9,8 +9,10 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import {
   acquireSubtaskLock,
+  acquireSubtaskLockWait,
   canonicalSessionPath,
   createSubtaskTool,
   formatSubtaskSummary,
@@ -80,6 +82,79 @@ test("subtask: list on an empty session reports (no subtasks), details empty", a
   assert.equal(r.isError, undefined);
   assert.match(text(r), /\(no subtasks\)/);
   assert.deepEqual((r.details as { subtasks: SubtaskInfo[] }).subtasks, []);
+});
+
+test("subtask: every action's details carry action + updatedAt (the TUI's settle-window inputs)", async () => {
+  // Audit F1a: the TUI's applyEvent decides "activity vs observational"
+  // from details.action, and the poller's snapshot signature includes the
+  // file's updatedAt — a list result WITHOUT action re-armed the display
+  // and pinned a settled list on screen forever.
+  const t = tool();
+  const c = await t.execute("1", { action: "create", items: ["a"] }, sig);
+  const cd = c.details as { action?: string; updatedAt?: number };
+  assert.equal(cd.action, "create");
+  assert.ok(typeof cd.updatedAt === "number" && cd.updatedAt > 0, "create stamps updatedAt");
+
+  const l = await t.execute("2", { action: "list" }, sig);
+  const ld = l.details as { action?: string; updatedAt?: number };
+  assert.equal(ld.action, "list", "list is TAGGED (observational — must not re-arm the display)");
+  assert.equal(ld.updatedAt, cd.updatedAt, "a read does not move updatedAt");
+
+  const m = await t.execute("3", { action: "mark", id: 1, status: "done" }, sig);
+  const md = m.details as { action?: string; updatedAt?: number };
+  assert.equal(md.action, "mark");
+  assert.ok(md.updatedAt! >= cd.updatedAt!, "mark stamps a fresh updatedAt");
+});
+
+test("subtask: every action's details carry rev (the write identity) — bump on write, stable on read", async () => {
+  // Rev model (DESIGN.md): `rev` is the monotonic per-write identity,
+  // separate from the updatedAt clock. create/mark bump it; list reports
+  // the CURRENT file rev without bumping.
+  const t = tool();
+  const c = await t.execute("1", { action: "create", items: ["a"] }, sig);
+  const cd = c.details as { rev?: number };
+  assert.equal(cd.rev, 1, "the first write is rev 1");
+  const l = await t.execute("2", { action: "list" }, sig);
+  const ld = l.details as { rev?: number };
+  assert.equal(ld.rev, 1, "a read does not bump rev");
+  const m = await t.execute("3", { action: "mark", id: 1, status: "done" }, sig);
+  const md = m.details as { rev?: number };
+  assert.equal(md.rev, 2, "the next write is rev 2");
+  // The file on disk carries the same rev the result reported.
+  const file = JSON.parse(readFileSync(subtaskFilePath(subtaskDir(home), KEY), "utf8"));
+  assert.equal(file.rev, 2, "the persisted file carries the write's rev");
+});
+
+test("subtask: identical writes get DISTINCT revs (audit F2 — Date.now collision cannot inherit ownership)", async () => {
+  // The audit F2 fix: two identical create writes — even inside the same
+  // millisecond — are distinct writes (rev R and R+1), so a foreign
+  // same-content rewrite can never masquerade as the armed write.
+  const t = tool();
+  const a = await t.execute("1", { action: "create", items: ["same"] }, sig);
+  const b = await t.execute("2", { action: "create", items: ["same"] }, sig);
+  const ra = (a.details as { rev: number }).rev;
+  const rb = (b.details as { rev: number }).rev;
+  assert.equal(rb, ra + 1, "an identical rewrite bumps rev");
+  // A mark that rewrites identical content (same status) bumps it too.
+  const m = await t.execute("3", { action: "mark", id: 1, status: "queued" }, sig);
+  assert.equal((m.details as { rev: number }).rev, rb + 1, "a no-op mark still bumps rev");
+});
+
+test("subtask: rev survives a legacy file (no rev on disk reads as 0, next write is 1)", async () => {
+  // A file written before revisions existed (or hand-edited without rev)
+  // reads as rev 0 = no write identity; the next create/mark continues the
+  // sequence from there (rev 1) — strictly increasing from then on.
+  const dir = subtaskDir(home);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    subtaskFilePath(dir, KEY),
+    JSON.stringify({ items: [{ id: 1, name: "legacy", status: "queued" }], updatedAt: 42 }),
+    "utf8",
+  );
+  const l = await tool().execute("1", { action: "list" }, sig);
+  assert.equal((l.details as { rev?: number }).rev, 0, "a legacy file reads as rev 0");
+  const m = await tool().execute("2", { action: "mark", id: 1, status: "done" }, sig);
+  assert.equal((m.details as { rev?: number }).rev, 1, "the first rev-aware write continues from 0 → 1");
 });
 
 test("subtask: mark updates one item and returns the full list", async () => {
@@ -159,15 +234,28 @@ test("subtask: corrupt list file → REFUSED (I3), the file is preserved", async
   assert.match(text(r3), /1\. fresh \(queued\)/);
 });
 
-test("subtask: unwritable dir → the call still succeeds in-memory (I3)", async () => {
-  // A dir whose parent is a FILE: mkdirSync fails, the write is swallowed,
-  // and the result still carries the list (the model sees the update).
+test("subtask: unwritable dir → the write failure is VISIBLE, no details published (audit cycle-1 F2)", async () => {
+  // A dir whose parent is a FILE: mkdirSync fails. The pre-cycle-2 behavior
+  // swallowed the failure and reported success WITH the list + a rev —
+  // publishing an uncommitted revision as an ownership identity (the
+  // audit's failed-write finding: a later foreign write reuses that rev
+  // and inherits the first write's exemption). Now the failure is an
+  // isError result and, crucially, carries NO details: nothing to mirror,
+  // nothing to arm.
   const blocker = path.join(home, "blocker");
   writeFileSync(blocker, "x", "utf8");
   const t = createSubtaskTool("s", path.join(home, "blocker"));
   const r = await t.execute("1", { action: "create", items: ["a"] }, sig);
-  assert.equal(r.isError, undefined, "the write failure is swallowed (I3)");
-  assert.deepEqual((r.details as { subtasks: SubtaskInfo[] }).subtasks, [{ id: 1, name: "a", status: "queued" }]);
+  assert.equal(r.isError, true, "the write failure is visible (no fake success)");
+  assert.match(text(r), /could not be written/);
+  assert.equal(r.details, undefined, "no details → the uncommitted rev is never published");
+  // A failed write does not poison the session either: `list` still
+  // answers (a read of nothing), and every retry fails visibly.
+  const l = await t.execute("2", { action: "list" }, sig);
+  assert.equal(l.isError, undefined);
+  const r2 = await t.execute("3", { action: "create", items: ["a"] }, sig);
+  assert.equal(r2.isError, true);
+  assert.equal(r2.details, undefined);
 });
 
 test("subtask: session ids are sanitized for the filename", async () => {
@@ -311,11 +399,13 @@ test("subtask: two sessions are isolated (per-session files)", async () => {
 
 test("subtask: readSubtasks/writeSubtasks round-trip + readSubtasks never throws", () => {
   const dir = subtaskDir(home);
-  writeSubtasks(dir, "x", { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 123 });
+  writeSubtasks(dir, "x", { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 123, rev: 5 });
   const f = readSubtasks(dir, "x");
   assert.deepEqual(f.items, [{ id: 1, name: "a", status: "done" }]);
   assert.equal(f.updatedAt, 123);
+  assert.equal(f.rev, 5, "the write revision round-trips");
   assert.deepEqual(readSubtasks(dir, "missing").items, []);
+  assert.equal(readSubtasks(dir, "missing").rev, 0, "a missing file reads as rev 0");
   const file = subtaskFilePath(dir, "bad");
   mkdirSync(dir, { recursive: true });
   writeFileSync(file, "[]", "utf8"); // wrong shape (array, not object)
@@ -342,6 +432,13 @@ test("subtask: normalizeSubtaskFile coerces bad fields, rejects wrong shapes", (
     { id: 4, name: "d", status: "failed" },
   ]);
   assert.equal(ok!.updatedAt, 0);
+  // A file without a rev (or with a bad/non-positive one) reads as rev 0 =
+  // "no write identity" (the legacy fallback) — never a rejection.
+  assert.equal(ok!.rev, 0);
+  assert.equal(normalizeSubtaskFile({ items: [], rev: "nope" })!.rev, 0);
+  assert.equal(normalizeSubtaskFile({ items: [], rev: -2 })!.rev, 0);
+  assert.equal(normalizeSubtaskFile({ items: [], rev: 7 })!.rev, 7);
+  assert.equal(normalizeSubtaskFile({ items: [], rev: 2.4 })!.rev, 2, "rev is rounded");
 });
 
 test("subtask: formatSubtaskSummary — lines + progress fraction", () => {
@@ -483,10 +580,10 @@ test("subtask lock: a heartbeat does NOT re-touch a RE-CLAIMED lock (token check
 test("subtask: readSubtaskState distinguishes missing / ok / corrupt", () => {
   const dir = subtaskDir(home);
   assert.deepEqual(readSubtaskState(dir, "nope"), { status: "missing" });
-  writeSubtasks(dir, "x", { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 7 });
+  writeSubtasks(dir, "x", { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 7, rev: 3 });
   assert.deepEqual(readSubtaskState(dir, "x"), {
     status: "ok",
-    file: { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 7 },
+    file: { items: [{ id: 1, name: "a", status: "done" }], updatedAt: 7, rev: 3 },
   });
   const bad = subtaskFilePath(dir, "bad");
   mkdirSync(dir, { recursive: true });
@@ -536,4 +633,293 @@ test("subtask persist: a session-bound tool still writes the file (the default)"
   const key = subtaskKey("s.jsonl");
   assert.ok(existsSync(subtaskFilePath(subtaskDir(home), key)), "the list file is written");
   assert.ok(!existsSync(subtaskLockPath(subtaskDir(home), key)), "the lock is released after the call");
+});
+
+// ── audit cycle-1 finding 1: the lock is NOT best-effort for mutations ─────
+//
+// The rev ownership identity is only sound if EVERY allocation runs under
+// the session lock. The pre-fix code acquired the lock once and proceeded
+// UNLOCKED when a live holder owned it — two processes could both read R
+// and both publish R+1. Now create/mark WAIT for the lock and are REFUSED
+// (visible error, nothing written, no rev published) when it cannot be
+// acquired; `list` stays a lock-free read.
+
+test("acquireSubtaskLockWait: waits for a live holder and claims after release", async () => {
+  const dir = subtaskDir(home);
+  const a = acquireSubtaskLock(dir, "s");
+  assert.ok(a !== null);
+  // A waiter with a short budget gives up while the holder is live…
+  const t0 = Date.now();
+  const missed = await acquireSubtaskLockWait(dir, "s", 120);
+  assert.equal(missed, null, "no claim while a live holder owns the lock");
+  assert.ok(Date.now() - t0 >= 100, "the waiter actually waited (not an instant null)");
+  // …and claims as soon as the holder releases.
+  const waiter = acquireSubtaskLockWait(dir, "s", 5_000);
+  setTimeout(() => releaseSubtaskLock(a), 80);
+  const got = await waiter;
+  assert.ok(got !== null, "the waiter claimed the lock after the release");
+  releaseSubtaskLock(got);
+});
+
+test("acquireSubtaskLockWait: an un-writable dir returns null immediately (no budget burn)", async () => {
+  const blocker = path.join(home, "blocker");
+  writeFileSync(blocker, "x", "utf8");
+  const t0 = Date.now();
+  const got = await acquireSubtaskLockWait(path.join(home, "blocker", "sub"), "s", 60_000);
+  assert.equal(got, null, "no lock is possible → null");
+  assert.ok(Date.now() - t0 < 5_000, "fails fast instead of waiting the whole budget");
+});
+
+test("acquireSubtaskLockWait: an aborted signal never claims", async () => {
+  const dir = subtaskDir(home);
+  const ac = new AbortController();
+  ac.abort();
+  const got = await acquireSubtaskLockWait(dir, "s", 5_000, ac.signal);
+  assert.equal(got, null, "an aborted run does not wait or claim");
+});
+
+test("subtask: a mutation REFUSES while another process holds the lock (audit cycle-1 F1)", async () => {
+  // A LIVE holder (another process's lock file, fresh mtime) must block a
+  // create/mark — the old behavior proceeded unlocked and could publish a
+  // duplicate rev. The refusal writes nothing and publishes no revision.
+  const dir = subtaskDir(home);
+  mkdirSync(dir, { recursive: true });
+  const holder = acquireSubtaskLock(dir, KEY);
+  assert.ok(holder !== null, "the fixture holds the session lock");
+  const t = createSubtaskTool(SESSION_ID, home, true, 150); // short wait for the test
+  const r = await t.execute("1", { action: "create", items: ["a"] }, sig);
+  assert.equal(r.isError, true, "the mutation is refused, not run unlocked");
+  assert.match(text(r), /could not acquire the session subtask lock/);
+  assert.equal(r.details, undefined, "no details → no rev published");
+  assert.ok(!existsSync(subtaskFilePath(dir, KEY)), "nothing was written");
+  // `list` still works under contention (a read allocates nothing).
+  const l = await t.execute("2", { action: "list" }, sig);
+  assert.equal(l.isError, undefined, "list is a lock-free read");
+  releaseSubtaskLock(holder);
+  // After the holder releases, the same tool writes normally.
+  const r2 = await t.execute("3", { action: "create", items: ["a"] }, sig);
+  assert.equal(r2.isError, undefined);
+  assert.equal((r2.details as { rev: number }).rev, 1, "the rev sequence starts clean");
+});
+
+test("subtask: an aborted signal refuses the mutation instead of writing unlocked", async () => {
+  const t = createSubtaskTool(SESSION_ID, home, true, 5_000);
+  const ac = new AbortController();
+  ac.abort();
+  const r = await t.execute("1", { action: "create", items: ["a"] }, ac.signal);
+  assert.equal(r.isError, true, "an aborted call never writes");
+  assert.equal(r.details, undefined);
+});
+
+type Outcome = { out: string; err: string; code: number | null };
+type ChildRun = {
+  proc: ReturnType<typeof spawn>;
+  ready: Promise<void>;
+  done: Promise<Outcome>;
+  /** Settles on the child's `close` event (process gone AND stdio drained). */
+  closed: Promise<void>;
+};
+
+test("subtask: concurrent processes writing the same session get DISTINCT revs (audit cycle-1 F1, cross-process contention)", async () => {
+  // Cross-process contention, proven from the PRODUCTION path. The parent
+  // holds the session lock. Each child runs the real `create` tool, whose
+  // lock wait reports (via the injectable contention observer) every claim
+  // it sees REFUSED by the live holder. A child prints `ready` only from
+  // that observer — so readiness means "this child's claim was actually
+  // refused by the held lock", not merely "the child booted". The parent
+  // releases only after all N children have been refused, so every child
+  // must then serialize through the lock. Under the pre-fix code a refused
+  // child wrote anyway and could reuse a rev; the mid-test assertion
+  // (no commit while held) and the distinct-rev assertion catch that.
+  const dir = subtaskDir(home);
+  mkdirSync(dir, { recursive: true });
+  writeSubtasks(dir, KEY, { items: [{ id: 1, name: "seed", status: "queued" as const }], updatedAt: 1, rev: 0 });
+  const N = 6;
+  const parent = acquireSubtaskLock(dir, KEY);
+  assert.ok(parent !== null, "the parent claims the lock for the contention phase");
+
+  // From HERE to the end of the test, every started child and the parent
+  // lock are inside the try/finally: a synchronous throw during child
+  // setup (spawn CAN throw — e.g. an invalid environment value) still
+  // releases the lock and reaps the children that DID start.
+  const runs: ChildRun[] = [];
+  try {
+    const childSrc = [
+      `import { createSubtaskTool } from ${JSON.stringify(path.join(process.cwd(), "dist/src/tools/subtask.js"))};`,
+      `const sig = new AbortController().signal;`,
+      `let announced = false;`,
+      `const t = createSubtaskTool(${JSON.stringify(SESSION_ID)}, ${JSON.stringify(home)}, true, 30_000, () => {`,
+      `  if (!announced) { announced = true; process.stdout.write("ready\\n"); }`,
+      `});`,
+      `const r = await t.execute("c", { action: "create", items: ["p-" + process.pid] }, sig);`,
+      `process.stdout.write(JSON.stringify({ err: r.isError === true, rev: r.details?.rev ?? null }) + "\\n");`,
+    ].join("\n");
+
+    // Bounds: every wait is deadline-raced; nothing can hang the test.
+    const WAIT_MS = 60_000;
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    const withDeadline = <T>(p: Promise<T>, what: string): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<never>((_, rej) => {
+          deadlineTimer = setTimeout(() => rej(new Error(`deadline (${WAIT_MS}ms): ${what}`)), WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(deadlineTimer));
+
+    for (let i = 0; i < N; i++) runs.push(startChild(childSrc));
+
+    // Readiness = each child's claim was refused by the held lock.
+    await withDeadline(Promise.all(runs.map((r) => r.ready)), "waiting for contended-claim readiness");
+    // Contention proven: while the lock is held, no child may commit.
+    assert.equal(readSubtasks(dir, KEY).rev, 0, "no child committed while the parent held the lock");
+    releaseSubtaskLock(parent);
+    const outs = await withDeadline(Promise.all(runs.map((r) => r.done)), "waiting for children to finish");
+    const results = outs.map((p, i) => {
+      assert.equal(p.code, 0, `child ${i} exited cleanly: ${p.err}`);
+      const lines = p.out.trimEnd().split("\n");
+      assert.equal(lines[0], "ready", `child ${i} announced contention before its result`);
+      return JSON.parse(lines[lines.length - 1]!);
+    });
+    const ok = results.filter((r) => !r.err);
+    assert.equal(ok.length, N, `every contended child eventually got the lock (got ${ok.length}/${N})`);
+    const revs = ok.map((r) => r.rev).sort((a, b) => a - b);
+    assert.deepEqual(revs, [1, 2, 3, 4, 5, 6], "six contended writes → six DISTINCT revs 1..6");
+    assert.equal(readSubtasks(dir, KEY).rev, N, "the persisted rev is the number of committed writes");
+  } finally {
+    releaseSubtaskLock(parent); // idempotent
+    // Guaranteed, escalating cleanup: SIGTERM, bounded grace, then
+    // SIGKILL, then await every child's CLOSE event (not merely process
+    // exit — exit fires while the child's stdio may still be open, e.g.
+    // a descendant holding the pipe; the fixture must not be deleted
+    // under a still-connected writer). A child that survives SIGKILL is
+    // a hard failure.
+    const terminate = async (sig: NodeJS.Signals, graceMs: number): Promise<boolean> => {
+      for (const r of runs) if (r.proc.exitCode === null && r.proc.signalCode === null) r.proc.kill(sig);
+      let timer: NodeJS.Timeout | undefined;
+      const outcome = await Promise.race([
+        Promise.all(runs.map((r) => r.closed)).then(() => "closed" as const),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), graceMs);
+        }),
+      ]);
+      clearTimeout(timer);
+      return outcome === "closed";
+    };
+    const closedInGrace = await terminate("SIGTERM", 2_000);
+    if (!closedInGrace) {
+      const killed = await terminate("SIGKILL", 5_000);
+      assert.ok(killed, "every contention child reached its close event (none survived SIGKILL)");
+    }
+  }
+
+  // One child: spawn + persistent collectors + the three promises.
+  // `ready` resolves from the contention line (a real refused claim);
+  // `done` settles on the RESULT (exit code + full output); `closed`
+  // settles ONLY on the `close` event (process gone AND stdio drained) —
+  // exitCode/signalCode alone do not mean the streams are finished.
+  // Every promise gets its rejection handler at creation, so neither a
+  // spawn `error` nor an early `close` can leave an unhandled rejection.
+  function startChild(childSrc: string): ChildRun {
+    const proc = spawn(process.execPath, ["--input-type=module", "-e", childSrc], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    let resolveReady!: () => void;
+    let rejectReady!: (e: Error) => void;
+    const ready = new Promise<void>((res, rej) => {
+      resolveReady = res;
+      rejectReady = rej;
+    });
+    let resolveDone!: (o: Outcome) => void;
+    let rejectDone!: (e: Error) => void;
+    const done = new Promise<Outcome>((res, rej) => {
+      resolveDone = res;
+      rejectDone = rej;
+    });
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((res) => {
+      resolveClosed = res;
+    });
+    ready.catch(() => {}); // consumed below; never an unhandled rejection
+    done.catch(() => {});
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (d: string) => {
+      out += d;
+      if (out.includes("ready\n")) resolveReady();
+    });
+    proc.stderr.on("data", (d: string) => (err += d));
+    proc.once("error", (e) => {
+      // A failed spawn (ENOENT etc.) NEVER runs the child — but Node still
+      // emits `close` after `error`, so `closed` is resolved there (its
+      // contract: settles ONLY on `close`).
+      rejectReady(e);
+      rejectDone(e);
+    });
+    proc.once("close", (code) => {
+      // A child that exits before announcing readiness fails the barrier
+      // promptly, not at the full deadline.
+      rejectReady(new Error(`child exited before ready (code ${code}): ${err}`));
+      resolveDone({ out, err, code });
+      resolveClosed();
+    });
+    return { proc, ready, done, closed };
+  }
+});
+
+// ── audit cycle-1 finding 2: a failed write must not publish its revision ──
+
+test("subtask: an obstructed tmp path fails VISIBLE and the rev is not reused for a foreign exemption (audit cycle-1 F2)", async () => {
+  // The audit's exact repro: `<list>.<pid>.tmp` is a DIRECTORY, so the
+  // rename fails. Pre-fix: create reported success + rev 1 while disk
+  // stayed empty; a later foreign write then committed rev 1 and — fed
+  // through applyEvent (arm at the first rev 1) and the poller (the
+  // foreign rev 1) — inherited the exemption forever. Now: the failure is
+  // an error with NO details (nothing armed), and after clearing the
+  // obstruction the retry commits rev 1 cleanly — an identity that was
+  // never armed is never inherited.
+  const dir = subtaskDir(home);
+  mkdirSync(dir, { recursive: true });
+  const file = subtaskFilePath(dir, KEY);
+  const tmp = `${file}.${process.pid}.tmp`;
+  mkdirSync(tmp, { recursive: true }); // obstruct the atomic rename
+  const t = createSubtaskTool(SESSION_ID, home);
+  const r = await t.execute("1", { action: "create", items: ["mine"] }, sig);
+  assert.equal(r.isError, true, "the failed write is visible");
+  assert.equal(r.details, undefined, "no details → the uncommitted rev 1 is never published");
+  assert.ok(!existsSync(file), "disk unchanged by the failed write");
+  // The TUI armed NOTHING (no details), so there is no exemption to
+  // inherit — assert the state-layer half in the same breath: an event
+  // without details leaves the arm untouched.
+  // (Full applyEvent coverage lives in test/tui-state.test.ts; here the
+  // tool contract is what matters: no details on failure.)
+  // Clear the obstruction → the retry succeeds and IS the first rev.
+  rmSync(tmp, { recursive: true, force: true });
+  const r2 = await t.execute("2", { action: "create", items: ["mine"] }, sig);
+  assert.equal(r2.isError, undefined, "after fixing the path the write lands");
+  assert.equal((r2.details as { rev: number }).rev, 1, "the retry re-allocates from the committed file (never double-bumps)");
+  const onDisk = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(onDisk.rev, 1, "the reported rev is the COMMITTED rev");
+  // And a mark continues the sequence from the committed file.
+  const r3 = await t.execute("3", { action: "mark", id: 1, status: "done" }, sig);
+  assert.equal((r3.details as { rev: number }).rev, 2);
+});
+
+test("subtask: a failed mark is visible with no details too (audit cycle-1 F2, mark path)", async () => {
+  const dir = subtaskDir(home);
+  mkdirSync(dir, { recursive: true });
+  const t = createSubtaskTool(SESSION_ID, home);
+  const c = await t.execute("1", { action: "create", items: ["a", "b"] }, sig);
+  assert.equal((c.details as { rev: number }).rev, 1);
+  const file = subtaskFilePath(dir, KEY);
+  const tmp = `${file}.${process.pid}.tmp`;
+  mkdirSync(tmp, { recursive: true });
+  const r = await t.execute("2", { action: "mark", id: 1, status: "done" }, sig);
+  assert.equal(r.isError, true);
+  assert.equal(r.details, undefined, "no details on the failed mark");
+  const still = readSubtasks(dir, KEY);
+  assert.equal(still.rev, 1, "the file still holds the last COMMITTED rev");
+  assert.equal(still.items[0]!.status, "queued", "the failed mark did not touch disk");
+  rmSync(tmp, { recursive: true, force: true });
 });

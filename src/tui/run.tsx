@@ -69,7 +69,8 @@ import {
   steerInput,
   submitInput,
   submitSlashBusy,
-  subtasksExpired,
+  subtasksBusyArmed,
+  subtasksPollTick,
   type TuiItem,
   type TuiState,
 } from "./state.js";
@@ -92,6 +93,7 @@ import type {
   ExecuteToolCall,
   ModelConfig,
   StreamFn,
+  SubtaskInfo,
   TextBlock,
   Tool,
   WorkerStatus,
@@ -814,8 +816,17 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
         tap: (ev) => {
           // The elapsed clock follows the run's own events: armed on
           // agent_start, stopped on agent_end (see the timer above).
-          if (ev.type === "agent_start") onAgentStart();
-          else if (ev.type === "agent_end") onAgentEnd();
+          if (ev.type === "agent_start") {
+            onAgentStart();
+            // Audit F1: reconcile the subtasks display the moment a run
+            // starts — a deadline that elapsed while idle (or a list
+            // first observed while this run was already busy) must not
+            // stay on screen until the next 5s tick just because the
+            // flag hadn't flipped yet. The tick runs on the PRE-event
+            // state (busy still false → not armed), so the new run can
+            // never exempt the previous workstream.
+            subtasksTick();
+          } else if (ev.type === "agent_end") onAgentEnd();
           (isHighFrequencyStreamEvent(ev) ? setState : setStateNow)(applyEvent(state, ev));
         },
       });
@@ -1398,20 +1409,37 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
 
   // ── Subtask expiry tick (5s) ────────────────────────────────────────────
   // The `subtasks` field settles to "none" like the `workers` field does
-  // when its entries go stale (pruneWorkerDir): once every subtask is
-  // done/failed and no subtask has been created/marked within
-  // SUBTASK_STALE_MS, the field shows "none" until the next subtask
-  // activity. The list itself is NOT cleared (the tool's file keeps the
-  // full history — `list` still shows it); only the DISPLAY expires. The
-  // file's `updatedAt` is refreshed by every create/mark, so "settled +
-  // quiet" is exactly "the workstream is over and nobody is watching".
+  // when its entries go stale (pruneWorkerDir): once no subtask has been
+  // created/marked within SUBTASK_STALE_MS, the field shows "none" until
+  // the next subtask activity. The list itself is NOT cleared (the tool's
+  // file keeps the full history — `list` still shows it); only the DISPLAY
+  // expires. The file's `updatedAt` is refreshed by every create/mark, so
+  // "quiet" is exactly "the workstream is over (or abandoned) and nobody
+  // is touching it". A list with live items is exempt ONLY WHILE THE RUN
+  // THAT PRODUCED THE LAST SUBTASK ACTIVITY IS IN FLIGHT (a long tool
+  // call between marks must not blank the field) — the ARM-anchored
+  // exemption (audit F1): busyArmed = subtasksBusyArmed(state), i.e. the
+  // run's own create/mark armed it. An unrelated later run gets no
+  // exemption; a live list from an abandoned workstream follows the same
+  // quiet window while idle (or under an unrelated run) and settles to
+  // "none" instead of pinning the field forever (audit F2).
   //
   // The poller mirrors the workers poller's shape (self-rescheduling,
-  // unref'd, try/catch I3, change-detected by signature): it only pushes a
-  // new state when the EXPIRED flag flips, so a quiet session costs one
-  // cheap file read per 5s and no re-renders. Sessionless runs (no
-  // session path — the tool then keeps the list in memory only) have no
-  // file to read, so the poller is not armed at all.
+  // unref'd, try/catch I3), but the tick's decision is the PURE
+  // subtasksPollTick (state.ts): file-snapshot-only signature + derived-
+  // flag comparison against the live state — the audit F1b self-heal
+  // (an out-of-band flip of state.subtasksExpired no longer desyncs the
+  // poller permanently) and the rev-model arm-ownership rule (the
+  // exemption is bound to the armed activity's WRITE REVISION — exact per
+  // write; a newer-rev snapshot disarms the exemption outright, and an
+  // older-rev snapshot is never mirrored while the owning run is armed).
+  // It only pushes
+  // a new state when the file's view and the state disagree, so a quiet
+  // session costs one cheap file read per 5s and no re-renders.
+  // Sessionless runs (no session path — the tool then keeps the list in
+  // memory only) have no file to read: the tick expires from the state's
+  // own activity stamp (applyEvent mirrors `details.updatedAt` into
+  // state.subtasksUpdatedAt) — audit F3.
   const SUBTASK_STALE_MS = opts.subtasksStaleMs ?? 90_000; // default = WORKER_STALE_MS
   let subtasksTimer: NodeJS.Timeout | undefined;
   let subtasksStopped = false;
@@ -1425,18 +1453,69 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
   };
   const subtasksTick = (): void => {
     try {
-      if (opts.sessionPath === undefined) return; // in-memory list — nothing to expire from
-      const dir = subtaskDir(opts.home ?? homedir());
-      const sid = subtaskKey(canonicalSessionPath(resolve(opts.sessionPath)));
-      const file = readSubtasks(dir, sid); // I3: never throws (missing → empty list)
-      const expired = subtasksExpired(file.items, file.updatedAt, Date.now(), SUBTASK_STALE_MS);
-      const sig = JSON.stringify({ items: file.items, updatedAt: file.updatedAt, expired });
-      if (sig !== subtasksSig) {
-        subtasksSig = sig;
+      // Sessionless runs (no session path) have no file — the tick decides
+      // from the state's own activity stamp (audit F3); file-backed runs
+      // read the snapshot and reconcile through the pure tick
+      // (subtasksPollTick — the F1b self-heal lives there, unit-tested).
+      let file: { items: SubtaskInfo[]; updatedAt: number; rev?: number } | null = null;
+      if (opts.sessionPath !== undefined) {
+        const dir = subtaskDir(opts.home ?? homedir());
+        const sid = subtaskKey(canonicalSessionPath(resolve(opts.sessionPath)));
+        file = readSubtasks(dir, sid); // I3: never throws (missing → empty list)
+      }
+      const r = subtasksPollTick({
+        state: {
+          subtasks: state.subtasks,
+          subtasksExpired: state.subtasksExpired,
+          subtasksUpdatedAt: state.subtasksUpdatedAt,
+          // Audit F1: the exemption belongs to the run that produced the
+          // last subtask activity — not to any run in flight.
+          busyArmed: subtasksBusyArmed(state),
+          // Audit F1b: …and to the SNAPSHOT that activity produced — a
+          // list another process wrote (mirrored below) never inherits it.
+          // In the rev model the sig is the fallback identity for a
+          // legacy rev-0 arm only.
+          subtasksArmedSig: state.subtasksArmedSig,
+          // Rev model (audit F1c/F1-legacy/F2): the ownership identity is
+          // the armed WRITE REVISION — exact per write, unlike a stamp.
+          subtasksArmedRev: state.subtasksArmedRev,
+          // The rev of the currently mirrored list (a pushed field the
+          // self-healing comparison checks).
+          subtasksRev: state.subtasksRev,
+        },
+        file,
+        lastSig: subtasksSig,
+        now: Date.now(),
+        staleMs: SUBTASK_STALE_MS,
+      });
+      // Rev model: the snapshot on disk SUPERSEDED the armed write — a rev
+      // strictly newer than the armed one (a foreign write, whatever its
+      // content). An older-rev snapshot never disarms (a lagging read
+      // cannot supersede; while this run is armed it is not even mirrored —
+      // the tick's lagging-read skip). The exemption is over: clear the
+      // arm so the deadline rules alone decide, until the run's NEXT real
+      // subtask activity re-arms.
+      if (r.disarm && state.subtasksArmedRun !== null) {
+        setStateNow({
+          ...state,
+          subtasksArmedRun: null,
+          subtasksArmedSig: "",
+          subtasksArmedRev: 0,
+        });
+      }
+      if (r.push) {
+        subtasksSig = r.sig;
         // File changes from another process (or a list update) are mirrored
         // too; the expired flag is evaluated from the same snapshot so the
         // renderer cannot retain a stale list after the poller's first tick.
-        setStateNow({ ...state, subtasks: file.items, subtasksExpired: expired });
+        setStateNow({
+          ...state,
+          subtasks: r.subtasks,
+          subtasksExpired: r.subtasksExpired,
+          subtasksUpdatedAt: r.subtasksUpdatedAt,
+          // Mirror the snapshot's write identity with the snapshot itself.
+          subtasksRev: r.rev,
+        });
       }
     } catch {
       // I3: the poller must NEVER throw — a read failure is swallowed and

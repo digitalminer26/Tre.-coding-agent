@@ -21,8 +21,14 @@
  * long as it holds it, so a LIVE holder — even one whose critical section
  * runs longer than the stale window — is never mistaken for a dead one:
  * only a holder that has been SILENT for `staleAfterMs` (crashed, kill -9)
- * is claimable. The lock is best-effort (an unacquirable lock degrades to
- * the old behavior rather than failing the call).
+ * is claimable. The lock is NOT best-effort for persistent mutations
+ * (audit cycle-1 finding 1): the monotonic `rev` ownership identity is only
+ * meaningful if EVERY allocation runs under it, so a create/mark that
+ * cannot acquire the lock within `lockWaitMs` is REFUSED with a visible
+ * error instead of racing the live holder (the read-only `list` still
+ * degrades to a plain read — it allocates nothing). A failed write is
+ * likewise visible (finding 2): a revision is never published for an
+ * uncommitted write.
  *
  * I3: never throws for expected failures — bad args, unknown ids, corrupt
  * or unwritable files all become isError RESULTS the model reads. Writes are
@@ -65,11 +71,19 @@ export function subtaskLockPath(dir: string, sessionId: string): string {
 
 /**
  * The on-disk shape. `items` is the ordered subtask list (ids are 1-based
- * positions, assigned by `create`); `updatedAt` is the last write (ms).
+ * positions, assigned by `create`); `updatedAt` is the last write (ms) —
+ * the EXPIRY clock; `rev` is the monotonic WRITE REVISION — the ownership
+ * identity. The two clocks are deliberately separate (audit F1-legacy/F2):
+ * `updatedAt = Date.now()` cannot distinguish two identical writes in the
+ * same millisecond, and a receipt time is never the file's write time, so
+ * neither is fit to identify WHICH write produced a list. `rev` is bumped
+ * by every successful create/mark (both writers serialize on the session
+ * lock), so it is strictly increasing per session and unique per write.
  */
 export interface SubtaskFile {
   items: SubtaskInfo[];
   updatedAt: number;
+  rev: number;
 }
 
 const STATUSES: readonly SubtaskInfo["status"][] = [
@@ -105,7 +119,14 @@ export function normalizeSubtaskFile(parsed: unknown): SubtaskFile | null {
   }
   const updatedAt =
     typeof o.updatedAt === "number" && Number.isFinite(o.updatedAt) ? o.updatedAt : 0;
-  return { items, updatedAt };
+  // Missing/invalid `rev` → 0: a legacy file (written before revisions
+  // existed) has NO write identity — the TUI falls back to its content-only
+  // arm for it. Never reject a whole file over a bad rev. Writers only ever
+  // produce rev ≥ 1, so a non-positive number is treated as "no identity"
+  // too (0 is the reserved legacy value).
+  const rev =
+    typeof o.rev === "number" && Number.isFinite(o.rev) && o.rev > 0 ? Math.round(o.rev) : 0;
+  return { items, updatedAt, rev };
 }
 
 /**
@@ -118,7 +139,7 @@ export function normalizeSubtaskFile(parsed: unknown): SubtaskFile | null {
  * failed to read.
  */
 export function readSubtasks(dir: string, sessionId: string): SubtaskFile {
-  const empty: SubtaskFile = { items: [], updatedAt: 0 };
+  const empty: SubtaskFile = { items: [], updatedAt: 0, rev: 0 };
   try {
     const raw = readFileSync(subtaskFilePath(dir, sessionId), "utf8");
     const norm = normalizeSubtaskFile(JSON.parse(raw));
@@ -280,6 +301,71 @@ export function acquireSubtaskLock(
   return null;
 }
 
+/** How long a mutation waits for a live holder's lock before refusing. */
+const LOCK_WAIT_MS = 2_000;
+/** Poll interval while waiting for a live holder to release. */
+const LOCK_POLL_MS = 50;
+
+/**
+ * Acquire the session lock, WAITING up to `waitMs` for a LIVE holder to
+ * release it (audit cycle-1 finding 1). `acquireSubtaskLock` alone answers
+ * immediately (null on contention), and the pre-rev code then proceeded
+ * with the read/modify-write UNLOCKED — tolerable when the lock only
+ * protected lost-update hygiene, NOT when it underwrites the monotonic `rev`
+ * allocation: two processes that both miss the lock can both read R and
+ * both publish R+1, so a foreign write carries the armed revision. This
+ * wrapper closes that: retry until the claim succeeds, the wait budget runs
+ * out, or the signal aborts. A structural failure (the dir can never be
+ * written — the lock file cannot exist) is detected (the lock file is
+ * absent after a failed claim) and returns null immediately instead of
+ * burning the budget. Returns the claim or null; the CALLER must refuse a
+ * rev-allocating mutation on null (never run it unlocked).
+ */
+export async function acquireSubtaskLockWait(
+  dir: string,
+  sessionId: string,
+  waitMs: number = LOCK_WAIT_MS,
+  signal?: AbortSignal,
+  staleAfterMs = 30_000,
+  refreshMs = LOCK_REFRESH_MS,
+  /**
+   * Observer fired on each FAILED claim that finds a live holder — the
+   * contention signal (tests use it to know a claim was actually refused
+   * by the lock; production passes nothing). Never throws into the caller.
+   */
+  onContended?: () => void,
+): Promise<SubtaskLock | null> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    if (signal?.aborted === true) return null;
+    const claim = acquireSubtaskLock(dir, sessionId, staleAfterMs, signal, refreshMs);
+    if (claim !== null) return claim;
+    // Failed claim. Is a lock file PRESENT (a live holder worth waiting
+    // for), or is the whole dir un-writable (waiting can never help)?
+    let present = true;
+    try {
+      statSync(subtaskLockPath(dir, sessionId));
+    } catch {
+      present = false;
+    }
+    if (!present) {
+      // The holder may have released between the failed claim and the
+      // stat — one final attempt, then give up.
+      return acquireSubtaskLock(dir, sessionId, staleAfterMs, signal, refreshMs);
+    }
+    if (onContended !== undefined) {
+      try {
+        onContended();
+      } catch {
+        // An observer must never break the claim path.
+      }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    await new Promise<void>((r) => setTimeout(r, Math.min(LOCK_POLL_MS, remaining)));
+  }
+}
+
 /**
  * Release a lock claimed by `acquireSubtaskLock`. Best-effort (I3): a lock
  * that is already gone (stale-claimed by another process while we were
@@ -414,6 +500,26 @@ function canonicalizeMissing(p: string, depth: number): string {
 const text = (t: string): ToolResult["content"] => [{ type: "text", text: t }];
 
 /**
+ * The visible, non-throwing result for a mutation whose write FAILED
+ * (audit cycle-1 finding 2). Crucially it carries NO `details`: the TUI's
+ * applyEvent mirrors nothing and arms nothing, so the allocated revision is
+ * never published as an ownership identity. The model reads the failure and
+ * can retry — the retry re-reads the still-committed file and re-allocates
+ * the same rev, which is safe precisely because the failed one was never
+ * armed anywhere.
+ */
+function persistFailure(dir: string, sid: string): ToolResult {
+  return {
+    content: text(
+      `subtask: the list could not be written to ${subtaskFilePath(dir, sid)} ` +
+        "(disk error, permissions, or an obstructed path) — the change is NOT saved and no " +
+        "revision was published. Fix the path and retry.",
+    ),
+    isError: true,
+  };
+}
+
+/**
  * Build the `subtask` tool bound to a session. `sessionId` is the session
  * file's PATH (the driver injects it — the model never sees it). The list
  * file is keyed by `subtaskKey(sessionId)` — the sanitized basename plus a
@@ -433,17 +539,25 @@ export function createSubtaskTool(
   sessionId: string,
   home: string = homedir(),
   persist: boolean = true,
+  /** Injectable lock wait budget (tests use a short value). */
+  lockWaitMs: number = LOCK_WAIT_MS,
+  /** Injectable contention observer (tests only; see acquireSubtaskLockWait). */
+  onLockContended?: () => void,
 ): Tool {
   const dir = subtaskDir(home);
   const sid = subtaskKey(sessionId);
   // In-memory list for `persist: false` (sessionless runs).
-  let mem: SubtaskFile = { items: [], updatedAt: 0 };
-  const writeLocal = (f: SubtaskFile): void => {
+  let mem: SubtaskFile = { items: [], updatedAt: 0, rev: 0 };
+  // Returns TRUE when the snapshot is COMMITTED (the write identity —
+  // `rev` — may only be published for committed writes, audit finding 2).
+  // In-memory mode commits into the closure synchronously; persistent mode
+  // reports writeSubtasks' real outcome instead of discarding it.
+  const writeLocal = (f: SubtaskFile): boolean => {
     if (persist) {
-      writeSubtasks(dir, sid, f);
-    } else {
-      mem = f;
+      return writeSubtasks(dir, sid, f);
     }
+    mem = f;
+    return true;
   };
   return {
     name: "subtask",
@@ -484,12 +598,46 @@ export function createSubtaskTool(
     },
     async execute(_toolCallId, args, signal): Promise<ToolResult> {
       const action = typeof args.action === "string" ? args.action : "";
-      // Cross-process guard: serialize this read-modify-write on the
-      // per-session lock file (acquireSubtaskLock) so a second process on
-      // the same session id cannot interleave its read/write with ours.
-      // The run's abort signal stops the lock's heartbeat early. In-memory
-      // mode (persist: false) has no shared file — no lock.
-      const claim = persist ? acquireSubtaskLock(dir, sid, 30_000, signal) : null;
+      // Cross-process guard (audit cycle-1 finding 1): rev-allocating
+      // mutations (create/mark) SERIALIZE on the per-session lock file —
+      // and, unlike the pre-rev best-effort behavior, they WAIT for a live
+      // holder and are REFUSED (visible isError, nothing written, no rev
+      // published) when it cannot be acquired in time. Running a mutation
+      // unlocked is never safe once the lock underwrites the monotonic `rev`
+      // allocation: two processes that both missed the lock could both read
+      // R and both publish R+1, so a foreign write would carry the armed
+      // revision. `list` allocates nothing — it is a plain atomic read
+      // (writes are tmp+rename), so it never waits and never fails on lock
+      // contention (the safe read-only degradation stays). The run's abort
+      // signal stops the lock's heartbeat early and cancels the wait.
+      // In-memory mode (persist: false) has no shared file — no lock.
+      const mutating = action === "create" || action === "mark";
+      let claim: SubtaskLock | null = null;
+      if (persist && mutating) {
+        claim = await acquireSubtaskLockWait(dir, sid, lockWaitMs, signal, undefined, undefined, onLockContended);
+        if (claim === null) {
+          // Distinguish the two nulls for the model: a lock file that
+          // EXISTS means a live holder (retry may help); no lock file at
+          // all means the location cannot host the lock — the same
+          // condition that makes the list file unwritable, so report the
+          // persistence failure honestly (retry won't help until the path
+          // is fixed). Either way: nothing written, no rev published.
+          let lockPresent = true;
+          try {
+            statSync(subtaskLockPath(dir, sid));
+          } catch {
+            lockPresent = false;
+          }
+          if (signal?.aborted !== true && !lockPresent) return persistFailure(dir, sid);
+          return {
+            content: text(
+              `subtask: could not acquire the session subtask lock (another process is ` +
+                `writing this session's list, waited ${lockWaitMs}ms) — refusing to write. Retry.`,
+            ),
+            isError: true,
+          };
+        }
+      }
       try {
         const read = persist ? readSubtaskState(dir, sid) : ({ status: "ok", file: mem } as const);
         if (read.status === "corrupt") {
@@ -505,7 +653,7 @@ export function createSubtaskTool(
             isError: true,
           };
         }
-        const file = read.status === "ok" ? read.file : { items: [], updatedAt: 0 };
+        const file = read.status === "ok" ? read.file : { items: [], updatedAt: 0, rev: 0 };
         if (action === "create") {
           const raw = Array.isArray(args.items) ? args.items : [];
           const names = raw.filter((n): n is string => typeof n === "string" && n.trim() !== "");
@@ -520,17 +668,38 @@ export function createSubtaskTool(
             name,
             status: "queued",
           }));
-          const next: SubtaskFile = { items, updatedAt: Date.now() };
-          writeLocal(next);
+          // Bump the write revision on EVERY successful write — including a
+          // create whose content is identical to the previous list (audit
+          // F2: two identical writes get rev R and R+1, so `updatedAt =
+          // Date.now()` collisions can never inherit ownership). `file.rev`
+          // was read under the lock just above, and every writer serializes
+          // on it, so rev is strictly increasing per session.
+          const next: SubtaskFile = { items, updatedAt: Date.now(), rev: file.rev + 1 };
+          // The revision may only be PUBLISHED for a COMMITTED write
+          // (audit cycle-1 finding 2): a failed persistence that reported
+          // rev R+1 as success let a later foreign write land on the same
+          // R+1 and inherit the first write's exemption. A failure is now a
+          // visible error with NO details (the TUI mirrors nothing, arms
+          // nothing), and the next successful write re-allocates the same
+          // rev from the still-committed file — an identity that was never
+          // committed is never armed.
+          if (!writeLocal(next)) return persistFailure(dir, sid);
           return {
             content: text(`created ${items.length} subtask(s):\n${formatSubtaskSummary(items)}`),
-            details: { subtasks: items, action },
+            details: { subtasks: items, action, updatedAt: next.updatedAt, rev: next.rev },
           };
         }
         if (action === "list") {
+          // `action` and `updatedAt` ride along so the TUI's consumers can
+          // tell an observational list from create/mark activity (the
+          // settle-window un-expire rule) and keep their file-snapshot
+          // signature exact — without `action` the poller's change detector
+          // pinned a settled list on screen forever (the audit finding).
+          // `rev` is the CURRENT file rev (a read does not bump it) — the
+          // write identity of the snapshot being mirrored.
           return {
             content: text(formatSubtaskSummary(file.items)),
-            details: { subtasks: file.items },
+            details: { subtasks: file.items, action, updatedAt: file.updatedAt, rev: file.rev },
           };
         }
         if (action === "mark") {
@@ -554,11 +723,15 @@ export function createSubtaskTool(
             };
           }
           const items = file.items.map((i) => (i.id === id ? { ...i, status: status as SubtaskInfo["status"] } : i));
-          const next: SubtaskFile = { items, updatedAt: Date.now() };
-          writeLocal(next);
+          // Same revision rule as `create`: every successful write bumps
+          // rev, even a mark that rewrites identical content (audit F2).
+          const next: SubtaskFile = { items, updatedAt: Date.now(), rev: file.rev + 1 };
+          // Same commit rule as `create`: no committed write → no published
+          // revision (audit cycle-1 finding 2).
+          if (!writeLocal(next)) return persistFailure(dir, sid);
           return {
             content: text(`${id}. ${items[idx]!.name} → ${status}\n${formatSubtaskSummary(items)}`),
-            details: { subtasks: items, action },
+            details: { subtasks: items, action, updatedAt: next.updatedAt, rev: next.rev },
           };
         }
         return {

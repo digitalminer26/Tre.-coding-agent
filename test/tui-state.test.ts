@@ -60,8 +60,12 @@ import {
   submitSlashBusy,
   subtaskStatusColor,
   subtasksBottomValue,
+  subtasksBusyArmed,
   subtasksExpired,
+  subtaskItemsSig,
   subtasksLineAnsi,
+  subtasksPollTick,
+  type SubtasksPollTick,
   formatElapsedMs,
   normalizeSubtaskList,
   type ModelOption,
@@ -1835,6 +1839,8 @@ const subEnd = (
   subtasks: unknown,
   isError = false,
   action?: "create" | "list" | "mark",
+  updatedAt?: number,
+  rev?: number,
 ): AgentEvent => ({
   type: "tool_execution_end",
   toolCallId: id,
@@ -1844,7 +1850,16 @@ const subEnd = (
     toolName: "subtask",
     content: [{ type: "text", text: "ok" }],
     isError,
-    ...(isError ? {} : { details: { subtasks, ...(action === undefined ? {} : { action }) } }),
+    ...(isError
+      ? {}
+      : {
+          details: {
+            subtasks,
+            ...(action === undefined ? {} : { action }),
+            ...(updatedAt === undefined ? {} : { updatedAt }),
+            ...(rev === undefined ? {} : { rev }),
+          },
+        }),
     timestamp: 0,
   },
 });
@@ -2066,7 +2081,7 @@ test("subtasksLineAnsi: per-status color, dim fraction, code-stripped = plain on
   assert.ok(!line.includes("\n"), "one row");
 });
 
-test("subtasksExpired: live never expires; settled expires after the quiet window", () => {
+test("subtasksExpired: live+busy never expires; everything else after the quiet window", () => {
   const done: SubtaskInfo[] = [
     { id: 1, name: "a", status: "done" },
     { id: 2, name: "b", status: "failed" },
@@ -2078,15 +2093,22 @@ test("subtasksExpired: live never expires; settled expires after the quiet windo
   const t0 = 1_000_000;
   // empty list → expired (nothing to show)
   assert.equal(subtasksExpired([], t0, t0, 90_000), true);
-  // live (queued or in-progress) → never expired, even when ancient
-  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000), false);
-  assert.equal(subtasksExpired([{ id: 1, name: "q", status: "queued" }], t0, t0 + 999_999_999, 90_000), false);
+  // live + busy → never expired, even when ancient (a long tool call
+  // between marks must not blank the field mid-run)
+  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000, true), false);
+  assert.equal(subtasksExpired([{ id: 1, name: "q", status: "queued" }], t0, t0 + 999_999_999, 90_000, true), false);
+  // live + IDLE (audit F2: an abandoned workstream — aborted run, dead
+  // loop) → follows the same quiet window as a settled list
+  assert.equal(subtasksExpired(live, t0, t0 + 90_001, 90_000, false), true);
+  assert.equal(subtasksExpired(live, t0, t0 + 10_000, 90_000, false), false);
   // settled + recent activity → still shown (the settle just happened)
   assert.equal(subtasksExpired(done, t0, t0 + 10_000, 90_000), false);
   // settled + quiet past the window → expired (the field settles to "none")
   assert.equal(subtasksExpired(done, t0, t0 + 90_001, 90_000), true);
   // exactly at the window boundary → still shown (strictly greater)
   assert.equal(subtasksExpired(done, t0, t0 + 90_000, 90_000), false);
+  // busy defaults to false (the flag is only about the live exemption)
+  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000), true);
 });
 
 test("applyEvent: create/mark un-expire the field; observational list does not", () => {
@@ -2099,6 +2121,959 @@ test("applyEvent: create/mark un-expire the field; observational list does not",
   s = applyEvent(s, subEnd("2", [{ id: 1, name: "a", status: "done" }], false, "list"));
   assert.equal(s.subtasks[0]!.status, "done", "list still refreshes the displayed snapshot");
   assert.equal(s.subtasksExpired, true, "list does not re-arm a settled display");
+});
+
+test("applyEvent: create/mark arms the exemption for the CURRENT run (audit F1)", () => {
+  // Activity during a run stamps subtasksArmedRun = runStartedAt.
+  let s = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: 555 },
+    subEnd("1", [{ id: 1, name: "a", status: "in-progress" }], false, "mark"),
+  );
+  assert.equal(s.subtasksArmedRun, 555, "the mark arms the exemption for this run");
+  assert.equal(subtasksBusyArmed(s), true);
+  // An observational list does NOT arm.
+  let s2 = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: 777 },
+    subEnd("1", [{ id: 1, name: "a", status: "done" }], false, "list"),
+  );
+  assert.equal(s2.subtasksArmedRun, null, "a list never arms the exemption");
+  // A later run (fresh runStartedAt, no activity) is NOT armed — the
+  // previous run's arm does not carry over: agent_start clears it.
+  const armedMid = { ...s2, busy: true, runStartedAt: 555, subtasksArmedRun: 555 };
+  const started = applyEvent(armedMid, { type: "agent_start" } as AgentEvent);
+  assert.equal(started.subtasksArmedRun, null, "agent_start un-arms the previous run's exemption");
+  assert.equal(started.subtasksExpired, s2.subtasksExpired, "agent_start leaves the flag to the poller");
+  assert.equal(subtasksBusyArmed(started), false, "an unrelated run has no exemption");
+});
+
+test("applyEvent: subtask action resolution — start capture + content heuristic (audit F2)", () => {
+  // (a) details.action wins: a tagged list never arms.
+  let s = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: 100 },
+    subEnd("t1", [{ id: 1, name: "a", status: "done" }], false, "list"),
+  );
+  assert.equal(s.subtasksArmedRun, null, "tagged list never arms");
+  // (b) no details.action (older/custom tool), start captured `list` →
+  // a read: no un-expire, no arm — even when the content CHANGES (the
+  // OLD code armed on every untagged result).
+  let s2: TuiState = { ...makeInitialState("m"), busy: true, runStartedAt: 100, subtasksExpired: true };
+  s2 = applyEvent(s2, toolStart("t2", "subtask", { action: "list" }));
+  s2 = applyEvent(s2, subEnd("t2", [{ id: 1, name: "a", status: "done" }], false));
+  assert.equal(s2.subtasks[0]!.status, "done", "the list still refreshes the snapshot");
+  assert.equal(s2.subtasksExpired, true, "start-captured list is a read — no un-expire");
+  assert.equal(s2.subtasksArmedRun, null, "start-captured list never arms");
+  // (c) no start event, no tag → CONTENT heuristic: identical snapshot
+  // is a read (no arm), a changed snapshot is activity (arm).
+  let s3: TuiState = {
+    ...makeInitialState("m"),
+    busy: true,
+    runStartedAt: 200,
+    subtasks: [{ id: 1, name: "a", status: "done" }],
+  };
+  s3 = applyEvent(s3, subEnd("t3", [{ id: 1, name: "a", status: "done" }], false));
+  assert.equal(s3.subtasksArmedRun, null, "identical untagged snapshot = read");
+  s3 = applyEvent(s3, subEnd("t4", [{ id: 1, name: "a", status: "in-progress" }], false));
+  assert.equal(s3.subtasksArmedRun, 200, "changed untagged snapshot = activity");
+});
+
+test("applyEvent: details.updatedAt is mirrored into state.subtasksUpdatedAt", () => {
+  let s = makeInitialState("m");
+  assert.equal(s.subtasksUpdatedAt, 0);
+  s = applyEvent(s, subEnd("1", [{ id: 1, name: "a", status: "queued" }], false, "create", 123_456));
+  assert.equal(s.subtasksUpdatedAt, 123_456, "create stamps the activity clock (the sessionless expire source)");
+  // a list result carries the file's (unchanged) updatedAt — still mirrored
+  s = applyEvent(s, subEnd("2", [{ id: 1, name: "a", status: "queued" }], false, "list", 123_456));
+  assert.equal(s.subtasksUpdatedAt, 123_456);
+  // absent updatedAt on a LIST (older/custom tool) → the stamp is left
+  // alone (a read is not activity — audit F1)
+  s = applyEvent(s, subEnd("3", [{ id: 1, name: "a", status: "done" }], false, "list"));
+  assert.equal(s.subtasksUpdatedAt, 123_456, "a list without updatedAt does not clobber the stamp");
+  // audit A3: absent updatedAt on ACTIVITY (create/mark) → the stamp
+  // falls back to the receipt time, so the settle window starts NOW
+  // (before the fix the field kept the old stamp and a fresh legacy list
+  // died on the next poll tick).
+  const before = Date.now();
+  s = applyEvent(s, subEnd("4", [{ id: 1, name: "a", status: "done" }], false, "mark"));
+  assert.ok(s.subtasksUpdatedAt >= before, `receipt time stamped: ${s.subtasksUpdatedAt}`);
+  assert.ok(s.subtasksUpdatedAt <= Date.now(), "receipt time is not in the future");
+});
+
+// ── the subtasks expiry poller's tick (the F1b self-heal) ──────────────────
+
+const settled = [
+  { id: 1, name: "a", status: "done" as const },
+  { id: 2, name: "b", status: "done" as const },
+];
+
+test("subtasksPollTick: no push while the state and the file agree (no 5s churn)", () => {
+  const t0 = 1_000_000;
+  const file = { items: settled, updatedAt: t0 };
+  const state = { subtasks: settled, subtasksExpired: false, subtasksUpdatedAt: t0 };
+  const r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ ...file, rev: 0 }), now: t0 + 10_000, staleMs: 90_000 });
+  assert.equal(r.push, false);
+});
+
+test("subtasksPollTick: re-expiry (audit F1b) — an out-of-band un-expire self-heals", () => {
+  // The exact pin sequence from the audit: settled file, the poller
+  // expired the display, then applyEvent un-expired it (a `list` call
+  // from an older tool without the action tag, or any flip). The OLD
+  // signature folded `expired` in, so the poller saw its own last
+  // signature and never re-expired — the display stuck FOREVER.
+  const t0 = 1_000_000;
+  const file = { items: settled, updatedAt: t0 };
+  let state = { subtasks: settled, subtasksExpired: false, subtasksUpdatedAt: t0 };
+  let sig: string | null = null;
+
+  // tick 1: fresh settle window → push the file's view (expired=false)
+  let r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 10_000, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  sig = r.sig;
+
+  // the window elapses → tick pushes expired=true (display: none)
+  r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 90_001, staleMs: 90_000 });
+  assert.equal(r.push, true, "the expiry flip pushes");
+  state = { ...state, subtasksExpired: true };
+  sig = r.sig;
+
+  // applyEvent un-expires out-of-band (the pin trigger)
+  state = { ...state, subtasksExpired: false };
+
+  // the NEXT tick must re-push the file's view (expired=true) — this is
+  // the self-heal; the old signature-based check no-oped here forever.
+  r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 95_000, staleMs: 90_000 });
+  assert.equal(r.push, true, "disagreement on the derived flag re-pushes (self-heal)");
+  assert.equal(r.subtasksExpired, true, "the file's view wins");
+  state = { ...state, subtasksExpired: r.subtasksExpired };
+
+  // and then it settles: no further pushes while they agree
+  r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 100_000, staleMs: 90_000 });
+  assert.equal(r.push, false, "agreement → quiet");
+});
+
+test("subtasksPollTick: a file change (another process) is mirrored", () => {
+  const t0 = 1_000_000;
+  const state = { subtasks: settled, subtasksExpired: true, subtasksUpdatedAt: t0 };
+  const file = { items: [{ id: 1, name: "a", status: "in-progress" as const }], updatedAt: t0 + 5_000 };
+  const r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ items: settled, updatedAt: t0 }), now: t0 + 6_000, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasks[0]!.status, "in-progress");
+  assert.equal(r.subtasksExpired, false, "a fresh live item un-expires the display");
+});
+
+test("subtasksPollTick: sessionless (no file) expires from the state's own stamp (audit F3)", () => {
+  const t0 = 1_000_000;
+  // settled in-memory list, quiet past the window → expire
+  let state: SubtasksPollTick = { subtasks: settled, subtasksExpired: false, subtasksUpdatedAt: t0 };
+  let r = subtasksPollTick({ state, file: null, lastSig: null, now: t0 + 90_001, staleMs: 90_000 });
+  assert.equal(r.push, true, "the sessionless list settles to none too");
+  assert.equal(r.subtasksExpired, true);
+  assert.equal(r.subtasks, settled, "the list itself is untouched");
+
+  // live + armed (this run's own workstream) → exempt (a long tool call
+  // between marks must not blank the field)
+  state = { subtasks: [{ id: 1, name: "a", status: "in-progress" as const }], subtasksExpired: false, subtasksUpdatedAt: t0, busyArmed: true };
+  r = subtasksPollTick({ state, file: null, lastSig: null, now: t0 + 999_999, staleMs: 90_000 });
+  assert.equal(r.push, false, "live + armed never expires");
+
+  // live + idle (abandoned) → expires on the same window (F2 sessionless)
+  r = subtasksPollTick({ state: { ...state, busyArmed: false }, file: null, lastSig: null, now: t0 + 999_999, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasksExpired, true);
+
+  // already expired → quiet (no repeated push)
+  state = { ...state, subtasksExpired: true };
+  r = subtasksPollTick({ state: { ...state, busyArmed: false }, file: null, lastSig: null, now: t0 + 999_999, staleMs: 90_000 });
+  assert.equal(r.push, false);
+});
+
+test("subtasksExpired: the ARMED exemption replaces the sticky flag (audit F1)", () => {
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const t0 = 1_000_000;
+  // armed (the in-flight run owns the activity) → protected however old
+  assert.equal(subtasksExpired(live, t0, t0 + 10_000, 90_000, true), false);
+  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000, true), false);
+  // NOT armed (a busy-but-unrelated run, or idle) → the deadline rules,
+  // regardless of what the display flag currently says — nothing sticky
+  assert.equal(subtasksExpired(live, t0, t0 + 90_001, 90_000, false), true);
+  assert.equal(subtasksExpired(live, t0, t0 + 999_999_999, 90_000, false), true);
+});
+
+test("subtasksBusyArmed: the exemption belongs to the activity's own run (audit F1)", () => {
+  const t0 = 1_000_000;
+  // idle → never armed
+  assert.equal(subtasksBusyArmed({ busy: false, runStartedAt: t0, subtasksArmedRun: t0 }), false);
+  // busy but the list was never armed → no exemption
+  assert.equal(subtasksBusyArmed({ busy: true, runStartedAt: t0, subtasksArmedRun: null }), false);
+  // busy, armed by a PREVIOUS run → no exemption (the F1 hole)
+  assert.equal(subtasksBusyArmed({ busy: true, runStartedAt: t0 + 500, subtasksArmedRun: t0 }), false);
+  // busy and armed for THIS run → exempt
+  assert.equal(subtasksBusyArmed({ busy: true, runStartedAt: t0, subtasksArmedRun: t0 }), true);
+  // idle run (runStartedAt null) never matches the never-armed null
+  assert.equal(subtasksBusyArmed({ busy: true, runStartedAt: null, subtasksArmedRun: null }), false);
+});
+
+// ── audit F1b: the arm is bound to the armed SNAPSHOT ───────────────────────
+
+test("applyEvent: create/mark arms the snapshot identity (audit F1b)", () => {
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  let s = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", live, false, "create", t0),
+  );
+  assert.equal(s.subtasksArmedSig, subtaskItemsSig(live), "the arm carries the produced snapshot's identity");
+  assert.equal(subtasksBusyArmed(s, live), true, "the armed snapshot is exempt");
+  assert.equal(subtasksBusyArmed(s, [{ id: 1, name: "foreign", status: "in-progress" }]), false, "a foreign list is NOT exempt");
+  // agent_start clears the identity with the run arm.
+  const started = applyEvent({ ...s, busy: false }, { type: "agent_start" } as AgentEvent);
+  assert.equal(started.subtasksArmedSig, "", "agent_start clears the armed identity");
+});
+
+test("subtasksBusyArmed: the snapshot check is additive (legacy states without an identity)", () => {
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  // armed run, no identity (hand-built/legacy) → the run-only check applies
+  const legacy = { busy: true, runStartedAt: t0, subtasksArmedRun: t0 };
+  assert.equal(subtasksBusyArmed(legacy, live), true, "no identity → no snapshot constraint");
+  // identity armed but empty string → same ("" = never armed)
+  assert.equal(subtasksBusyArmed({ ...legacy, subtasksArmedSig: "" }, live), true);
+  // identity armed and matching / mismatching
+  assert.equal(subtasksBusyArmed({ ...legacy, subtasksArmedSig: subtaskItemsSig(live) }, live), true);
+  assert.equal(subtasksBusyArmed({ ...legacy, subtasksArmedSig: subtaskItemsSig(live) }, settled), false);
+  // not busy → never exempt, identity or not
+  assert.equal(subtasksBusyArmed({ ...legacy, busy: false }, live), false);
+});
+
+test("subtaskItemsSig: content identity, order-sensitive, stamp-independent", () => {
+  const a: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const a2: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "a", status: "done" }];
+  const swapped: SubtaskInfo[] = [{ id: 2, name: "a", status: "in-progress" }, ...a];
+  assert.equal(subtaskItemsSig(a), subtaskItemsSig(a2), "same content → same sig");
+  assert.notEqual(subtaskItemsSig(a), subtaskItemsSig(b), "status change → different sig");
+  assert.notEqual(subtaskItemsSig(a), subtaskItemsSig(swapped), "identity/order change → different sig");
+});
+
+test("subtasksPollTick: an external replacement does NOT inherit the run's exemption (audit F1b)", () => {
+  const t0 = 1_000_000;
+  const mine: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const foreign: SubtaskInfo[] = [{ id: 1, name: "external abandoned work", status: "in-progress" }];
+  // Run A created `mine` → armed (run + identity).
+  let state: SubtasksPollTick = {
+    subtasks: mine,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(mine),
+  };
+  // tick 1: the file was replaced by a FRESH foreign list → mirrored, shown.
+  const file = { items: foreign, updatedAt: t0 + 1_000 };
+  let r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ items: mine, updatedAt: t0, rev: 0 }), now: t0 + 2_000, staleMs: 90_000 });
+  assert.equal(r.push, true, "the replacement is mirrored");
+  assert.equal(r.subtasksExpired, false, "fresh → shown (the deadline rules, not the exemption)");
+  state = { ...state, subtasks: r.subtasks, subtasksExpired: r.subtasksExpired, subtasksUpdatedAt: r.subtasksUpdatedAt };
+  const sig = r.sig;
+  // tick 2 (much later, run A STILL in flight and armed for its own
+  // snapshot): the stale foreign list must expire — no inheritance.
+  r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 500_000, staleMs: 90_000 });
+  assert.equal(r.push, true, "the stale foreign list expires despite the armed run");
+  assert.equal(r.subtasksExpired, true);
+  // tick 3: stays expired (the mirror did not re-grant the exemption).
+  state = { ...state, subtasksExpired: true };
+  r = subtasksPollTick({ state, file, lastSig: r.sig, now: t0 + 505_000, staleMs: 90_000 });
+  assert.equal(r.push, false, "no churn, no resurrection");
+  assert.equal(r.subtasksExpired, true);
+});
+
+test("subtasksPollTick: the owning run's own snapshot keeps the exemption (audit F1b, no regression)", () => {
+  const t0 = 1_000_000;
+  const mine: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const file = { items: mine, updatedAt: t0 };
+  const state: SubtasksPollTick = {
+    subtasks: mine,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(mine),
+  };
+  const r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ ...file, rev: 0 }), now: t0 + 999_999, staleMs: 90_000 });
+  assert.equal(r.push, false, "identity match + armed → the long tool call keeps the field alive");
+  assert.equal(r.subtasksExpired, false);
+});
+
+test("subtasksPollTick: sessionless foreign state honors the identity the same way (audit F1b)", () => {
+  const t0 = 1_000_000;
+  const foreign: SubtaskInfo[] = [{ id: 1, name: "foreign", status: "in-progress" }];
+  // The in-memory list does NOT match the armed identity (e.g. a replay
+  // or hand-built state) → the deadline rules.
+  const state: SubtasksPollTick = {
+    subtasks: foreign,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig([{ id: 9, name: "other", status: "done" }]),
+  };
+  let r = subtasksPollTick({ state, file: null, lastSig: null, now: t0 + 90_001, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasksExpired, true, "identity mismatch → no sessionless exemption either");
+  // identity match → exempt.
+  r = subtasksPollTick({
+    state: { ...state, subtasksArmedSig: subtaskItemsSig(foreign) },
+    file: null, lastSig: null, now: t0 + 999_999, staleMs: 90_000,
+  });
+  assert.equal(r.push, false);
+  assert.equal(r.subtasksExpired, false);
+});
+
+// ── rev model (audit F1c/F1-legacy/F2): the arm is bound to the armed WRITE
+//    REVISION — content and stamps are not ownership, and a newer-rev write
+//    DISARMS ──────────────────────────────────────────────────────────────────
+
+test("applyEvent: create/mark arms the write rev (rev model)", () => {
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", live, false, "create", t0, 5),
+  );
+  assert.equal(s.subtasksArmedRev, 5, "the arm carries the producing write's rev");
+  assert.equal(s.subtasksRev, 5, "the mirrored list's rev moves with the mirror");
+  assert.equal(s.subtasksUpdatedAt, t0, "updatedAt stays the expiry clock");
+  assert.equal(subtasksBusyArmed(s, live, 5), true, "the armed write (rev match) is exempt");
+  // Same content, a DIFFERENT rev (another process rewrote the same items —
+  // even in the same millisecond): not exempt — only the armed write is.
+  assert.equal(subtasksBusyArmed(s, live, 6), false, "same content, foreign rev → not exempt");
+  assert.equal(subtasksBusyArmed(s, live, 4), false, "older rev → not the armed write");
+  assert.equal(subtasksBusyArmed(s, live, 0), false, "a rev-less (legacy) snapshot vs a rev arm → not exempt");
+  // A legacy content-only arm (rev 0 — a custom/legacy result without
+  // details.rev) keeps the content check: a matching list is exempt
+  // whatever its stamp (the F1-legacy fix — the receipt time is never an
+  // identity), a foreign list still is not (F1b).
+  const legacy = { busy: true, runStartedAt: t0, subtasksArmedRun: t0, subtasksArmedSig: subtaskItemsSig(live), subtasksArmedRev: 0 };
+  assert.equal(subtasksBusyArmed(legacy, live, 12_345), true, "rev-0 arm → content match, stamp/rev unconstrained");
+  assert.equal(subtasksBusyArmed(legacy, [{ id: 1, name: "foreign", status: "in-progress" }], 0), false, "rev-0 arm still rejects a foreign list");
+  // agent_start clears the rev arm with the rest of the arm.
+  const started = applyEvent(s, { type: "agent_start" } as AgentEvent);
+  assert.equal(started.subtasksArmedRev, 0, "agent_start clears the armed rev");
+});
+
+test("applyEvent: a legacy result (no rev) arms rev 0 and mirrors rev 0 (rev model, F1-legacy)", () => {
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const before = Date.now();
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", live, false, "create"), // no updatedAt, no rev
+  );
+  const after = Date.now();
+  assert.equal(s.subtasksArmedRev, 0, "no details.rev → arm with NO write identity");
+  assert.equal(s.subtasksArmedSig, subtaskItemsSig(live), "the content signature is the fallback identity");
+  assert.ok(s.subtasksUpdatedAt >= before && s.subtasksUpdatedAt <= after, "the receipt time is the CLOCK only");
+  assert.equal(s.subtasksRev, 0, "the mirrored list has no write identity either");
+});
+
+test("subtasksPollTick: a same-content external rewrite (newer rev) disarms the exemption (rev model, F2)", () => {
+  const t0 = 1_000_000;
+  const mine: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const state: SubtasksPollTick = {
+    subtasks: mine,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(mine),
+    subtasksArmedRev: 5,
+    subtasksRev: 5,
+  };
+  // Another process rewrites the SAME items (rev 6 — the same-content
+  // same-millisecond case Date.now could not separate) while the run is
+  // in flight: fresh → still shown (deadline rules), but the tick reports
+  // the arm is over — the exemption belongs to rev 5, not to the content.
+  const file = { items: mine, updatedAt: t0 + 1_000, rev: 6 };
+  const r = subtasksPollTick({
+    state,
+    file,
+    lastSig: JSON.stringify({ items: mine, updatedAt: t0, rev: 5 }),
+    now: t0 + 2_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.disarm, true, "a write with a newer rev supersedes the armed write → disarm");
+  assert.equal(r.rev, 6, "the mirrored rev follows the file");
+  assert.equal(r.subtasksExpired, false, "fresh → shown (deadline, not exemption)");
+  // After the driver applies the disarm, the SAME file at deadline time
+  // expires — the content match no longer rescues it.
+  const after: SubtasksPollTick = {
+    subtasks: mine,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0 + 1_000,
+    busyArmed: false, // disarmed
+    subtasksRev: 6,
+  };
+  const r2 = subtasksPollTick({ state: after, file, lastSig: JSON.stringify({ ...file, rev: 6 }), now: t0 + 92_000, staleMs: 90_000 });
+  assert.equal(r2.push, true);
+  assert.equal(r2.subtasksExpired, true, "post-disarm the deadline rules alone decide");
+});
+
+test("subtasksPollTick: an A→B→A stale restore cannot regain the exemption (rev model)", () => {
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  // Run A creates A at rev 5 (arms run + rev via the real applyEvent path).
+  let run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  const snapshotOf = (st: TuiState): SubtasksPollTick => ({
+    subtasks: st.subtasks,
+    subtasksExpired: st.subtasksExpired,
+    subtasksUpdatedAt: st.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(st),
+    subtasksArmedSig: st.subtasksArmedSig,
+    subtasksArmedRev: st.subtasksArmedRev,
+    subtasksRev: st.subtasksRev,
+  });
+  let state = snapshotOf(run);
+  // tick 1: another process replaces the list with B (rev 6 > armed rev 5).
+  const fileB = { items: b, updatedAt: t0 + 1_000, rev: 6 };
+  let r = subtasksPollTick({
+    state,
+    file: fileB,
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 1_001,
+    staleMs: 90_000,
+  });
+  assert.equal(r.disarm, true, "the foreign B write (newer rev) disarms the arm");
+  // The driver applies the disarm (clears the three arm fields) and
+  // mirrors B. The run is still busy, but busyArmed is the driver's own
+  // computation — with the arm cleared it is false.
+  run = { ...run, subtasks: r.subtasks, subtasksExpired: r.subtasksExpired, subtasksUpdatedAt: r.subtasksUpdatedAt, subtasksRev: r.rev,
+          subtasksArmedRun: null, subtasksArmedSig: "", subtasksArmedRev: 0 };
+  assert.equal(subtasksBusyArmed(run), false, "disarmed: no exemption even while busy");
+  state = snapshotOf(run);
+  // tick 2: a stale restore puts A's CONTENT back with a newer rev
+  // (A→B→A, rev 7). The content matches the old arm — but the arm is
+  // gone, so once past the window it must expire (no resurrection).
+  const fileA2 = { items: a, updatedAt: t0 + 5_000, rev: 7 };
+  r = subtasksPollTick({
+    state,
+    file: fileA2,
+    lastSig: JSON.stringify({ ...fileB, rev: 6 }),
+    now: t0 + 96_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasksExpired, true, "A→B→A restore: content match without an arm → expired");
+});
+
+test("subtasksPollTick: the armed write never disarms; an older-rev snapshot is skipped, not mirrored (rev model, F3)", () => {
+  const t0 = 1_000_000;
+  const mine: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const state: SubtasksPollTick = {
+    subtasks: mine,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(mine),
+    subtasksArmedRev: 5,
+    subtasksRev: 5,
+  };
+  // The owning run's own snapshot (equal rev): exempt, no disarm — the
+  // long-tool-call case stays protected.
+  const file = { items: mine, updatedAt: t0, rev: 5 };
+  const r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ ...file, rev: 5 }), now: t0 + 999_999, staleMs: 90_000 });
+  assert.equal(r.disarm, false, "equal rev → not a foreign write");
+  assert.equal(r.push, false);
+  assert.equal(r.subtasksExpired, false);
+  // An OLDER-rev snapshot while the owning run is armed (a lagging read
+  // racing the armed write, or a rollback): NOT mirrored (the display
+  // keeps the owned snapshot), NOT disarmed (a lagging observation cannot
+  // supersede the armed write — the arm survives for the real write).
+  const restore = subtasksPollTick({
+    state,
+    file: { items: mine, updatedAt: t0 - 1_000, rev: 4 },
+    lastSig: "stale",
+    now: t0 + 999_999,
+    staleMs: 90_000,
+  });
+  assert.equal(restore.disarm, false, "an older rev cannot supersede the armed write");
+  assert.equal(restore.push, false, "the lagging snapshot is never accepted into state (F3)");
+  assert.equal(restore.subtasksExpired, false, "the armed view survives the lagging read");
+});
+
+test("subtasksPollTick: a foreign write in the armed millisecond (newer rev) disarms; A→B→A cannot regain (rev model, F2)", () => {
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  // Run A creates A at rev 5. A foreign B written in the SAME millisecond
+  // (same updatedAt — invisible to the stamp model) carries rev 6: the rev
+  // model sees it as the newer write it is → expire on deadline + disarm.
+  let run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  const snapshotOf = (st: TuiState): SubtasksPollTick => ({
+    subtasks: st.subtasks,
+    subtasksExpired: st.subtasksExpired,
+    subtasksUpdatedAt: st.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(st),
+    subtasksArmedSig: st.subtasksArmedSig,
+    subtasksArmedRev: st.subtasksArmedRev,
+    subtasksRev: st.subtasksRev,
+  });
+  let state = snapshotOf(run);
+  const r1 = subtasksPollTick({
+    state,
+    file: { items: b, updatedAt: t0, rev: 6 },
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 200_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r1.subtasksExpired, true, "the same-millisecond foreign write expires (no exemption)");
+  assert.equal(r1.disarm, true, "the newer-rev foreign write disarms the arm");
+  // The driver applies the disarm…
+  run = { ...run, subtasksArmedRun: null, subtasksArmedSig: "", subtasksArmedRev: 0 };
+  state = snapshotOf(run);
+  // …and a subsequent A→B→A restore (any rev) cannot regain the
+  // exemption: the arm is gone, the deadline rules decide.
+  const r2 = subtasksPollTick({
+    state,
+    file: { items: a, updatedAt: t0 + 5_000, rev: 7 },
+    lastSig: JSON.stringify({ items: b, updatedAt: t0, rev: 6 }),
+    now: t0 + 210_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r2.subtasksExpired, true, "A→B→A restore after the disarm → expired");
+});
+
+test("subtasksPollTick: a strictly-newer rev snapshot disarms (foreign rewrite, rev model)", () => {
+  const t0 = 1_000_000;
+  const mine: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", mine, false, "create", t0, 5),
+  );
+  const state: SubtasksPollTick = {
+    subtasks: run.subtasks,
+    subtasksExpired: run.subtasksExpired,
+    subtasksUpdatedAt: run.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(run),
+    subtasksArmedSig: run.subtasksArmedSig,
+    subtasksArmedRev: run.subtasksArmedRev,
+    subtasksRev: run.subtasksRev,
+  };
+  const r = subtasksPollTick({
+    state,
+    file: { items: mine, updatedAt: t0 + 1_000, rev: 6 },
+    lastSig: JSON.stringify({ items: mine, updatedAt: t0, rev: 5 }),
+    now: t0 + 2_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, false, "fresh → shown (deadline rules)");
+  assert.equal(r.disarm, true, "a newer-rev same-content write is a foreign rewrite → disarm");
+});
+
+// ── audit cycle-1 finding 3: OBSERVATIONAL snapshot ingress (applyEvent
+//    `list` results) goes through the same ownership reconciliation as the
+//    poller — older observations are skipped, accepted newer ones disarm ────
+
+test("applyEvent: an older observational list (rev < armed) is NOT accepted while armed (audit cycle-1 F3)", () => {
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  let run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  // A `list` result carrying an OLDER snapshot (rev 4 — a read that raced
+  // the armed write, or a rollback read): the display keeps the owned
+  // snapshot, the arm survives, and the older content is never staged for
+  // an "exact restore" to revive.
+  run = applyEvent(run, toolStart("t2", "subtask", { action: "list" }));
+  run = applyEvent(run, subEnd("t2", b, false, "list", t0 - 5_000, 4));
+  assert.deepEqual(run.subtasks, a, "the older observation is not mirrored");
+  assert.equal(run.subtasksRev, 5, "the mirrored rev keeps the armed write's");
+  assert.equal(run.subtasksArmedRev, 5, "the arm survives the older observation");
+  assert.equal(run.subtasksArmedRun, t0, "the run arm survives too");
+  assert.equal(run.subtasksUpdatedAt, t0, "the clock is not moved by the rejected observation");
+  // Tool-completion bookkeeping is independent: the tool line still closed.
+  const toolItem = run.items.find((it) => it.kind === "tool" && it.id === "t2");
+  assert.ok(toolItem !== undefined && toolItem.kind === "tool" && toolItem.running === false, "the tool item still completes");
+  // And the poller's exact-restore path stays correct (the armed write is
+  // exempt) while the rejected snapshot never entered the view:
+  const state: SubtasksPollTick = {
+    subtasks: run.subtasks, subtasksExpired: run.subtasksExpired, subtasksUpdatedAt: run.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(run), subtasksArmedSig: run.subtasksArmedSig,
+    subtasksArmedRev: run.subtasksArmedRev, subtasksRev: run.subtasksRev,
+  };
+  const r = subtasksPollTick({
+    state, file: { items: a, updatedAt: t0, rev: 5 },
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 300_000, staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, false, "the armed write stays exempt (no stale exemption was revived — the older snapshot was never accepted)");
+});
+
+test("applyEvent: a newer observational list (rev > armed) is accepted AND disarms the arm (audit cycle-1 F3)", () => {
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  let run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  // A `list` result carrying a NEWER committed write (rev 6): the write
+  // superseded the armed one — accept the snapshot AND clear the arm (the
+  // poller's disarm rule), so a later exact restore of the armed content
+  // cannot revive the exemption.
+  run = applyEvent(run, subEnd("t2", b, false, "list", t0 + 1_000, 6));
+  assert.deepEqual(run.subtasks, b, "the newer snapshot is mirrored");
+  assert.equal(run.subtasksRev, 6, "the mirrored rev follows the newer write");
+  assert.equal(run.subtasksArmedRun, null, "the superseded arm is cleared");
+  assert.equal(run.subtasksArmedRev, 0, "the rev arm is cleared");
+  assert.equal(run.subtasksArmedSig, "", "the sig arm is cleared");
+  // The exact restore of A's CONTENT (rev 5 — older than the newest write)
+  // after the window: expired, no resurrection (the arm is gone).
+  const state: SubtasksPollTick = {
+    subtasks: run.subtasks, subtasksExpired: run.subtasksExpired, subtasksUpdatedAt: run.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(run), subtasksArmedSig: run.subtasksArmedSig,
+    subtasksArmedRev: run.subtasksArmedRev, subtasksRev: run.subtasksRev,
+  };
+  const r = subtasksPollTick({
+    state, file: { items: a, updatedAt: t0, rev: 5 },
+    lastSig: JSON.stringify({ items: b, updatedAt: t0 + 1_000, rev: 6 }),
+    now: t0 + 200_000, staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, true, "post-disarm the restored list follows the deadline (no revival)");
+  assert.equal(r.disarm, false, "nothing left to disarm");
+});
+
+test("applyEvent: the observational reconciliation only gates a live positive-rev arm (no regressions)", () => {
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  // (a) equal rev (the armed write itself re-observed via list): mirrored,
+  //     arm intact.
+  let run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  run = applyEvent(run, subEnd("t2", a, false, "list", t0, 5));
+  assert.deepEqual(run.subtasks, a);
+  assert.equal(run.subtasksArmedRev, 5, "the armed write's own observation keeps the arm");
+  // (b) NOT armed (idle): a list is a plain mirror, no reconciliation.
+  let idle = applyEvent(makeInitialState("m"), subEnd("t1", b, false, "list", t0, 3));
+  assert.deepEqual(idle.subtasks, b, "unarmed list mirrors normally");
+  assert.equal(idle.subtasksRev, 3);
+  // (c) legacy rev-0 arm (a legacy result armed by content): revs cannot
+  //     order writes → the list mirrors normally (F1b semantics kept).
+  let legacy = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create"), // no rev → rev-0 arm
+  );
+  legacy = applyEvent(legacy, subEnd("t2", b, false, "list", t0 + 1_000));
+  assert.deepEqual(legacy.subtasks, b, "a rev-less arm cannot order observations");
+  assert.equal(legacy.subtasksArmedRun, t0, "the rev-0 arm is not disarmed by rev");
+  // (d) a different run's arm (subtasksArmedRun ≠ runStartedAt): no gate —
+  //     the observation belongs to the current run's view.
+  let other = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 + 999, subtasksArmedRun: t0, subtasksArmedRev: 5, subtasksArmedSig: subtaskItemsSig(a), subtasks: a, subtasksRev: 5 },
+    subEnd("t1", b, false, "list", t0 + 1_000, 4),
+  );
+  assert.deepEqual(other.subtasks, b, "an arm belonging to another run does not gate this run's mirror");
+});
+
+// ── audit cycle-1 finding 4: the lagging-read skip must NOT freeze the
+//    expiry of the RETAINED view — settled lists expire even while the
+//    owning run is busy and the file keeps reading old ──────────────────────
+
+test("subtasksPollTick: a settled retained list expires during a lagging file read (audit cycle-1 F4)", () => {
+  const t0 = 1_000_000;
+  const doneList: SubtaskInfo[] = [{ id: 1, name: "mine", status: "done" }];
+  // State: a SETTLED list mirrored from the armed write (rev 5), clock at
+  // 1, not yet expired; the owning run is busy and armed (a long tool
+  // call). The file lags behind (rev 4 — rollback / racing read).
+  const state: SubtasksPollTick = {
+    subtasks: doneList,
+    subtasksExpired: false,
+    subtasksUpdatedAt: 1,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(doneList),
+    subtasksArmedRev: 5,
+    subtasksRev: 5,
+  };
+  const r = subtasksPollTick({
+    state,
+    file: { items: [{ id: 1, name: "older rollback", status: "in-progress" }], updatedAt: 1, rev: 4 },
+    lastSig: "lagging",
+    now: 1_000_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, true, "a settled list follows the quiet window even under the lagging-read skip");
+  assert.equal(r.push, true, "the expiry-only flip is pushed (self-heal, not frozen)");
+  assert.equal(r.disarm, false, "the lagging file still cannot supersede the armed write");
+  assert.deepEqual(r.subtasks, doneList, "the older file snapshot is NOT mirrored");
+  assert.equal(r.rev, 5, "the mirrored rev keeps the armed write's");
+  // Once expired, agreement → no churn.
+  const r2 = subtasksPollTick({
+    state: { ...state, subtasksExpired: true },
+    file: { items: [{ id: 1, name: "older rollback", status: "in-progress" }], updatedAt: 1, rev: 4 },
+    lastSig: "lagging",
+    now: 1_001_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r2.push, false, "agreement → quiet");
+});
+
+test("subtasksPollTick: the lagging-read skip still protects a LIVE retained list (F4, no over-expiry)", () => {
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const state: SubtasksPollTick = {
+    subtasks: live,
+    subtasksExpired: false,
+    subtasksUpdatedAt: t0,
+    busyArmed: true,
+    subtasksArmedSig: subtaskItemsSig(live),
+    subtasksArmedRev: 5,
+    subtasksRev: 5,
+  };
+  // Same lagging file, same long tool call — but the retained list is
+  // LIVE and owned (rev 5 = armed): the exemption applies, nothing moves.
+  const r = subtasksPollTick({
+    state,
+    file: { items: [{ id: 1, name: "older rollback", status: "done" }], updatedAt: 1, rev: 4 },
+    lastSig: "lagging",
+    now: t0 + 1_000_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.push, false, "the owned live list is untouched by the lagging read");
+  assert.equal(r.subtasksExpired, false, "live + owned → exempt (the long tool call stays protected)");
+  assert.equal(r.disarm, false);
+});
+
+// ── DESIGN.md "Acceptance" — the three findings, end-to-end through the
+//    real applyEvent path + the driver's tick ────────────────────────────────
+
+test("acceptance F1-legacy: a legacy file-backed result keeps the owning run's live list exempt (rev model)", () => {
+  // A custom/legacy tool result carries NO details.updatedAt/rev: the TUI
+  // stamps the RECEIPT time into the expiry clock and arms rev 0 (content
+  // identity). The on-disk file's updatedAt is a DIFFERENT number (written
+  // earlier by the tool) — under the old stamp model exact stamp matching
+  // rejected the owning run's own live list during a long tool call. The
+  // rev model: the clock never identifies the write, so the content-
+  // matching live list stays exempt however far its updatedAt drifted.
+  const t0 = 1_000_000;
+  const live: SubtaskInfo[] = [{ id: 1, name: "a", status: "in-progress" }];
+  const before = Date.now();
+  // Legacy result: no updatedAt, no rev → arms rev 0 + content sig, clock =
+  // receipt time (≫ the file's own write time).
+  const run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", live, false, "create"),
+  );
+  assert.equal(run.subtasksArmedRev, 0, "legacy result arms with NO write identity");
+  assert.ok(run.subtasksUpdatedAt >= before, "the receipt time is the clock");
+  // The file the tool actually wrote: same content, DIFFERENT (older)
+  // updatedAt, no rev (legacy file). A long tool call: the deadline is
+  // long past, the run is still in flight.
+  const file = { items: live, updatedAt: t0 - 50_000 };
+  const state: SubtasksPollTick = {
+    subtasks: run.subtasks,
+    subtasksExpired: run.subtasksExpired,
+    subtasksUpdatedAt: run.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(run),
+    subtasksArmedSig: run.subtasksArmedSig,
+    subtasksArmedRev: run.subtasksArmedRev,
+    subtasksRev: run.subtasksRev,
+  };
+  // Tick 1: the poller syncs the expiry clock to the file's (pre-existing
+  // behavior — the file is the clock's truth) but the list must NOT
+  // expire: the exemption is content-based (rev-0 arm), so the receipt-
+  // time/file-time divergence no longer rejects the owning run's own list.
+  let r = subtasksPollTick({
+    state,
+    file,
+    lastSig: JSON.stringify({ ...file, rev: 0 }),
+    now: run.subtasksUpdatedAt + 90_001,
+    staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, false, "the field survives the long tool call (no stamp-matching rejection)");
+  assert.equal(r.disarm, false, "a legacy rev-0 arm cannot be ordered/disarmed by rev");
+  // Tick 2 (driver applied tick 1's mirror): quiet, still not expired.
+  r = subtasksPollTick({
+    state: { ...state, subtasksUpdatedAt: file.updatedAt },
+    file,
+    lastSig: r.sig,
+    now: run.subtasksUpdatedAt + 95_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r.push, false, "agreement → no churn");
+  assert.equal(r.subtasksExpired, false, "still exempt");
+});
+
+test("acceptance F2: identical writes have distinct revs — the poller disarms on the second and the list follows the deadline", async () => {
+  // Two identical writes stamped in the SAME millisecond (Date.now
+  // collision): the tool gives them rev R and R+1 (the real tool's
+  // lock-serialized allocation is covered in subtask-tool.test.ts; here
+  // the revs are constructed fixtures for the poller's ownership rule).
+  // Arming at the first, the poller observing the second (same
+  // content, rev+1) DISARMS, and the list then follows the deadline rules
+  // while the run stays busy.
+  const t0 = 1_000_000;
+  const same: SubtaskInfo[] = [{ id: 1, name: "same", status: "in-progress" }];
+  // Arm at rev 5 (the run's own first write).
+  const run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", same, false, "create", t0, 5),
+  );
+  // A foreign identical rewrite in the SAME millisecond — rev 6 (what the
+  // tool's lock-serialized bump guarantees for any second write).
+  const file = { items: same, updatedAt: t0, rev: 6 };
+  const state: SubtasksPollTick = {
+    subtasks: run.subtasks,
+    subtasksExpired: run.subtasksExpired,
+    subtasksUpdatedAt: run.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(run),
+    subtasksArmedSig: run.subtasksArmedSig,
+    subtasksArmedRev: run.subtasksArmedRev,
+    subtasksRev: run.subtasksRev,
+  };
+  let r = subtasksPollTick({
+    state, file,
+    lastSig: JSON.stringify({ items: same, updatedAt: t0, rev: 5 }),
+    now: t0 + 1, staleMs: 90_000,
+  });
+  assert.equal(r.disarm, true, "the same-content same-ms rewrite (rev+1) disarms");
+  // Driver applies the disarm; past the window the list expires (the run
+  // is STILL busy — no resurrection).
+  const after: SubtasksPollTick = {
+    subtasks: same, subtasksExpired: false, subtasksUpdatedAt: t0,
+    busyArmed: false, subtasksRev: 6,
+  };
+  r = subtasksPollTick({ state: after, file, lastSig: JSON.stringify({ ...file, rev: 6 }), now: t0 + 92_000, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasksExpired, true, "post-disarm the list follows the deadline");
+});
+
+test("acceptance F3: older replacement is skipped (not mirrored, not disarmed); exact restore re-exempts; newer restore disarms", () => {
+  // Armed at rev 5. The file rolls back to rev 4 with DIFFERENT content →
+  // the tick must NOT mirror it and must NOT disarm (the display keeps the
+  // owned snapshot, the arm survives for the real write). A later exact
+  // restore to rev 5 with the armed content is genuinely the armed write
+  // again → exempt (correct). A restore to rev 6 is a foreign write →
+  // NOT exempt, and disarms.
+  const t0 = 1_000_000;
+  const a: SubtaskInfo[] = [{ id: 1, name: "mine", status: "in-progress" }];
+  const b: SubtaskInfo[] = [{ id: 1, name: "other work", status: "in-progress" }];
+  const run = applyEvent(
+    { ...makeInitialState("m"), busy: true, runStartedAt: t0 },
+    subEnd("t1", a, false, "create", t0, 5),
+  );
+  const snapshotOf = (st: TuiState): SubtasksPollTick => ({
+    subtasks: st.subtasks,
+    subtasksExpired: st.subtasksExpired,
+    subtasksUpdatedAt: st.subtasksUpdatedAt,
+    busyArmed: subtasksBusyArmed(st),
+    subtasksArmedSig: st.subtasksArmedSig,
+    subtasksArmedRev: st.subtasksArmedRev,
+    subtasksRev: st.subtasksRev,
+  });
+  const state = snapshotOf(run);
+  // 1) rolled-back older replacement (rev 4, different content, old clock):
+  //    never accepted, arm survives.
+  const rolled = { items: b, updatedAt: t0 - 5_000, rev: 4 };
+  let r = subtasksPollTick({
+    state, file: rolled,
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 200_000, staleMs: 90_000,
+  });
+  assert.equal(r.push, false, "the older replacement is NOT mirrored");
+  assert.equal(r.disarm, false, "an older rev cannot supersede the armed write");
+  assert.equal(r.subtasksExpired, false, "the owned view survives");
+  // 2) exact restore to rev 5 with the armed content → exempt (it IS the
+  //    armed write — re-exempting is correct, no stale exemption revived
+  //    because the older snapshot was never accepted).
+  r = subtasksPollTick({
+    state, file: { items: a, updatedAt: t0, rev: 5 },
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 300_000, staleMs: 90_000,
+  });
+  assert.equal(r.subtasksExpired, false, "the exact restore (rev = armed) is the armed write → exempt");
+  assert.equal(r.disarm, false, "the armed write itself never disarms");
+  // 3) a restore carrying rev 6 (a foreign write at a newer rev) → NOT
+  //    exempt (deadline rules) and disarms. Fresh clock → still shown,
+  //    but on its own deadline, not on the exemption.
+  r = subtasksPollTick({
+    state, file: { items: a, updatedAt: t0 + 250_000, rev: 6 },
+    lastSig: JSON.stringify({ items: a, updatedAt: t0, rev: 5 }),
+    now: t0 + 250_001, staleMs: 90_000,
+  });
+  assert.equal(r.disarm, true, "rev > armed rev → supersede → disarm");
+  assert.equal(r.subtasksExpired, false, "fresh clock → still shown (deadline rules, not the exemption)");
+  // Past the window with the arm gone: expires, no resurrection.
+  const after: SubtasksPollTick = {
+    subtasks: a, subtasksExpired: false, subtasksUpdatedAt: t0 + 250_000,
+    busyArmed: false, subtasksRev: 6,
+  };
+  r = subtasksPollTick({ state: after, file: { items: a, updatedAt: t0 + 250_000, rev: 6 }, lastSig: JSON.stringify({ items: a, updatedAt: t0 + 250_000, rev: 6 }), now: t0 + 340_001, staleMs: 90_000 });
+  assert.equal(r.push, true);
+  assert.equal(r.subtasksExpired, true, "post-disarm the restored list follows the deadline");
+});
+
+test("subtasksPollTick: an unrelated busy run does not resurrect an abandoned list (audit F1, file-backed)", () => {
+  const t0 = 1_000_000;
+  const abandoned = [{ id: 1, name: "a", status: "in-progress" as const }];
+  const file = { items: abandoned, updatedAt: t0 };
+  const sig = JSON.stringify({ ...file, rev: 0 });
+  // The display expired while idle. A NEW unrelated run starts (busy,
+  // but NOT armed — no subtask activity of its own) → the field stays
+  // expired for the run's whole duration.
+  const state = { subtasks: abandoned, subtasksExpired: true, subtasksUpdatedAt: t0, busyArmed: false };
+  let r = subtasksPollTick({ state, file, lastSig: sig, now: t0 + 200_000, staleMs: 90_000 });
+  assert.equal(r.push, false, "busy-but-unrelated must not resurrect the display");
+  assert.equal(r.subtasksExpired, true, "the file's view is expired and stays expired");
+  // Real activity (a create/mark → applyEvent arms the exemption) → the
+  // run keeps the field alive.
+  const armed = { ...state, subtasksExpired: false, busyArmed: true };
+  r = subtasksPollTick({ state: armed, file, lastSig: sig, now: t0 + 200_000, staleMs: 90_000 });
+  assert.equal(r.push, false, "armed live exemption → quiet, still shown");
+  assert.equal(r.subtasksExpired, false, "the exemption protects the active workstream");
+});
+
+test("subtasksPollTick: an UNARMED busy run cannot exempt a newly-seen live list (audit F1 — the sticky-flag hole)", () => {
+  // The exact F1 scenario: an external live list appears mid-run (the
+  // poller never saw it; the display flag is false). The run did NOT do
+  // the subtask work (busyArmed false) → the deadline applies even
+  // though `busy` is true and the flag is false. The OLD signature
+  // (busy && !alreadyExpired) exempted this forever.
+  const t0 = 1_000_000;
+  const live = [{ id: 1, name: "a", status: "in-progress" as const }];
+  const file = { items: live, updatedAt: t0 };
+  const state = { subtasks: [], subtasksExpired: true, subtasksUpdatedAt: 0, busyArmed: false };
+  const r = subtasksPollTick({ state, file, lastSig: null, now: t0 + 200_000, staleMs: 90_000 });
+  assert.equal(r.push, true, "first observation pushes the file's view");
+  assert.equal(r.subtasksExpired, true, "busy alone (unarmed) does NOT exempt a foreign live list");
+});
+
+test("subtasksPollTick: same stamp, different displayed items → the file wins (audit A2)", () => {
+  const t0 = 1_000_000;
+  // The state shows an OLD list; the file holds a NEWER list written at
+  // the SAME millisecond (a same-ms write, or applyEvent's mirror racing
+  // a later file write). Neither the signature (lastSig tracks the file)
+  // nor the derived flags move — only the item comparison catches it.
+  const state = { subtasks: settled, subtasksExpired: false, subtasksUpdatedAt: t0 };
+  const file = { items: [{ id: 1, name: "a", status: "in-progress" as const }], updatedAt: t0 };
+  const r = subtasksPollTick({ state, file, lastSig: JSON.stringify({ ...file, rev: 0 }), now: t0 + 1_000, staleMs: 90_000 });
+  assert.equal(r.push, true, "displayed items ≠ file items → push");
+  assert.equal(r.subtasks[0]!.status, "in-progress", "the file's items win");
+  // And once mirrored, they agree → quiet (no 5s churn from the new
+  // comparison).
+  const r2 = subtasksPollTick({
+    state: { subtasks: file.items, subtasksExpired: r.subtasksExpired, subtasksUpdatedAt: t0 },
+    file,
+    lastSig: JSON.stringify({ ...file, rev: 0 }),
+    now: t0 + 6_000,
+    staleMs: 90_000,
+  });
+  assert.equal(r2.push, false, "agreement → quiet");
 });
 
 // ── /display-bottom field picker (the bottomFields modal) ──────────────────

@@ -62,6 +62,14 @@ export type TuiItem =
       argsText: string;
       /** Present for `edit` calls — unified-diff lines (see diff.ts). */
       diff?: string[];
+      /**
+       * Audit F2: for `subtask` calls, the action captured at
+       * tool_execution_start (the tool's schema REQUIRES it). The end
+       * handler falls back to it when the result carries no
+       * `details.action` (older/custom tools), so an observational
+       * `list` is never mistaken for activity.
+       */
+      subtaskAction?: "create" | "list" | "mark";
       running: boolean;
       resultText?: string;
       isError?: boolean;
@@ -160,14 +168,69 @@ export interface TuiState {
   bottomFields: number | null;
   /**
    * The `subtasks` field's EXPIRED flag (the settle-to-"none" behavior —
-   * see subtasksExpired): true when the list has settled (all done/failed)
-   * and no subtask has changed within the settle window, so the field
-   * shows "none" until the next subtask activity. The driver's expiry
-   * poller flips it (the list itself is never cleared — only the display);
-   * applyEvent resets it to false on any subtask activity (a fresh
-   * create/mark/list re-arms the field immediately).
+   * see subtasksExpired): true when the list has gone quiet within the
+   * settle window (all done/failed, or live but idle — an abandoned
+   * workstream), so the field shows "none" until the next subtask
+   * activity. The driver's expiry poller flips it (the list itself is
+   * never cleared — only the display); applyEvent resets it to false on
+   * real subtask activity (a fresh create/mark re-arms the field
+   * immediately; an observational `list` does NOT).
    */
   subtasksExpired: boolean;
+  /**
+   * The last subtask ACTIVITY stamp (ms) observed from the tool's results
+   * (`details.updatedAt` on create/mark, every successful action's write
+   * time). The poller normally reads `updatedAt` off the session's list
+   * FILE; this mirror covers the sessionless case (the tool keeps the
+   * list in memory, no file to read) — the poller falls back to it so an
+   * in-memory list still settles to "none". 0 = no subtask activity seen
+   * this process. (Audit F3.)
+   */
+  subtasksUpdatedAt: number;
+  /**
+   * The RUN the current subtask activity was armed for (audit F1): set to
+   * `runStartedAt` when a create/mark (or a content-changing snapshot)
+   * re-arms the display, null when no in-flight run has touched the list.
+   * The busy exemption then requires `subtasksArmedRun === runStartedAt`:
+   * a live list is only protected while the run that produced the last
+   * activity is still running. This kills the "unrelated later run keeps
+   * an abandoned list alive" hole that sticky expiry only half-closed:
+   * the exemption is now anchored to the activity's OWN run, not to the
+   * poller's last observation. A new run that does no subtask work has a
+   * fresh `runStartedAt` ≠ `subtasksArmedRun` → no exemption. (Audit F1.)
+   */
+  subtasksArmedRun: number | null;
+  /**
+   * Audit F1b: the snapshot IDENTITY (`subtaskItemsSig` of the items the
+   * armed activity produced) the exemption was armed FOR. The exemption
+   * only protects a snapshot that still MATCHES it — when the poller
+   * mirrors a list another process wrote (a replacement, not this run's
+   * activity), the sig no longer matches and the foreign list cannot
+   * inherit this run's exemption, for the whole rest of the run. "" =
+   * unarmed. Cleared with `subtasksArmedRun` on `agent_start`.
+   */
+  subtasksArmedSig: string;
+  /**
+   * Audit F1c (rev model): the WRITE REVISION (`details.rev` of the armed
+   * activity) the arm is bound to — the OWNERSHIP identity, deliberately
+   * separate from `subtasksUpdatedAt` (the expiry clock). Content equality
+   * is NOT ownership and neither is a timestamp: `updatedAt = Date.now()`
+   * collides inside one millisecond (audit F2) and a legacy result's
+   * receipt time is never the file's write time (audit F1-legacy) — a
+   * monotonic per-write `rev` (bumped by every create/mark under the
+   * session lock) is exact. The exemption protects the snapshot whose
+   * `rev` equals this value and nothing else. 0 = no write identity
+   * (legacy results without `details.rev`, hand-built states): the arm
+   * falls back to the content signature (`subtasksArmedSig`).
+   */
+  subtasksArmedRev: number;
+  /**
+   * The `rev` of the currently MIRRORED list (`state.subtasks`) — the
+   * poller's/applyEvent's write-identity view. Kept in sync with the
+   * mirrored snapshot on every push and every activity mirror; 0 = the
+   * mirrored list has no write identity (legacy, sessionless, or empty).
+   */
+  subtasksRev: number;
   /** Cumulative Usage.totalTokens across assistant `done` events. */
   totalTokens: number;
   /** Session token usage, accumulated separately by provider/model id. */
@@ -411,6 +474,11 @@ export function makeInitialState(
     // contract as `workers` (the state machine never reads the disk).
     subtasks: [],
     subtasksExpired: false,
+    subtasksUpdatedAt: 0,
+    subtasksArmedRun: null,
+    subtasksArmedSig: "",
+    subtasksArmedRev: 0,
+    subtasksRev: 0,
   };
 }
 
@@ -425,7 +493,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // selection does not survive a new turn).
       // F2: a fresh run starts with no guard-retry fires of its own — the
       // per-run counter resets (the session totals survive).
-      return { ...state, busy: true, runStartedAt: Date.now(), viewTop: null, selection: null, guardRetryRunFired: 0 };
+      // Audit F1: a fresh run also starts UN-ARMED — the subtask busy
+      // exemption belongs to the run that does subtask work, so activity
+      // from a previous run (even one started in the same millisecond)
+      // must not carry over. The arm is set by the first create/mark of
+      // THIS run (tool_execution_end → subtasksArmedRun = runStartedAt).
+      // Audit F1b: the armed snapshot identity clears with it. Rev model:
+      // the armed WRITE REVISION (`subtasksArmedRev`) clears too — the arm
+      // is (run, rev); `subtasksRev` (the mirrored list's rev) is NOT a
+      // per-run fact and survives with the mirrored list itself.
+      return { ...state, busy: true, runStartedAt: Date.now(), viewTop: null, selection: null, guardRetryRunFired: 0, subtasksArmedRun: null, subtasksArmedSig: "", subtasksArmedRev: 0 };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -638,6 +715,17 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       const quiet = QUIET_ON_SUCCESS_TOOLS.has(ev.toolCall.name);
       const diff =
         quiet ? undefined : ev.toolCall.name === "edit" ? renderEditDiff(ev.toolCall.arguments) : undefined;
+      // Audit F2: remember the subtask action the model asked for (the
+      // tool schema requires it). The end handler uses it when the result
+      // omits details.action (older/custom tools) so a `list` result is
+      // never treated as activity.
+      const subtaskAction =
+        ev.toolCall.name === "subtask" &&
+        (ev.toolCall.arguments.action === "create" ||
+          ev.toolCall.arguments.action === "list" ||
+          ev.toolCall.arguments.action === "mark")
+          ? (ev.toolCall.arguments.action as "create" | "list" | "mark")
+          : undefined;
       return {
         ...state,
         // /stats: count every tool execution that started (including the
@@ -651,6 +739,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             name: ev.toolCall.name,
             argsText: oneLine(JSON.stringify(ev.toolCall.arguments), 120),
             diff,
+            ...(subtaskAction !== undefined ? { subtaskAction } : {}),
             running: true,
             ...(quiet ? { hidden: true } : {}),
           },
@@ -691,23 +780,88 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // The `subtask` tool returns its FULL list in `details.subtasks` on
       // every successful action (create/list/mark) — the TUI mirrors it into
       // state.subtasks so the `subtasks` bottom field re-renders. Error
-      // results carry no details (the list is unchanged) — skipped. Any
-      // activity also UN-EXPIRES the field (subtasksExpired → false): the
-      // settle window restarts from this write, so a fresh create/mark
-      // re-arms the display immediately without waiting for the poller.
+      // results carry no details (the list is unchanged) — skipped. Real
+      // ACTIVITY (create/mark) also UN-EXPIRES the field (subtasksExpired →
+      // false) and ARMS the display for the current run
+      // (subtasksArmedRun = runStartedAt): the settle window restarts from
+      // this write, and the busy exemption belongs to THIS run only. An
+      // observational `list` refreshes the snapshot but must NOT re-arm it
+      // — the file's updatedAt is unchanged by a read, and un-expiring
+      // there pinned a settled list on screen forever (audit F1).
+      // ACTION RESOLUTION (audit F2), in order of trust:
+      //  1. `details.action` — the current tool tags every result;
+      //  2. the action captured at tool_execution_start (the schema
+      //     REQUIRES it) — covers older/custom tools that omit it, so a
+      //     `list` result is never mistaken for activity;
+      //  3. no start event and no tag (replays, exotic producers) → a
+      //     conservative CONTENT-CHANGE heuristic: a snapshot that differs
+      //     from what's displayed is an update; an identical one is a read.
+      // `details.updatedAt` (the write time of the list the result mirrors)
+      // is stamped into state.subtasksUpdatedAt — the poller's fallback
+      // activity clock for sessionless in-memory lists (audit F3);
+      // activity without a stamp falls back to the receipt time (audit A3).
+      // `details.rev` (the write REVISION of the list the result mirrors)
+      // is the OWNERSHIP identity — kept strictly separate from the clock
+      // (rev model, DESIGN.md): the receipt time is never an ownership key
+      // (audit F1-legacy), and a wall-clock stamp cannot separate two
+      // identical writes in one millisecond (audit F2). A result without a
+      // rev (legacy/custom tool) arms with NO write identity → the arm
+      // falls back to the content signature.
       let subtasks: SubtaskInfo[] | null = null;
       let subtaskActivity = false;
+      let subtaskUpdatedAt: number | null = null;
+      let subtaskRev: number | null = null;
       if (ev.result.toolName === "subtask" && ev.result.isError !== true) {
         const d = ev.result.details;
         if (d !== undefined && Array.isArray(d.subtasks)) {
           const norm = normalizeSubtaskList(d.subtasks);
           if (norm !== null) {
             subtasks = norm; // null is unreachable: Array.isArray above
-            // `list` is observational; it does not update the tool file's
-            // updatedAt and must not extend the display's settle window.
-            // Missing action preserves compatibility with older/custom
-            // subtask tools that only returned {subtasks}.
-            subtaskActivity = d.action !== "list";
+            const tagged = typeof d.action === "string" ? (d.action as string) : null;
+            if (tagged !== null) {
+              // `list` is observational; anything the tool reports (even an
+              // unknown action) is activity.
+              subtaskActivity = tagged !== "list";
+            } else {
+              let startAction: string | undefined;
+              for (let i = state.items.length - 1; i >= 0; i--) {
+                const it = state.items[i]!;
+                if (it.kind === "tool" && it.id === ev.toolCallId && it.name === "subtask") {
+                  startAction = it.subtaskAction;
+                  break;
+                }
+              }
+              if (startAction !== undefined) {
+                subtaskActivity = startAction !== "list";
+              } else {
+                // Audit F2 fallback: unknown action, no start capture —
+                // only a CONTENT change counts as activity (an identical
+                // re-read must not re-arm the settle window).
+                subtaskActivity =
+                  JSON.stringify(norm) !== JSON.stringify(state.subtasks);
+              }
+            }
+            // The write revision (rev > 0) of the mirrored snapshot; a
+            // legacy/custom result carries none → null (no identity).
+            subtaskRev =
+              typeof d.rev === "number" && Number.isFinite(d.rev) && d.rev > 0
+                ? Math.round(d.rev)
+                : null;
+            if (typeof d.updatedAt === "number" && Number.isFinite(d.updatedAt)) {
+              subtaskUpdatedAt = d.updatedAt;
+            } else if (subtaskActivity) {
+              // Audit A3: a legacy/custom result (no updatedAt) is still
+              // real activity — stamp the RECEIPT time so the settle
+              // window starts from this moment. Without it the field
+              // keeps the previous (possibly 0) stamp and the fresh list
+              // dies on the next poll tick. applyEvent already reads the
+              // clock for agent_start (runStartedAt), so this stays in
+              // convention. Rev model (audit F1-legacy): this receipt
+              // time is the CLOCK ONLY — the arm's identity is
+              // `subtasksArmedRev`, never this value, so the file's own
+              // (different) write time no longer breaks the exemption.
+              subtaskUpdatedAt = Date.now();
+            }
           }
         }
       }
@@ -716,9 +870,80 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         (t) => ({ ...t, running: false, resultText: text, isError: ev.result.isError === true }),
         ev.toolCallId,
       );
-      return subtasks === null
-        ? ended
-        : { ...ended, subtasks, ...(subtaskActivity ? { subtasksExpired: false } : {}) };
+      if (subtasks === null) return ended;
+      // Audit cycle-1 finding 3: an OBSERVATIONAL snapshot (a `list`
+      // result) is another ingress path for a snapshot into the mirrored
+      // view — exactly like the poller's tick — so it must go through the
+      // SAME ownership reconciliation. The poller's lagging-read skip and
+      // supersede-disarm are not enough while applyEvent accepts any list
+      // unconditionally and preserves the arm: accepting an older snapshot
+      // here left precisely the reviveable arm F3 is about (arm A rev 5,
+      // list result rev 4 accepted, exact restore of A re-exempts), and
+      // accepting a newer one left a stale arm that an exact restore could
+      // revive. Reconcile only while the CURRENT run's arm is in effect
+      // (the run-arm gate of subtasksBusyArmed) and the arm has a rev
+      // identity; real ACTIVITY (create/mark) is the run's own new write
+      // and re-arms outright, and a legacy rev-0 arm cannot order writes.
+      // Tool-completion bookkeeping (`ended`) is applied in every case.
+      if (
+        !subtaskActivity &&
+        state.busy &&
+        state.subtasksArmedRun !== null &&
+        state.subtasksArmedRun === state.runStartedAt &&
+        state.subtasksArmedRev > 0
+      ) {
+        const obsRev = subtaskRev ?? 0;
+        if (obsRev < state.subtasksArmedRev) {
+          // Older-than-armed observation (a read that raced the armed
+          // write, or a rollback read): NOT accepted — the display keeps
+          // the owned snapshot, the arm survives for the real write, and
+          // the older content is never staged for a later "exact restore"
+          // to revive. (Same rule as the poller's lagging-read skip.)
+          return ended;
+        }
+        if (obsRev > state.subtasksArmedRev) {
+          // A newer committed write superseded the armed one: accept the
+          // snapshot AND clear the arm (the poller's disarm rule) — the
+          // exemption belongs to the armed write, and once the session
+          // holds a newer write it is over, so a later exact restore of
+          // the armed content cannot revive it.
+          return {
+            ...ended,
+            subtasks,
+            subtasksRev: obsRev,
+            subtasksArmedRun: null,
+            subtasksArmedSig: "",
+            subtasksArmedRev: 0,
+            ...(subtaskUpdatedAt !== null ? { subtasksUpdatedAt: subtaskUpdatedAt } : {}),
+          };
+        }
+        // obsRev === armedRev → the armed write itself: mirror, keep the
+        // arm (falls through to the normal path below).
+      }
+      return {
+        ...ended,
+        subtasks,
+        ...(subtaskActivity
+          ? {
+              subtasksExpired: false,
+              subtasksArmedRun: state.runStartedAt,
+              // Audit F1b: the arm is bound to the snapshot this activity
+              // produced — the exemption only protects THAT list, not any
+              // list the poller happens to show while the run is in
+              // flight. Rev model (audit F1c/F1-legacy/F2): the identity
+              // is the write REVISION (`details.rev`); 0 = a legacy result
+              // with no rev → the content signature (`subtasksArmedSig`)
+              // is the best available identity.
+              subtasksArmedSig: subtaskItemsSig(subtasks),
+              subtasksArmedRev: subtaskRev ?? 0,
+            }
+          : {}),
+        // The mirrored snapshot's write identity moves with the mirror
+        // (activity OR an observational list read — state.subtasks is
+        // being replaced either way); a snapshot with no rev is rev 0.
+        subtasksRev: subtaskRev ?? 0,
+        ...(subtaskUpdatedAt !== null ? { subtasksUpdatedAt: subtaskUpdatedAt } : {}),
+      };
     }
     case "context_compacted": {
       // docs/07 item 2: the compaction SHRINKS the context — the delta is
@@ -2262,30 +2487,388 @@ export function subtasksLineAnsi(subtasks: SubtaskInfo[], width: number): string
 /**
  * The `subtasks` field's EXPIRY (the same "settle to none" behavior the
  * `workers` field gets from pruneWorkerDir): the list is a live workstream
- * indicator — once it has SETTLED (every subtask done or failed) and no
- * subtask has changed within `staleMs` (the file's `updatedAt` — refreshed
- * by every create/mark), the field shows "none" until the NEXT subtask
- * activity. The rules, in order:
+ * indicator — once nothing has changed within `staleMs` (the file's
+ * `updatedAt` — refreshed by every create/mark), the field shows "none"
+ * until the NEXT subtask activity. The rules, in order:
  *  - empty list → "none" (nothing to expire);
- * - any item still queued/in-progress → LIVE (never expires — the work is
- *   not over; a long tool call between marks must not blank the field);
- * - settled (all done/failed) and `updatedAt` within `staleMs` → still
- *   shown (the settle just happened — the user wants to see the final
- *   state, e.g. `5/5 done`, for a moment);
- * - settled and `updatedAt` older than `staleMs` → "none".
- * Pure (the driver reads the file's `updatedAt` and passes it in); `now`
- * is injectable for tests.
+ * - any item still queued/in-progress, a run is in flight (`busy`), AND
+ *   the field is not already expired → LIVE (never expires — the work is
+ *   happening RIGHT NOW; a long tool call between marks must not blank
+ *   the field);
+ * - settled (all done/failed), or live but IDLE (the workstream was
+ *   abandoned — aborted run, errored loop, or a model that stopped
+ *   marking), and `updatedAt` within `staleMs` → still shown (the change
+ *   just happened — the user wants to see the state, e.g. `5/5 done`,
+ *   for a moment);
+ * - and `updatedAt` older than `staleMs` → "none".
+ *
+ * The busy-aware live rule (audit F2): before it, a live list NEVER
+ * expired, so an aborted/abandoned workstream (items stuck queued/
+ * in-progress with no run in flight) pinned the field forever. While
+ * idle, a live list now follows the same quiet window as a settled one —
+ * an abandoned `2/5 foo` settles to "none" like everything else.
+ *
+ * The exemption is ARM-anchored (audit F1, superseding the first sticky
+ * attempt): `busyArmed` is not "a run is in flight" but "the IN-FLIGHT
+ * RUN has subtask activity of its own" (`subtasksArmedRun ===
+ * runStartedAt`, maintained by applyEvent). A live list is protected only
+ * while the run that produced the last activity is still running — an
+ * UNRELATED later run (fresh runStartedAt, no subtask activity) gets no
+ * exemption even if the previous run armed the list, and even if the
+ * expiry deadline elapsed between two poll ticks while the flag was still
+ * false. Nothing is sticky: each tick derives the flag from the CURRENT
+ * snapshot + the CURRENT arm, so a newly observed external snapshot is
+ * never judged with a stale flag (audit F3). Audit F1b closes the last
+ * leak: the arm also carries the armed snapshot's IDENTITY
+ * (`subtasksArmedSig`), so a live list that ANOTHER process wrote (the
+ * poller mirrors a replacement for this run's list) cannot inherit this
+ * run's exemption — the exemption is per (run, snapshot), not per run.
+ * Pure (the driver computes `busyArmed` from the state and passes it
+ * in); `now` and `busyArmed` are injectable for tests.
  */
 export function subtasksExpired(
   subtasks: SubtaskInfo[],
   updatedAt: number,
   now: number,
   staleMs: number,
+  busyArmed = false,
 ): boolean {
   if (subtasks.length === 0) return true;
   const live = subtasks.some((s) => s.status === "queued" || s.status === "in-progress");
-  if (live) return false;
+  if (live && busyArmed) return false;
   return now - updatedAt > staleMs;
+}
+
+/**
+ * The canonical IDENTITY of a subtask snapshot (audit F1b): the items'
+ * (id, name, status) triple in order — deliberately NOT the updatedAt
+ * stamp, so the arm survives nothing but a CONTENT change. A foreign list
+ * mirrored by the poller has a different sig than the snapshot the armed
+ * activity produced, so it cannot inherit that run's busy exemption.
+ * Pure, deterministic (explicit field order → key order can never drift).
+ */
+export function subtaskItemsSig(items: SubtaskInfo[]): string {
+  return JSON.stringify(items.map((s) => [s.id, s.name, s.status]));
+}
+
+/**
+ * The busy exemption for the CURRENT state (audit F1): a run is in
+ * flight AND the last subtask activity belongs to THAT run. Null-safe on
+ * both sides (a never-armed list has `subtasksArmedRun === null`, which
+ * must never match a null `runStartedAt` — hence the explicit null
+ * check). Exported for the poller and tests; applyEvent maintains the
+ * arm (create/mark → `subtasksArmedRun = runStartedAt`).
+ *
+ * Rev model (audit F1c/F1-legacy/F2, DESIGN.md): the arm's IDENTITY is
+ * the armed write's monotonic REVISION (`subtasksArmedRev`), NOT a stamp
+ * — `updatedAt = Date.now()` collides inside one millisecond (two
+ * identical writes indistinguishable, F2) and a legacy result's receipt
+ * time is never the file's write time (F1-legacy), so neither is fit to
+ * identify the write. When a `snapshot` is passed (with its write
+ * revision `rev`):
+ *  - a legacy run-only arm (no sig, no rev — hand-built states) keeps the
+ *    run-only check (nothing to compare);
+ *  - a rev arm (`subtasksArmedRev > 0`) is owned iff `rev ===
+ *    subtasksArmedRev` — EXACT write identity, unique per write (closes
+ *    F1-legacy: the file's own live list carries the armed rev whatever
+ *    its `updatedAt`; closes F2: a same-content rewrite is rev R+1, not R);
+ *  - a legacy content-only arm (rev 0 — a legacy/custom result without
+ *    `details.rev`) falls back to the content signature (audit F1b): a
+ *    foreign list has different content, so it is still rejected.
+ */
+export function subtasksBusyArmed(
+  state: {
+    busy: boolean;
+    runStartedAt: number | null;
+    subtasksArmedRun: number | null;
+    subtasksArmedSig?: string;
+    subtasksArmedRev?: number;
+  },
+  snapshot?: SubtaskInfo[],
+  rev?: number,
+): boolean {
+  if (!state.busy || state.subtasksArmedRun === null || state.subtasksArmedRun !== state.runStartedAt) {
+    return false;
+  }
+  if (snapshot !== undefined) {
+    const armedSig = state.subtasksArmedSig ?? "";
+    const armedRev = state.subtasksArmedRev ?? 0;
+    if (armedSig === "" && armedRev === 0) return true; // legacy: run-only
+    if (armedRev > 0) {
+      // Exact write identity: rev is bumped under the session lock by
+      // every write, so a match means the snapshot IS the armed write
+      // (same content included) and anything else — same-content rewrite,
+      // restore, foreign list — is not.
+      return rev === armedRev;
+    }
+    // Legacy content-only arm (rev 0): content match is all it claims.
+    return armedSig === subtaskItemsSig(snapshot);
+  }
+  return true;
+}
+
+/**
+ * One tick of the driver's `subtasks` expiry poller, as a PURE decision
+ * (the same extraction convention as telegramBusyDecision — the poller's
+ * closure in run.tsx only does the file read and the state push).
+ *
+ * `file` is the session list-file snapshot (items + expiry clock + write
+ * revision), or null for a SESSIONLESS run (the tool keeps the list in
+ * memory — there is no file; the tick then expires from the state's own
+ * activity stamp, audit F3). `file.rev` is optional and defaults to 0 =
+ * a legacy file with no write identity (written before revisions existed).
+ *
+ * Change detection (audit F1b + A2): for a file-backed session the
+ * signature covers ONLY the file snapshot — never the derived `expired`
+ * flag — and the push condition compares EVERYTHING the push writes
+ * against the live state: the file-vs-last-snapshot signature (items,
+ * updatedAt AND rev — a same-content different-rev write IS a change, so
+ * a foreign same-millisecond rewrite cannot hide behind an identical
+ * signature), the displayed ITEMS vs the file's items (audit A2: same
+ * updatedAt with different content — e.g. a same-millisecond write, or
+ * applyEvent's mirror of a result that raced a later file write), the
+ * activity stamp, the mirrored write revision, and the derived expiry
+ * flag. The old
+ * version folded `expired` into the signature alone, so an out-of-band
+ * flip of `state.subtasksExpired` (applyEvent's un-expire on create/mark)
+ * desynced the poller permanently: it recomputed the same signature it
+ * last pushed and never re-expired the display, pinning a settled list on
+ * screen forever after any `list` call. Comparing the live state makes
+ * the poller self-healing: whenever the state and the file's view of the
+ * world disagree on ANY pushed field, the file's view wins on the next
+ * tick (and while they agree, nothing is pushed — no 5s churn).
+ *
+ * ARM OWNERSHIP (rev model, DESIGN.md — supersedes the (items, stamp)
+ * identity): the exemption is bound to the armed activity's WRITE
+ * REVISION (`subtasksArmedRev`), not to a timestamp — `updatedAt` is only
+ * the expiry clock (audit F1-legacy: a legacy result's receipt time is
+ * never the file's write time; audit F2: Date.now() collides within one
+ * millisecond). The tick:
+ *  - exempts a snapshot iff its rev EQUALS the armed rev (exact write
+ *    identity — closes F1-legacy and F2), falling back to the content
+ *    signature for a legacy rev-0 arm (audit F1b preserved);
+ *  - reports `disarm` when the observed snapshot SUPERSEDES the armed
+ *    write (rev > armedRev — a newer write, whatever its content);
+ *  - LAGGING-READ SKIP (audit F3): while the owning run is in flight and
+ *    armed (rev R), a file snapshot with rev < R raced the armed write
+ *    (the tool result already established rev R under the session lock) —
+ *    the tick neither mirrors it nor derives the expiry from it (push:
+ *    false, disarm: false). The display keeps the owned snapshot, the arm
+ *    survives for the real write, and — crucially — the older snapshot is
+ *    never "accepted", so a later exact restore to rev R with the armed
+ *    content is genuinely the armed write again (re-exempting is correct)
+ *    and a restore to rev > R is a foreign write (disarm, no exemption).
+ *    The skip is gated on the exemption actually being in effect
+ *    (busyArmed): once the owning run is over the arm protects nothing,
+ *    and the file (however old its rev) is the truth the display follows.
+ * After a disarm the driver clears the arm fields and the deadline rules
+ * alone decide, until the run's NEXT real subtask activity re-arms.
+ */
+export interface SubtasksPollTick {
+  /** The current state's subtask fields (the poller's view to reconcile). */
+  subtasks: SubtaskInfo[];
+  subtasksExpired: boolean;
+  subtasksUpdatedAt: number;
+  /**
+   * The busy exemption for the current run (audit F1): computed by the
+   * driver via subtasksBusyArmed(state) — "a run is in flight AND the
+   * last subtask activity belongs to it". NOT plain `state.busy`.
+   * Optional (defaults false = no exemption) so pure decision tests can
+   * omit it.
+   */
+  busyArmed?: boolean;
+  /**
+   * Audit F1b: the armed snapshot CONTENT signature (`state.subtasksArmedSig`).
+   * Used ONLY as the identity fallback for a legacy rev-0 arm (a
+   * legacy/custom result without `details.rev`): the exemption then
+   * requires the evaluated snapshot to still match it — a foreign list
+   * (this run's list replaced by another process) never inherits the
+   * exemption, even while the owning run is in flight. Undefined/"" = no
+   * identity constraint (pure decision tests, legacy states).
+   */
+  subtasksArmedSig?: string;
+  /**
+   * Rev model (audit F1c/F1-legacy/F2): the armed WRITE REVISION
+   * (`state.subtasksArmedRev`) — the ownership identity. The exemption
+   * requires the evaluated snapshot's rev to EQUAL it (exact write
+   * identity); 0 = no write identity → the content-signature fallback.
+   */
+  subtasksArmedRev?: number;
+  /**
+   * The rev of the currently MIRRORED list (`state.subtasksRev`) — one of
+   * the pushed fields the self-healing comparison checks (a state whose
+   * mirrored rev disagrees with the file's is re-synced on the next tick).
+   */
+  subtasksRev?: number;
+}
+
+export interface SubtasksPollResult {
+  /** Push a new state (and repaint)? */
+  push: boolean;
+  /** The fields to push (meaningful only when `push`). */
+  subtasks: SubtaskInfo[];
+  subtasksExpired: boolean;
+  subtasksUpdatedAt: number;
+  /**
+   * The write revision to mirror (the file's rev, or the state's own for
+   * the sessionless branch) — pushed into `subtasksRev` with the list.
+   */
+  rev: number;
+  /** The new file signature (meaningful only when `push` and file-backed). */
+  sig: string;
+  /**
+   * The observed snapshot SUPERSEDED the armed write — a rev STRICTLY
+   * newer than the armed one (a foreign write, whatever its content). The
+   * driver must CLEAR the arm fields (`subtasksArmedRun`/
+   * `subtasksArmedSig`/`subtasksArmedRev`): the exemption belongs to the
+   * armed write, and once the file holds a newer write the exemption is
+   * over — even if a later foreign write happens to reproduce the armed
+   * content (A→B→A). An older-rev snapshot never disarms (a lagging read
+   * cannot supersede the armed write; the arm survives for the real
+   * write, and the snapshot is not mirrored at all — see the
+   * lagging-read skip). A legacy rev-0 arm never disarms (rev 0 cannot
+   * order writes).
+   */
+  disarm: boolean;
+}
+
+export function subtasksPollTick(opts: {
+  state: SubtasksPollTick;
+  file: { items: SubtaskInfo[]; updatedAt: number; rev?: number } | null;
+  lastSig: string | null;
+  now: number;
+  staleMs: number;
+}): SubtasksPollResult {
+  // Rev model (DESIGN.md): the exemption belongs to the armed activity's
+  // OWN write — identified by its monotonic revision, not by a timestamp
+  // and not by content — and is evaluated per snapshot (the in-memory
+  // list or the file's list), so a replacement observed mid-tick is judged
+  // on its own merits, never with the armed list's exemption.
+  //  - rev arm (armedRev > 0): owned iff the snapshot's rev === armedRev.
+  //    Unique per write (bumped under the session lock), so a same-content
+  //    rewrite in the same millisecond is rev R+1 and NOT exempt (F2), and
+  //    the owning run's own live file is exempt whatever its updatedAt
+  //    (F1-legacy — the receipt time is the clock, never the identity).
+  //  - legacy content-only arm (armedRev === 0, sig set): content match
+  //    is all it claims (a foreign list differs → rejected, F1b).
+  //  - no identity at all (sig "" and rev 0, hand-built/legacy): run-only.
+  // DISARM on SUPERSEDE: rev > armedRev is a newer write → the exemption
+  // is over. rev < armedRev is the LAGGING-READ case (F3): never a disarm,
+  // never mirrored while the owning run is armed (see below).
+  const armedSigOf = (): string => opts.state.subtasksArmedSig ?? "";
+  const armedRevOf = (): number => opts.state.subtasksArmedRev ?? 0;
+  const hasIdentity = (): boolean => armedSigOf() !== "" || armedRevOf() !== 0;
+  const exemptFor = (items: SubtaskInfo[], rev: number): boolean => {
+    if (opts.state.busyArmed !== true) return false;
+    if (!hasIdentity()) return true; // legacy/hand-built: run-only check
+    const armedRev = armedRevOf();
+    if (armedRev > 0) return rev === armedRev; // exact write identity
+    // Legacy rev-0 arm: content match is all it ever claimed (F1b).
+    return subtaskItemsSig(items) === armedSigOf();
+  };
+  const disarmFor = (items: SubtaskInfo[], rev: number): boolean => {
+    const armedRev = armedRevOf();
+    if (armedRev === 0) return false; // no rev identity → cannot order writes
+    if (rev < armedRev) return false; // lagging read → cannot supersede
+    if (rev === armedRev) return false; // the armed write itself
+    return true; // rev > armedRev: a newer write superseded the armed one
+  };
+  if (opts.file === null) {
+    // Sessionless (in-memory): the state IS the list; only the expired
+    // flag can move (nothing else has changed — no run of code touches
+    // these fields without going through applyEvent, which keeps the arm
+    // and the mirrored rev in sync, so `disarm` never fires for a real
+    // sessionless run).
+    const stateRev = opts.state.subtasksRev ?? 0;
+    const expired = subtasksExpired(
+      opts.state.subtasks,
+      opts.state.subtasksUpdatedAt,
+      opts.now,
+      opts.staleMs,
+      exemptFor(opts.state.subtasks, stateRev),
+    );
+    return {
+      push: expired !== opts.state.subtasksExpired,
+      subtasks: opts.state.subtasks,
+      subtasksExpired: expired,
+      subtasksUpdatedAt: opts.state.subtasksUpdatedAt,
+      rev: stateRev,
+      sig: opts.lastSig ?? "",
+      disarm: disarmFor(opts.state.subtasks, stateRev),
+    };
+  }
+  const fileRev = opts.file.rev ?? 0;
+  const armedRev = armedRevOf();
+  // LAGGING-READ SKIP (audit F3, the crucial half; refined by cycle-1
+  // finding 4): while the owning run is armed and in flight (busyArmed —
+  // the exemption actually in effect), a file snapshot with rev < armedRev
+  // raced the armed write: the tool result already established rev =
+  // armedRev as the truth under the session lock, so this older snapshot is
+  // a transient lagging read or a rollback — neither is the armed write.
+  // Do NOT mirror it and do NOT take its clock: the display keeps the
+  // RETAINED snapshot and the arm survives for the real write (disarm:
+  // false). Because the older snapshot is never "accepted", a later exact
+  // restore to rev = armedRev with the armed content is genuinely the armed
+  // write again (exempting it is correct), and a restore to rev > armedRev
+  // is a plain foreign write (disarm + deadline rules). BUT the skip only
+  // ignores the older FILE's view — it must not freeze the RETAINED view:
+  // the exemption protects LIVE items only, so a settled (all done/failed)
+  // retained list still follows the quiet window from its OWN clock even
+  // while the owning run is busy and the file keeps reading old. Derive
+  // the expiry from the retained state (its items, its mirrored rev, the
+  // mirrored activity clock) and push an expiry-only change when it flips
+  // — otherwise a lagging/rolled-back file could keep a settled list
+  // visible indefinitely during a long unrelated tool call (the cycle-1
+  // finding). Gated on busyArmed: once the owning run is over the
+  // exemption protects nothing and the file is the truth the display
+  // follows, rev or no rev.
+  if (opts.state.busyArmed === true && armedRev > 0 && fileRev < armedRev) {
+    const stateRev = opts.state.subtasksRev ?? 0;
+    const retainedExpired = subtasksExpired(
+      opts.state.subtasks,
+      opts.state.subtasksUpdatedAt,
+      opts.now,
+      opts.staleMs,
+      exemptFor(opts.state.subtasks, stateRev),
+    );
+    return {
+      // Expiry-only change; the retained items/clock/rev never move.
+      push: retainedExpired !== opts.state.subtasksExpired,
+      subtasks: opts.state.subtasks,
+      subtasksExpired: retainedExpired,
+      subtasksUpdatedAt: opts.state.subtasksUpdatedAt,
+      rev: stateRev,
+      sig: opts.lastSig ?? "",
+      disarm: false,
+    };
+  }
+  const expired = subtasksExpired(
+    opts.file.items,
+    opts.file.updatedAt,
+    opts.now,
+    opts.staleMs,
+    exemptFor(opts.file.items, fileRev),
+  );
+  const sig = JSON.stringify({ items: opts.file.items, updatedAt: opts.file.updatedAt, rev: fileRev });
+  const push =
+    sig !== opts.lastSig ||
+    opts.state.subtasksExpired !== expired ||
+    opts.state.subtasksUpdatedAt !== opts.file.updatedAt ||
+    // The mirrored write identity disagrees with the file's (pushed field).
+    (opts.state.subtasksRev ?? 0) !== fileRev ||
+    // Audit A2: the displayed items differ from the file's (same stamp,
+    // different content — a same-millisecond write, or applyEvent's
+    // mirror racing a later file write). The file wins.
+    JSON.stringify(opts.state.subtasks) !== JSON.stringify(opts.file.items);
+  return {
+    push,
+    subtasks: opts.file.items,
+    subtasksExpired: expired,
+    subtasksUpdatedAt: opts.file.updatedAt,
+    rev: fileRev,
+    sig,
+    disarm: disarmFor(opts.file.items, fileRev),
+  };
 }
 
 /**
