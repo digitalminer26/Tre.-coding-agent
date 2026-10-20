@@ -24,6 +24,7 @@
  */
 import type {
   ExecuteToolCall,
+  GuardEvidence,
   Tool,
   ToolCallBlock,
   ToolResult,
@@ -167,6 +168,22 @@ export function stallText(toolName: string): string {
   );
 }
 
+/** D33 (docs/08 §10) — the persisted excerpt cap: big enough for a real
+ *  denial or traceback head, small enough that one entry never dominates
+ *  the JSONL. The display truncates further (one line). */
+export const GUARD_EXCERPT_MAX = 2000;
+
+/** Build a D33 error excerpt: whitespace collapsed to ONE line, capped.
+ *  (Raw denial text and normalized failure text converge on the same
+ *  shape: a single capped line the display can print verbatim.)
+ *  Exported for tests. */
+export function guardExcerpt(text: string): string {
+  const oneLine = text.trim().replace(/\s+/g, " ");
+  return oneLine.length > GUARD_EXCERPT_MAX
+    ? oneLine.slice(0, GUARD_EXCERPT_MAX)
+    : oneLine;
+}
+
 /**
  * Build the loop's `executeToolCall` from the pipeline. `tools` is only used
  * for descriptive error text; the loop has already resolved the tool.
@@ -271,7 +288,20 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
               `Repeated identical failure detected: the "${tool.name}" tool returned the same error for the same arguments ${REPEAT_FAILURE_THRESHOLD} times within ${REPEAT_FAILURE_WINDOW} calls of that tool. The call WAS executed; its result is replaced and the run stops here (stopReason 'stall'). Change the operation or explain the unresolved failure.`,
             ),
             isError: true,
-            details: { stall: true, repeatFailure: true },
+            // D33: stallEvidence names the trigger alongside the legacy
+            // `stall` flag (additive on Record<string, unknown> — the
+            // loop's details.stall check and existing tests are untouched).
+            details: {
+              stall: true,
+              repeatFailure: true,
+              stallEvidence: {
+                guard: "repeat-failure",
+                tool: tool.name,
+                repeats: REPEAT_FAILURE_THRESHOLD,
+                window: REPEAT_FAILURE_WINDOW,
+                errorExcerpt: guardExcerpt(errorText),
+              } satisfies GuardEvidence,
+            },
           };
         }
       }
@@ -304,7 +334,18 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         return {
           content: text(stallText(tool.name)),
           isError: true,
-          details: { stall: true },
+          // D33: the denial's OWN text (the raw result, not STALL_TEXT —
+          // the notice is boilerplate; the evidence is what was denied).
+          details: {
+            stall: true,
+            stallEvidence: {
+              guard: "permission-stall",
+              tool: tool.name,
+              denials: entry.count,
+              window: STALL_WINDOW,
+              errorExcerpt: guardExcerpt(result.content.map((c) => c.text).join("\n")),
+            } satisfies GuardEvidence,
+          },
         };
       }
     }

@@ -465,3 +465,92 @@ test("defaultSessionPath (D20): deterministic UTC name under ~/.tre/sessions/, o
   const oneSecondLater = defaultSessionPath(new Date(Date.UTC(2026, 8, 19, 10, 5, 4)), 4242);
   assert.notEqual(oneSecondLater, p);
 });
+
+// ─────────────── D33: the guardStop entry (docs/08 §10) ───────────────
+
+test("D33: appendGuardStop round-trips through loadSession; replay ignores the entry", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-guard-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "guard.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  const before = await s.appendMessage(userMsg("do the thing", 1));
+  const evidence = {
+    guard: "identical-batch",
+    signature: 'read:{"path":"x"}',
+    repeats: 3,
+    guardRetries: 1,
+  } as const;
+  const entryId = await s.appendGuardStop(evidence);
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const guard = loaded.entries.find((e) => e.type === "guardStop");
+  assert.ok(guard && guard.type === "guardStop", "the guardStop entry is in the file");
+  assert.equal(guard.id, entryId);
+  assert.ok(guard.timestamp > 0);
+  assert.deepEqual(guard.evidence, evidence);
+  // Replay: harness metadata, NOT LLM context — the context is exactly the
+  // messages, as if the entry were not there.
+  assert.deepEqual(
+    replayContext(loaded.entries),
+    replayContext(loaded.entries.filter((e) => e.type !== "guardStop")),
+  );
+  assert.ok(before.length > 0);
+});
+
+test("D33: a guardStop before a compaction boundary does not break the kept-entry chain", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-guard-cx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "guard-cx.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  const m1 = await s.appendMessage(userMsg("one", 1));
+  await s.appendGuardStop({
+    guard: "permission-stall",
+    tool: "bash",
+    denials: 3,
+    window: 8,
+    errorExcerpt: "Operation not permitted",
+  });
+  const m2 = await s.appendMessage(userMsg("two", 2));
+  await s.appendCompaction("SUMMARY: earlier work", m2, 1000);
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const ctx = replayContext(loaded.entries);
+  // [summary-as-user-message] + m2 — the guardStop entry is skipped and the
+  // compaction's firstKeptEntryId (m2) still resolves.
+  assert.equal(ctx.length, 2);
+  assert.equal(ctx[1]!.content, "two");
+  assert.ok(m1.length > 0);
+});
+
+test("D33: a reader that predates guardStop skips it (additive entry, format version stays 1)", async () => {
+  // The pre-D33 replay loop, verbatim in behavior: message + compaction
+  // branches only, everything else falls through. A file WITH a guardStop
+  // entry replays to the same context as without it.
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-guard-old-"));
+  const path = join(dir, "old.jsonl");
+  try {
+    const s = await Session.create(path, { model: MODEL });
+    await s.appendMessage(userMsg("keep", 1));
+    await s.appendGuardStop({
+      guard: "repeat-failure",
+      tool: "t",
+      repeats: 3,
+      window: 8,
+      errorExcerpt: "same error",
+    });
+    await s.close();
+
+    const loaded = await loadSession(path);
+    assert.equal(SESSION_FORMAT_VERSION, 1, "the format version was NOT bumped");
+    const legacy = loaded.entries
+      .filter((e) => e.type === "message")
+      .map((e) => (e as { message: AgentMessage }).message);
+    assert.deepEqual(replayContext(loaded.entries), legacy);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

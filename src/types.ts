@@ -162,6 +162,48 @@ export type AssistantStreamEvent =
   | { type: "done"; message: AssistantMessage };
 
 /**
+ * D33 (docs/08 §10) — the evidence a guard stop was triggered by. One
+ * discriminated union, shared by the `agent_end.evidence` event field, the
+ * session `guardStop` entry, and the display lines. The privacy position:
+ * signatures and excerpts are tool arguments/errors ALREADY persisted in
+ * the session's message entries — this adds naming, not disclosure.
+ * `errorExcerpt` is capped at excerpt() size for the persisted form;
+ * display truncates further.
+ */
+export type GuardEvidence =
+  | {
+      /** C26 identical-batch guard → stopReason "loop". */
+      guard: "identical-batch";
+      /** batchSignature() output of the repeated batch. */
+      signature: string;
+      /** The guard's repeat threshold (3). */
+      repeats: number;
+      /** H5 auto-retries spent before the stop (0 = legacy hard stop). */
+      guardRetries: number;
+    }
+  | {
+      /** H1 permission-stall guard → stopReason "stall". */
+      guard: "permission-stall";
+      tool: string;
+      /** Permission denials of this tool inside `window` calls. */
+      denials: number;
+      /** STALL_WINDOW (8). */
+      window: number;
+      /** Raw denial text (one line, capped). */
+      errorExcerpt: string;
+    }
+  | {
+      /** H2 repeat-failure guard → stopReason "stall". */
+      guard: "repeat-failure";
+      tool: string;
+      repeats: number;
+      /** REPEAT_FAILURE_WINDOW (8). */
+      window: number;
+      /** Normalized error text (capped). */
+      errorExcerpt: string;
+    };
+
+/**
  * The loop's event stream — what the CLI prints and the session persists.
  * Wire events pass through unchanged; the loop adds lifecycle + tool events.
  */
@@ -185,6 +227,15 @@ export type AgentEvent =
        * reached".
        */
       maxCycles?: number;
+      /**
+       * D33 (docs/08 §10): present exactly when stopReason is "loop" or
+       * "stall" — WHICH trigger fired (the repeated batch's signature, or
+       * the tool + denial count + error excerpt). Same conditional-field
+       * pattern as maxTurns/maxCycles. The driver persists it (guardStop
+       * session entry) and the display interpolates it; the loop is the
+       * only producer.
+       */
+      evidence?: GuardEvidence;
     }
   | {
       /**
@@ -287,6 +338,34 @@ export function lengthEndNote(messages: AgentMessage[]): string {
   return hadCall
     ? "length: output limit hit — tool-call arguments may be truncated"
     : "length: output limit hit — response cut off before any tool call (thinking/text consumed the output budget)";
+}
+
+/** D33 (docs/08 §10) — the display's one-line evidence summary, shared by
+ *  the TUI error item and the CLI stderr stop line: loop → the repeated
+ *  batch's first line (tool + truncated args); stall → tool + count/window
+ *  + the error excerpt. Each part is clamped so the whole line stays one
+ *  terminal-friendly line (~160 chars max). Exported for tests. */
+export function guardEvidenceNote(evidence: GuardEvidence): string {
+  const clip = (s: string, max: number): string =>
+    s.length > max ? `${s.slice(0, Math.max(0, max - 1))}…` : s;
+  if (evidence.guard === "identical-batch") {
+    // batchSignature joins calls with \u0000; "name:json" may itself embed
+    // newlines (string args). Show the FIRST call, flattened to one line.
+    const firstCall = (evidence.signature.split("\u0000", 1)[0] ?? "").replace(
+      /[\n\r]+/g,
+      " ",
+    );
+    return `trigger: ${clip(firstCall, 110)} (×${evidence.repeats} in a row${
+      evidence.guardRetries > 0 ? `, after ${evidence.guardRetries} auto-retr${evidence.guardRetries > 1 ? "ies" : "y"}` : ""
+    })`;
+  }
+  const count =
+    evidence.guard === "permission-stall"
+      ? `${evidence.denials}/${evidence.window} calls`
+      : `${evidence.repeats}/${evidence.window} calls`;
+  return `trigger: ${clip(evidence.tool, 30)} failed ${count}${
+    evidence.errorExcerpt !== "" ? ` — ${clip(evidence.errorExcerpt, 90)}` : ""
+  }`;
 }
 
 // ─────────────────── 3. The loop's two dependencies ───────────────────

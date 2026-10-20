@@ -131,7 +131,7 @@ action has already executed. Changed args or diagnostics do not combine.
 This strict matching limits false positives from transient failures whose
 diagnostics change, while bounding identical churn.
 
-### H3 — Loop visibility (designed 2026-10-20, D33; NOT yet implemented → §10)
+### H3 — Loop visibility (IMPLEMENTED 2026-10-20, D33 — design in §10)
 
 On `loop`/`stall` stop, the stop event and the TUI surface the TRIGGERING
 signature (which batch/call repeated, how many times). Today the evidence
@@ -455,7 +455,7 @@ arrives, not to keep it. In rough order of value:
    counters today; if thrashing turns out to span resumes, that needs a
    persisted (and therefore reviewed) shape, not a silent store.
 
-## 10. H3 — Loop visibility design (designed 2026-10-20, D33; NOT yet implemented)
+## 10. H3 — Loop visibility design (D33; implemented 2026-10-20)
 
 The problem restated: on a `loop`/`stall` stop the harness knows exactly
 what triggered it — the repeated batch signature, the tool, the failure

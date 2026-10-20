@@ -39,6 +39,7 @@ import { Session, replaySession } from "../src/session/session.js";
 import { readWorkerStatuses } from "../src/cli/workers.js";
 import { subtaskDir, subtaskKey, canonicalSessionPath } from "../src/tools/subtask.js";
 import { deriveMaxTurns } from "../src/loop/agent-loop.js";
+import { guardEvidenceNote } from "../src/types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -46,6 +47,7 @@ import type {
   LlmContext,
   ModelConfig,
   StreamFn,
+  Tool,
   UserMessage,
 } from "../src/types.js";
 
@@ -2115,4 +2117,134 @@ test("D: compactNow — force with a too-short context → undefined (no plan)",
   assert.equal(events[0]!.type, "compaction_skipped");
   if (events[0]!.type === "compaction_skipped")
     assert.match(events[0]!.reason, /no safe shrink is possible/);
+});
+
+// ─────────────── D33: guard-stop evidence in the CLI stop lines (docs/08 §10) ───────────────
+
+test("printEvent: loop agent_end WITH evidence → the trigger line joins the stop note", () => {
+  let err = "";
+  const sinks: PrintSinks = { out: { write: () => {} }, err: { write: (s) => (err += s) } };
+  printEvent(
+    {
+      type: "agent_end",
+      stopReason: "loop",
+      messages: [],
+      evidence: {
+        guard: "identical-batch",
+        signature: 'bash:{"command":"ls"}\u0000read:{"path":"a"}',
+        repeats: 3,
+        guardRetries: 0,
+      },
+    },
+    sinks,
+    "/tmp/s.jsonl",
+  );
+  assert.match(err, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
+  assert.match(err, /trigger: bash:\{"command":"ls"\} \(×3 in a row\)/);
+  assert.doesNotMatch(err, /auto-retr/, "0 retries spent — no retry clause");
+  assert.match(err, /resume: --resume \/tmp\/s\.jsonl/, "the resume hint follows the trigger line");
+});
+
+test("printEvent: stall agent_end WITH evidence → tool + count + excerpt; without → the static string", () => {
+  let err = "";
+  const sinks: PrintSinks = { out: { write: () => {} }, err: { write: (s) => (err += s) } };
+  printEvent(
+    {
+      type: "agent_end",
+      stopReason: "stall",
+      messages: [],
+      evidence: {
+        guard: "permission-stall",
+        tool: "read",
+        denials: 3,
+        window: 8,
+        errorExcerpt: "read /etc/shadow: Operation not permitted",
+      },
+    },
+    sinks,
+  );
+  assert.match(err, /trigger: read failed 3\/8 calls — read \/etc\/shadow: Operation not permitted/);
+
+  err = "";
+  printEvent({ type: "agent_end", stopReason: "stall", messages: [] }, sinks);
+  assert.match(err, /stall: the same tool failed 3 times with a permission denial/);
+  assert.doesNotMatch(err, /trigger:/, "no evidence → the old static line, unchanged");
+});
+
+test("D33: guardEvidenceNote clamps every part to one terminal-friendly line", () => {
+  const long = guardEvidenceNote({
+    guard: "identical-batch",
+    signature: `write:{"content":"${"x".repeat(500)}"}`,
+    repeats: 3,
+    guardRetries: 2,
+  });
+  assert.ok(long.includes("…"), "the clipped signature segment ends with an ellipsis");
+  assert.ok(long.length <= 160, `the note stays one line (${long.length} chars)`);
+  assert.ok(!long.includes("\n"));
+  const plural = guardEvidenceNote({
+    guard: "identical-batch",
+    signature: "read:{}",
+    repeats: 3,
+    guardRetries: 2,
+  });
+  assert.match(plural, /after 2 auto-retries/);
+});
+
+// ─────────── D33: runTurn persists the guardStop entry (docs/08 §10) ───────────
+
+test("D33: a loop stop with a session writes a guardStop entry after the run's messages", async (t) => {
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "s.jsonl");
+  const session = await Session.create(sessionPath, {
+    cwd: dir,
+    model: { id: MODEL.id, provider: "fake" },
+  });
+  t.after(() => session.close());
+  const silent: PrintSinks = { out: { write: () => true }, err: { write: () => true } };
+
+  const echoTool: Tool = {
+    name: "echo",
+    description: "echo",
+    parameters: { type: "object" },
+    async execute() {
+      return { content: [{ type: "text", text: "ok" }] };
+    },
+  };
+  const sameCall = { name: "echo", args: { a: 1 } };
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [sameCall] },
+    { type: "toolcall", calls: [sameCall] },
+    { type: "toolcall", calls: [sameCall] }, // guard fires → auto-retry
+    { type: "toolcall", calls: [sameCall] },
+    { type: "toolcall", calls: [sameCall] },
+    { type: "toolcall", calls: [sameCall] }, // re-fires, retry spent → stop
+  ]);
+
+  const { outcome } = await runTurn({
+    model: MODEL,
+    systemPrompt: "sys",
+    tools: [echoTool],
+    streamFn,
+    controller: new AbortController(),
+    context: [],
+    session,
+    prompt: "loop for me",
+    sinks: silent,
+    maxTurns: 50,
+  });
+  assert.equal(outcome.stopReason, "loop");
+
+  const replayed = await replaySession(sessionPath);
+  const guard = replayed.entries.find((e) => e.type === "guardStop");
+  assert.ok(guard && guard.type === "guardStop", "the guardStop entry is persisted");
+  if (guard && guard.type === "guardStop") {
+    assert.equal(guard.evidence.guard, "identical-batch");
+    assert.equal(guard.evidence.repeats, 3);
+    assert.match(guard.evidence.signature, /echo:/);
+  }
+  // The entry lands AFTER the run's messages (the stop is the last thing).
+  assert.equal(replayed.entries[replayed.entries.length - 1], guard);
+  // Replay: the entry carries no LLM context.
+  const messages = replayed.entries.filter((e) => e.type === "message");
+  assert.equal(replayed.context.length, messages.length);
 });

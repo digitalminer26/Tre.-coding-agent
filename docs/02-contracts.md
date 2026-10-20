@@ -257,7 +257,33 @@ Invariants:
 | `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
 | `guard_retry`             | the loop guard (same batch 3×) fired; the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries` |
-| `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"` |
+| `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below |
+
+#### D33 — guard-stop evidence (`GuardEvidence`)
+
+A guard stop names its trigger instead of discarding it. One discriminated
+union (exported from `types.ts`), three homes:
+
+- **The event:** `agent_end.evidence` (above). `identical-batch` →
+  `signature` (batchSignature output), `repeats`, `guardRetries` (H5 retries
+  spent); `permission-stall` / `repeat-failure` → `tool`, count
+  (`denials`/`repeats`) + `window`, `errorExcerpt` (one line, capped at
+  `GUARD_EXCERPT_MAX` = 2000). The pipeline feeds the stall variants via
+  the additive `details.stallEvidence` on the in-band result —
+  `details.stall` keeps its exact meaning; the loop copies the evidence off
+  it.
+- **The session:** a `guardStop` entry (`{ type, id, timestamp, evidence }`)
+  written by the DRIVER on the evidence-carrying `agent_end` — harness
+  metadata, NOT LLM context: replay ignores it (like `modelChange`), it is
+  never a compaction `firstKeptEntryId`. `SESSION_FORMAT_VERSION` stays 1:
+  additive entry types are two-way compatible (loaders cast blindly;
+  replay skips unknown types by fall-through).
+- **The display:** the TUI error item and the CLI stderr stop line append
+  `guardEvidenceNote(evidence)` — one clamped line (`trigger: …`); no
+  evidence (older producers) keeps the static strings.
+
+Privacy: signatures and excerpts are tool arguments/errors already persisted
+in the session's message entries — the entry adds naming, not disclosure.
 
 ## Contract 3 — `StreamFn`
 

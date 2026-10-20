@@ -3193,3 +3193,72 @@ test("applyEvent: agent_start sets runStartedAt, agent_end clears it", () => {
     assert.equal(s2.runStartedAt, null, `cleared on ${stopReason}`);
   }
 });
+
+// ─────────────── D33: guard-stop evidence in the stop lines (docs/08 §10) ───────────────
+
+test("D33: agent_end loop WITH evidence → the error item names the trigger", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    {
+      type: "agent_end",
+      stopReason: "loop",
+      messages: [],
+      evidence: {
+        guard: "identical-batch",
+        signature: 'read:{"path":"x"}',
+        repeats: 3,
+        guardRetries: 1,
+      },
+    },
+  );
+  const last = s.items[s.items.length - 1]!;
+  assert.equal(last.kind, "error");
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
+  assert.match(text, /trigger: read:\{"path":"x"\} \(×3 in a row, after 1 auto-retry\)/);
+});
+
+test("D33: agent_end stall WITH permission evidence → tool, count, and the denial text", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    {
+      type: "agent_end",
+      stopReason: "stall",
+      messages: [],
+      evidence: {
+        guard: "permission-stall",
+        tool: "bash",
+        denials: 3,
+        window: 8,
+        errorExcerpt: "bash: exit code 1 Operation not permitted",
+      },
+    },
+  );
+  const last = s.items[s.items.length - 1]!;
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /stall: the same tool failed 3 times with a permission denial/);
+  assert.match(text, /trigger: bash failed 3\/8 calls — bash: exit code 1 Operation not permitted/);
+});
+
+test("D33: agent_end stall with repeat-failure evidence → the H2 wording, not the sandbox wall", () => {
+  const s = applyEvent(
+    { ...makeInitialState("m"), busy: true },
+    {
+      type: "agent_end",
+      stopReason: "stall",
+      messages: [],
+      evidence: {
+        guard: "repeat-failure",
+        tool: "bash",
+        repeats: 3,
+        window: 8,
+        errorExcerpt: "test failed: expected 1, got 2",
+      },
+    },
+  );
+  const last = s.items[s.items.length - 1]!;
+  const text = last.kind === "error" ? last.text : "<not an error item>";
+  assert.match(text, /identical error 3 times/);
+  assert.doesNotMatch(text, /--no-sandbox/, "an H2 stall is not the sandbox wall");
+  assert.match(text, /trigger: bash failed 3\/8 calls — test failed: expected 1, got 2/);
+});

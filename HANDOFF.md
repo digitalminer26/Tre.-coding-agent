@@ -1,23 +1,26 @@
 # Current project status (2026-10-20)
 
-**H3 loop visibility — designed (2026-10-20, D33; docs-only, NOT yet implemented).**
-`docs/08-loop-hardening.md` gains §10: guard stops (`loop`/`stall`) currently
-print static strings and discard the trigger — the design names the evidence
-once (a `GuardEvidence` union: identical-batch → signature/repeats/retries
-spent; permission-stall & repeat-failure → tool/count/window/errorExcerpt,
-excerpt capped) and gives it three homes: `agent_end.evidence?` (pipeline
-feeds the stall variants via additive `details.stallEvidence`;
-`details.stall` untouched), a driver-written session `guardStop` entry
-(replay-ignored like `modelChange`; `SESSION_FORMAT_VERSION` stays 1 —
-additive entry types are two-way compatible), and the TUI/CLI stop lines
-interpolating it with the old strings as fallback. Rulings (user,
-2026-10-20): persist, not display-only; include the error text; **H4 WIP
-checkpoint commits NOT adopted — commits stay at the current threshold**
-(green build + full suite, human-reviewable; guardrail-zone protocol
-unchanged, §H4 annotated). Non-goals: no flags/config, no threshold or
-guard-text changes, docs/02 rows land WITH the implementation. Docs-only
-increment — gate unchanged. F1 (D32, §9) remains designed-not-implemented;
-its data-gated items stay unspeced on purpose.
+**H3 loop visibility — IMPLEMENTED (2026-10-20, D33; docs/08 §10).**
+Guard stops (`loop`/`stall`) now name their trigger instead of discarding
+it. One `GuardEvidence` union (`identical-batch` → signature/repeats/
+guardRetries spent; `permission-stall` & `repeat-failure` → tool/count/
+window/errorExcerpt, excerpt one line capped at 2000) with three homes:
+`agent_end.evidence?` (pipeline feeds the stall variants via additive
+`details.stallEvidence`; `details.stall` untouched), a driver-written
+session `guardStop` entry (replay-ignored like `modelChange`, never a
+compaction anchor, `SESSION_FORMAT_VERSION` stays 1 — verified two-way
+compatible), and the TUI/CLI stop lines appending a clamped one-line
+`guardEvidenceNote` (static strings remain the no-evidence fallback; H2
+repeat-failure stalls get their own wording, not the sandbox-wall text).
+Rulings honored: persist, error text included, no H4 (commits stay at the
+current threshold). docs/02 gained the `agent_end.evidence` row + the D33
+section. +18 tests (loop 5, pipeline 3, session 3, TUI 3, CLI 4); suite
+1253 / 0 / 14. Next: D32 (F1 progress detection, docs/08 §9) implements
+the same way.
+
+**H3 loop visibility — designed earlier today (2026-10-20, D33; docs commit
+`4359bb0`, superseded by the implementation above — see docs/08 §10 for the
+design and its rulings, incl. H4's non-adoption).**
 
 **F1 progress detection — designed (2026-10-20, D32; docs-only, NOT yet implemented).**
 `docs/08-loop-hardening.md` gains §9: the design pass on the last logged

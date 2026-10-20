@@ -121,7 +121,7 @@ import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type T
 import { TelegramDriver } from "../telegram/driver.js";
 import { workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote } from "../types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -597,12 +597,19 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       } else if (ev.stopReason === "loop") {
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(
-          `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${resume}\n`,
+          `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${
+            ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""
+          }${resume}\n`,
         );
       } else if (ev.stopReason === "stall") {
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
+        const h2 = ev.evidence?.guard === "repeat-failure";
         sinks.err.write(
-          `\nstall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox${resume}\n`,
+          `\n${
+            h2
+              ? "stall: the same tool returned the identical error 3 times within its last 8 calls — the repeat was not re-executed. Change the operation or explain the unresolved failure"
+              : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox"
+          }${ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""}${resume}\n`,
         );
       }
       break;
@@ -934,6 +941,11 @@ export async function runTurn(opts: {
       // order).
       if (ev.type === "done") await persist(ev.message);
       else if (ev.type === "tool_execution_end") await persist(ev.result);
+      else if (ev.type === "agent_end" && ev.evidence !== undefined)
+        // D33 (docs/08 §10): the guard-stop evidence entry — written AFTER
+        // the run's messages (same file order as the stop), skipped when no
+        // session is open. Replay ignores it; the transcript names itself.
+        await session.appendGuardStop(ev.evidence);
       else if (ev.type === "steer")
         // The steer's user message is pushed to the context by the loop but
         // travels only as an event — persist the EXACT object the loop

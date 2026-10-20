@@ -69,6 +69,7 @@
 import type {
   AgentEvent,
   AgentMessage,
+  GuardEvidence,
   UserMessage,
   AssistantMessage,
   ExecuteToolCall,
@@ -333,6 +334,9 @@ export async function* runLoop(
 
   let turn = 0;
   let stopReason: StopReason = "aborted"; // fallback: no assistant turn ran
+  // D33 (docs/08 §10): the evidence for a guard stop, set at the stop
+  // sites, attached to agent_end (present exactly for "loop"/"stall").
+  let guardEvidence: GuardEvidence | undefined;
   let lengthNudged = false; // C22: the one retry for a no-call `length` stop
   // C26 — cycle bookkeeping: the budget is per-cycle, not per-run.
   const maxContinuations =
@@ -683,6 +687,14 @@ export async function* runLoop(
           continue; // the nudge consumes no turn (it is not an LLM call)
         }
         stopReason = "loop";
+        // D33: name the trigger. `signature` + `guardRetries` are already
+        // in scope at the stop site — the evidence rides out on agent_end.
+        guardEvidence = {
+          guard: "identical-batch",
+          signature,
+          repeats: 3,
+          guardRetries,
+        };
         break;
       }
     }
@@ -783,7 +795,22 @@ export async function* runLoop(
       // a permission denial — the third repeat was answered in-band and NOT
       // executed. Stop the run; a new prompt (or a different approach)
       // breaks the pattern, so the run is resumable like "loop".
-      if (entry?.result.details?.stall === true) stalled = true;
+      if (entry?.result.details?.stall === true) {
+        stalled = true;
+        // D33: the pipeline names the trigger via details.stallEvidence
+        // (absent on legacy/custom executors — evidence then stays
+        // undefined and the display falls back to the static string).
+        // First stall in the batch wins.
+        const raw = entry.result.details.stallEvidence;
+        if (
+          guardEvidence === undefined &&
+          raw !== null &&
+          typeof raw === "object" &&
+          "guard" in raw
+        ) {
+          guardEvidence = raw as GuardEvidence;
+        }
+      }
     }
     if (stalled) {
       stopReason = "stall";
@@ -801,6 +828,7 @@ export async function* runLoop(
     stopReason,
     messages: context,
     ...(stopReason === "budget" ? { maxTurns, maxCycles } : {}),
+    ...(guardEvidence !== undefined ? { evidence: guardEvidence } : {}),
   };
 }
 

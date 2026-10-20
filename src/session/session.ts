@@ -27,7 +27,7 @@ import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { makeSummaryMessage } from "../context/compact.js";
-import type { AgentMessage, UserMessage, Usage } from "../types.js";
+import type { AgentMessage, GuardEvidence, UserMessage, Usage } from "../types.js";
 
 /** Bump when the on-disk entry shape changes; replay rejects other versions. */
 export const SESSION_FORMAT_VERSION = 1;
@@ -186,11 +186,29 @@ export interface CompactionEntry {
   timestamp: number;
 }
 
+/**
+ * D33 (docs/08 §10) — a guard stop (loop/stall) recorded by the driver when
+ * an agent_end carried evidence. Harness metadata, NOT LLM context: replay
+ * ignores it like modelChange (the model must not see "you were stopped for
+ * looping" as a context mutation), and it is never referenced by a
+ * compaction's firstKeptEntryId. Additive entry type: SESSION_FORMAT_VERSION
+ * stays 1 — loadSession casts blindly and both replay paths skip unknown
+ * types by fall-through, so old readers ignore it and new readers handle
+ * old files.
+ */
+export interface GuardStopEntry {
+  type: "guardStop";
+  id: string;
+  timestamp: number;
+  evidence: GuardEvidence;
+}
+
 export type SessionEntry =
   | SessionHeaderEntry
   | MessageEntry
   | ModelChangeEntry
-  | CompactionEntry;
+  | CompactionEntry
+  | GuardStopEntry;
 
 /** Model identity as recorded by a modelChange entry (resolved from
  *  models.json by the CLI on resume — apiKeys never land in the session file). */
@@ -321,6 +339,22 @@ export class Session {
     });
   }
 
+  /**
+   * Append a guard-stop evidence entry (D33, docs/08 §10). Written by the
+   * driver on the agent_end that carried `evidence` — one greppable line
+   * naming the guard, the trigger, and the count, so a resumed session is
+   * diagnosable without signature archaeology. Replay ignores the entry
+   * (see GuardStopEntry).
+   */
+  appendGuardStop(evidence: GuardEvidence): Promise<string> {
+    return this.write({
+      type: "guardStop",
+      id: randomUUID(),
+      timestamp: Date.now(),
+      evidence,
+    });
+  }
+
   /** Flush + release the file handle. Appends after close() throw. */
   async close(): Promise<void> {
     const handle = this.handle;
@@ -431,7 +465,7 @@ export function replayContextWithIds(entries: SessionEntry[]): ReplayWithIds {
         ...retained.slice(idx),
       ];
     }
-    // header / modelChange carry no LLM context
+    // header / modelChange / guardStop carry no LLM context
   }
   return { context: retained.map((r) => r.message), contextEntryIds: retained.map((r) => r.id) };
 }

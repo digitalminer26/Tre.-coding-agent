@@ -1920,3 +1920,105 @@ test("D27b F2: keep-alive at the budget boundary leaves the steer undrained (no 
   assert.equal(events.filter((e) => e.type === "steer").length, 0, "the steer was not delivered");
   assert.equal(queue.length, 1, "the steer is still in the queue — no turn was left to send it");
 });
+
+// ─────────────────────── D33: guard-stop evidence (docs/08 §10) ───────────────────────
+
+test("D33: a loop stop carries the identical-batch evidence (signature, repeats, retries spent)", async () => {
+  // Six identical turns: the guard fires at 3 (→ 1 auto-retry), re-fires at
+  // 6 with the retry spent → stop "loop" WITH the evidence naming the batch.
+  const { tool } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({
+    type: "toolcall",
+    calls: [same],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  assert.deepEqual(end.evidence, {
+    guard: "identical-batch",
+    signature: batchSignature([
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "x" } },
+    ]),
+    repeats: 3,
+    guardRetries: 1,
+  });
+});
+
+test("D33: the legacy hard stop (maxGuardRetries 0) reports guardRetries 0", async () => {
+  const { tool } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
+    type: "toolcall",
+    calls: [same],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, maxGuardRetries: 0 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  assert.equal(end.evidence?.guard, "identical-batch");
+  assert.equal(
+    end.evidence?.guard === "identical-batch" ? end.evidence.guardRetries : -1,
+    0,
+  );
+});
+
+test("D33: a stall stop copies the pipeline's stallEvidence off details", async () => {
+  const { tool } = makeTool("bash");
+  const executor: ExecuteToolCall = async (t, c, sig, onUpdate) => {
+    if (c.arguments.command === "third") {
+      return {
+        content: [{ type: "text", text: "STALL_TEXT" }],
+        isError: true,
+        details: {
+          stall: true,
+          stallEvidence: {
+            guard: "permission-stall",
+            tool: "bash",
+            denials: 3,
+            window: 8,
+            errorExcerpt: "Operation not permitted",
+          },
+        },
+      };
+    }
+    return tool.execute(c.id, c.arguments, sig, onUpdate);
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "first" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "bash", args: { command: "first" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "third" } }] },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, executeToolCall: executor });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall");
+  assert.deepEqual(end.evidence, {
+    guard: "permission-stall",
+    tool: "bash",
+    denials: 3,
+    window: 8,
+    errorExcerpt: "Operation not permitted",
+  });
+});
+
+test("D33: a stall WITHOUT stallEvidence (legacy/custom executor) → no evidence, stop unchanged", async () => {
+  const { tool } = makeTool("bash");
+  const executor: ExecuteToolCall = async (t, c, sig, onUpdate) => {
+    const r = await tool.execute(c.id, c.arguments, sig, onUpdate);
+    return { ...r, details: { stall: true } };
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "x" } }] },
+  ];
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, executeToolCall: executor });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall", "details.stall still stops the run");
+  assert.equal(end.evidence, undefined, "no evidence to name — the display falls back");
+});
+
+test("D33: a clean stop carries no evidence", async () => {
+  const turns: FakeTurn[] = [{ type: "text", text: "done" }];
+  const events = await drainLoop(turns, []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(end.evidence, undefined);
+});

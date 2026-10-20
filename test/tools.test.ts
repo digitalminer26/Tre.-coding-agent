@@ -988,3 +988,56 @@ test("safety: no ask function → sensitive/destructive are denied (fail-closed)
   const d3 = await hook(FAKE_TOOL, { type: "toolCall", id: "3", name: "bash", arguments: { command: "ls" } });
   assert.equal(d3, undefined, "read-only bash needs no human");
 });
+
+// ─────────────── D33: stall evidence on details (docs/08 §10) ───────────────
+
+import { guardExcerpt, GUARD_EXCERPT_MAX } from "../src/tools/pipeline.js";
+
+test("D33: the permission-stall guard attaches details.stallEvidence (tool, count, window, excerpt)", async () => {
+  const { tool } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: permFail }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "x" }), sig);
+  await executor(tool, call("2", "t", { p: "x" }), sig);
+  const r3 = await executor(tool, call("3", "t", { p: "x" }), sig);
+  assert.equal(r3.details?.stall, true, "the legacy flag is unchanged");
+  assert.deepEqual(r3.details?.stallEvidence, {
+    guard: "permission-stall",
+    tool: "t",
+    denials: 3,
+    window: 8,
+    // The RAW denial text (not the STALL_TEXT boilerplate), one line.
+    errorExcerpt: guardExcerpt(permFail),
+  });
+});
+
+test("D33: the repeat-failure guard attaches details.stallEvidence with the normalized error", async () => {
+  const { tool } = makeTool("repeat", async () => ({
+    content: [{ type: "text" as const, text: "test failed: expected 1, got 2" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "repeat", { test: "x" }), sig);
+  await executor(tool, call("2", "repeat", { test: "x" }), sig);
+  const c = await executor(tool, call("3", "repeat", { test: "x" }), sig);
+  assert.deepEqual(c.details?.stallEvidence, {
+    guard: "repeat-failure",
+    tool: "repeat",
+    repeats: 3,
+    window: 8,
+    errorExcerpt: "test failed: expected 1, got 2",
+  });
+});
+
+test("D33: guardExcerpt collapses to one line and caps at GUARD_EXCERPT_MAX", () => {
+  assert.equal(guardExcerpt("  line one  \nline two  "), "line one line two");
+  assert.equal(guardExcerpt("a\nb\nc"), "a b c");
+  const huge = "x".repeat(GUARD_EXCERPT_MAX + 500);
+  const capped = guardExcerpt(huge);
+  assert.equal(capped.length, GUARD_EXCERPT_MAX, "capped at the persisted size");
+  assert.equal(guardExcerpt(""), "", "empty stays empty");
+});

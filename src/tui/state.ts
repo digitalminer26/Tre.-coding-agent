@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
 import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
@@ -531,11 +531,15 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       } else if (ev.stopReason === "loop") {
         // C26: runaway-loop detection (3 identical batches in a row). The
         // third repeat was NOT executed; a new prompt breaks the pattern.
+        // D33: with evidence the line names the trigger (which batch
+        // repeated); without (older producers) it stays the static string.
         items = [
           ...items,
           {
             kind: "error",
-            text: "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue",
+            text:
+              "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue" +
+              (ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""),
           },
         ];
       } else if (ev.stopReason === "stall") {
@@ -543,12 +547,19 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // recent calls (the deterministic sandbox wall — docs/08 H1: the
         // count is windowed, so interleaved successes don't hide it). The
         // failing call was NOT executed; a different approach (or
-        // --no-sandbox) breaks the pattern.
+        // --no-sandbox) breaks the pattern. D33: evidence names the tool,
+        // the count, and the denial text (H2 repeat-failure stalls say so).
+        const h2 = ev.evidence?.guard === "repeat-failure";
         items = [
           ...items,
           {
             kind: "error",
-            text: "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox — send another prompt to continue",
+            text:
+              (h2
+                ? "stall: the same tool returned the identical error 3 times within its last 8 calls — the repeat was not re-executed. Change the operation or explain the unresolved failure"
+                : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox") +
+              " — send another prompt to continue" +
+              (ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""),
           },
         ];
       }
