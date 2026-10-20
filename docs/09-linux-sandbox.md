@@ -63,7 +63,23 @@ Verified on the lab VM (Ubuntu 24.04, bwrap 0.9.0, 2026-10-06): `node --test dis
 
 ## 6. Nesting + env
 
-The child environment sets `GIT_CONFIG_NOSYSTEM` to `1` unless the caller already supplied a value, forces `TMPDIR=/tmp`, and sets `TRE_SANDBOX=1`. If the spawning tre process already has `TRE_SANDBOX=1`, the backend starts the shell directly rather than applying another bwrap layer. The child inherits the caller's existing namespace and confinement; it does not get a new per-call workspace policy. This matches the Darwin nesting behavior.
+The child gets **no caller-env spread** (the caller's env may hold tokens/keys
+that must not leak into the sandboxed child) — only the vars in
+`BWRAP_ENV_ALLOWLIST` (`sandbox-linux.ts`): `PATH`, `HOME`, `TMPDIR`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TERM`, `USER`, `LOGNAME`, `SHELL`. A
+missing or empty caller `PATH` falls back to `BWRAP_DEFAULT_PATH` (the
+standard Linux search order) so the child shell still finds its binaries.
+`GIT_*` (other than `GIT_CONFIG_NOSYSTEM`) is deliberately not allowlisted —
+a caller-supplied `GIT_DIR`/`GIT_WORK_TREE` could redirect git outside the
+policy.
+
+On top of the allowlist, the child environment sets `GIT_CONFIG_NOSYSTEM` to
+`1` unless the caller already supplied a value, forces `TMPDIR=/tmp` (the
+private tmpfs), and sets `TRE_SANDBOX=1`. If the spawning tre process already
+has `TRE_SANDBOX=1`, the backend starts the shell directly rather than
+applying another bwrap layer. The child inherits the caller's existing
+namespace and confinement; it does not get a new per-call workspace policy.
+This matches the Darwin nesting behavior.
 
 ## 7. Reverting
 

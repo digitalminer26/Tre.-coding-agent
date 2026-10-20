@@ -27,8 +27,10 @@ same settings), a context/compaction readout, approval controls (`--yes` is
 the default — auto-approve, with only systemic sensitive/destructive
 operations blocked; `--ask` and `--no-approve` are alternatives),
 deployability (`npm i -g .`
-builds `dist/` on install), loop/stall guards that stop runaway and
-sandbox-wall retry loops, and a session-scoped `subtask` tool (create/list/
+builds `dist/` on install), a Linux bash sandbox (Bubblewrap, alongside the
+MVP's macOS Seatbelt), loop/stall guards that stop runaway and
+sandbox-wall retry loops, an MCP client (tier 1 stdio servers + a
+model-invoked `mcp_resource` reader; see `docs/10-mcp-scope.md`), and a session-scoped `subtask` tool (create/list/
 mark) whose progress the TUI renders in a color-coded bottom field
 (in-progress green, queued yellow, failed red) that settles to `none` once
 the workstream is done and quiet — next to a header elapsed-time ticker.
@@ -166,7 +168,7 @@ download and execute the versioned installer script from the release:
 curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/download/vX.Y.Z/install-tre-X.Y.Z.sh | sh
 ```
 
-Replace `X.Y.Z` with the release version (e.g. `v0.4.1`). The script downloads the matching
+Replace `X.Y.Z` with the release version (e.g. `v0.4.3`). The script downloads the matching
 offline bundle, installs it under `~/.tre/tre`, creates the `tre.` symlink,
 updates the shell PATH configuration if needed, and smoke-tests the install.
 Alternatively, download the `.tgz` asset and run its embedded

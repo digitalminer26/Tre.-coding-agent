@@ -54,24 +54,34 @@ skill directories) rather than guessing from the current working directory.
 
 ## Where an agent can CREATE skills
 
-The agent's `write` tool is confined to the workspace root and its `bash` is
-kernel-sandboxed (no writes outside the workspace), so an agent-created skill
-MUST live in `<cwd>/.tre/skills/`. `~/.tre/agent/skills/` is for the USER (or
-a `--no-sandbox` run) — e.g. machine-wide preferences. Don't instruct the
-model to write there; it can't.
+The agent's `write` tool is confined to the workspace root, its extra roots,
+and (since C38) the implicit `~/.tre` root; its `bash` is kernel-sandboxed to
+the same boundary. So an agent CAN create a skill in either:
+
+1. `<cwd>/.tre/skills/` — the workspace copy (the normal choice: per-project,
+   reviewed with the repo, but per D20-style policy left UNTRACKED).
+2. `~/.tre/agent/skills/` — the user skill root (machine-wide; reachable
+   because C38 makes `~/.tre` an always-on read+write root). Use this only
+   when the skill should apply to every launch dir on the machine.
+
+Anything OUTSIDE those roots (e.g. `/usr/local/share/skills`) is unwritable
+from a sandboxed run — don't instruct the model to write there.
 
 ## Deployment policy
 
 **Skills are deployment-specific — they are NOT committed to the repo by
 default.** Different deployments communicate, authenticate, and operate
 differently (telegram vs slack vs email; different endpoints, different
-machines). The repo's `.gitignore` ignores `.tre/skills/` wholesale; the two
-exceptions (`git-commit`, `self-improve`) are the repo's own development
-protocol and were force-added deliberately. If a skill is meant to be shared
+machines). The repo's `.gitignore` ignores `.tre/skills/` wholesale; the one
+exception (`self-improve`) is the repo's own development protocol and was
+force-added deliberately. (`git-commit` was a second exception until commit
+`c6c5188` removed the project-local copy — it now lives in
+`~/.tre/agent/skills/` like any user skill.) If a skill is meant to be shared
 with every deployment, add it with `git add -f` and say so in HANDOFF.md.
 
-Per-machine state and secrets a skill needs (tokens, offsets) go in
-gitignored workspace files (e.g. `.tre/<skill>.json`, `.tre/<skill>/`), never
+Per-machine state and secrets a skill needs (tokens, offsets) go in gitignored
+files under the MACHINE config root `~/.tre` (e.g. `~/.tre/<skill>.json`,
+`~/.tre/<skill>/` — C40; pre-C40 these lived in the workspace `.tre/`), never
 in the skill dir itself and never in git.
 
 ## The read asymmetry (sandbox)
@@ -141,7 +151,9 @@ they're what the model will actually hit in a fresh deployment.
 1. `mkdir -p .tre/skills/<name>`; write `SKILL.md` (frontmatter: `name` +
    `description` with a WHEN clause; `always: true` only for user-absent
    channels like telegram) and any helper (system binary, stdlib).
-2. Secrets/state → gitignored workspace files; add them to `.gitignore`.
+2. Secrets/state → gitignored files under the MACHINE config root `~/.tre`
+   (e.g. `~/.tre/<skill>.json`, `~/.tre/<skill>/`), NOT workspace files (C40) —
+   they must be reachable from any launch dir and can never enter git.
 3. Test with a fake credential (expect a clean auth error, not a crash).
 4. Verify the loader indexes it: `loadSkillsIndex('.tre/skills')` shows the
    entry with the right name/description.

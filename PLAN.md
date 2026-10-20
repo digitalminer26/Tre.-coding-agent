@@ -1,7 +1,7 @@
 # Coding Agent — Build Plan & Workstreams
 
-> **Status note (2026-10-14):** This is the original build plan and its
-> decision log is historical through D29 (2026-10-14); it is not a complete
+> **Status note (2026-10-19):** This is the original build plan and its
+> decision log is historical through D31 (2026-10-19); it is not a complete
 > inventory of later hardening. The foundational workstreams are complete.
 > For current project status, see `README.md` and the top of `HANDOFF.md`;
 > later contract increments are recorded in `docs/02-contracts.md` and the

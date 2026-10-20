@@ -1,8 +1,9 @@
 # Spec — Loop hardening: windowed stall guard (H1) + follow-ups (H2–H5)
 
-Status: **H1 approved 2026-09-30; H2 + H5 implemented. H3–H4 logged, not yet
-implemented.** All new logic is L3 (independent); no pi prior art (see
-`docs/03-citation-policy.md`).
+Status: **H1 approved 2026-09-30, IMPLEMENTED (commit `2a12ca0` — the
+windowed guard, `STALL_WINDOW` 8 / 3 failures, is in `src/tools/pipeline.ts`);
+H2 + H5 implemented. H3–H4 logged, not yet implemented.** All new logic is L3
+(independent); no pi prior art (see `docs/03-citation-policy.md`).
 
 Scope (H1): `src/tools/pipeline.ts` (stall-guard state machine),
 `test/tools.test.ts` (stall-guard cases), `docs/02-contracts.md` (stall

@@ -252,7 +252,9 @@ Invariants:
 | `tool_execution_start`    | per tool call                | `toolCall`                                 |
 | `tool_execution_update`   | optional progress            | `toolCallId`, `text`                       |
 | `tool_execution_end`      | per tool call, in call order | `toolCallId`, `result` (ToolResultMessage) |
-| `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars` |
+| `steer`                   | mid-run guidance was delivered: queued user message(s) pushed into the running loop's context (D25/D27; the driver persists them — session entry ids keyed by message identity) | `turn`, `text`, `message` (UserMessage) |
+| `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars`; `contextTokens?`, `degraded?` (fallback shrink, docs/06 D), `overBudget?` (strict reduction still over budget — kept anyway) |
+| `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
 | `guard_retry`             | the loop guard (same batch 3×) fired; the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"` |
@@ -297,11 +299,15 @@ interface Tool {
 
 ## `ModelConfig` (models.json)
 
-`{ id, provider, baseUrl, api, contextWindow, maxTokens, compactionReserve?, temperature?, apiKey?, compat? }`
+`{ id, provider, baseUrl, api, contextWindow, maxTokens, compactionReserve?, temperature?, apiKey?, headers?, auth?, compat? }`
 — one entry per model. `maxTokens` is the output cap (the `max_tokens` sent to
 the server); `compactionReserve` (optional, default 16384) is the compaction
 trigger's reserved headroom — a SEPARATE knob that sets the leading "start
-compacting now" threshold without touching output capacity. `compat` (per-model
+compacting now" threshold without touching output capacity. `headers` (per-model,
+optional) is sent verbatim with every request (validated at config load;
+OpenRouter attribution headers live here). `auth` (optional, `"chatgpt-oauth"`)
+picks the token source instead of a static `apiKey` — only meaningful with
+`api: "openai-responses"` (D15). `compat` (per-model
 flags: `maxTokensField`, `supportsUsageInStreaming`,
 `requiresAssistantAfterToolResult`, `promptCaching`, `extraParams`) is where
 endpoint quirks live, so the wire layer stays one code path. `promptCaching`

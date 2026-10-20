@@ -17,7 +17,7 @@
  * Options:
  *   --model <id>       model id from models.json (default: the file's "default")
  *   --models <file>    models.json path (default: ~/.tre/tre/models.json)
- *   --tools <list>     comma list of read,write,edit,bash; "all" (default) or "none"
+ *   --tools <list>     comma list of read,write,edit,bash,subtask; "all" (default) or "none"
  *   --cwd <dir>        working directory the agent operates in (default: process.cwd())
  *   --mcp <file|none>  WS12: MCP servers (stdio). tre.json's "mcpServers" is the
  *                      default; --mcp <file> is an explicit config path (tests);
@@ -217,7 +217,9 @@ export interface CliOptions {
   /** --compact-keep (WS9): estimated tokens kept after a compaction. */
   compactKeepTokens: number;
   /** --no-sandbox (WS11): run bash without the kernel file-access sandbox
-   *  (default: sandboxed on darwin; the flag is a no-op elsewhere). */
+   *  (default: sandboxed where a backend exists — Seatbelt on darwin,
+   *  Bubblewrap on linux; elsewhere there is no backend, so bash runs
+   *  unsandboxed with or without the flag). */
   noSandbox: boolean;
   /** C35: --extra-root <dir> (repeatable): explicitly assigned additional
    *  read/write regions (non-sensitive dirs under the user's home), in
@@ -1012,7 +1014,7 @@ quitting — the new process resumes the session automatically.
 Options:
   --model <id>       model id from models.json (default: the file's "default")
   --models <file>    models.json path (default: ~/.tre/tre/models.json)
-  --tools <list>     read,write,edit,bash — or "all" (default) / "none"
+  --tools <list>     read,write,edit,bash,subtask — or "all" (default) / "none"
   --cwd <dir>        project root: the agent's working directory and the
                      sandbox boundary for file tools (default: process cwd)
   --extra-root <dir> C35: an ADDITIONAL read/write root in addition to the
@@ -1067,8 +1069,9 @@ Options:
   --no-compact       disable auto-compaction (on by default — context management, session or not)
   --compact-keep <n> estimated tokens to keep after a compaction (default
                      8192)
-  --no-sandbox       run bash without the kernel file-access sandbox
-                     (on by default on macOS; no-op elsewhere)
+  --no-sandbox       run bash without the kernel file-access sandbox (on by
+                     default where a backend exists: Seatbelt on macOS,
+                     Bubblewrap on Linux; an honest banner when unavailable)
   --plain            interactive plain REPL (one prompt per line) instead of
                      the TUI — the default when stdin is piped anyway
 
@@ -1084,9 +1087,10 @@ escape it (../, absolute paths, symlinks) are refused. C35: --extra-root
 adds explicitly assigned read/write roots (non-sensitive dirs under your
 home) to that boundary, for the file tools AND the bash sandbox — ONE-SHOT
 (this launch only, never written to tre.json); the durable baseline is
-tre.json (C36), which the flag appends to. On macOS
-the bash tool runs in the project root under a kernel (Seatbelt) sandbox
-with the same boundary; elsewhere it runs in the project root unsandboxed.
+tre.json (C36), which the flag appends to. The
+bash tool runs in the project root under a kernel sandbox with the same
+boundary where a backend exists (Seatbelt on macOS, Bubblewrap on Linux);
+elsewhere it runs in the project root unsandboxed.
 Approval (D8): the DEFAULT mode (yes) auto-approves everything except
 SYSTEMIC sensitive reads and SYSTEMIC destructive commands (dd to /dev/*,
 raw-device redirects, mkfs, fork bomb, shutdown/reboot — inherently
@@ -1207,8 +1211,9 @@ export function makeInteractiveAsk(inner: AskApproval, err: PrintSinks["err"]): 
 export function behaviorSettingsLines(
   mode: ApprovalMode,
   /** `true` = kernel sandbox active; `false` = user opted out (--no-sandbox);
-   *  `"unsupported"` = the platform has no kernel sandbox (non-darwin) —
-   *  bash runs UNSANDBOXED and the approval gate is the only boundary. */
+   *  `"unsupported"` = the platform has no usable kernel sandbox backend
+   *  (non-darwin/linux, or bwrap missing/refused) — bash runs UNSANDBOXED
+   *  and the approval gate is the only boundary. */
   sandboxOn: boolean | "unsupported",
   durableRoots: string[] = [],
   oneShotRoots: string[] = [],
@@ -1502,7 +1507,8 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   const extraRoots = [implicitRoot, ...durableRoots, ...oneShotRoots];
   // bash runs in the project root, so its relative paths mean the same
   // thing as the file tools' (the safety hook resolves those against it);
-  // on darwin the child is kernel-sandboxed to the same boundary (WS11).
+  // where a backend exists (darwin Seatbelt, linux bwrap) the child is
+  // kernel-sandboxed to the same boundary (WS11).
   // C35: extra roots are re-allowed in the per-call kernel policy AND in
   // the write/edit path sandbox — one boundary, both layers.
   //
@@ -1774,9 +1780,10 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // stderr (below). Durable (tre.json) and one-shot (--extra-root) roots are
   // passed separately so the summary labels each (one-shot is flagged as
   // this-launch-only + not written to tre.json).
-  // The actual sandbox state, not the flag: on non-darwin the kernel
-  // sandbox is unavailable, so bash runs UNSANDBOXED even though
-  // --no-sandbox was not passed. The banner must show the reality —
+  // The actual sandbox state, not the flag: where no kernel backend is
+  // available (e.g. Linux without a usable bwrap), the kernel sandbox is
+  // unavailable, so bash runs UNSANDBOXED even though --no-sandbox was not
+  // passed. The banner must show the reality —
   // claiming "on" there is a false sense of containment (verified on
   // Ubuntu 24.04, 2026-10-05).
   const sandboxOn = !args.noSandbox
