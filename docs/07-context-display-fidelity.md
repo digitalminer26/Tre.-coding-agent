@@ -190,13 +190,19 @@ number within ±1 per bucket. `npm run build` + `npm test` green; TUI frame
 check (bottom line + `/context` info item).
 
 ## 8. Future items (logged, not designed)
-- **F2 — System-prompt section split.** The driver measures the prompt's
-  sections (identity/tools, guidelines, project-context files, skills index,
-  cwd) at build time; the `sys` number becomes `sys 4.2k (ctx 1.8k · skills
-  0.9k)`.
+
+No items remain logged here. The two once-logged items have both landed and
+are recorded at their implementation sites:
+
+- ~~**F2 — System-prompt section split**~~ — **RESOLVED 2026-10-11
+  (`f11f8d9`)**: the driver measures the prompt's sections at build time
+  (`systemPromptSectionChars`) and the `sys` number renders as
+  `sys N (ctx X · skills Y)`.
+- ~~**F1 — Message composition**~~ — designed in §7, **implemented
+  2026-10-13 (`46b25db`)**: the `msgs` number + `/context` report break down
+  into `t/m/u` origins.
+
 - **Rejected for now:** cost tracking (no pricing fields in `models.json`;
   the design deliberately omits cost — a scope decision, not a display one);
   per-message token counts (belongs in a `/history`-style command, not the
-  bottom line — the TUI state machine stays lean). F2 was resolved 2026-10-11
-  (see the `sys (ctx · skills)` suffix); F1 was designed in §7 and implemented
-  (2026-10-13).
+  bottom line — the TUI state machine stays lean).

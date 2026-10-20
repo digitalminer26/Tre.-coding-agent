@@ -179,7 +179,15 @@ handles; `state.ts` stays pure). +10 tests (parseArgs `--mcp`, `/mcp` handler,
 `SLASH_COMMANDS`/menu entries); full suite 1075 tests / 0 fail.
 
 **MCP scope re-audit (WS12/D29) — docs committed, safety branch committed,
-implementation NOT started (2026-10-14).** Second audit of
+implementation NOT started (2026-10-14).**
+> **Superseded (2026-10-15+):** "implementation NOT started" and the "NOT
+> DONE" block below were true on 2026-10-14 and have since been overtaken —
+> the WS12 core landed `f87597d`/`da93ed6`/`0b315bb`, CLI wiring + `/mcp`
+> status enabled tier 1 registration on 2026-10-15 (see the entries above),
+> and tier 2 item 1 (`mcp_resource`) landed `78052da`. Retained as the
+> dated audit record; current status is the top of this file.
+
+Second audit of
 `docs/10-mcp-scope.md` against the code; the
 design gaps are fixed in the doc (commit `d49f962`): `sandbox:true` now has an
 explicit platform split (darwin Seatbelt via `generateBashSandboxPolicy`, linux
