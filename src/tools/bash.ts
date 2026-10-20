@@ -12,10 +12,10 @@
  * relative paths in the file tools (the safety hook resolves those
  * against the root). `bashTool` (no cwd) is the process-cwd default.
  *
- * WS11: when a cwd is set and the platform is darwin, the child runs under
- * a kernel (Seatbelt) sandbox that confines file access to the workspace
- * plus system dirs — see `sandbox.ts` / D12. Off: `{ sandbox: false }`
- * (the CLI's --no-sandbox).
+ * WS11: when a cwd is set and a kernel backend is available (Seatbelt on
+ * darwin, Bubblewrap on linux), the child runs under it, confining file
+ * access to the workspace plus system dirs — see `sandbox.ts` / D12 /
+ * `sandbox-linux.ts`. Off: `{ sandbox: false }` (the CLI's --no-sandbox).
  *
  * Timeout/abort kill (2026-09-21): the shell is spawned DETACHED so the
  * whole command tree (shell + its pipeline children) forms its own process
@@ -62,7 +62,8 @@ function boundedTail(s: string, cap: number): string {
 
 export interface BashToolOptions {
   /** WS11: kernel-sandbox the child's file access to the workspace.
-   *  On by default when a cwd is set AND the platform is darwin. */
+   *  On by default when a cwd is set AND a backend is available (Seatbelt
+   *  on darwin, Bubblewrap on linux — see bashSandboxAvailable()). */
   sandbox?: boolean;
   /** C35: explicitly assigned additional read/write regions (CLI
    *  --extra-root) re-allowed in the per-call kernel policy. */
@@ -79,8 +80,9 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
     "command (grep, head, tail, ...) when the output may be large. " +
     "A non-zero exit code or a timeout is reported as an error result. " +
     "Timeout defaults to 120s. " +
-    "File access is confined to the working directory (kernel sandbox on " +
-    "macOS): reading system files (/etc, other home dirs) or writing system " +
+    "File access is confined to the working directory (kernel sandbox where " +
+    "a backend exists: macOS Seatbelt / Linux bwrap): reading system files " +
+    "(/etc, other home dirs) or writing system " +
     "directories fails with 'Operation not permitted' — do not retry those.",
   parameters: {
     type: "object",
