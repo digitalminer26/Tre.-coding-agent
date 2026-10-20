@@ -131,16 +131,17 @@ action has already executed. Changed args or diagnostics do not combine.
 This strict matching limits false positives from transient failures whose
 diagnostics change, while bounding identical churn.
 
-### H3 — Loop visibility (logged, not designed)
+### H3 — Loop visibility (designed 2026-10-20, D33; NOT yet implemented → §10)
 
 On `loop`/`stall` stop, the stop event and the TUI surface the TRIGGERING
 signature (which batch/call repeated, how many times). Today the evidence
 is discarded at stop — the next loop incident is diagnosed from holes in
 the guards, not from the transcript. Small change: `agent_end` (and the
 `tool_execution_end` that carried `details.stall`) already has the data;
-it needs to be named and displayed.
+it needs to be named and displayed. Full design (persist + display, with
+error text) in §10.
 
-### H4 — Checkpoint commits (protocol change, NOT an agent commit)
+### H4 — Checkpoint commits (logged 2026-09-30; NOT adopted — see D33 ruling)
 
 `.tre/skills/self-improve/SKILL.md` is guardrail zone — a human commits
 this change with `GUARDRAIL_BYPASS=1`. Allow committing a
@@ -150,6 +151,10 @@ feature is not finished) as an explicitly-marked WIP commit
 session was that the finished half of docs/07 item 1 was never committed;
 checkpoint commits cap the loss at the last half-hour instead of the whole
 session.
+**Ruling (user, 2026-10-20, with D33): NOT adopted** — commits stay at the
+current threshold (green build + full suite, human-reviewable). The
+guardrail-zone protocol is unchanged; if loss-capping is ever wanted, this
+design is the starting point.
 
 ### H5 — Bounded autonomous retry on the loop guard (implemented)
 
@@ -449,3 +454,139 @@ arrives, not to keep it. In rough order of value:
 6. **Cross-run progress memory** — a run that resumes a session inherits no
    counters today; if thrashing turns out to span resumes, that needs a
    persisted (and therefore reviewed) shape, not a silent store.
+
+## 10. H3 — Loop visibility design (designed 2026-10-20, D33; NOT yet implemented)
+
+The problem restated: on a `loop`/`stall` stop the harness knows exactly
+what triggered it — the repeated batch signature, the tool, the failure
+count, the denial text — and throws the evidence away. Both stop messages
+are static strings ("the same tool call(s) 3 times in a row"), so the
+operator sees *that* a guard fired but not *what* fired, and a resumed
+session is undiagnosable without re-deriving signatures by hand.
+
+Rulings (user, 2026-10-20): **(1) persist** the evidence (not display-only);
+**(2) include the error text** on the stall side (the pipeline starts
+carrying it); **(3)** commits stay at the **current threshold** — H4's WIP checkpoint
+commits are NOT adopted; the existing bar (green build + full suite,
+human-reviewable) is the only committable state, so H3 changes nothing in
+the self-improve protocol.
+
+### The evidence shape (one contract, three homes)
+
+A discriminated union keyed on which guard fired — exported from
+`agent-loop.ts`, reused verbatim by the event, the session entry, and the
+display:
+
+```ts
+export type GuardEvidence =
+  | { guard: "identical-batch";                       // C26 guard → "loop"
+      signature: string;                              // batchSignature() output
+      repeats: number;                                // the guard constant (3)
+      guardRetries: number }                          // H5 retries spent before the stop
+  | { guard: "permission-stall";                      // H1 guard → "stall"
+      tool: string; denials: number; window: number;  // count / STALL_WINDOW
+      errorExcerpt: string }                          // raw denial text, first line, capped
+  | { guard: "repeat-failure";                        // H2 guard → "stall"
+      tool: string; repeats: number; window: number;
+      errorExcerpt: string }                          // normalized error text, capped
+```
+
+`errorExcerpt` is capped at 2 000 chars at construction (the persisted
+form) — big enough for a real denial or traceback head, small enough that
+one entry never dominates the JSONL. Display truncates further (one line,
+~160 chars, ellipsis). Note the privacy position: signatures and excerpts
+are tool arguments/errors that are ALREADY in the session's message
+entries — the new entry adds no disclosure, only naming.
+
+### Home 1 — the event: `agent_end.evidence`
+
+`AgentEvent["agent_end"]` gains an optional `evidence?: GuardEvidence`,
+present exactly when `stopReason` is `"loop"` or `"stall"` — the same
+conditional-field pattern as `maxTurns`/`maxCycles` on `"budget"`.
+
+Wiring, per guard (all sites verified against `src/` on 2026-10-20):
+
+- **identical-batch** (`agent-loop.ts`, the C26 stop site): `signature`
+  and `guardRetries` are already in scope where `stopReason = "loop"` is
+  set — assign to a local, attach at `agent_end`. No pipeline involvement.
+- **permission-stall / repeat-failure** (`pipeline.ts`): the pipeline owns
+  the data (tool name, window, count, the failing result's text) but
+  currently propagates only `details: { stall: true }` (plus
+  `repeatFailure: true` on H2). It adds a sibling structured field:
+  `details: { stall: true, stallEvidence: {...} }`. `details.stall` keeps
+  its exact current meaning and shape (the loop's check at
+  `agent-loop.ts:786` and the existing tests key off it; `details` is
+  already `Record<string, unknown>` — additive is in-contract). The loop
+  copies `stallEvidence` onto the local evidence variable at the same
+  site where it maps `details.stall` → `stopReason`.
+
+### Home 2 — the session: a `guardStop` entry
+
+```ts
+export interface GuardStopEntry {
+  type: "guardStop";
+  id: string;
+  timestamp: number;
+  evidence: GuardEvidence;   // same shape as the event's
+}
+```
+
+- Added to the `SessionEntry` union; `Session.appendGuardStop(evidence)`.
+- **Written by the driver** (CLI + TUI) on the `agent_end` that carries
+  `evidence` — the same place messages are appended; skipped when no
+  session is open. The loop stays session-ignorant (contract C-level
+  separation: the loop yields, the driver persists).
+- **Replay: ignored, not replayed.** `replayContextWithIds` passes it
+  through like `modelChange` — it is harness metadata, not LLM context;
+  the model must not see "you were stopped for looping" as a user-visible
+  context mutation. Compaction is unaffected (entries are never referenced
+  by `firstKeptEntryId`).
+- **`SESSION_FORMAT_VERSION` stays 1.** Additive entry types are
+  two-way compatible under the current loaders: `loadSession` casts
+  blindly, and both replay paths ignore unknown types by fall-through.
+  New code reads old files; old code reads new files (the entry is simply
+  skipped). Bumping the version would refuse old binaries for zero gain.
+- Why a dedicated entry when the in-band guard result text is already
+  persisted inside the toolResult message: reconstructing the loop-guard
+  trigger today means knowing to re-run `batchSignature` over the last
+  three assistant batches and diffing them — that IS the archaeology H3
+  exists to end. One greppable line (`"guardStop"`) names the guard, the
+  trigger, and the count.
+
+### Home 3 — the display: evidence in the stop lines
+
+`state.ts` (`agent_end`, the `loop`/`stall` branches) and `cli/main.ts`
+(the stderr stop lines) keep their guidance text but interpolate the
+evidence: loop → the signature's first line (tool + truncated args);
+stall → tool name, `denials/window` (or `repeats/window`), and the
+excerpt's first line. No evidence (older producers) → the current static
+strings, unchanged.
+
+### Explicit non-goals
+
+- No `guard_retry`-event change (it already names the turn/retry counts;
+  the signature there is a possible follow-up, not this design).
+- No new CLI flags, no config keys.
+- No change to guard thresholds or text semantics — evidence is
+  observation, not behavior.
+- docs/02 gains the `agent_end.evidence` field + the `guardStop` entry row
+  WITH the implementation (it documents shipped behavior, not plans —
+  same rule D32 applied).
+
+### Exit criteria
+
+1. Unit (loop): a run stopped by the identical-batch guard yields
+   `agent_end.evidence = { guard: "identical-batch", signature: <the
+   repeated batch>, repeats: 3, guardRetries: <spent> }` — including the
+   exhausted-retries path (`maxGuardRetries: 0` → `guardRetries: 0`).
+2. Unit (pipeline): both stall guards set `details.stallEvidence` with
+   correct tool/count/window and a capped `errorExcerpt`; `details.stall`
+   unchanged (existing tests keep passing untouched).
+3. Session: `appendGuardStop` round-trips through `loadSession`;
+   `replayContext` output is identical with and without guardStop entries;
+   a pre-H3 session file loads unchanged; a post-H3 file loads under a
+   reader that predates the type (fall-through assertion).
+4. Display: TUI `applyEvent` and CLI stderr lines contain the tool name /
+   signature excerpt when evidence is present, and the old static string
+   when absent.
+5. Gate green; suite grows by the above only.
