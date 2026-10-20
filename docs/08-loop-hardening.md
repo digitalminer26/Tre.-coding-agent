@@ -2,7 +2,9 @@
 
 Status: **H1 approved 2026-09-30, IMPLEMENTED (commit `2a12ca0` — the
 windowed guard, `STALL_WINDOW` 8 / 3 failures, is in `src/tools/pipeline.ts`);
-H2 + H5 implemented. H3–H4 logged, not yet implemented.** All new logic is L3
+H2 + H5 implemented. H3–H4 logged, not yet implemented. F1 (progress
+detection) DESIGNED 2026-10-20 (D32, §9) — variant B first, A3 second,
+measure-only rollout; not yet implemented.** All new logic is L3
 (independent); no pi prior art (see `docs/03-citation-policy.md`).
 
 Scope (H1): `src/tools/pipeline.ts` (stall-guard state machine),
@@ -216,10 +218,9 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
 
 ## 7. Future items (logged, not designed)
 
-- **F1 — Progress detection.** Notice "the same file edited N times with
-  no successful verification in between" or "N turns with zero successful
-  calls". The strongest anti-loop signal and the riskiest (false positives
-  on legitimately iterative work) — needs its own design pass.
+- **F1 — Progress detection.** DESIGNED 2026-10-20 (D32) — see §9. Split into
+  variant B (zero-success turns) landing first and variant A3 (same-target
+  edits with no verification); rollout is measure-only → nudge → stop.
 - **F2 — Loop telemetry (implemented — minimal scope).** The TUI counts
   how often the loop guard's autonomous retry (H5) actually RECOVERED, per
   session (the TUI process — the events are not persisted, so the counters
@@ -237,3 +238,214 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
   a higher retry budget, H3 visibility, or the stall guard. The spec-literal
   part (counting loop/stall/budget stops in the bottom line, "fighting its
   cage in real time") is deferred.
+
+## 9. F1 — Progress detection (designed 2026-10-20, D32; NOT yet implemented)
+
+**The gap.** Three guards cover repeats and walls; none covers **thrashing** —
+activity that never repeats byte-identically (C26 misses it), never hits a
+permission wall (H1 misses it), and never produces varied-error churn (H2's
+strict same-error matching misses it):
+
+| Shape | C26 | H1 | H2 | Caught by |
+|---|---|---|---|---|
+| Edit the same file repeatedly, running nothing | no (args differ) | no (not a permission wall) | no (no failures at all) | **budget, late** |
+| Every call failing with *different* errors N turns running | no | no (not permission) | no (error text varies) | **budget, late** |
+
+The unifying principle isn't "repetition" — it's **act–measure–act**: a model
+that keeps acting without ever measuring is not making progress, whatever the
+arguments look like. F1 detects the missing measurement.
+
+**Why this is the riskiest guard, and the split that defuses it.** Editing one
+file five times is *normal* (fixing compile errors one at a time). The
+discriminator can't be edit count — it has to be what happened in between.
+The two shapes have very different false-positive profiles, so they ship
+separately:
+
+- **Variant B — zero-success turns.** Near-zero false positives: legitimate
+  iterative work has successes; it is the expected first landing.
+- **Variant A3 — same-target edits with no verification.** The genuinely
+  risky one; needs the verification definition below and a measure-only
+  shakedown before it may nudge.
+
+**Landing order and commit slicing are decided at implementation time** (one
+behavior per commit, per the self-improve protocol), adjusted to the code's
+actual shape. What this spec binds is the POSTURE — the trigger definitions,
+the ladder, the `watch` default — not the sequence.
+
+### Variant B — zero-success turns
+
+**Definition.** A *turn* whose tool batch was non-empty and whose every result
+carried `isError: true` counts as a **no-success turn**. `NO_SUCCESS_TURNS`
+(default **3**) consecutive such turns trigger. Reset on any turn with at
+least one successful call, and on steer delivery (the D27 Finding 2 rule that
+already resets `sigHistory`: fresh user input can legitimize repetition).
+
+**Counted from:** the per-batch results the loop already collects
+(`agent-loop.ts`, the `results` map — no new plumbing; `isError` is the single
+failure representation).
+
+**Edge rules.**
+- A turn with **no tool calls** is neutral: neither counted nor reset (a
+  model that just talks ends the run with `stop` anyway).
+- **Safety-blocked** calls count as failures — being blocked repeatedly *is*
+  the signal (the model is trying things the gate refuses).
+- **Synthetic in-band guard results** (`LOOP_GUARD_TEXT`, `STALL_TEXT`,
+  `ABORTED_CALL_TEXT`) do NOT feed the counter: those paths terminate on their
+  own terms and must not double-count as model activity.
+- Aborts break the loop before the check; no interaction.
+
+### Variant A3 — same-target edits with no verification
+
+**Definition.** The same normalized target path touched by `write`/`edit`
+`UNVERIFIED_EDITS` (default **4**) times with **no executed `bash` call in
+between** triggers. Per normalized path; a bash call resets ALL path counters
+(ground contact is global — the model measured something).
+
+**Verification definition (the decision that makes this tractable).** A3
+deliberately does NOT try to know which commands verify anything. Pattern
+matching (`npm test`, `tsc`, `pytest`, …) is fragile across ecosystems and
+becomes a maintenance surface — **rejected**. The rule instead encodes the
+universal discipline: *any executed bash call counts as a measurement*.
+Refinement over the "any successful bash call" framing discussed earlier: a
+**failing** `npm test` is precisely a measurement (the model learned the code
+is broken), so the reset keys on **execution**, not outcome — every bash call
+that actually ran, whatever it returned. Calls blocked by the safety gate
+never executed and do not reset.
+
+**Path normalization.** `edit`/`write` `path` args resolved against the tool
+root (`path.resolve`), so `src/x.ts` and `./src/x.ts` are one target. No
+case-folding, no symlink resolution — the guard is a heuristic, not a
+boundary. `read` never counts (reading isn't changing).
+
+### Nudge, then stop (one ladder, both variants)
+
+Mirrors H5's proven shape — bounded, and the retry must be *different*:
+
+1. **Nudge** — a context-only user message (not persisted to the session,
+   exactly like `GUARD_RETRY_TEXT`), distinct per kind:
+   - `no-success`: the last N turns produced no successful tool call — do NOT
+     re-issue similar calls; state what you believe is wrong and what you need
+     from the user, or try a fundamentally different approach.
+   - `no-verification`: you have edited `<path>` N times without running
+     anything — run the project's check, or explain why verification isn't
+     applicable here.
+2. **Stop** — if the same condition recurs again after the nudge, with no
+   intervening ground truth (A: no bash call; B: no successful call), the run
+   stops with a new `stopReason: "progress"`.
+
+`maxProgressNudges` (default **1**, mirroring `maxGuardRetries`): at the cap
+the stop fires. `0` = hard stop on first hit (no nudge) — the same
+"0 restores the legacy behavior" convention as H5.
+
+**Contract additions** (all additive; `docs/02`):
+- `StopReason` gains `"progress"` (a distinct value rather than overloading
+  `"loop"`: H5's auto-retry is scoped to the identical-batch guard, and a
+  reader must not conflate the two).
+- New event `progress_nudge`: `{ turn, kind: "no-success" | "no-verification",
+  mode, target?, count }` (`target` only for `no-verification`).
+- `agent_end` gains `progress?: { kind, count }` when
+  `stopReason === "progress"` (mirrors the existing conditional
+  `maxTurns`/`maxCycles` on `budget`).
+
+Ripple for the new StopReason (enumerated so it isn't discovered later): the
+TUI's `agent_end` mapping (`state.ts` — an error item explaining the
+no-progress stop, alongside the existing `loop`/`stall` items) and the CLI's
+stderr line.
+
+### Rollout: measure-only → nudge → stop
+
+The risk label says earn the right to interrupt. One knob records where the
+ladder stands, all three modes implemented and tested up front:
+
+`progressMode: "watch" | "nudge" | "stop"` — default **`"watch"`** at landing.
+
+- **`watch`** — the event fires with `mode: "watch"` and NOTHING else happens:
+  no context injection, no stop. Pure observation.
+- **`nudge`** — the context nudge is injected; the stop is disabled.
+- **`stop`** — the full ladder.
+
+Promotion is a one-line default flip whose commit message carries the
+telemetry that justified it. Variant B's near-zero false-positive rate means
+it can likely be promoted to `nudge` well before A3.
+
+**Telemetry (extends the F2 pattern).** TUI-side counters fed by the events
+(the events are not persisted; counters reset on restart, like every other
+tally): per kind, `fired` (runs in which the condition was detected at least
+once) and `recovered` (runs that, after a fire, re-established ground truth —
+a bash call for `no-verification`, a successful call for `no-success` — before
+ending). Surfaced as `/stats_progress` (one info line per kind: fires,
+recovered, rate). This is the data the default flip needs, and the
+false-positive audit: a high fire rate with a low recovery rate means the
+detector is wrong, not the model.
+
+### Scope & invariants
+
+- **Where:** turn-level state in `agent-loop.ts` (the pipeline is call-scoped
+  and cannot see a whole turn). Nothing in `pipeline.ts`.
+- **No guardrail-zone files** (`sandbox.ts` / `safety.ts` / `bash.ts` / hook
+  scripts / the self-improve skill) — the loop reads tool names and args it
+  already has.
+- **Nothing persisted.** Per-run counters; the nudge rides the context only
+  (same rule as the budget and guard-retry nudges).
+- **I3 untouched:** F1 never skips a result; the nudge is appended after the
+  batch's results are all in context, and the stop happens after the batch
+  completed normally.
+- **No new CLI flags** at landing — `progressMode` is a `runLoop` option so
+  tests pin all three modes; the default is code-owned and promoted by commit.
+- Tunables exported for tests/tuning, like `STALL_WINDOW`: `NO_SUCCESS_TURNS`,
+  `UNVERIFIED_EDITS`, `MAX_PROGRESS_NUDGES`.
+
+### Exit criteria
+
+**Variant B — acceptance (landing default `watch`):**
+- `NO_SUCCESS_TURNS` exported; the state machine matches the edge rules above
+  exactly (neutral no-call turns, blocked-calls-count, synthetic results
+  excluded, steer resets).
+- `test/agent-loop.test.ts`: (a) 3 all-failed turns → one `progress_nudge`
+  (`kind: "no-success"`, `mode: "watch"`) and the run CONTINUES; (b) a success
+  on turn 2 of 3 → no fire; (c) a steer between failing turns → no fire;
+  (d) mixed batch (one ok, one failed) → no fire; (e) `mode: "nudge"` → the
+  nudge message is in the next request's context and NOT written to the
+  session; (f) `mode: "stop"` → recurrence after the nudge stops with
+  `stopReason "progress"` + `progress` on `agent_end`; (g)
+  `maxProgressNudges: 0` → stops on the first hit.
+- TUI: `/stats_progress` renders fires/recovered/rate; the `progress` stop
+  renders an explanatory error item.
+- `docs/02` rows for the event, the StopReason value, the `agent_end` field.
+- `npm run build` + `npm test` green.
+
+**Variant A3 — acceptance:**
+- `UNVERIFIED_EDITS` exported; per-path counters; a bash call (success OR
+  failure) resets all counters; a gate-BLOCKED bash call does not; `read`
+  never counts; `write` and `edit` to the same path share a counter; `./x` and
+  `x` normalize together.
+- Tests for each of the above, plus: 4 edits with a failed `npm test` between
+  → no fire (the measurement happened); 4 edits with nothing between → fire.
+- Lands at `watch` regardless of variant B's promoted mode — A3 is the risky
+  one and earns its own shakedown.
+
+### Future improvements (logged — greater autonomy is the direction)
+
+The posture here is deliberately conservative; the goal is to relax it as data
+arrives, not to keep it. In rough order of value:
+
+1. **Raise `maxProgressNudges`** once `/stats_progress` shows nudges reliably
+   recovering — more autonomous recovery before any stop.
+2. **Name the actual check command** in the `no-verification` nudge (from
+   `package.json` scripts / a Makefile / the project's own documented command)
+   instead of the generic "run the project's check" — a specific instruction
+   the model can follow beats a nudge about a concept.
+3. **Auto-run the verification**: the harness runs the detected check itself
+   and injects the output as ground truth. The maximally autonomous shape —
+   it supplies the missing measurement rather than asking for it. Needs its
+   own design (approval-mode interaction: a harness-initiated bash call is not
+   a model-initiated one, and must not quietly bypass the gate).
+4. **Per-project thresholds / mode via `tre.json`** (the durable-config seam
+   C36/D22 established) — a long-running build project may want a wider window
+   than a docs repo.
+5. **Variant A2 (verification classification)** — a pattern list that tells a
+   real test run from a `git status`, so "edited 4× but only ran `ls`" can
+   fire. Only worth it if A3's permissiveness proves to leave a real gap.
+6. **Cross-run progress memory** — a run that resumes a session inherits no
+   counters today; if thrashing turns out to span resumes, that needs a
+   persisted (and therefore reviewed) shape, not a silent store.

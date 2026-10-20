@@ -1,4 +1,30 @@
-# Current project status (2026-10-19)
+# Current project status (2026-10-20)
+
+**F1 progress detection — designed (2026-10-20, D32; docs-only, NOT yet implemented).**
+`docs/08-loop-hardening.md` gains §9: the design pass on the last logged
+loop-hardening item. Unifying principle **act–measure–act** (thrashing that
+never repeats byte-identically / never hits a permission wall / never produces
+same-error churn is missed by C26/H1/H2 — only the budget catches it, late).
+Rulings (user, 2026-10-20): **(1)** split — **variant B** (zero-success
+turns: 3 consecutive turns whose whole batch is `isError`; reset on any success
+or steer), then **variant A3** (same-target `write`/`edit` 4× with no executed
+`bash` in between; verification = ANY bash call that ran — a failing `npm test`
+counts as the measurement; the A2 pattern-list rejected as fragile). Landing
+order + commit slicing are decided at implementation time — the spec binds the
+posture, not the sequence. **(2)**
+one ladder: context-only nudge, then recurrence → new `stopReason "progress"`
+(distinct value; H5 auto-retry stays scoped to the identical-batch guard);
+`maxProgressNudges` default 1. **(3)** rollout **measure-only**: `progressMode`
+default `"watch"` (event fires, nothing else), promote to `nudge` then `stop`
+via a one-line default flip backed by `/stats_progress` telemetry (fires /
+recovered / rate per kind, the F2 pattern). Future-improvement log recorded in
+§9 (autonomy is the direction: raise the nudge budget, name the real check
+command, auto-run the verification, per-project thresholds via tre.json).
+Scope: `agent-loop.ts` turn-level state, no guardrail-zone files, nothing
+persisted, I3 untouched, no new CLI flags at landing. PLAN decision log gains
+the D32 row; docs/02 will gain the contract rows WITH the implementation
+(they describe shipped behavior, not the plan). Docs-only increment — no code
+or test change; gate unchanged (1235 / 0 / 14).
 
 **MCP testability seam + non-TTY refusal session-close fix (2026-10-19, committed `e107fc3`, shipped in v0.4.3).**
 Two `MainDeps` seams + one production fix + regression tests, all audited
