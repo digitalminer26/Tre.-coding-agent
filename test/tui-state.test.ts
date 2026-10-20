@@ -55,6 +55,7 @@ import {
   slashCandidates,
   statsLine,
   statsLoopGuardLine,
+  statsProgressLine,
   steerInput,
   submitInput,
   submitSlashBusy,
@@ -3261,4 +3262,150 @@ test("D33: agent_end stall with repeat-failure evidence → the H2 wording, not 
   assert.match(text, /identical error 3 times/);
   assert.doesNotMatch(text, /--no-sandbox/, "an H2 stall is not the sandbox wall");
   assert.match(text, /trigger: bash failed 3\/8 calls — test failed: expected 1, got 2/);
+});
+
+// ── F1 (docs/08 §9, D32): no-progress telemetry — /stats_progress ─────────
+
+const progressNudge = (
+  kind: "no-success" | "no-verification",
+  mode: "watch" | "nudge" | "stop",
+  count: number,
+  target?: string,
+): AgentEvent => ({ type: "progress_nudge", turn: 3, kind, mode, count, ...(target !== undefined ? { target } : {}) });
+
+const toolEndDetails = (
+  id: string,
+  text: string,
+  isError: boolean,
+  name: string,
+  details: Record<string, unknown>,
+): AgentEvent => ({
+  type: "tool_execution_end",
+  toolCallId: id,
+  result: { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError, details, timestamp: 0 },
+});
+
+test("F1: progress_nudge appends an info item and counts the run as fired (per kind, one per run)", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  assert.equal(s.progressStats["no-success"].fired, 1);
+  assert.equal(s.progressStats["no-verification"].fired, 0, "the other kind is untouched");
+  // A second fire of the SAME episode (no ground truth between) does not
+  // double-count the run.
+  s = applyEvent(s, progressNudge("no-success", "watch", 4));
+  assert.equal(s.progressStats["no-success"].fired, 1, "fired is per-RUN per kind");
+  const last = s.items[s.items.length - 1];
+  assert.equal(last?.kind, "info", "the fire lands as an info item in every mode");
+});
+
+test("F1: a successful tool call after a no-success fire is a recovery (one per run)", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  s = applyEvent(s, toolEnd("t1", "ok", false, "read"));
+  assert.equal(s.progressStats["no-success"].recovered, 1);
+  s = applyEvent(s, toolEnd("t2", "ok", false, "read"));
+  assert.equal(s.progressStats["no-success"].recovered, 1, "the episode closed — one recovery per run");
+});
+
+test("F1: a FAILED bash recovers no-verification (execution is the reset), but not no-success", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-verification", "watch", 4, "/abs/src/x.ts"));
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  s = applyEvent(s, toolEnd("t1", "tests failed", true, "bash")); // a failing test IS a measurement
+  assert.equal(s.progressStats["no-verification"].recovered, 1, "the executed bash recovered A3");
+  assert.equal(s.progressStats["no-success"].recovered, 0, "a failed call is not ground truth for B");
+});
+
+test("F1: a gate-blocked bash (details.notExecuted) does NOT recover no-verification", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-verification", "watch", 4, "/abs/src/x.ts"));
+  s = applyEvent(s, toolEndDetails("t1", "blocked", true, "bash", { notExecuted: true }));
+  assert.equal(s.progressStats["no-verification"].recovered, 0, "a call that never ran is not ground contact");
+});
+
+test("F1: fired/recovered are PER RUN per kind — a re-fire after recovery does not re-count (audit fix)", () => {
+  // The promotion data counts RUNS, not episodes: one run contributes at
+  // most one fired and one recovered per kind. The pre-fix behavior
+  // (episode counting) inflated `fired` to 2 for a single run and
+  // distorted the recovery rate the mode flip depends on.
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  s = applyEvent(s, toolEnd("t1", "ok", false, "read")); // the run's recovery
+  s = applyEvent(s, progressNudge("no-success", "watch", 3)); // same run again
+  assert.equal(s.progressStats["no-success"].fired, 1, "the run already counted its fire");
+  assert.equal(s.progressStats["no-success"].recovered, 1, "the recovery stands");
+  s = applyEvent(s, toolEnd("t2", "ok", false, "read"));
+  assert.equal(s.progressStats["no-success"].recovered, 1, "one recovery per run too");
+  // The info line still lands for every fire (the transcript is per-fire;
+  // only the COUNTERS are per-run).
+  assert.equal(s.items.filter((i) => i.kind === "info" && (i as { text: string }).text.includes("no-progress detected")).length, 2);
+});
+
+test("F1: a synthetic guard result (details.notExecuted) is not a recovery (audit fix)", () => {
+  // The loop/length guards fill results in-band for calls that NEVER ran;
+  // a synthetic `bash` fill must not look like ground contact.
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-verification", "watch", 4, "/abs/src/x.ts"));
+  s = applyEvent(s, toolEndDetails("t1", "loop guard", true, "bash", { notExecuted: true }));
+  assert.equal(s.progressStats["no-verification"].recovered, 0, "a fill for a call that never ran is not a measurement");
+  s = applyEvent(s, toolEndDetails("t2", "ok", false, "bash", { notExecuted: true }));
+  assert.equal(s.progressStats["no-verification"].recovered, 0, "not even a non-error fill");
+});
+
+test("F1: the episode bookkeeping resets on agent_start", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  s = applyEvent(s, { type: "agent_end", stopReason: "stop", messages: [] });
+  s = applyEvent(s, { type: "agent_start" });
+  assert.equal(s.progressRunEpisode["no-success"], "idle", "the per-run episode state clears");
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  assert.equal(s.progressStats["no-success"].fired, 2, "the next run's fire counts");
+});
+
+test("F1: /stats_progress reports fires, recovered, and rate per kind", () => {
+  let s = makeInitialState("m");
+  const empty = statsProgressLine(s);
+  assert.match(empty, /no-progress detectors/);
+  assert.match(empty, /no-success.*0 fires/s, "zero-state says so per kind");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, progressNudge("no-success", "watch", 3));
+  s = applyEvent(s, toolEnd("t1", "ok", false, "read"));
+  s = applyEvent(s, progressNudge("no-verification", "nudge", 4, "/abs/src/x.ts"));
+  const line = statsProgressLine(s);
+  assert.match(line, /no-success.*1 fire\(s\), 1 recovered \(100%\)/s);
+  assert.match(line, /no-verification.*1 fire\(s\), 0 recovered \(0%\)/s);
+  // The slash command routes to it.
+  const r = handleSlashCommand(s, "/stats_progress");
+  assert.equal(r.handled, true);
+  assert.match((r.state.items[r.state.items.length - 1] as { text: string }).text, /no-progress detectors/);
+});
+
+test("F1: an agent_end with stopReason progress renders an explanatory error item", () => {
+  let s = makeInitialState("m");
+  s = applyEvent(s, { type: "agent_start" });
+  s = applyEvent(s, {
+    type: "agent_end",
+    stopReason: "progress",
+    messages: [],
+    progress: { kind: "no-success", count: 4 },
+  });
+  const last = s.items[s.items.length - 1];
+  assert.equal(last?.kind, "error");
+  assert.match((last as { text: string }).text, /progress: stopped/);
+  assert.match((last as { text: string }).text, /every tool call failed for 4 turns/);
+  // A3 names the shape differently.
+  s = applyEvent(s, {
+    type: "agent_end",
+    stopReason: "progress",
+    messages: [],
+    progress: { kind: "no-verification", count: 4 },
+  });
+  assert.match((s.items[s.items.length - 1] as { text: string }).text, /edited 4 times with nothing run/);
 });

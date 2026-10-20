@@ -23,8 +23,13 @@ import {
   ABORTED_CALL_TEXT,
   BUDGET_CONTINUE_TEXT,
   GUARD_RETRY_TEXT,
+  MAX_PROGRESS_NUDGES,
+  NO_SUCCESS_NUDGE_TEXT,
+  NO_SUCCESS_TURNS,
+  UNVERIFIED_EDITS,
   batchSignature,
   deriveMaxTurns,
+  progressTargetOf,
   runLoop,
   type AgentLoopOptions,
 } from "../src/loop/agent-loop.js";
@@ -40,6 +45,11 @@ import type {
   Tool,
   UserMessage,
 } from "../src/types.js";
+import { makeToolExecutor } from "../src/tools/pipeline.js";
+import { makeSafetyHooks } from "../src/tools/safety.js";
+import { createBashTool } from "../src/tools/bash.js";
+import { resolve } from "node:path";
+import { applyEvent, makeInitialState } from "../src/tui/state.js";
 
 const MODEL: ModelConfig = {
   id: "fake-model",
@@ -2021,4 +2031,592 @@ test("D33: a clean stop carries no evidence", async () => {
   const end = agentEnd(events);
   assert.equal(end.stopReason, "stop");
   assert.equal(end.evidence, undefined);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// F1 (docs/08 §9, D32) — no-progress detection: variant B (zero-success
+// turns) + variant A3 (same-target edits with no executed bash between).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Run with per-call context capture: `seen[i]` is the i-th LLM request. */
+async function drainSeen(
+  turns: FakeTurn[],
+  tools: Tool[],
+  extra: Partial<AgentLoopOptions> = {},
+): Promise<{ events: AgentEvent[]; seen: LlmContext[] }> {
+  const seen: LlmContext[] = [];
+  const base = fakeStream(turns, { model: MODEL });
+  const streamFn: StreamFn = (m, ctx, o) => {
+    seen.push({ ...ctx, messages: JSON.parse(JSON.stringify(ctx.messages)) });
+    return base(m, ctx, o);
+  };
+  const events = await drain(
+    runLoop({
+      model: MODEL,
+      systemPrompt: "sys",
+      initialMessages: [userMsg("hi")],
+      tools,
+      streamFn,
+      signal: new AbortController().signal,
+      ...extra,
+    }),
+  );
+  return { events, seen };
+}
+
+/** A tool whose result is always an error (variant B's failing call). */
+function failingTool(name: string): Tool {
+  return {
+    name,
+    description: `failing ${name}`,
+    parameters: { type: "object" },
+    execute: async () => ({
+      content: [{ type: "text" as const, text: `${name} failed` }],
+      isError: true,
+    }),
+  };
+}
+
+const progressEvents = (events: AgentEvent[]) =>
+  events.filter((e): e is Extract<AgentEvent, { type: "progress_nudge" }> => e.type === "progress_nudge");
+
+test("F1 B: 3 all-failed turns → one progress_nudge (kind no-success, mode watch) and the run CONTINUES", async () => {
+  const tool = failingTool("bash");
+  // Varying args per turn so the C26 identical-batch guard never fires —
+  // this isolates the no-success detector.
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "a" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "bash", args: { command: "b" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "c" } }] },
+    { type: "text", text: "giving up" },
+  ];
+  const { events, seen } = await drainSeen(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop", "watch mode: the run continues to its normal end");
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "the condition fires exactly once (episode, not per-turn spam)");
+  assert.equal(p[0]!.kind, "no-success");
+  assert.equal(p[0]!.mode, "watch", "the landing default is pure observation");
+  assert.equal(p[0]!.count, 3, "the count is the streak that crossed the threshold");
+  assert.equal(p[0]!.target, undefined, "no target for no-success");
+  assert.equal(p[0]!.turn, 3);
+  // Watch: NOTHING was injected — no nudge text in any later request.
+  assert.equal(seen.length, 4, "the 4th turn was requested (the run continued)");
+  for (const ctx of seen) {
+    assert.equal(
+      ctx.messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content.includes("No progress detected")),
+      false,
+      "watch mode injects nothing",
+    );
+  }
+});
+
+test("F1 B: a success on turn 2 of 3 → no fire", async () => {
+  const ok = makeTool("read");
+  const bad = failingTool("bash");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "a" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "read", args: { path: "x" } }] }, // success resets
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "c" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "bash", args: { command: "d" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [ok.tool, bad], { maxTurns: 50 });
+  assert.equal(progressEvents(events).length, 0, "the success reset the streak");
+  assert.equal(agentEnd(events).stopReason, "stop");
+});
+
+test("F1 B: a steer between failing turns resets the streak → no fire", async () => {
+  const bad = failingTool("bash");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "a" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "bash", args: { command: "b" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "c" } }] },
+    { type: "text", text: "thanks, done" },
+  ];
+  const { events } = await drainSteered(turns, [bad], 2, ["try a different approach"], { maxTurns: 50 });
+  assert.equal(progressEvents(events).length, 0, "the steer reset the no-success streak (D27 F2 rule)");
+  assert.equal(agentEnd(events).stopReason, "stop");
+});
+
+test("F1 B: a mixed batch (one ok, one failed) → no fire", async () => {
+  const ok = makeTool("read");
+  const bad = failingTool("bash");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "a" } }, { id: "c2", name: "read", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "c" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "bash", args: { command: "d" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [ok.tool, bad], { maxTurns: 50 });
+  assert.equal(progressEvents(events).length, 0, "a non-empty batch with ANY success is not a no-success turn");
+});
+
+test("F1 B: mode nudge → the nudge rides the next request's context, and no event carries it (not persisted)", async () => {
+  const bad = failingTool("bash");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "bash", args: { command: "a" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "bash", args: { command: "b" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "bash", args: { command: "c" } }] },
+    { type: "text", text: "ok, stopping" },
+  ];
+  const { events, seen } = await drainSeen(turns, [bad], { maxTurns: 50, progressMode: "nudge" });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1);
+  assert.equal(p[0]!.mode, "nudge");
+  // The nudge is in the 4th request's context (the model saw it)…
+  const fourth = seen[3]!;
+  assert.ok(
+    fourth.messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content === NO_SUCCESS_NUDGE_TEXT),
+    "the no-success nudge is in the next request's context",
+  );
+  // …but NO event carries it (the session persists only event-borne
+  // messages — done/tool_execution_end/steer), so nothing lands in the file.
+  for (const e of events) {
+    if (e.type === "done") assert.ok(!JSON.stringify(e.message).includes("No progress detected"));
+    if (e.type === "steer") assert.notEqual(e.text, NO_SUCCESS_NUDGE_TEXT);
+  }
+  assert.equal(agentEnd(events).stopReason, "stop", "nudge mode never stops");
+});
+
+test("F1 B: mode stop → recurrence after the nudge stops with stopReason progress + progress on agent_end", async () => {
+  const bad = failingTool("bash");
+  // 3 failed turns → nudge (ladder 1/1); the condition persists → turn 6
+  // recurs with the ladder spent → stop.
+  const turns: FakeTurn[] = Array.from({ length: 7 }, (_, i) => ({
+    type: "toolcall" as const,
+    calls: [{ id: `c${i}`, name: "bash", args: { command: `cmd-${i}` } }],
+  }));
+  const { events, seen } = await drainSeen(turns, [bad], { maxTurns: 50, progressMode: "stop" });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "progress", "recurrence with no ground truth stops the run");
+  assert.deepEqual(end.progress, { kind: "no-success", count: 4 }, "the turn AFTER the nudge recurs → stop");
+  assert.equal(end.evidence, undefined, "progress is not a loop/stall stop");
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "one announcement event for the episode");
+  assert.equal(p[0]!.mode, "stop");
+  // The nudge was injected on the first hit (the model got its chance).
+  assert.ok(
+    seen.some((ctx) =>
+      ctx.messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content === NO_SUCCESS_NUDGE_TEXT),
+    ),
+    "the nudge was injected before the stop",
+  );
+});
+
+test("F1 B: maxProgressNudges 0 (mode stop) → hard stop on the first hit, no nudge", async () => {
+  const bad = failingTool("bash");
+  const turns: FakeTurn[] = Array.from({ length: 4 }, (_, i) => ({
+    type: "toolcall" as const,
+    calls: [{ id: `c${i}`, name: "bash", args: { command: `cmd-${i}` } }],
+  }));
+  const { events, seen } = await drainSeen(turns, [bad], {
+    maxTurns: 50,
+    progressMode: "stop",
+    maxProgressNudges: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "progress", "0 = legacy hard stop at the first hit");
+  assert.deepEqual(end.progress, { kind: "no-success", count: 3 });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "the event still fires (the observation channel survives any mode)");
+  assert.equal(p[0]!.mode, "stop");
+  for (const ctx of seen) {
+    assert.equal(
+      ctx.messages.some((m) => m.role === "user" && typeof m.content === "string" && m.content === NO_SUCCESS_NUDGE_TEXT),
+      false,
+      "a run capped at 0 nudges never injects",
+    );
+  }
+});
+
+test("F1 A3: 4 edits of the same path with nothing in between → fire (mode watch)", async () => {
+  const w = makeTool("write");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "src/x.ts", content: "3" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "write", args: { path: "src/x.ts", content: "4" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool], { maxTurns: 50 });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1);
+  assert.equal(p[0]!.kind, "no-verification");
+  assert.equal(p[0]!.count, 4);
+  assert.ok(p[0]!.target !== undefined && p[0]!.target.endsWith("src/x.ts"), "the normalized target is named");
+  assert.equal(agentEnd(events).stopReason, "stop", "watch: the run continues");
+});
+
+test("F1 A3: 4 edits with a FAILED npm test between → no fire (the measurement happened)", async () => {
+  const w = makeTool("write");
+  const failingBash: Tool = {
+    name: "bash",
+    description: "failing bash",
+    parameters: { type: "object" },
+    execute: async () => ({ content: [{ type: "text" as const, text: "tests failed" }], isError: true }),
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "src/x.ts", content: "3" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "bash", args: { command: "npm test" } }] }, // a FAILING test is a measurement
+    { type: "toolcall", calls: [{ id: "c5", name: "write", args: { path: "src/x.ts", content: "4" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, failingBash], { maxTurns: 50 });
+  assert.equal(progressEvents(events).length, 0, "the executed bash reset the counter, whatever it returned");
+});
+
+test("F1 A3: a gate-BLOCKED bash (details.notExecuted) does NOT reset", async () => {
+  const w = makeTool("write");
+  const blockedBash: Tool = {
+    name: "bash",
+    description: "blocked bash",
+    parameters: { type: "object" },
+    execute: async () => ({
+      content: [{ type: "text" as const, text: "blocked by safety gate" }],
+      isError: true,
+      details: { notExecuted: true },
+    }),
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "src/x.ts", content: "3" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "bash", args: { command: "rm -rf /" } }] }, // never ran
+    { type: "toolcall", calls: [{ id: "c5", name: "write", args: { path: "src/x.ts", content: "4" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, blockedBash], { maxTurns: 50 });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "a blocked call is not ground contact — the 4th edit still fires");
+  assert.equal(p[0]!.kind, "no-verification");
+});
+
+test("F1 A3: read never counts; write and edit to the same path share a counter; ./x and x normalize together", async () => {
+  const w = makeTool("write");
+  const e = makeTool("edit");
+  const r = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "src/x.ts" } }] }, // read: neutral
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "edit", args: { path: "./src/x.ts", oldText: "a", newText: "b" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "read", args: { path: "src/x.ts" } }] },
+    { type: "toolcall", calls: [{ id: "c5", name: "edit", args: { path: "src/x.ts", oldText: "b", newText: "c" } }] },
+    { type: "toolcall", calls: [{ id: "c6", name: "write", args: { path: "./src/x.ts", content: "4" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, e.tool, r.tool], { maxTurns: 50 });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "3 writes + 2 edits (reads free) cross the threshold once");
+  assert.equal(p[0]!.kind, "no-verification");
+  assert.equal(p[0]!.count, 4, "the shared counter reached 4 (./x and x are one target)");
+});
+
+test("F1 A3: separate paths keep separate counters", async () => {
+  const w = makeTool("write");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "a.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "b.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "a.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "write", args: { path: "b.ts", content: "2" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool], { maxTurns: 50 });
+  assert.equal(progressEvents(events).length, 0, "2+2 edits of two paths touch neither threshold");
+});
+
+test("F1: the guard paths never feed the counters (synthetic results excluded)", async () => {
+  // 3 identical batches: the loop guard fires at turn 3 and the guarded
+  // in-band results (isError, never executed) must NOT count as a no-success
+  // turn — the run stops with "loop", and F1 stays silent.
+  const { tool } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({ type: "toolcall" as const, calls: [same] }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  assert.equal(agentEnd(events).stopReason, "loop");
+  assert.equal(progressEvents(events).length, 0, "the loop guard's synthetic results are not model activity");
+});
+
+test("F1 A3: an executed bash LATER in the same batch cancels the detection (audit fix)", async () => {
+  // [write ×3] then a batch of [4th write, bash]: the bash measures the
+  // edits, so the turn must NOT fire — pre-fix, the threshold crossed
+  // earlier in the batch survived the reset and stopped the run in "stop"
+  // mode despite the measurement.
+  const w = makeTool("write");
+  const okBash: Tool = {
+    name: "bash",
+    description: "ok bash",
+    parameters: { type: "object" },
+    execute: async () => ({ content: [{ type: "text" as const, text: "tests passed" }] }),
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "src/x.ts", content: "3" } }] },
+    { type: "toolcall", calls: [
+      { id: "c4", name: "write", args: { path: "src/x.ts", content: "4" } },
+      { id: "c5", name: "bash", args: { command: "npm test" } },
+    ] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, okBash], { maxTurns: 50, progressMode: "stop", maxProgressNudges: 0 });
+  assert.equal(progressEvents(events).length, 0, "the same-batch bash cancelled the threshold");
+  assert.equal(agentEnd(events).stopReason, "stop", "no progress stop despite the 4th edit");
+});
+
+test("F1 A3: edits AFTER the same-bash bash still count toward the next threshold", async () => {
+  const w = makeTool("write");
+  const okBash: Tool = {
+    name: "bash",
+    description: "ok bash",
+    parameters: { type: "object" },
+    execute: async () => ({ content: [{ type: "text" as const, text: "ran" }] }),
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [
+      { id: "c3", name: "bash", args: { command: "ls" } },
+      { id: "c4", name: "write", args: { path: "src/x.ts", content: "3" } },
+      { id: "c5", name: "write", args: { path: "src/x.ts", content: "4" } },
+    ] },
+    { type: "toolcall", calls: [{ id: "c6", name: "write", args: { path: "src/x.ts", content: "5" } }] },
+    { type: "toolcall", calls: [{ id: "c7", name: "write", args: { path: "src/x.ts", content: "6" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, okBash], { maxTurns: 50 });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "the two post-bash edits need four MORE to fire");
+  assert.equal(p[0]!.count, 4);
+});
+
+test("F1 A3: a VALIDATION-rejected bash (never executed) does NOT reset (audit fix)", async () => {
+  // Through the REAL pipeline: a malformed bash call (missing its required
+  // arg) never reaches the tool — `details.notExecuted` must mark it, or a
+  // malformed command would masquerade as a measurement.
+  const w = makeTool("write");
+  const realBash: Tool = {
+    name: "bash",
+    description: "bash",
+    parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    execute: async () => ({ content: [{ type: "text" as const, text: "ran" }] }),
+  };
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "write", args: { path: "src/x.ts", content: "1" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "write", args: { path: "src/x.ts", content: "2" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "write", args: { path: "src/x.ts", content: "3" } }] },
+    { type: "toolcall", calls: [{ id: "c4", name: "bash", args: { nope: 1 } }] }, // rejected: never ran
+    { type: "toolcall", calls: [{ id: "c5", name: "write", args: { path: "src/x.ts", content: "4" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [w.tool, realBash], { maxTurns: 50, executeToolCall: makeToolExecutor() });
+  const p = progressEvents(events);
+  assert.equal(p.length, 1, "a rejected call is not ground contact — the 4th edit still fires");
+  assert.equal(p[0]!.kind, "no-verification");
+});
+
+test("F1: synthetic loop-guard fills carry notExecuted (audit fix)", async () => {
+  // The loop guard's in-band results must be marked never-executed: a
+  // guarded `bash` fill would otherwise look like ground contact to the
+  // TUI's recovery tracking (and to A3's reset).
+  const tool: Tool = {
+    name: "bash",
+    description: "bash",
+    parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    execute: async () => ({ content: [{ type: "text" as const, text: "denied" }], isError: true }),
+  };
+  const same = { id: "c1", name: "bash", args: { command: "same" } };
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({ type: "toolcall" as const, calls: [same] }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  assert.equal(agentEnd(events).stopReason, "loop");
+  const ends = events.filter((e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end");
+  const guardFills = ends.filter((e) => e.result.content.some((c) => c.text.includes("Runaway loop detected")));
+  assert.ok(guardFills.length > 0, "the guard filled at least one result");
+  for (const e of guardFills)
+    assert.equal(e.result.details?.notExecuted, true, "the fill says the call never ran");
+});
+
+test("F1 A3: effective workspace paths unify relative and absolute aliases", async () => {
+  const root = resolve("src"); // differs from process.cwd(); fake tool never writes
+  const w = makeTool("write", { executionMode: "sequential" });
+  const turns: FakeTurn[] = Array.from({ length: 4 }, (_, i) => ({
+    type: "toolcall",
+    calls: [{ name: "write", args: { path: i % 2 ? resolve(root, "audit-target.ts") : "audit-target.ts", content: String(i) } }],
+  }));
+  const events = await drainLoop([...turns, { type: "text", text: "done" }], [w.tool], {
+    executeToolCall: makeToolExecutor({ beforeToolCall: makeSafetyHooks({ root, mode: "yes" }) }),
+  });
+  assert.equal(new Set(w.calls.map((c) => c.args.path)).size, 1);
+  const p = progressEvents(events);
+  assert.equal(p.length, 1);
+  assert.equal(p[0]!.target, resolve(root, "audit-target.ts"));
+  assert.equal(p[0]!.count, 4);
+});
+
+test("F1 A3: simultaneous B detection defers A3 to a read-only turn", async () => {
+  const edit = makeTool("edit", {
+    executionMode: "sequential",
+    execute: async () => ({ content: [], isError: true }),
+  });
+  const bad = failingTool("bad");
+  const read = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ name: "bad", args: { n: 1 } }] },
+    { type: "toolcall", calls: [{ name: "bad", args: { n: 2 } }] },
+    { type: "toolcall", calls: Array.from({ length: 4 }, (_, n) => ({ name: "edit", args: { path: "x", n } })) },
+    { type: "toolcall", calls: [{ name: "read", args: { path: "x" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [edit.tool, bad, read.tool]);
+  assert.deepEqual(progressEvents(events).map((e) => [e.kind, e.turn]), [["no-success", 3], ["no-verification", 4]]);
+  // A measurement on the deferred turn cancels A3 instead of announcing it.
+  const bash = makeTool("bash");
+  const measured = await drainLoop([
+    ...turns.slice(0, 3),
+    { type: "toolcall", calls: [{ name: "bash", args: { command: "check" } }] },
+    { type: "text", text: "done" },
+  ], [edit.tool, bad, bash.tool]);
+  assert.deepEqual(progressEvents(measured).map((e) => e.kind), ["no-success"]);
+});
+
+test("F1: real length and not-found fills cannot recover A3 in the TUI", async () => {
+  for (const kind of ["length", "not-found"] as const) {
+    const w = makeTool("write", { executionMode: "sequential" });
+    const bash = makeTool("bash");
+    const edits: FakeTurn[] = Array.from({ length: 4 }, (_, n) => ({
+      type: "toolcall", calls: [{ name: "write", args: { path: "x", content: String(n) } }],
+    }));
+    const tail: FakeTurn = kind === "length"
+      ? { type: "length", calls: [{ name: "bash", args: { command: "never run" } }] }
+      : { type: "toolcall", calls: [{ name: "bash", args: { command: "not installed" } }] };
+    const events = await drainLoop([...edits, tail, { type: "text", text: "done" }], kind === "length" ? [w.tool, bash.tool] : [w.tool]);
+    const end = events.find((e) => e.type === "tool_execution_end" && e.result.toolName === "bash");
+    assert.ok(end?.type === "tool_execution_end");
+    assert.equal(end.result.details?.notExecuted, true, kind);
+    assert.equal(bash.calls.length, 0);
+    let state = makeInitialState("fake");
+    for (const ev of events) state = applyEvent(state, ev);
+    assert.deepEqual(state.progressStats["no-verification"], { fired: 1, recovered: 0 }, kind);
+  }
+});
+
+test("F1: a bash SPAWN failure does not reset A3, and does not recover it in the TUI (audit fix)", async () => {
+  // The real bash tool pointed at a nonexistent cwd: no shell ever starts.
+  // Such a failure must not count as a measurement (loop side) nor as
+  // ground truth closing a fired episode (TUI side).
+  const deadCwd = resolve("this-dir-does-not-exist-f1-audit");
+  const bashTool = createBashTool(deadCwd, { sandbox: false });
+  const w = makeTool("write", { executionMode: "sequential" });
+  const edits: FakeTurn[] = Array.from({ length: 4 }, (_, n) => ({
+    type: "toolcall", calls: [{ name: "write", args: { path: "x", content: String(n) } }],
+  }));
+  const fourthEdit: FakeTurn = { type: "toolcall", calls: [{ name: "write", args: { path: "x", content: "4" } }] };
+  const spawnFail: FakeTurn = { type: "toolcall", calls: [{ name: "bash", args: { command: "echo hi" } }] };
+
+  // Loop side: [w, w, w, spawnFail, w] — the spawn failure neither counts
+  // nor resets, so the 4th edit fires.
+  const es = await drainLoop([...edits.slice(0, 3), spawnFail, fourthEdit, { type: "text", text: "done" }], [w.tool, bashTool]);
+  const p = progressEvents(es);
+  assert.equal(p.length, 1, "a spawn failure is not ground contact — the 4th edit still fires");
+  assert.equal(p[0]!.kind, "no-verification");
+
+  // TUI side: A3 fires, then a spawn failure arrives — no recovery.
+  const fired = await drainLoop([...edits, spawnFail, { type: "text", text: "done" }], [w.tool, bashTool]);
+  let state = makeInitialState("fake");
+  for (const ev of fired) state = applyEvent(state, ev);
+  assert.deepEqual(state.progressStats["no-verification"], { fired: 1, recovered: 0 }, "a shell that never started is not ground truth");
+});
+
+test("F1: the H2 stall replacement PRESERVES notExecuted (real executor, audit fix)", async () => {
+  // The third identical failure gets its result REPLACED by the H2 notice.
+  // The replacement must not erase the execution fact: an unmarked stall
+  // notice reads to the TUI as an executed bash and falsely recovers A3.
+  const bashTool = createBashTool(resolve("this-dir-does-not-exist-f1-h2"), { sandbox: false });
+  const w = makeTool("write", { executionMode: "sequential" });
+  const edits: FakeTurn[] = Array.from({ length: 4 }, (_, n) => ({
+    type: "toolcall", calls: [{ name: "write", args: { path: "x", content: String(n) } }],
+  }));
+  // Same command each time (the H2 signature), separated by a successful
+  // read so the identical-BATCH guard never fires.
+  const shell: FakeTurn = { type: "toolcall", calls: [{ name: "bash", args: { command: "echo hi" } }] };
+  const readOnce: FakeTurn = { type: "toolcall", calls: [{ name: "read", args: { path: "x" } }] };
+  const events = await drainLoop(
+    [...edits, shell, readOnce, shell, readOnce, shell, { type: "text", text: "done" }],
+    [w.tool, bashTool, makeTool("read").tool],
+    { executeToolCall: makeToolExecutor() },
+  );
+  const bashEnds = events.filter(
+    (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+      e.type === "tool_execution_end" && e.result.toolName === "bash",
+  );
+  assert.equal(bashEnds.length, 3);
+  for (const e of bashEnds)
+    assert.equal(e.result.details?.notExecuted, true, "every spawn failure keeps its marker, incl. the H2 replacement");
+  assert.match(
+    bashEnds[2]!.result.content.map((c) => c.text).join(" "),
+    /was NOT executed/,
+    "the H2 notice says the truth about a never-executed call",
+  );
+  let state = makeInitialState("fake");
+  for (const ev of events) state = applyEvent(state, ev);
+  assert.deepEqual(state.progressStats["no-verification"], { fired: 1, recovered: 0 }, "the stall notice is not ground contact");
+});
+
+test("F1: an afterToolCall rewrite that drops details cannot fake an A3 recovery (audit fix)", async () => {
+  // The audit probe: a real bash spawn failure (missing cwd) runs through
+  // a redaction-shaped afterToolCall hook (new content, keep isError, drop
+  // details). Without the execution-fact restoration the unmarked result
+  // reads as an executed bash: it resets A3 in the loop AND falsely
+  // recovers a fired episode in the TUI.
+  const bashTool = createBashTool(resolve("this-dir-does-not-exist-f1-redact"), { sandbox: false });
+  const w = makeTool("write", { executionMode: "sequential" });
+  const redactor = { afterToolCall: (_t: unknown, _c: unknown, r: { isError?: boolean }) => ({ content: [{ type: "text" as const, text: "REDACTED" }], isError: r.isError }) };
+  const edits: FakeTurn[] = Array.from({ length: 4 }, (_, n) => ({
+    type: "toolcall", calls: [{ name: "write", args: { path: "x", content: String(n) } }],
+  }));
+  const fourthEdit: FakeTurn = { type: "toolcall", calls: [{ name: "write", args: { path: "x", content: "4" } }] };
+  const spawnFail: FakeTurn = { type: "toolcall", calls: [{ name: "bash", args: { command: "echo hi" } }] };
+
+  // Loop side: the redacted spawn failure must neither count nor reset.
+  const es = await drainLoop([...edits.slice(0, 3), spawnFail, fourthEdit, { type: "text", text: "done" }], [w.tool, bashTool], {
+    executeToolCall: makeToolExecutor(redactor),
+  });
+  const p = progressEvents(es);
+  assert.equal(p.length, 1, "the redacted spawn failure is still not ground contact");
+  assert.equal(p[0]!.kind, "no-verification");
+
+  // TUI side: A3 fires, then the redacted spawn failure arrives — no recovery.
+  const fired = await drainLoop([...edits, spawnFail, { type: "text", text: "done" }], [w.tool, bashTool], {
+    executeToolCall: makeToolExecutor(redactor),
+  });
+  const bashEnd = fired.find(
+    (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+      e.type === "tool_execution_end" && e.result.toolName === "bash",
+  );
+  assert.ok(bashEnd, "the spawn failure produced a result");
+  assert.equal(bashEnd.result.content.map((c) => c.text).join(""), "REDACTED", "the hook did rewrite the content");
+  assert.equal(bashEnd.result.details?.notExecuted, true, "and the marker survived the rewrite");
+  let state = makeInitialState("fake");
+  for (const ev of fired) state = applyEvent(state, ev);
+  assert.deepEqual(state.progressStats["no-verification"], { fired: 1, recovered: 0 }, "a redacted never-run call is not ground truth");
+});
+
+test("F1: the tunables are exported for tests/tuning", () => {
+  assert.equal(NO_SUCCESS_TURNS, 3);
+  assert.equal(UNVERIFIED_EDITS, 4);
+  assert.equal(MAX_PROGRESS_NUDGES, 1);
+});
+
+test("F1: progressTargetOf — write/edit paths resolve, reads and non-strings do not count", () => {
+  assert.equal(
+    progressTargetOf({ type: "toolCall", id: "x", name: "write", arguments: { path: "./src/x.ts" } }),
+    progressTargetOf({ type: "toolCall", id: "y", name: "edit", arguments: { path: "src/x.ts" } }),
+  );
+  assert.ok((progressTargetOf({ type: "toolCall", id: "x", name: "write", arguments: { path: "x" } }) ?? "").startsWith("/"));
+  assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "read", arguments: { path: "x" } }), undefined);
+  assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "bash", arguments: { path: "x" } }), undefined);
+  assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "edit", arguments: {} }), undefined);
+  assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "write", arguments: { path: "" } }), undefined);
 });

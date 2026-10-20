@@ -124,6 +124,7 @@ test("pipeline: invalid args → isError result, tool NEVER runs", async () => {
   const r = await exec(t, call("1", "t", { wrong: true }));
   assert.equal(r.isError, true);
   assert.match(resultText(r), /Invalid arguments/);
+  assert.equal(r.details?.notExecuted, true, "F1: a rejected call never ran (docs/08 §9)");
   assert.equal(calls.length, 0);
 });
 
@@ -254,7 +255,53 @@ test("stall guard: same tool, permission failure 3× → 3rd replaced with STALL
   assert.equal(r3.isError, true, "3rd failure is an in-band error result (I3)");
   assert.match(resultText(r3), /WAS executed.*REPLACED/);
   assert.equal(r3.details?.stall, true, "the loop maps details.stall onto stopReason");
+  assert.notEqual(r3.details?.notExecuted, true, "an executed denial gains no marker");
   assert.equal(calls.length, 3, "all three executed (a denial is a harmless no-op)");
+});
+
+// F1 (docs/08 §9, sixth audit pass): the execution fact survives result
+// rewriting — a redaction hook that drops `details` must not turn a
+// never-executed call into apparent ground contact.
+test("pipeline: afterToolCall dropping details cannot erase notExecuted", async () => {
+  const { tool } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: "spawn failed" }],
+    isError: true,
+    details: { notExecuted: true, other: "meta" },
+  }));
+  const executor = makeToolExecutor({
+    // the documented redaction shape: new content, keep the error flag,
+    // no details at all
+    afterToolCall: (_t, _c, r) => ({
+      content: [{ type: "text" as const, text: "REDACTED" }],
+      isError: r.isError,
+    }),
+  });
+  const r = await executor(tool, call("1", "t", {}), new AbortController().signal);
+  assert.equal(resultText(r), "REDACTED", "the hook still rewrites the content");
+  assert.equal(r.details?.notExecuted, true, "the execution fact is authoritative, not the hook");
+});
+
+// F1 (docs/08 §9, fifth audit pass): the H1 replacement PRESERVES
+// notExecuted and its notice says the truth — a never-executed result must
+// never read to the loop/TUI as ground contact (a measurement).
+test("stall guard: a NOT-EXECUTED permission failure keeps notExecuted through the replacement", async () => {
+  const { tool } = makeTool("t", async () => ({
+    content: [{ type: "text" as const, text: permFail }],
+    isError: true,
+    details: { notExecuted: true }, // e.g. a bash whose spawn failed EPERM
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "t", { p: "x" }), sig);
+  await executor(tool, call("2", "t", { p: "x" }), sig);
+  const r3 = await executor(tool, call("3", "t", { p: "x" }), sig);
+  assert.equal(r3.details?.stall, true, "still a stall stop");
+  assert.equal(r3.details?.notExecuted, true, "the replacement preserves the execution fact");
+  assert.match(
+    resultText(r3),
+    /was NOT executed.*REPLACED/,
+    "the notice follows the fact (parameterized stallText, not a string splice)",
+  );
 });
 
 test("stall guard: REPHRASED arguments do NOT reset the count (the stall pattern)", async () => {

@@ -22,6 +22,7 @@
  * I3: this never throws. Every failure path returns a ToolResult with
  * `isError: true` whose text the model reads (D7).
  */
+import { resolve } from "node:path";
 import type {
   ExecuteToolCall,
   GuardEvidence,
@@ -84,7 +85,10 @@ export type BeforeToolCall = (
   | undefined
   | Promise<{ args?: Record<string, unknown> } | { blocked: string } | undefined>;
 
-/** afterToolCall: return undefined (keep result) or a replacement result. */
+/** afterToolCall: return undefined (keep result) or a replacement result.
+ *  F1 (docs/08 §9): a replacement may DROP `details`, but it cannot erase
+ *  the execution fact — the pipeline restores `notExecuted: true` when the
+ *  original result carried it (redaction must not fake ground contact). */
 export type AfterToolCall = (
   tool: Tool,
   call: ToolCallBlock,
@@ -146,16 +150,22 @@ export function isPermissionStallText(texts: string[]): boolean {
 
 /**
  * The stall guard's in-band answer: the tool has now failed 3 times with a
- * permission denial within its last 8 calls, so the (already-executed)
- * result of the failing call is REPLACED by this notice and the run stops
- * with stopReason "stall" (the loop maps the `stall` detail onto it).
- * The model is told the failure is deterministic, what to do instead, and
- * how the user can lift the boundary (--no-sandbox for system-maintenance
- * work).
+ * permission denial within its last 8 calls, so the result of the failing
+ * call is REPLACED by this notice and the run stops with stopReason
+ * "stall" (the loop maps the `stall` detail onto it). The model is told
+ * the failure is deterministic, what to do instead, and how the user can
+ * lift the boundary (--no-sandbox for system-maintenance work).
+ * `executed` (default true — a kernel denial IS an execution) drives the
+ * first clause honestly: a result carrying `notExecuted` (F1, docs/08 §9)
+ * must not be described as having run. Parameterized on purpose — a
+ * string-splice over this text would silently revert the wording if the
+ * prefix were ever edited (fifth audit pass).
  */
-export function stallText(toolName: string): string {
+export function stallText(toolName: string, executed = true): string {
   return (
-    `This call WAS executed, but its result was REPLACED by this notice: ` +
+    (executed
+      ? "This call WAS executed, but its result was REPLACED by this notice: "
+      : "This call was NOT executed; its result is REPLACED by this notice: ") +
     `the "${toolName}" tool has now failed 3 times with a permission denial ` +
     "(Operation not permitted / permission denied) within its last 8 calls. " +
     "That failure is deterministic — the sandbox boundary will not move, so " +
@@ -209,6 +219,10 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       return {
         content: text(`Invalid arguments for "${tool.name}": ${validationError}`),
         isError: true,
+        // F1 (docs/08 §9): a malformed call never reached the tool — same
+        // "never executed" contract as the gate paths, so a rejected `bash`
+        // is not a measurement and a rejected `write`/`edit` does not count.
+        details: { notExecuted: true },
       };
     }
 
@@ -228,12 +242,20 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
             }`,
           ),
           isError: true,
+          // F1 (docs/08 §9): the call never executed — the gate itself broke.
+          details: { notExecuted: true },
         };
       }
       if (decision && "blocked" in decision) {
         return {
           content: text(`Tool "${tool.name}" was blocked: ${decision.blocked}`),
           isError: true,
+          // F1 (docs/08 §9, D32): the safety gate refused the call — it was
+          // NEVER EXECUTED. F1's A3 reset keys on execution (a blocked bash
+          // is not a measurement), and this flag is the honest cross-seam
+          // signal (the loop must not regex-match pipeline prose). Additive
+          // on details, like D33's stallEvidence.
+          details: { notExecuted: true },
         };
       }
       if (decision?.args) args = decision.args;
@@ -260,6 +282,13 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     }
 
     // 4. afterToolCall — may rewrite the result.
+    // F1 (docs/08 §9, sixth audit pass): the EXECUTION FACT is
+    // authoritative and independent of content redaction — capture it
+    // before the hook and restore it after, so a replacement that drops
+    // `details` (the documented redaction shape: new content, keep the
+    // error flag) cannot turn a never-executed call into apparent ground
+    // contact (an A3 bash reset / a false TUI recovery).
+    const neverExecuted = result.details?.notExecuted === true;
     if (hooks.afterToolCall) {
       try {
         const replacement = await hooks.afterToolCall(tool, call, result);
@@ -267,6 +296,9 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       } catch {
         // A broken hook never changes the outcome — keep the tool's result.
       }
+    }
+    if (neverExecuted && result.details?.notExecuted !== true) {
+      result = { ...result, details: { ...result.details, notExecuted: true } };
     }
 
     // 5. H2 same-failure guard — strict same tool + canonical args +
@@ -283,15 +315,26 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         entry.calls.push(repeatCallIndex);
         repeatFailures.set(signatureKey, entry);
         if (entry.calls.length >= REPEAT_FAILURE_THRESHOLD) {
+          // F1 (docs/08 §9, audit fix): the replacement must not erase the
+          // execution fact — a never-executed call (e.g. a bash spawn
+          // failure) stays `notExecuted` here, or the TUI would read the
+          // stall notice as ground contact and falsely recover A3. The
+          // wording follows the fact instead of asserting execution.
+          const wasExecuted = result.details?.notExecuted !== true;
           return {
             content: text(
-              `Repeated identical failure detected: the "${tool.name}" tool returned the same error for the same arguments ${REPEAT_FAILURE_THRESHOLD} times within ${REPEAT_FAILURE_WINDOW} calls of that tool. The call WAS executed; its result is replaced and the run stops here (stopReason 'stall'). Change the operation or explain the unresolved failure.`,
+              `Repeated identical failure detected: the "${tool.name}" tool returned the same error for the same arguments ${REPEAT_FAILURE_THRESHOLD} times within ${REPEAT_FAILURE_WINDOW} calls of that tool. ${
+                wasExecuted
+                  ? "The call WAS executed"
+                  : "The call was NOT executed"
+              }; its result is replaced and the run stops here (stopReason 'stall'). Change the operation or explain the unresolved failure.`,
             ),
             isError: true,
             // D33: stallEvidence names the trigger alongside the legacy
             // `stall` flag (additive on Record<string, unknown> — the
             // loop's details.stall check and existing tests are untouched).
             details: {
+              ...(wasExecuted ? {} : { notExecuted: true }),
               stall: true,
               repeatFailure: true,
               stallEvidence: {
@@ -331,12 +374,18 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       entry.count = entry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
       stallByTool.set(tool.name, entry);
       if (permission && entry.count >= STALL_THRESHOLD) {
+        // F1 (docs/08 §9, audit fix): same rule as the H2 replacement —
+        // never erase the execution fact. A permission denial normally IS
+        // an execution (the kernel answered), but a result that says it
+        // never ran stays marked, and the notice says so honestly.
+        const wasExecuted = result.details?.notExecuted !== true;
         return {
-          content: text(stallText(tool.name)),
+          content: text(stallText(tool.name, wasExecuted)),
           isError: true,
           // D33: the denial's OWN text (the raw result, not STALL_TEXT —
           // the notice is boilerplate; the evidence is what was denied).
           details: {
+            ...(wasExecuted ? {} : { notExecuted: true }),
             stall: true,
             stallEvidence: {
               guard: "permission-stall",
@@ -350,6 +399,13 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       }
     }
 
+    // Expose the effective target AFTER hook rewriting, not the original
+    // model path: safety resolves relative paths against the workspace,
+    // which can differ from process.cwd() (--cwd). Attach after result hooks
+    // so annotations/redaction cannot accidentally drop this execution fact.
+    if ((tool.name === "write" || tool.name === "edit") && typeof args.path === "string") {
+      result = { ...result, details: { ...result.details, progressTarget: resolve(args.path) } };
+    }
     return result;
   };
 }

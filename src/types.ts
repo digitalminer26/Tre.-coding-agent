@@ -82,7 +82,28 @@ export interface Usage {
  *              failing call was not executed; set by the LOOP (from the
  *              tool pipeline's `stall` detail); the run is resumable
  */
-export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted" | "budget" | "loop" | "stall";
+// F1 (docs/08 §9, D32): "progress" = the no-progress detector stopped a run
+// that kept acting without measuring (zero-success turns, or same-target
+// edits with no executed bash between). Distinct from "loop" on purpose:
+// H5's auto-retry is scoped to the identical-batch guard, and a reader must
+// not conflate the two. Resumable like budget/loop/stall.
+export type StopReason =
+  | "stop"
+  | "length"
+  | "toolUse"
+  | "error"
+  | "aborted"
+  | "budget"
+  | "loop"
+  | "stall"
+  | "progress";
+
+/** F1 (docs/08 §9) — which no-progress condition fired. */
+export type ProgressKind = "no-success" | "no-verification";
+
+/** F1 rollout ladder (docs/08 §9): watch = observe only (the landing
+ *  default), nudge = inject the context message, stop = the full ladder. */
+export type ProgressMode = "watch" | "nudge" | "stop";
 
 export interface UserMessage {
   role: "user";
@@ -236,6 +257,13 @@ export type AgentEvent =
        * only producer.
        */
       evidence?: GuardEvidence;
+      /**
+       * F1 (docs/08 §9, D32): present exactly when stopReason === "progress"
+       * — which no-progress condition stopped the run and the count that
+       * crossed the threshold. Same conditional-field pattern as
+       * maxTurns/maxCycles (budget) and evidence (loop/stall).
+       */
+      progress?: { kind: ProgressKind; count: number };
     }
   | {
       /**
@@ -270,6 +298,23 @@ export type AgentEvent =
       retry: number;
       /** Total autonomous retries allowed before the run stops. */
       maxRetries: number;
+    }
+  | {
+      /**
+       * F1 (docs/08 §9, D32) — a no-progress condition was detected. Fires in
+       * ALL modes (including "watch" — that is the observation channel);
+       * mode says where the ladder stood, so telemetry can attribute fires.
+       * Informational, not an error: in "watch"/"nudge" the run keeps going.
+       */
+      type: "progress_nudge";
+      turn: number;
+      kind: ProgressKind;
+      /** The mode the run was in when the condition fired. */
+      mode: ProgressMode;
+      /** Normalized target path — only for "no-verification". */
+      target?: string;
+      /** The count that crossed the threshold (turns, or edits of target). */
+      count: number;
     }
   | { type: "turn_start"; turn: number }
   | { type: "turn_end"; turn: number }

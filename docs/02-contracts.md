@@ -44,10 +44,10 @@ Rules:
 - **`toolCall.arguments` is a parsed object** — the wire layer owns JSON
   parse + salvage; everything downstream gets an object or an error.
 - **`stopReason` is the outcome channel**: `stop | length | toolUse |
-  error | aborted | budget | loop | stall`. `length` is load-bearing: the
+  error | aborted | budget | loop | stall | progress`. `length` is load-bearing: the
   loop must fail *all* tool calls in that message (truncated args may parse
-  yet be incomplete). `budget`/`loop`/`stall` are set by the LOOP (never a
-  wire finish_reason) and all three are resumable.
+  yet be incomplete). `budget`/`loop`/`stall`/`progress` are set by the LOOP
+  (never a wire finish_reason) and all four are resumable.
 - **C26 — the turn budget is per-cycle, and the runaway guard is
   pattern-based.** `maxTurns` (derived or explicit) caps one *cycle*; at
   exhaustion the loop injects `BUDGET_CONTINUE_TEXT` (a user message) and
@@ -90,6 +90,47 @@ Rules:
   guards are complementary: byte-identical retries are caught by the loop
   guard (stopReason `loop`); rephrased or interleaved retries are caught
   here (stopReason `stall`).
+- **F1 — no-progress detection (act–measure–act; docs/08 §9, D32).** Two
+  turn-level detectors in the loop (the pipeline is call-scoped and cannot
+  see a whole turn). **Variant B (`no-success`)**: `NO_SUCCESS_TURNS` (3)
+  consecutive turns whose tool batch was non-empty and whose EVERY result
+  carried `isError` (gate-blocked calls count — being refused repeatedly IS
+  the signal). A turn with no tool calls is neutral; a turn with any success
+  resets; a steer delivery resets (the D27 Finding 2 rule). **Variant A3
+  (`no-verification`)**: `UNVERIFIED_EDITS` (4) `write`/`edit` calls against
+  the SAME normalized path (the pipeline's `details.progressTarget` records
+  the effective path AFTER workspace/safety-hook rewriting, so relative and
+  absolute aliases unify even under `--cwd`; custom executors without this
+  metadata fall back to resolving the call's path against process cwd)
+  with no EXECUTED `bash` call in between — the reset keys on
+  EXECUTION, not outcome (a failing `npm test` is precisely a measurement),
+  and a bash call resets ALL path counters (ground contact is global). A
+  gate-blocked call never executed: the pipeline marks it
+  `details.notExecuted` and it neither counts nor resets — the same marker
+  covers argument-VALIDATION rejections (the tool never ran). Synthetic
+  in-band results (loop guard, length guard, abort/error fills, not-found
+  tools) all carry `details.notExecuted` and never feed the counters or
+  the A3 bash reset — every guard path continues or breaks before the
+  evaluation. The bash tool marks its own spawn failures the same way (the
+  spawn `catch`, and a child `error` before the `spawn` event; a command
+  that started and later errored stays unmarked). The H1/H2 stall-result
+  replacements PRESERVE `notExecuted` and their notices state the truth
+  ("WAS executed" only when it was). `notExecuted` is the AUTHORITATIVE
+  execution fact: the pipeline restores it if an `afterToolCall`
+  replacement drops `details` entirely (redaction cannot fake ground
+  contact).
+  One ladder per kind: the `progress_nudge` event fires in EVERY mode (it
+  is the observation channel); `progressMode` (default `"watch"` — event
+  only, nothing else) decides the effect: `"nudge"` injects a context-only
+  user message per kind, `"stop"` additionally stops the run with
+  `stopReason: "progress"` when the condition recurs after the ladder is
+  spent (`maxProgressNudges` per kind, default 1; 0 = hard stop on first
+  hit). Ground truth (a success / an executed bash) deletes the kind's
+  ladder entry — "recurrence with no intervening ground truth" falls out of
+  that rule. Nothing is persisted; the nudge rides the context only (like
+  the budget and guard-retry nudges). I3 untouched: the nudge is appended
+  after the batch's results are all in context; the stop happens after the
+  batch completed normally.
 - **C35 — extra roots: an explicitly assigned, non-sensitive directory under
   home becomes an additional read/write region (one boundary, two layers).**
   The boundary is a *set* of roots, not a single value: the workspace
@@ -257,7 +298,8 @@ Invariants:
 | `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
 | `guard_retry`             | the loop guard (same batch 3×) fired; the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries` |
-| `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below |
+| `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
+| `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
 #### D33 — guard-stop evidence (`GuardEvidence`)
 

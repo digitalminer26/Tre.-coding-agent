@@ -129,6 +129,11 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
           `bash: failed to spawn: ${err instanceof Error ? err.message : String(err)}`,
         ),
         isError: true,
+        // F1 (docs/08 §9): the spawn itself threw — NO shell ever started,
+        // so this is not a measurement (A3's bash reset keys on execution).
+        // Additive metadata only; the sandbox behavior is untouched (the
+        // reviewed guardrail-zone exception from the F1 audit).
+        details: { notExecuted: true },
       };
     }
 
@@ -157,6 +162,16 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
       let settled = false;
       let timedOut = false;
       let aborted = false;
+      // F1 (docs/08 §9): did the child EVER start? Node emits `spawn` on a
+      // successful posix_spawn/execve; an `error` BEFORE it means the shell
+      // never started (ENOENT shell, missing cwd, ...) — a failed spawn is
+      // not a measurement, so the result carries `notExecuted` and A3's
+      // bash reset ignores it. An `error` AFTER `spawn` (rare: a failed
+      // kill) leaves the command having run — unmarked, as before.
+      let spawned = false;
+      child.once("spawn", () => {
+        spawned = true;
+      });
       let forceTimer: ReturnType<typeof setTimeout> | undefined;
 
       // Last-resort backstop: a SIGKILL'd group can only fail to release the
@@ -196,6 +211,10 @@ export function createBashTool(cwd?: string, opts: BashToolOptions = {}): Tool {
         resolve({
           content: text(`bash: failed to run command: ${err.message}`),
           isError: true,
+          // F1 (docs/08 §9): an error before the `spawn` event means the
+          // shell never started — never executed, not a measurement (the
+          // spawn-success `spawn` event above is the execution witness).
+          ...(spawned ? {} : { details: { notExecuted: true } }),
         });
       });
 

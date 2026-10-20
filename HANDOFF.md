@@ -1,5 +1,77 @@
 # Current project status (2026-10-20)
 
+**F1 follow-up audit fixes.** Effective execution paths now travel from the
+pipeline via `details.progressTarget` after safety-hook rewriting, fixing
+relative/absolute alias counters when `--cwd` differs from process cwd. A3
+checks the outstanding map each tool turn, so a simultaneous B detection
+cannot lose a deferred A3 hit on a later read-only turn (an executed bash
+still cancels it). Regression tests cover both, plus actual length-guard
+and unknown-tool results replayed into the TUI: neither falsely recovers A3.
+THIRD-PASS FIX: the real bash tool's spawn failures (the spawn `catch` and
+a child `error` before the `spawn` event) now carry `details.notExecuted` —
+a shell that never started is not a measurement, so it neither resets A3
+nor recovers a fired episode. This is the reviewed guardrail-zone exception
+(additive metadata only in bash.ts; sandbox behavior untouched), noted in
+docs/08 §9. Regression tests: bash-kill.test.ts (spawn failure marked; a
+running-but-failing command unmarked) and agent-loop.test.ts (loop + TUI
+probes with the real bash tool). FOURTH-PASS FIX: the H1/H2 stall-result
+replacements dropped `notExecuted` (the third identical bash spawn failure
+arrived at the TUI as a plain stall notice and falsely recovered A3).
+Both replacements now carry the marker through and their notices say
+"WAS executed"/"was NOT executed" per the fact. Regression: agent-loop.test.ts
+real-executor probe (3 spawn failures through makeToolExecutor + TUI
+replay). FIFTH-PASS HYGIENE: stallText(tool, executed) is parameterized
+(the notExecuted variant was a fragile string splice over its own prefix),
+the H1 replacement got its regression test (marker preserved + honest
+wording; the executed-denial test now also asserts NO marker), and docs/08
+§9 "Scope & invariants" was amended to record the reviewed pipeline.ts and
+bash.ts exceptions the audit passes actually shipped (it previously said
+"nothing in pipeline.ts" / "no bash.ts" — self-contradictory vs the notes).
+SIXTH-PASS FIX: an afterToolCall replacement that DROPS `details` could
+still erase `notExecuted` (the documented redaction shape turned a real
+bash spawn failure into apparent ground contact — false A3 reset / false
+TUI recovery). The pipeline now captures the execution fact before the
+hook and restores it after; the AfterToolCall type documents it as
+authoritative. Regressions: tools.test.ts (hook dropping details) +
+agent-loop.test.ts (real bash + redaction hook, loop AND TUI sides).
+Verification: `npm test` (quality gate + tsc + full suite), 1305 total,
+1291 passed, 0 failed, 14 skipped; `git diff --check` clean.
+
+**F1 progress detection — IMPLEMENTED (2026-10-20, D32; docs/08 §9).**
+The act–measure–act guards: variant **B** (`no-success` — 3 consecutive
+turns whose whole batch failed; reset on any success or steer) and variant
+**A3** (`no-verification` — 4 `write`/`edit`s of the same normalized path
+with no EXECUTED `bash` between; a failing test IS the measurement; a
+gate-blocked call never ran and neither counts nor resets — EVERY
+never-executed path now tags `details.notExecuted`: the pipeline's
+validation rejection + two gate paths, the loop's `failInband`, the
+loop/length-guard fills, and not-found tools).
+Turn-level state machine at the end of the batch body in `agent-loop.ts`
+(every guard path continues/breaks first, so synthetic results never feed
+it; an executed bash LATER in the same batch cancels a threshold crossed
+earlier in it). One ladder per kind, one ANNOUNCEMENT per episode: the
+`progress_nudge` event fires in EVERY mode (the observation channel);
+`progressMode` (default **`"watch"`** — event only, nothing else) decides
+the effect; `"nudge"` injects a context-only message; `"stop"` stops on
+recurrence with the new resumable `stopReason: "progress"` (exit 3) +
+`progress` on `agent_end`. `maxProgressNudges` default 1, 0 = hard stop
+(the H5 convention). Telemetry: TUI per-kind fired/recovered — the
+COUNTERS are per-RUN per kind (at most one fired + one recovered per run)
+(`/stats_progress`, resets on restart like every tally — the data the
+default flip needs); the plain CLI prints fires only in nudge/stop modes;
+both render the progress stop as an explanatory line. Nothing persisted;
+I3 untouched; no guardrail-zone files. docs/02: the StopReason value, the
+event row, the `agent_end.progress` field, the F1 contract bullet.
+AUDITED + FIXED (2026-10-20): four findings — stale same-batch A3
+detection stopped runs despite a measurement; validation rejections and
+loop/length-guard fills lacked `notExecuted` (false ground contact, incl.
+a TUI false recovery); telemetry counted episodes instead of runs.
+Regression tests pin all four: +5 tests (loop 4, TUI 1), 1 TUI test
+rewritten (it had pinned the episode-counting behavior), 1 tools test
+extended. Suite 1295 / 0 / 14. Next: run daily, flip
+variant B's default to `nudge` when `/stats_progress` earns it (one-line
+commit with the telemetry in the message).
+
 **H3 loop visibility — IMPLEMENTED (2026-10-20, D33; docs/08 §10).**
 Guard stops (`loop`/`stall`) now name their trigger instead of discarding
 it. One `GuardEvidence` union (`identical-batch` → signature/repeats/

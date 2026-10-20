@@ -587,14 +587,14 @@ test("slashCandidates: bare command words only, alphabetical prefix filter", () 
   assert.deepEqual(slashCandidates(""), []); // no slash
   assert.deepEqual(slashCandidates("quit"), []); // no leading slash
   assert.deepEqual(slashCandidates("/quit"), ["/quit"]);
-  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/mcp", "/models", "/quit", "/restart", "/stats", "/stats_loop_guard", "/usage"]); // all, alphabetical
+  assert.deepEqual(slashCandidates("/"), ["/compact", "/context", "/display-bottom", "/exit", "/mcp", "/models", "/quit", "/restart", "/stats", "/stats_loop_guard", "/stats_progress", "/usage"]); // all, alphabetical
   assert.deepEqual(slashCandidates("/u"), ["/usage"]); // usage remains discoverable by prefix
   assert.deepEqual(slashCandidates("/d"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/di"), ["/display-bottom"]);
   assert.deepEqual(slashCandidates("/display-bottom"), ["/display-bottom"]); // exact
   assert.deepEqual(slashCandidates("/c"), ["/compact", "/context"]);
   assert.deepEqual(slashCandidates("/m"), ["/mcp", "/models"]); // mcp sorts before models
-  assert.deepEqual(slashCandidates("/st"), ["/stats", "/stats_loop_guard"]); // both stats commands
+  assert.deepEqual(slashCandidates("/st"), ["/stats", "/stats_loop_guard", "/stats_progress"]); // all stats commands
   assert.deepEqual(slashCandidates("/zz"), []); // no match
   assert.deepEqual(slashCandidates("/display-bottom m"), []); // space → arguments, menu hides
   assert.deepEqual(slashCandidates("/quit "), []); // completed word (trailing space)
@@ -605,7 +605,7 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // no menu for a plain prompt
   assert.deepEqual(suggestMenu({ ...s, input: "hi" }, 80), []);
 
-  // "/" → all commands (11); the menu is a 5-row WINDOW — the first 5 are
+  // "/" → all commands (12); the menu is a 5-row WINDOW — the first 5 are
   // shown, the rest are reached by scrolling the selection (see below).
   const all = suggestMenu({ ...s, input: "/" }, 80);
   assert.equal(all.length, 5);
@@ -622,7 +622,7 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   // selection moves with suggestIdx (and clamps when it overruns the list)
   assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 2 }, 80).map((m) => m.selected),
     [false, false, true, false, false]);
-  assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 10 }, 80).map((m) => m.selected),
+  assert.deepEqual(suggestMenu({ ...s, input: "/", suggestIdx: 11 }, 80).map((m) => m.selected),
     [false, false, false, false, true]); // clamp to last candidate
 
   // the window SCROLLS with the selection: at idx 8 (/stats) the window is
@@ -634,9 +634,9 @@ test("suggestMenu: grey lines with selection marker, capped, hidden for approval
   assert.ok(scrolled[2]!.line.startsWith("  /quit — "));
   assert.ok(scrolled[3]!.line.startsWith("  /restart — "));
   assert.ok(scrolled[4]!.line.startsWith("> /stats — "));
-  // at the very end (idx 10, /usage) the window is pinned at the tail
-  const tail = suggestMenu({ ...s, input: "/", suggestIdx: 10 }, 80);
-  assert.ok(tail[0]!.line.startsWith("  /quit — "));
+  // at the very end (idx 11, /usage) the window is pinned at the tail
+  const tail = suggestMenu({ ...s, input: "/", suggestIdx: 11 }, 80);
+  assert.ok(tail[0]!.line.startsWith("  /restart — "));
   assert.ok(tail[4]!.line.startsWith("> /usage — "));
 
   // truncated to one row at a narrow width (marker survives)
@@ -674,13 +674,13 @@ test("menuNav: arrows move the selection with wrap-around, null off-menu", () =>
   assert.equal(menuNav({ ...s, input: "/zz" }, 1), null);
 
   // on-menu: down from null → 1, up from null → last (wrap). Navigation
-  // spans the FULL candidate list (11 commands) — the window follows.
+  // spans the FULL candidate list (12 commands) — the window follows.
   const base: TuiState = { ...s, input: "/" };
   assert.equal(menuNav(base, 1)!.suggestIdx, 1);
-  assert.equal(menuNav(base, -1)!.suggestIdx, 10);
-  // wrap at both ends (across all 11)
-  assert.equal(menuNav({ ...base, suggestIdx: 10 }, 1)!.suggestIdx, 0);
-  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 10);
+  assert.equal(menuNav(base, -1)!.suggestIdx, 11);
+  // wrap at both ends (across all 12)
+  assert.equal(menuNav({ ...base, suggestIdx: 11 }, 1)!.suggestIdx, 0);
+  assert.equal(menuNav({ ...base, suggestIdx: 0 }, -1)!.suggestIdx, 11);
   // a stale (overrun) index is clamped to the list end before moving
   assert.equal(menuNav({ ...base, suggestIdx: 99 }, 1)!.suggestIdx, 0);
   // past the first window: down from idx 4 → 5 (the window scrolls to follow)
@@ -712,8 +712,8 @@ test("menuComplete: enter completes the selected word, exact match submits", () 
   const c4 = menuComplete({ ...s, input: "/", suggestIdx: 4 });
   assert.equal(c4!.input, "/mcp "); // index 4 = /mcp
   // a selection PAST the first window completes the scrolled-to command
-  const c5 = menuComplete({ ...s, input: "/", suggestIdx: 10 });
-  assert.equal(c5!.input, "/usage "); // idx 10 = /usage (window scrolled to it)
+  const c5 = menuComplete({ ...s, input: "/", suggestIdx: 11 });
+  assert.equal(c5!.input, "/usage "); // idx 11 = /usage (window scrolled to it)
 
   // exact match → null (Enter submits; the completed trailing-space form
   // also has no menu → null)

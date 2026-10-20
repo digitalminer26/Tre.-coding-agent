@@ -43,6 +43,26 @@ const sig = () => new AbortController().signal;
 const text = (r: { content: { type: string; text: string }[] }) =>
   r.content.map((c) => c.text).join(" ");
 
+// ── F1 (docs/08 §9, audit fix): spawn failures are NOT executions ──────────
+
+test("F1: a bash spawn failure (missing cwd) carries notExecuted — it is not a measurement", async () => {
+  const tool = createBashTool(join(tmpdir(), "bash-kill-no-such-dir-f1"), { sandbox: false });
+  const r = await tool.execute("t1", { command: "echo hi" }, sig());
+  assert.equal(r.isError, true);
+  assert.match(text(r), /failed to (spawn|run command)/);
+  assert.equal(r.details?.notExecuted, true, "no shell ever started — A3's reset must ignore this");
+});
+
+test("F1: a bash that RUNS (even failing) never carries notExecuted", async (t) => {
+  const dir = await ws(t);
+  const tool = createBashTool(dir, { sandbox: false });
+  const ok = await tool.execute("t1", { command: "true" }, sig());
+  assert.notEqual(ok.details?.notExecuted, true, "a success is certainly an execution");
+  const bad = await tool.execute("t2", { command: "false" }, sig());
+  assert.equal(bad.isError, true);
+  assert.notEqual(bad.details?.notExecuted, true, "a non-zero exit IS a measurement (docs/08 §9)");
+});
+
 test("timeout kills the whole pipeline: prompt settle, no orphans (unsandboxed)", async (t) => {
   const dir = await ws(t);
   const tool = createBashTool(dir, { sandbox: false });

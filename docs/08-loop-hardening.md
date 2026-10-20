@@ -3,8 +3,10 @@
 Status: **H1 approved 2026-09-30, IMPLEMENTED (commit `2a12ca0` — the
 windowed guard, `STALL_WINDOW` 8 / 3 failures, is in `src/tools/pipeline.ts`);
 H2 + H5 implemented. H3–H4 logged, not yet implemented. F1 (progress
-detection) DESIGNED 2026-10-20 (D32, §9) — variant B first, A3 second,
-measure-only rollout; not yet implemented.** All new logic is L3
+detection) IMPLEMENTED 2026-10-20 (D32, §9) — variant B + A3 both landed
+together (one turn-level state machine), landing default `progressMode:
+"watch"` (pure observation; promotion is a one-line default flip backed by
+`/stats_progress`).** All new logic is L3
 (independent); no pi prior art (see `docs/03-citation-policy.md`).
 
 Scope (H1): `src/tools/pipeline.ts` (stall-guard state machine),
@@ -244,7 +246,43 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
   part (counting loop/stall/budget stops in the bottom line, "fighting its
   cage in real time") is deferred.
 
-## 9. F1 — Progress detection (designed 2026-10-20, D32; NOT yet implemented)
+## 9. F1 — Progress detection (designed 2026-10-20, D32; IMPLEMENTED 2026-10-20)
+
+**Implementation notes (landing shape, 2026-10-20).** Variants B and A3
+landed together (one turn-level state machine at the end of the batch body
+in `agent-loop.ts` — the spec binds the posture, not the sequence). The
+`notExecuted` detail (the "this call never ran" signal A3's reset keys on)
+is produced by EVERY never-executed path — the pipeline's validation
+rejection and two gate paths, the loop's in-band `failInband` fills, the
+loop-guard and length-guard fills, not-found tools, and the bash tool's own
+spawn failures (the `catch` around spawn, and a child `error` emitted
+BEFORE the `spawn` event — the spawn-success event is the execution
+witness; an `error` after it, e.g. a failed kill, stays unmarked) — so the
+rule holds across every producer (audit fix: validation rejections, guard
+fills, and bash spawn failures were unmarked and could masquerade as
+ground contact; the bash.ts change is the reviewed guardrail-zone
+exception — additive metadata only, sandbox behavior untouched). The H1/H2
+stall-result REPLACEMENTS preserve the marker and their notices follow the
+fact ("WAS executed" vs "was NOT executed") — an unmarked stall notice for
+a never-run call was the last path that could fake ground contact (fourth
+audit pass).
+An executed bash
+LATER in the same batch cancels a threshold crossed earlier in it:
+`[edit x ×4, bash]` measured the edits (audit fix: the stale candidate
+once stopped runs in "stop" mode despite the measurement). One
+ANNOUNCEMENT
+(the `progress_nudge` event) per episode per kind — the event fires in every
+mode; ground truth (a success / an executed bash) clears the episode, so a
+persisting condition never spams and a later episode re-announces. The TUI
+carries the per-kind fired/recovered telemetry (`/stats_progress`) — the
+COUNTERS are per-RUN per kind (at most one fired + one recovered per run;
+audit fix: they once counted episodes, inflating the promotion data), while
+the transcript line lands per fire. The
+plain CLI prints the fire only in `nudge`/`stop` modes (watch stays silent
+there — the TUI is the shakedown channel) and both render the `progress`
+stop. Tests: `test/agent-loop.test.ts` (the exit-criteria cases below plus
+target normalization), `test/tui-state.test.ts` (telemetry + the stop item),
+`test/cli.test.ts` (exit code 3).
 
 **The gap.** Three guards cover repeats and walls; none covers **thrashing** —
 activity that never repeats byte-identically (C26 misses it), never hits a
@@ -317,10 +355,18 @@ is broken), so the reset keys on **execution**, not outcome — every bash call
 that actually ran, whatever it returned. Calls blocked by the safety gate
 never executed and do not reset.
 
-**Path normalization.** `edit`/`write` `path` args resolved against the tool
-root (`path.resolve`), so `src/x.ts` and `./src/x.ts` are one target. No
-case-folding, no symlink resolution — the guard is a heuristic, not a
-boundary. `read` never counts (reading isn't changing).
+**Path normalization.** The pipeline attaches `details.progressTarget` for
+executed `write`/`edit` calls using the effective path AFTER safety-hook
+rewriting. Relative and absolute aliases therefore share a counter even
+when `--cwd` differs from process cwd. Executors without this metadata fall
+back to `path.resolve` on the original argument. No additional case-folding
+or symlink resolution in the detector — a heuristic, not a boundary. `read`
+never counts (reading isn't changing).
+
+**Simultaneous detections.** One action is selected per turn (B first).
+A3 is evaluated from the outstanding path-counter map, not just this turn's
+edits, so an A3 threshold deferred by B can be announced on a later
+read-only turn. Any intervening executed bash clears that outstanding state.
 
 ### Nudge, then stop (one ladder, both variants)
 
@@ -386,9 +432,18 @@ detector is wrong, not the model.
 ### Scope & invariants
 
 - **Where:** turn-level state in `agent-loop.ts` (the pipeline is call-scoped
-  and cannot see a whole turn). Nothing in `pipeline.ts`.
-- **No guardrail-zone files** (`sandbox.ts` / `safety.ts` / `bash.ts` / hook
-  scripts / the self-improve skill) — the loop reads tool names and args it
+  and cannot see a whole turn). The original landing kept `pipeline.ts`
+  untouched; the audit passes added the reviewed minimal exceptions there:
+  the `notExecuted` markers on never-executed paths, the `progressTarget`
+  metadata, marker-preserving H1/H2 stall replacements, and the
+  afterToolCall guard that restores a dropped `notExecuted` (the execution
+  fact is authoritative over result rewriting — sixth audit pass). All
+  additive metadata + honest wording — no new decisions in the pipeline.
+- **Guardrail-zone files** (`sandbox.ts` / `safety.ts` / hook scripts / the
+  self-improve skill): untouched. `bash.ts` carries ONE reviewed exception
+  from the F1 audit — additive `details.notExecuted` on spawn-failure paths
+  (the sandbox behavior, kill paths, and output handling are unchanged).
+  The loop still reads only tool names, args, and result details it
   already has.
 - **Nothing persisted.** Per-run counters; the nudge rides the context only
   (same rule as the budget and guard-retry nudges).

@@ -501,6 +501,10 @@ export function exitCodeFor(stopReason: StopReason): number {
       // interleaved successes don't hide it) — resumable like loop: a
       // different approach or --no-sandbox breaks the pattern.
       return 3;
+    case "progress":
+      // F1 (docs/08 §9, D32): the no-progress detector stopped a run that
+      // kept acting without measuring — resumable like loop/stall (exit 3).
+      return 3;
   }
 }
 
@@ -575,6 +579,19 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         `\n↻ loop guard fired (same tool call 3× in a row) — retrying with a changed approach (retry ${ev.retry}/${ev.maxRetries})\n`,
       );
       break;
+    case "progress_nudge":
+      // F1 (docs/08 §9): a no-progress condition fired. Printed only when the
+      // mode actually does something ("nudge"/"stop"): in "watch" the event
+      // is pure observation and the plain CLI stays silent (the TUI's
+      // /stats_progress is the shakedown channel).
+      if (ev.mode !== "watch") {
+        sinks.err.write(
+          `\n◌ no-progress detected (${ev.kind}${
+            ev.target !== undefined ? `: ${ev.target}` : ""
+          }, ${ev.count}) — mode ${ev.mode}\n`,
+        );
+      }
+      break;
     case "agent_end":
       if (ev.stopReason === "error") {
         const last = ev.messages[ev.messages.length - 1]!;
@@ -600,6 +617,16 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
           `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${
             ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""
           }${resume}\n`,
+        );
+      } else if (ev.stopReason === "progress") {
+        // F1 (docs/08 §9, D32): the no-progress ladder ended the run.
+        const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
+        const which =
+          ev.progress?.kind === "no-verification"
+            ? `the same file was edited ${ev.progress.count} times with nothing run in between`
+            : `every tool call failed for ${ev.progress?.count ?? "?"} turns in a row`;
+        sinks.err.write(
+          `\nprogress: stopped — ${which}. The batch completed normally; change approach or explain the blocker to continue${resume}\n`,
         );
       } else if (ev.stopReason === "stall") {
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";

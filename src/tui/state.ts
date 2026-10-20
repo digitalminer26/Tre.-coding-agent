@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type ProgressKind, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
 import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
@@ -260,6 +260,27 @@ export interface TuiState {
    */
   guardRetryRunFired: number;
   /**
+   * F1 (docs/08 §9, D32) — no-progress telemetry, session-lifetime (same
+   * rule as guardRetry: events are not persisted; resets on restart).
+   * Per kind: `fired` = RUNS in which the condition was detected at least
+   * once (one per run per kind); `recovered` = runs that, after a fire,
+   * re-established ground truth before ending (a successful tool call for
+   * `no-success`, an EXECUTED bash call — even a failing one — for
+   * `no-verification`). A high fire rate with a low recovery rate means the
+   * DETECTOR is wrong, not the model — this is the data the mode flip needs.
+   * Surfaced by `/stats_progress`.
+   */
+  progressStats: Record<ProgressKind, { fired: number; recovered: number }>;
+  /**
+   * F1 — per-run latch for `progressStats` (the counters are per-RUN per
+   * kind, so each run contributes at most one fired and one recovered per
+   * kind): "idle" (nothing counted yet — the next fire counts `fired`),
+   * "fired" (fired counted — the next ground truth counts `recovered`),
+   * "recovered" (both counted — nothing more this run; a later fire this
+   * run is the SAME run and does not re-count). Reset on `agent_start`.
+   */
+  progressRunEpisode: Record<ProgressKind, "idle" | "fired" | "recovered">;
+  /**
    * The model's context window (tokens) — static, from ModelConfig. Drives
    * the `context` bottom field; 0/absent = unknown (renders "—").
    */
@@ -446,6 +467,11 @@ export function makeInitialState(
     toolCalls: 0,
     guardRetry: { fired: 0, recovered: 0 },
     guardRetryRunFired: 0,
+    progressStats: {
+      "no-success": { fired: 0, recovered: 0 },
+      "no-verification": { fired: 0, recovered: 0 },
+    },
+    progressRunEpisode: { "no-success": "idle", "no-verification": "idle" },
     contextWindow: window,
     maxTokens,
     compactionReserve,
@@ -502,7 +528,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // the armed WRITE REVISION (`subtasksArmedRev`) clears too — the arm
       // is (run, rev); `subtasksRev` (the mirrored list's rev) is NOT a
       // per-run fact and survives with the mirrored list itself.
-      return { ...state, busy: true, runStartedAt: Date.now(), viewTop: null, selection: null, guardRetryRunFired: 0, subtasksArmedRun: null, subtasksArmedSig: "", subtasksArmedRev: 0 };
+      return { ...state, busy: true, runStartedAt: Date.now(), viewTop: null, selection: null, guardRetryRunFired: 0, progressRunEpisode: { "no-success": "idle", "no-verification": "idle" }, subtasksArmedRun: null, subtasksArmedSig: "", subtasksArmedRev: 0 };
     case "agent_end": {
       let items = state.items;
       if (ev.stopReason === "error") {
@@ -540,6 +566,22 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             text:
               "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue" +
               (ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""),
+          },
+        ];
+      } else if (ev.stopReason === "progress") {
+        // F1 (docs/08 §9, D32): the no-progress ladder ended the run — the
+        // model kept acting without measuring (zero-success turns, or same-
+        // target edits with nothing run in between). The batch completed
+        // normally; a new prompt breaks the pattern (like loop/stall).
+        const which =
+          ev.progress?.kind === "no-verification"
+            ? `the same file was edited ${ev.progress.count} times with nothing run in between`
+            : `every tool call failed for ${ev.progress?.count ?? "?"} turns in a row`;
+        items = [
+          ...items,
+          {
+            kind: "error",
+            text: `progress: stopped — ${which}. Change approach or explain the blocker — send another prompt to continue`,
           },
         ];
       } else if (ev.stopReason === "stall") {
@@ -633,6 +675,42 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         },
         guardRetryRunFired: state.guardRetryRunFired + 1,
       };
+    case "progress_nudge": {
+      // F1 (docs/08 §9, D32): a no-progress condition fired. The transcript
+      // line is informational in every mode ("watch" included — the event IS
+      // the observation channel); the mode says where the ladder stood.
+      // Telemetry: `fired` counts RUNS per kind — the run's FIRST fire of
+      // the kind counts (the same per-run rule as guardRetry.fired); fires
+      // after a mid-run recovery are the same run and do NOT re-count (the
+      // audit finding: episode counting inflated the promotion data).
+      const ep = state.progressRunEpisode[ev.kind];
+      return {
+        ...state,
+        items: [
+          ...state.items,
+          {
+            kind: "info",
+            text: `no-progress detected (${ev.kind}${
+              ev.target !== undefined ? `: ${ev.target}` : ""
+            }, ${ev.count}) — mode ${ev.mode}`,
+          },
+        ],
+        progressStats:
+          ep === "idle"
+            ? {
+                ...state.progressStats,
+                [ev.kind]: {
+                  fired: state.progressStats[ev.kind].fired + 1,
+                  recovered: state.progressStats[ev.kind].recovered,
+                },
+              }
+            : state.progressStats,
+        progressRunEpisode:
+          ep === "idle"
+            ? { ...state.progressRunEpisode, [ev.kind]: "fired" }
+            : state.progressRunEpisode,
+      };
+    }
     case "start": {
       // First assistant event of a turn — open a streaming item.
       if (lastAssistantStreaming(state.items)) return state;
@@ -765,6 +843,55 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         ev.toolCallId,
       );
     case "tool_execution_end": {
+      // F1 (docs/08 §9, D32) — recovery tracking FIRST (this case early-
+      // returns on every quiet-tool path). Ground truth closes the run's
+      // recovery slot: any SUCCESSFUL call recovers "no-success"; an
+      // EXECUTED bash call — even a failing one — recovers
+      // "no-verification" (the reset keys on execution, so a gate-blocked
+      // bash, `details.notExecuted`, does not). The latch then goes
+      // "recovered": the run has contributed its one fired + one recovered
+      // for the kind, and neither re-counts for the rest of the run.
+      {
+        const eps = state.progressRunEpisode;
+        const rec: Partial<Record<ProgressKind, boolean>> = {};
+        if (eps["no-success"] === "fired" && ev.result.isError !== true)
+          rec["no-success"] = true;
+        if (
+          eps["no-verification"] === "fired" &&
+          ev.result.toolName === "bash" &&
+          ev.result.details?.notExecuted !== true
+        )
+          rec["no-verification"] = true;
+        if (rec["no-success"] === true || rec["no-verification"] === true) {
+          state = {
+            ...state,
+            progressRunEpisode: {
+              ...eps,
+              ...(rec["no-success"] === true ? { "no-success": "recovered" } : {}),
+              ...(rec["no-verification"] === true ? { "no-verification": "recovered" } : {}),
+            },
+            progressStats: {
+              ...state.progressStats,
+              ...(rec["no-success"] === true
+                ? {
+                    "no-success": {
+                      fired: state.progressStats["no-success"].fired,
+                      recovered: state.progressStats["no-success"].recovered + 1,
+                    },
+                  }
+                : {}),
+              ...(rec["no-verification"] === true
+                ? {
+                    "no-verification": {
+                      fired: state.progressStats["no-verification"].fired,
+                      recovered: state.progressStats["no-verification"].recovered + 1,
+                    },
+                  }
+                : {}),
+            },
+          };
+        }
+      }
       const text = oneLine(ev.result.content.map((c) => c.text).join(" "), 200);
       if (QUIET_ON_SUCCESS_TOOLS.has(ev.result.toolName)) {
         if (ev.result.isError === true) {
@@ -1867,6 +1994,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "restart", summary: "restart tre. in place (same session + settings; no quit/re-invoke)" },
   { name: "stats", summary: "session stats: turns, tokens, tool calls, session size" },
   { name: "stats_loop_guard", summary: "loop-guard telemetry: how often the auto-retry recovered (F2)" },
+  { name: "stats_progress", summary: "no-progress detectors: fires / recovered per kind (F1)" },
 ];
 
 /** At most this many lines the menu may take (more candidates → the window
@@ -3045,6 +3173,32 @@ export function statsLoopGuardLine(state: TuiState): string {
 }
 
 /**
+ * F1 (docs/08 §9, D32) — the `/stats_progress` report: the no-progress
+ * detectors' telemetry over this TUI session (process lifetime; the events
+ * are not persisted, so the counters reset on restart, like every other
+ * tally). One line per kind: `fired` = runs in which the condition was
+ * detected at least once; `recovered` = runs that, after a fire,
+ * re-established ground truth before ending (a successful tool call for
+ * `no-success`; an EXECUTED bash call — even a failing one — for
+ * `no-verification`). This is the data the mode flip needs, AND the
+ * false-positive audit: a high fire rate with a low recovery rate means the
+ * DETECTOR is wrong, not the model.
+ */
+export function statsProgressLine(state: TuiState): string {
+  const kinds: Array<[ProgressKind, string]> = [
+    ["no-success", "no-success (variant B: every tool call failed for a row of turns)"],
+    ["no-verification", "no-verification (variant A3: same-target edits with nothing run in between)"],
+  ];
+  const lines = kinds.map(([kind, label]) => {
+    const { fired, recovered } = state.progressStats[kind];
+    if (fired === 0) return `  ${label}: 0 fires this session`;
+    const rate = ((recovered / fired) * 100).toFixed(0);
+    return `  ${label}: ${fired} fire(s), ${recovered} recovered (${rate}%)`;
+  });
+  return "no-progress detectors (this session):\n" + lines.join("\n");
+}
+
+/**
  * C34 — the multi-line report `/models` (no arg) appends as an info item:
  * one line per model in the catalog, the ACTIVE one marked with `*`. Each
  * line shows id + provider + window (so a switch's effect on the context
@@ -3316,6 +3470,9 @@ export const startupInfoItem = (text: string): { kind: "info"; text: string; sta
  *                              often the guard's autonomous retry (H5)
  *                              recovered, this session (fires / recovered
  *                              / rate)
+ *   /stats_progress            F1 (docs/08 §9, D32): no-progress detector
+ *                              telemetry — fires / recovered / rate per kind
+ *                              (no-success, no-verification), this session
  * Feedback lands as an `info` item in the output area. `/quit` and `/exit`
  * are NOT handled here — the driver owns them (it must unmount). `/restart`
  * IS handled here (it appends the "relaunching" feedback info item); the
@@ -3348,6 +3505,9 @@ export function handleSlashCommand(
   }
   if (line.trim() === "/stats_loop_guard") {
     return { state: withInfo(s, statsLoopGuardLine(s)), handled: true };
+  }
+  if (line.trim() === "/stats_progress") {
+    return { state: withInfo(s, statsProgressLine(s)), handled: true };
   }
   if (line.trim() === "/context") {
     return { state: withInfo(s, contextReport(s)), handled: true };

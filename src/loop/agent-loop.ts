@@ -66,10 +66,13 @@
  *    Abort/error/budget/loop breaks do NOT drain — the queue is per-run and
  *    the driver discards leftovers (a new prompt starts a fresh queue).
  */
+import { resolve } from "node:path";
 import type {
   AgentEvent,
   AgentMessage,
   GuardEvidence,
+  ProgressKind,
+  ProgressMode,
   UserMessage,
   AssistantMessage,
   ExecuteToolCall,
@@ -135,6 +138,20 @@ export interface AgentLoopOptions {
    * the worst case to a small, fixed number of extra turns (no runaway).
    */
   maxGuardRetries?: number;
+  /**
+   * F1 (docs/08 §9, D32) — where the no-progress ladder stands:
+   * "watch" (default at landing) fires the `progress_nudge` event and does
+   * NOTHING else; "nudge" injects the context nudge; "stop" runs the full
+   * ladder (nudge, then stopReason "progress" on recurrence). Promotion is
+   * a one-line default flip whose commit carries the /stats_progress
+   * telemetry that justified it. No CLI flag at landing (code-owned).
+   */
+  progressMode?: ProgressMode;
+  /**
+   * F1 (docs/08 §9) — auto-nudges per kind before the stop (per-run).
+   * Default 1; 0 = hard stop on the first hit (the H5 convention).
+   */
+  maxProgressNudges?: number;
   /**
    * Hook between turns: return a reduced/rewritten context for the next
    * turn, or undefined to keep the current one.
@@ -277,6 +294,61 @@ export function batchSignature(calls: ToolCallBlock[]): string {
   return calls.map((c) => `${c.name}:${stableJson(c.arguments)}`).join("\u0000");
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// F1 — progress detection (docs/08 §9, D32). The act–measure–act guards:
+// thrashing that never repeats byte-identically (C26 misses), never hits a
+// permission wall (H1 misses), and never produces same-error churn (H2
+// misses). Turn-level state lives HERE (the pipeline is call-scoped).
+// Nothing is persisted; the nudge rides the context only (like the budget
+// and guard-retry nudges). Landing default: mode "watch" — the event fires,
+// nothing else happens; promotion is a one-line default flip backed by the
+// /stats_progress telemetry.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** F1 variant B — consecutive turns whose non-empty batch is ALL failures
+ *  (blocked calls count; a turn with no tool calls is neutral). Exported
+ *  for tests/tuning, like STALL_WINDOW. */
+export const NO_SUCCESS_TURNS = 3;
+/** F1 variant A3 — writes/edits of the SAME normalized path with no
+ *  executed bash call in between (a bash call — success OR failure — resets
+ *  every path counter; a gate-blocked bash never ran and does not). */
+export const UNVERIFIED_EDITS = 4;
+/** F1 — nudges per kind before the stop (per-run). 0 = hard stop on the
+ *  first hit (the H5 convention). */
+export const MAX_PROGRESS_NUDGES = 1;
+
+/** F1 variant B's nudge: an approach-changing instruction, not "keep going"
+ *  (the model has produced zero successful tool calls for a while). */
+export const NO_SUCCESS_NUDGE_TEXT =
+  "No progress detected: your last tool calls ALL failed. Do NOT re-issue " +
+  "similar calls — re-read the error results, state what you believe is " +
+  "wrong and what you need from the user, or try a fundamentally different " +
+  "approach. If the task cannot proceed, finish with a text-only reply " +
+  "explaining the blocker.";
+
+/** F1 variant A3's nudge: name the missing measurement, not a concept. */
+export function noVerificationNudgeText(target: string, count: number): string {
+  return (
+    `No progress detected: you have edited ${target} ${count} times without ` +
+    "running anything in between. Edits without measurement are guesses — " +
+    "run the project's check (build/tests) to see whether the edits actually " +
+    "work, or explain why verification is not applicable here before " +
+    "continuing to edit."
+  );
+}
+
+/** F1 A3's fallback target for executors without effective-path metadata:
+ *  resolve a write/edit `path` against process cwd. The built-in pipeline
+ *  instead supplies details.progressTarget AFTER workspace path rewriting,
+ *  so --cwd and absolute/relative aliases count against the actual file.
+ *  No case-folding; a heuristic, not a boundary. Exported for tests. */
+export function progressTargetOf(call: ToolCallBlock): string | undefined {
+  if (call.name !== "write" && call.name !== "edit") return undefined;
+  const p = call.arguments.path;
+  if (typeof p !== "string" || p === "") return undefined;
+  return resolve(p);
+}
+
 /** Deep JSON.stringify with sorted object keys (argument identity that
  *  does not depend on key order). */
 function stableJson(value: unknown): string {
@@ -357,6 +429,32 @@ export async function* runLoop(
   // C26 — loop detection: signatures of the last two issued batches.
   let sigHistory: string[] = [];
 
+  // F1 (docs/08 §9, D32) — per-run no-progress state (act–measure–act).
+  // Nothing here is persisted; the nudge rides the context only (like the
+  // budget and guard-retry nudges). Landing default: "watch" — the event
+  // fires and NOTHING else happens; promotion is a one-line default flip
+  // backed by the /stats_progress telemetry.
+  const progressMode: ProgressMode = options.progressMode ?? "watch";
+  const maxProgressNudges =
+    options.maxProgressNudges !== undefined
+      ? options.maxProgressNudges
+      : MAX_PROGRESS_NUDGES;
+  // Variant B: consecutive all-failed turns (reset by any success, by a
+  // steer, and — as an episode end — by firing).
+  let noSuccessStreak = 0;
+  // Variant A3: unverified write/edit count per normalized path; an
+  // EXECUTED bash call clears the whole map (ground contact is global).
+  const unverifiedEdits = new Map<string, number>();
+  // Ladder budget per kind; ground truth deletes the entry (a post-
+  // recovery hit starts a fresh ladder — "recurrence with no intervening
+  // ground truth" falls out of this rule).
+  const progressNudges = new Map<ProgressKind, number>();
+  // One announcement per episode: set when the event fires, cleared by the
+  // same ground truth as the ladder budget (a persisting condition does not
+  // spam the event; a later episode re-announces).
+  const progressFired = new Map<ProgressKind, boolean>();
+  let progressStop: { kind: ProgressKind; count: number } | undefined;
+
   /**
    * Steering drain (D27). Delivers queued user guidance as user messages:
    * each is pushed to the context and carried in a `steer` event (the driver
@@ -383,6 +481,12 @@ export async function* runLoop(
       // D27 Finding 2 — external guidance makes a repeated batch legitimate
       // again; clear the consecutive-batch history (not the turn budget).
       sigHistory = [];
+      // F1 (docs/08 §9): the same rule for variant B — fresh user input can
+      // legitimize failing attempts (the guidance may explain the wall), so
+      // the no-success streak and its episode state reset too.
+      noSuccessStreak = 0;
+      progressNudges.delete("no-success");
+      progressFired.delete("no-success");
     }
     return events;
   }
@@ -404,7 +508,17 @@ export async function* runLoop(
       yield { type: "tool_execution_start", toolCall: call };
     }
     for (const call of calls) {
-      const msg = resultMessage(call, { content: [{ type: "text", text }] }, true);
+      const msg = resultMessage(
+        call,
+        {
+          content: [{ type: "text", text }],
+          // F1 (docs/08 §9): coherent contract — `notExecuted` means exactly
+          // what it says on EVERY in-band result (failInband never runs the
+          // calls), so F1's A3 reset rule holds across all producers.
+          details: { notExecuted: true },
+        },
+        true,
+      );
       context.push(msg);
       yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
     }
@@ -656,7 +770,13 @@ export async function* runLoop(
         for (const call of calls) {
           const msg = resultMessage(
             call,
-            { content: [{ type: "text", text: LOOP_GUARD_TEXT }] },
+            {
+              content: [{ type: "text", text: LOOP_GUARD_TEXT }],
+              // F1 (docs/08 §9): synthetic in-band fill — the call never
+              // ran, so it is not ground contact for A3's bash reset
+              // either (a guarded `bash` must not look like a measurement).
+              details: { notExecuted: true },
+            },
             true,
           );
           context.push(msg);
@@ -708,7 +828,13 @@ export async function* runLoop(
       for (const call of calls) {
         const msg = resultMessage(
           call,
-          { content: [{ type: "text", text: LENGTH_GUARD_TEXT }] },
+          {
+            content: [{ type: "text", text: LENGTH_GUARD_TEXT }],
+            // F1 (docs/08 §9): synthetic in-band fill — never executed (the
+            // §4.1 rule: truncated args may not run), so never ground
+            // contact for A3's bash reset.
+            details: { notExecuted: true },
+          },
           true,
         );
         context.push(msg);
@@ -733,6 +859,9 @@ export async function* runLoop(
         results.set(call.id, {
           result: {
             content: [{ type: "text", text: `Tool "${call.name}" not found.` }],
+            // F1 (docs/08 §9): no tool to run — never executed (counts as a
+            // failure for B, but a not-found `bash` is not a measurement).
+            details: { notExecuted: true },
           },
           isError: true,
         });
@@ -821,6 +950,145 @@ export async function* runLoop(
       stopReason = "aborted";
       break;
     }
+
+    // ── F1 (docs/08 §9, D32) — no-progress evaluation ────────────────────
+    // Only an EXECUTED batch reaches this point: every guard path above
+    // (loop, stall, length, abort, error) continues or breaks first, so the
+    // synthetic in-band results never feed the counters. The nudge rides the
+    // context AFTER the batch's results are all in it (I3 untouched); the
+    // stop happens after the batch completed normally.
+    {
+      // Variant B — the turn's batch was non-empty and ALL results failed.
+      // A success is ground truth: it resets the streak AND the ladder
+      // (a later episode starts a fresh ladder).
+      if (calls.length > 0) {
+        let allFailed = true;
+        for (const call of calls) {
+          if (!results.get(call.id)?.isError) {
+            allFailed = false;
+            break;
+          }
+        }
+        if (allFailed) noSuccessStreak += 1;
+        else {
+          noSuccessStreak = 0;
+          progressNudges.delete("no-success");
+          progressFired.delete("no-success");
+        }
+      }
+
+      // Variant A3 — same-target edits with no executed bash in between.
+      // In call order, so [edit x, bash] measures the edit; the reset keys
+      // on EXECUTION (a failing `npm test` is precisely a measurement), so a
+      // call the gate never ran (`details.notExecuted`) neither resets nor
+      // counts. `read` never counts (progressTargetOf).
+      let unverified: { target: string; count: number } | undefined;
+      for (const call of calls) {
+        if (results.get(call.id)?.result.details?.notExecuted === true) continue;
+        if (call.name === "bash") {
+          unverifiedEdits.clear(); // ground contact is global
+          // Audit fix: an executed bash LATER in this same batch cancels a
+          // threshold crossed earlier in it — [edit x ×4, bash] measured
+          // the edits, so the turn must not fire (letting a stale candidate
+          // through would stop a run in "stop" mode despite the
+          // measurement). Only edits AFTER the bash re-arm the detection.
+          unverified = undefined;
+          progressNudges.delete("no-verification");
+          progressFired.delete("no-verification");
+          continue;
+        }
+        const effectiveTarget = results.get(call.id)?.result.details?.progressTarget;
+        const target =
+          (call.name === "write" || call.name === "edit") && typeof effectiveTarget === "string"
+            ? resolve(effectiveTarget)
+            : progressTargetOf(call);
+        if (target === undefined) continue;
+        const count = (unverifiedEdits.get(target) ?? 0) + 1;
+        unverifiedEdits.set(target, count);
+      }
+      // Evaluate outstanding state, not just edits in this turn. When B
+      // wins the single-action slot, A3 must survive to a later read-only
+      // turn. An executed bash above clears the map, cancelling stale hits.
+      for (const [target, count] of unverifiedEdits) {
+        if (count >= UNVERIFIED_EDITS) unverified = { target, count };
+      }
+
+      // One ladder, both variants; first detection in the turn wins (the
+      // other is re-detected next turn if it is still true). The event fires
+      // in EVERY mode — it is the observation channel /stats_progress counts.
+      type F1Action = {
+        kind: ProgressKind;
+        count: number;
+        target?: string;
+        inject?: string;
+        stop?: boolean;
+        /** Emit the progress_nudge event (once per episode — see below). */
+        announce: boolean;
+      };
+      let action: F1Action | undefined;
+      const consider = (kind: ProgressKind, count: number, target?: string) => {
+        if (action !== undefined) return; // one action per turn
+        // One ANNOUNCEMENT (event) per episode: ground truth clears the flag,
+        // so a later episode re-announces; a persisting condition does not
+        // spam. The event fires in every mode/configuration — it is the
+        // observation channel /stats_progress counts.
+        const announce = progressFired.get(kind) !== true;
+        progressFired.set(kind, true);
+        const given = progressNudges.get(kind) ?? 0;
+        // The stop check comes FIRST: recurrence after the ladder is spent
+        // (with no intervening ground truth — ground truth deletes the entry)
+        // stops the run. `maxProgressNudges: 0` stops on the FIRST hit (the
+        // H5 convention) — the announcement still rides along.
+        if (progressMode === "stop" && given >= maxProgressNudges) {
+          action = { kind, count, target, stop: true, announce };
+          return;
+        }
+        if (progressMode === "watch" || given >= maxProgressNudges) {
+          // "watch": pure observation — event only, nothing else. "nudge"
+          // with the ladder spent: nothing left to inject (the stop is
+          // disabled there) — silence until ground truth.
+          action = announce ? { kind, count, target, announce } : undefined;
+          return;
+        }
+        // "nudge"/"stop" with ladder budget left: inject the approach-
+        // changing nudge (context-only, like the budget/guard-retry nudges).
+        progressNudges.set(kind, given + 1);
+        action = {
+          kind,
+          count,
+          target,
+          announce,
+          inject:
+            kind === "no-success"
+              ? NO_SUCCESS_NUDGE_TEXT
+              : noVerificationNudgeText(target ?? "", count),
+        };
+      };
+      if (noSuccessStreak >= NO_SUCCESS_TURNS) consider("no-success", noSuccessStreak);
+      if (unverified !== undefined)
+        consider("no-verification", unverified.count, unverified.target);
+
+      if (action !== undefined) {
+        if (action.announce) {
+          yield {
+            type: "progress_nudge",
+            turn,
+            kind: action.kind,
+            mode: progressMode,
+            ...(action.target !== undefined ? { target: action.target } : {}),
+            count: action.count,
+          };
+        }
+        if (action.stop === true) {
+          progressStop = { kind: action.kind, count: action.count };
+          stopReason = "progress";
+          break;
+        }
+        if (action.inject !== undefined) {
+          context.push({ role: "user", content: action.inject, timestamp: Date.now() });
+        }
+      }
+    }
   }
 
   yield {
@@ -829,6 +1097,7 @@ export async function* runLoop(
     messages: context,
     ...(stopReason === "budget" ? { maxTurns, maxCycles } : {}),
     ...(guardEvidence !== undefined ? { evidence: guardEvidence } : {}),
+    ...(progressStop !== undefined ? { progress: progressStop } : {}),
   };
 }
 
