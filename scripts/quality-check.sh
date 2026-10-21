@@ -144,6 +144,20 @@ awk -v sq="$SQ" -v dir="$DIR" '
 ' $FILELIST
 SCAN_STATUS=$?
 
+# 7. guardrail hook presence (AUDIT 2026-10-21, info item) — INFORMATIONAL
+#    warning, never a failure: CI clones and tarball deployments legitimately
+#    run the gate without the hook wired. In a working clone it should be on;
+#    install-tre.sh now wires it for git clones.
+REPO_ROOT=$(dirname "$(dirname "$0")")
+if [ -d "$REPO_ROOT/.git" ] && command -v git >/dev/null 2>&1; then
+  HOOKS_PATH=$(git -C "$REPO_ROOT" config core.hooksPath 2>/dev/null || true)
+  if [ "$HOOKS_PATH" != "scripts/git-hooks" ]; then
+    echo "quality-check: NOTE — this clone has no guardrail pre-commit wired" >&2
+    echo "  (core.hooksPath is '${HOOKS_PATH:-unset}'); the sandbox/approval cage" >&2
+    echo "  is NOT commit-protected. Fix: git config core.hooksPath scripts/git-hooks" >&2
+  fi
+fi
+
 if [ "$DEPS_STATUS" -ne 0 ] || [ "$SCAN_STATUS" -ne 0 ]; then
   echo "quality-check: FAILED — dependency freeze and/or source scan failed (see messages above)" >&2
   exit 1

@@ -53,6 +53,16 @@ show() {
      # then in THIS shell (a new terminal picks it up on its own):
      export PATH="$HOME/.local/bin:$PATH"
 
+ STEP 3b — guardrail hook (ONLY when <dest> is a git clone)
+ ------------------------------------------------------------------------
+   The repo's pre-commit guardrail (scripts/git-hooks → guardrail-check.sh)
+   protects the agent's own sandbox/approval files from model-driven
+   commits. It is wired per-clone via:
+     git -C <dest> config core.hooksPath scripts/git-hooks
+   The install command runs this automatically when <dest> is a git repo;
+   the offline tarball is NOT one, so there it stays a no-op (the tarball
+   ships dist/ — nobody commits there).
+
  STEP 4 — point it at an LLM endpoint (per-machine config)
  ------------------------------------------------------------------------
    tre. finds models.json by walking up from the launch dir, then
@@ -121,6 +131,20 @@ install() {
   fi
 
   chmod +x "$DEST/dist/src/cli/main.js"
+
+  # --- guardrail hook (step 3b): only meaningful for a git clone ---
+  # The offline tarball is not a repo; a source clone is. Wire the
+  # version-controlled pre-commit guard when (and only when) .git exists,
+  # so a fresh clone is not left without the guardrail (AUDIT info item).
+  if [ -d "$DEST/.git" ] && command -v git >/dev/null 2>&1; then
+    if git -C "$DEST" config core.hooksPath scripts/git-hooks; then
+      echo "==> guardrail pre-commit wired: core.hooksPath=scripts/git-hooks"
+    else
+      echo "WARNING: could not set core.hooksPath — the guardrail pre-commit" >&2
+      echo "         is NOT active in $DEST (set it by hand: git -C $DEST" >&2
+      echo "         config core.hooksPath scripts/git-hooks)" >&2
+    fi
+  fi
 
   # --- PATH symlink ---
   BINDIR="$HOME/.local/bin"

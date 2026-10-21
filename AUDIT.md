@@ -7,12 +7,14 @@ built code** (`dist/`), not by reading alone; repros are inline. This is a
 point-in-time audit record — findings are NOT yet fixed; each carries a
 proposed fix shape.
 
-> **REMEDIATION STATUS (2026-10-21, same day): ALL M and L findings fixed.**
-> M2 `f59cd83` · M1 `299ce1a` · M3 `f398df9` · L1–L4 + L5/L6 (two commits
-> below). Every fix carries regression tests pinning the audit's own repros
-> (29 new tests; suite 1330 pass / 0 fail), and the M1/L4 repros were
-> re-verified against built `dist/`. Per-finding notes below; the fix-order
-> section at the end is the index.
+> **REMEDIATION STATUS (2026-10-21, same day): all M/L findings from this
+> audit are FIXED.** M2 `f59cd83` · M1 `299ce1a` · M3 `f398df9` · L1–L4 +
+> L5/L6 (two commits below). Every fix carries regression tests pinning the
+> audit's own repros (29 new tests; suite 1330 pass / 0 fail), and the M1/L4
+> repros were re-verified against built `dist/`. Per-finding notes below;
+> the fix-order section at the end is the index. **One follow-up finding was
+> filed after remediation (M4, write/edit sensitive-check — OPEN), and two
+> Info items were implemented (guardrail-hook install step + gate note).**
 
 ## Automated gates (all green at audit time)
 
@@ -222,6 +224,30 @@ helper `poll` consuming updates from all chats (folded into M2).
 > **FIXED** via the M2 (f59cd83) and M3 (f398df9) commits.
 
 ---
+
+## M4 — write/edit never sensitive-check (filed 2026-10-21, post-remediation review; OPEN)
+
+The sensitive-path gate covers `read` and `bash`; the write/edit branch of
+`makeSafetyHooks` runs ONLY the path-sandbox (`checkPathWithinRoots`) — a
+path inside an authorized root is written without any sensitive-pattern or
+sys/ws check. Verified against `dist/` (2026-10-21): with `~/.tre` as an
+`--extra-root` and `mode:"yes"`, `write` to `~/.tre/telegram.json` and
+`~/.tre/models.json` returns an allow (args rewrite), no prompt, no block.
+
+Two-step, not one: the default launch has NO extra root covering `~/.tre`,
+and creating the symlink/dir an attack needs is itself gated bash. So this
+is not a bypass of M1/L6 — it is the remaining half of them: L6 closed the
+EXFIL direction (the model can no longer read the bot token); the TAKEOVER
+direction (an injected model with a `~/.tre` extra root swaps in an
+attacker bot token or rewrites the endpoint catalog, redirecting future
+sessions) is unguarded.
+
+**Fix shape.** Run the same `sensitivePathPatterns` check (case-folded,
+realpath-resolved — M1's helpers apply directly) over write/edit targets:
+sys-sensitive → blocked in every mode; ws-sensitive → prompt in "ask".
+Small diff in the PATH_TOOLS branch of `makeSafetyHooks`; guardrail-zone,
+needs a human commit. The one legitimate writer of these files is the
+human setup flow (and `tre. login`, which is not the gate's problem).
 
 ## Info / accepted
 

@@ -138,7 +138,12 @@ the same way.
 `4359bb0`, superseded by the implementation above — see docs/08 §10 for the
 design and its rulings, incl. H4's non-adoption).**
 
-**F1 progress detection — designed (2026-10-20, D32; docs-only, NOT yet implemented).**
+**F1 progress detection — IMPLEMENTED (2026-10-21, D32; `ecd893e`, watch
+default).** The shipped state is docs/08 §9 + the D32 rows in PLAN (the
+2026-10-21 truth pass `4174829` corrected PLAN and docs/08 §7; this section
+is corrected now). The paragraph below is the DESIGN RECORD as written at
+design time (2026-10-20) — kept verbatim; where it says "designed / NOT yet
+implemented", read it as history.
 `docs/08-loop-hardening.md` gains §9: the design pass on the last logged
 loop-hardening item. Unifying principle **act–measure–act** (thrashing that
 never repeats byte-identically / never hits a permission wall / never produces
