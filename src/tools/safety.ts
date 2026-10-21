@@ -364,12 +364,14 @@ async function realpathExisting(p: string): Promise<string> {
 }
 
 /**
- * M1 (audit 2026-10-21): the REAL path of a read target (workspace-relative
- * or absolute, `~` expanded), or null when it cannot be resolved (missing /
- * permission). Symlinked secrets resolve here so the sensitive check sees
- * the true target; a plain file resolves to itself. Never throws.
+ * M1 (audit 2026-10-21): the REAL path of a sensitive-check target (a read
+ * path, or a write/edit path already canonicalized by the path sandbox;
+ * workspace-relative or absolute, `~` expanded), or null when it cannot be
+ * resolved (missing / permission). Symlinked secrets resolve here so the
+ * sensitive check sees the true target; a plain file resolves to itself.
+ * Never throws. (M4: shared by the read AND the write/edit branches.)
  */
-async function resolveSensitiveReadTarget(root: string, p: string): Promise<string | null> {
+async function resolveSensitiveTarget(root: string, p: string): Promise<string | null> {
   const abs = path.resolve(root, expandHome(p));
   try {
     return await realpath(abs);
@@ -603,6 +605,14 @@ const SENSITIVE_PATH: { label: string; test: (segs: string[]) => boolean }[] = [
   { label: "~/.config/gcloud/", test: (s) => s.includes("gcloud") },
   { label: "~/.docker/config.json", test: (s) => s.includes(".docker") && s[s.length - 1] === "config.json" },
   { label: "/etc/shadow", test: (s) => s[s.length - 1] === "shadow" && s[s.length - 2] === "etc" },
+  // M4 (audit 2026-10-21): the machine-level endpoint catalogs (inline
+  // apiKeys + the default endpoint). .tre-anchored so a workspace
+  // models.json (no .tre segment) never matches — the L6 note deliberately
+  // kept bare `models.json` out of FILENAME for exactly that reason.
+  {
+    label: "~/.tre models.json (endpoint catalog)",
+    test: (s) => s.includes(".tre") && s[s.length - 1] === "models.json",
+  },
 ];
 
 /** Expand a leading "~" (or "~user") to the home directory. */
@@ -1442,10 +1452,42 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
       if (!check.ok) return { blocked: check.reason };
       const newArgs = { ...args, path: check.path };
 
+      // M4 (audit 2026-10-21): the sensitive check the read branch has —
+      // write/edit previously ran ONLY the path sandbox, so a model with a
+      // `~/.tre` extra root could overwrite the bot-token config or the
+      // endpoint catalog in yes mode (takeover: redirect future sessions).
+      // Same posture as read: sys-sensitive BLOCKED in every mode,
+      // ws-sensitive prompts in "ask". Checked on the canonical path AND
+      // its realpath (a link inside an authorized root pointing at a secret
+      // outside it must not slip through).
+      const realW = await resolveSensitiveTarget(root, check.path);
+      const wSensitive = [
+        ...new Set([
+          ...sensitivePathPatterns(check.path),
+          ...(realW ? sensitivePathPatterns(realW) : []),
+        ]),
+      ];
+      let wRealRoot = root;
+      if (realW !== null) {
+        try {
+          wRealRoot = await realpath(root);
+        } catch {
+          /* keep the lexical root */
+        }
+      }
+      const wSys =
+        wSensitive.length > 0 &&
+        (isSystemicSensitivePath(check.path, root) ||
+          (realW !== null && isSystemicSensitivePath(realW, wRealRoot)))
+          ? wSensitive
+          : [];
+      const wWs = wSys.length > 0 ? [] : wSensitive;
+
       // 2. approval gate (write/edit): no prompt in ask/yes (reversible via
       //    git, path-sandboxed to the root); blocked under --no-approve.
+      //    M4: ws-sensitive writes DO prompt in ask (like read).
       if (GATED_TOOLS.has(tool.name)) {
-        const blocked = await gate(tool.name, newArgs, [], [], [], [], false, false);
+        const blocked = await gate(tool.name, newArgs, [], wWs, [], wSys, false, false);
         if (blocked !== undefined) return { blocked };
       }
       if (newArgs !== args) return { args: newArgs }; // rewrite for the tool
@@ -1468,7 +1510,7 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
       // failure falls back to the lexical path (ENOENT — the read would
       // fail anyway). The sensitive check runs on BOTH the lexical and the
       // real path, blocking if either matches.
-      const real = await resolveSensitiveReadTarget(root, p);
+      const real = await resolveSensitiveTarget(root, p);
       const sensitive = [
         ...new Set([...sensitivePathPatterns(p), ...(real ? sensitivePathPatterns(real) : [])]),
       ];

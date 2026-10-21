@@ -13,8 +13,10 @@ proposed fix shape.
 > audit's own repros (29 new tests; suite 1330 pass / 0 fail), and the M1/L4
 > repros were re-verified against built `dist/`. Per-finding notes below;
 > the fix-order section at the end is the index. **One follow-up finding was
-> filed after remediation (M4, write/edit sensitive-check — OPEN), and two
-> Info items were implemented (guardrail-hook install step + gate note).**
+> filed after remediation (M4, write/edit sensitive-check — FIXED 2026-10-21
+> with 8 regression tests; suite now 1338 pass / 0 fail) and two Info items
+> were implemented (guardrail-hook install step + gate note). All M/L
+> findings are now closed.**
 
 ## Automated gates (all green at audit time)
 
@@ -225,7 +227,20 @@ helper `poll` consuming updates from all chats (folded into M2).
 
 ---
 
-## M4 — write/edit never sensitive-check (filed 2026-10-21, post-remediation review; OPEN)
+## M4 — write/edit never sensitive-check (filed 2026-10-21, post-remediation review; FIXED)
+
+> **FIXED 2026-10-21** — the PATH_TOOLS branch now runs the same sensitive
+> check the read branch has (M1 helpers: case-folded, realpath'd,
+> realpath-vs-realpath-root ws/sys split): sys-sensitive → blocked in every
+> mode; ws-sensitive → prompt in "ask". The machine endpoint catalogs are
+> covered by a new `.tre`-anchored PATH pattern (`~/.tre models.json`) — a
+> workspace `models.json` never matches. 8 regression tests
+> (`test/safety-m4.test.ts`), including the filed extra-root takeover repro
+> and the in-extra-root symlink case (sandbox passes it; only the sensitive
+> check stops it). Bonus finding pinned: the path sandbox refuses
+> cross-root symlink writes (each root is realpath-checked independently),
+> so a workspace link INTO an extra root never reaches the sensitive layer.
+> Residual: same TOCTOU/indirection caveats as M1 (inherent, documented).
 
 The sensitive-path gate covers `read` and `bash`; the write/edit branch of
 `makeSafetyHooks` runs ONLY the path-sandbox (`checkPathWithinRoots`) — a
