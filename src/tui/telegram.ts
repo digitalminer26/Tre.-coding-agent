@@ -25,6 +25,8 @@ import {
   resolveTelegramHelper,
   telegramConfigPath,
   telegramStateDir,
+  telegramAllowedChatIds,
+  parseTelegramPollOutput,
 } from "../telegram/paths.js";
 
 const pExecFile = promisify(execFile);
@@ -73,6 +75,10 @@ export function makeTelegramBridge(
   // MACHINE-LEVEL (~/.tre) — a bot configured once works from any launch dir.
   const script = resolveTelegramHelper(cwd, home);
   const outDir = telegramStateDir(home);
+  // M2 (cross-chat leak): the owner's chat id, from the machine-level config.
+  // Messages from any OTHER chat are dropped at parse time — see
+  // telegramAllowedChatIds in ./paths.ts.
+  const allowedChats = telegramAllowedChatIds(home);
   const enabled =
     existsSync(telegramConfigPath(home)) && script !== null;
   const run = async (args: string[]): Promise<string> => {
@@ -121,11 +127,8 @@ export function makeTelegramBridge(
     async poll() {
       const out = (await run(["poll"])).trim();
       if (out === "" || out.startsWith("telegram: no new messages")) return null;
-      const msgs: [string, string, string][] = [];
-      for (const line of out.split("\n")) {
-        const m = line.match(/^\[(\S+) from ([^\]]+)\] (.*)$/);
-        if (m) msgs.push([m[1]!, m[2]!, m[3]!]);
-      }
+      // M2: shared parse + chat allowlist (see ../telegram/paths.ts).
+      const msgs = parseTelegramPollOutput(out, allowedChats);
       return msgs.length > 0 ? msgs : null;
     },
     async send(text: string) {
