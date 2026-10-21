@@ -72,6 +72,7 @@ import {
   resolveModel,
 } from "../config/models.js";
 import { expandTilde, findTreConfig, loadTreConfig, type TreConfig, type McpServerConfig } from "../config/tre-config.js";
+import { hardenSecretFiles } from "../config/secret-mode.js";
 import {
   calibrateCharsPerToken,
   compactContext,
@@ -1427,6 +1428,15 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       return authLogoutCommand({ out: sinks.out, err: sinks.err });
     }
     return authStatusCommand({ out: sinks.out, err: sinks.err });
+  }
+
+  // M3 (audit 2026-10-21): tighten any world-readable secret file BEFORE
+  // anything reads it this run. One pass per startup; warnings go to stderr
+  // (they are operator-facing security lines, not conversation). Never
+  // fatal — a chmod failure warns and the run proceeds.
+  {
+    const { warnings } = hardenSecretFiles();
+    for (const w of warnings) sinks.err.write(w + "\n");
   }
 
   // models (D19: --models wins; otherwise use the installation catalog at

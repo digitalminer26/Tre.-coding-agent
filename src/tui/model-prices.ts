@@ -168,7 +168,10 @@ export function writePriceCache(
   file: string = PRICE_CACHE_FILE,
 ): void {
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(cache, null, 2) + "\n", { mode: 0o644 });
+  // M3 (audit 2026-10-21): 0600, not 0644. The cache holds no secrets today
+  // (public catalog prices), but it sits inside the secret-bearing ~/.tre/tre
+  // tree and a future field must not ship world-readable by default.
+  writeFileSync(file, JSON.stringify(cache, null, 2) + "\n", { mode: 0o600 });
 }
 
 /**
