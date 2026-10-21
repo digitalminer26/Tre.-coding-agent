@@ -226,3 +226,89 @@ test("resolveModelPrices: a hung fetch is bounded by the timeout (fail-open, no 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ───────────────────────── v2: cache rates + long-context tiers ─────────────────────────
+
+test("fetchOpenRouterPrices v2: cacheRead/cacheWrite/1h + overrides tiers captured; invalid optionals dropped, base kept", async () => {
+  const payload = {
+    data: [
+      {
+        id: "openai/gpt-x",
+        pricing: {
+          prompt: "0.0000001", completion: "0.0000005",
+          input_cache_read: "0.00000001", input_cache_write: "0.000000125",
+          overrides: [
+            { min_prompt_tokens: 272000, prompt: "0.0000002", completion: "0.00000075", input_cache_read: "0.00000002" },
+            { min_prompt_tokens: 1000, prompt: "0.00000015", completion: "0.0000006" }, // unsorted input
+            { prompt: "0.0000002" }, // no min_prompt_tokens → tier dropped
+          ],
+        },
+      },
+      { id: "a/nocache", pricing: { prompt: "0.000002", completion: "0.00001" } },
+      { id: "a/badcache", pricing: { prompt: "0.000002", completion: "0.00001", input_cache_read: "-1" } },
+      { id: "a/tinycache", pricing: { prompt: "0.00000015", completion: "0.00000047", input_cache_read: "0.000000005" } },
+      { id: "a/badoverrides", pricing: { prompt: "0.000002", completion: "0.00001", overrides: "junk" } },
+    ],
+  };
+  const f: typeof fetch = async () => new Response(JSON.stringify(payload), { status: 200 });
+  const map = await fetchOpenRouterPrices("https://example.invalid", f);
+  assert.deepEqual(map["openai/gpt-x"], {
+    in: 0.1, out: 0.5, cacheRead: 0.01, cacheWrite: 0.125,
+    overrides: [
+      { minPromptTokens: 1000, in: 0.15, out: 0.6 },
+      { minPromptTokens: 272000, in: 0.2, out: 0.75, cacheRead: 0.02 },
+    ],
+  }, "tiers sorted ascending; invalid tier dropped; per-1M conversion");
+  assert.deepEqual(map["a/nocache"], { in: 2, out: 10 }, "absent cache rates stay ABSENT (not 0)");
+  assert.deepEqual(map["a/badcache"], { in: 2, out: 10 }, "invalid cacheRead dropped, base price kept");
+  assert.deepEqual(map["a/tinycache"], { in: 0.15, out: 0.47, cacheRead: 0.005 },
+    "6-decimal precision preserves $0.005/M cache-read rates");
+  assert.deepEqual(map["a/badoverrides"], { in: 2, out: 10 }, "non-array overrides ignored");
+});
+
+test("readPriceCache v2: v2 round-trips; v1 stays READABLE; corrupt v2 optionals invalidate the whole cache", () => {
+  const dir = mkdtempSync(join(tmpdir(), "prices-"));
+  try {
+    const f = join(dir, "openrouter-prices.json");
+    // v2 round-trip with all optional fields.
+    const v2 = { v: 2 as const, fetchedAt: 123, prices: {
+      "a/b": { in: 1, out: 2, cacheRead: 0.1, cacheWrite: 0.125, cacheWrite1h: 0.25,
+        overrides: [{ minPromptTokens: 1000, in: 2, out: 4 }] },
+    } };
+    writePriceCache(v2, f);
+    assert.deepEqual(readPriceCache(f), v2);
+    // A v1 file (no optional fields) must still load — an old cache beats
+    // "no prices" on an offline host.
+    writePriceCache({ v: 1, fetchedAt: 456, prices: { "a/b": { in: 1, out: 2 } } }, f);
+    const got = readPriceCache(f);
+    assert.ok(got !== null && got.v === 1 && got.fetchedAt === 456);
+    // Corrupt v2 optionals → whole cache invalid (fail-open), same contract
+    // as the base fields.
+    for (const bad of [
+      { in: 1, out: 2, cacheRead: -1 },
+      { in: 1, out: 2, cacheRead: "x" },
+      { in: 1, out: 2, overrides: {} },
+      { in: 1, out: 2, overrides: [{ minPromptTokens: 1, in: NaN, out: 2 }] },
+      { in: 1, out: 2, overrides: [{ in: 1, out: 2 }] }, // no minPromptTokens
+    ]) {
+      writePriceCache({ v: 2, fetchedAt: 123, prices: { "a/b": bad } } as never, f);
+      assert.equal(readPriceCache(f), null, `corrupt optional rejected: ${JSON.stringify(bad)}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveModelPrices: a successful refresh WRITES v2 (the tokenomics shipper reads this file)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "prices-"));
+  try {
+    const f = join(dir, "openrouter-prices.json");
+    const payload = { data: [{ id: "a/b-1", pricing: { prompt: "0.0000001", completion: "0.0000005", input_cache_read: "0.00000001" } }] };
+    await resolveModelPrices({ file: f, now: 5_000_000, fetchImpl: (async () => new Response(JSON.stringify(payload), { status: 200 })) as typeof fetch });
+    const raw = JSON.parse(readFileSync(f, "utf8"));
+    assert.equal(raw.v, 2, "refreshed caches are written as v2");
+    assert.deepEqual(raw.prices["a/b-1"], { in: 0.1, out: 0.5, cacheRead: 0.01 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

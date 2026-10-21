@@ -44,19 +44,45 @@ export const FETCH_TIMEOUT_MS = 10_000;
 export const PRICE_CACHE_FILE = join(homedir(), ".tre", "tre", "openrouter-prices.json");
 
 /** One model's price, USD PER 1M tokens (already converted from the
- * endpoint's per-token values). */
+ * endpoint's per-token values). `in`/`out` round to 2 decimals (the TUI's
+ * display precision); the cache-rate fields keep 6 decimals because real
+ * cache-read rates go as low as $0.005/M and 2-decimal rounding would
+ * destroy them (tokenomics consumes these rates for cost math). */
 export interface ModelPrice {
   in: number;
   out: number;
+  /** USD/1M for prompt tokens served from cache (`pricing.input_cache_read`).
+   * ABSENT when the endpoint doesn't publish one — consumers must NOT assume
+   * a blanket discount: `:free` → 0, otherwise treat as `in` (no benefit). */
+  cacheRead?: number;
+  /** USD/1M for cache writes (`pricing.input_cache_write`). */
+  cacheWrite?: number;
+  /** USD/1M for 1-hour-tier cache writes (`pricing.input_cache_write_1h`). */
+  cacheWrite1h?: number;
+  /** Long-context pricing tiers (`pricing.overrides`): the tier applies when
+   * a request's prompt tokens cross `minPromptTokens`. Sorted ascending. */
+  overrides?: PriceOverrideTier[];
+}
+
+/** One long-context price tier. Same field semantics as ModelPrice. */
+export interface PriceOverrideTier {
+  minPromptTokens: number;
+  in: number;
+  out: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
 
 /** model id → price. Keys are the catalog ids (OpenRouter `vendor/model`). */
 export type PriceMap = Record<string, ModelPrice>;
 
 /** The on-disk cache shape (versioned so a future layout change can
- * invalidate old files instead of misreading them). */
-interface PriceCache {
-  v: 1;
+ * invalidate old files instead of misreading them). v2 adds the optional
+ * cache-rate + override-tier fields; v1 files stay READABLE (they simply
+ * carry no cache rates), so a version bump never strands an offline host
+ * with "no prices". */
+export interface PriceCache {
+  v: 1 | 2;
   /** Epoch ms the prices were fetched. */
   fetchedAt: number;
   prices: PriceMap;
@@ -68,19 +94,36 @@ export function priceCachePath(home: string = homedir()): string {
 }
 
 /** True when a cached price entry is a usable {in, out} pair (finite,
- * non-negative). A corrupt entry (NaN / Infinity / negative / non-numeric)
- * is treated as "no cache" so it can never render a bogus price. */
+ * non-negative) plus well-formed OPTIONAL fields (cacheRead / cacheWrite /
+ * cacheWrite1h / overrides). A corrupt entry (NaN / Infinity / negative /
+ * non-numeric, or a malformed tier) is treated as "no cache" so it can
+ * never render a bogus price. Absent optional fields are VALID (v1 files
+ * and models the endpoint doesn't publish cache rates for). */
+function validNum(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
 function validPrice(v: unknown): v is ModelPrice {
   if (!v || typeof v !== "object") return false;
   const p = v as Record<string, unknown>;
-  return (
-    typeof p.in === "number" &&
-    Number.isFinite(p.in) &&
-    p.in >= 0 &&
-    typeof p.out === "number" &&
-    Number.isFinite(p.out) &&
-    p.out >= 0
-  );
+  if (!validNum(p.in) || !validNum(p.out)) return false;
+  for (const k of ["cacheRead", "cacheWrite", "cacheWrite1h"] as const) {
+    if (p[k] !== undefined && !validNum(p[k])) return false;
+  }
+  if (p.overrides !== undefined) {
+    if (!Array.isArray(p.overrides)) return false;
+    for (const t of p.overrides as unknown[]) {
+      if (!t || typeof t !== "object") return false;
+      const tier = t as Record<string, unknown>;
+      if (
+        typeof tier.minPromptTokens !== "number" || !Number.isFinite(tier.minPromptTokens) || tier.minPromptTokens < 0 ||
+        !validNum(tier.in) || !validNum(tier.out) ||
+        (tier.cacheRead !== undefined && !validNum(tier.cacheRead)) ||
+        (tier.cacheWrite !== undefined && !validNum(tier.cacheWrite))
+      ) return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -94,7 +137,10 @@ export function readPriceCache(file: string = PRICE_CACHE_FILE): PriceCache | nu
   try {
     if (!existsSync(file)) return null;
     const j = JSON.parse(readFileSync(file, "utf8")) as Partial<PriceCache>;
-    if (j.v !== 1 || typeof j.fetchedAt !== "number" || !Number.isFinite(j.fetchedAt)) return null;
+    // v1 (in/out only) and v2 (+ cache rates / tiers) are both readable;
+    // anything else invalidates the file.
+    if (j.v !== 1 && j.v !== 2) return null;
+    if (typeof j.fetchedAt !== "number" || !Number.isFinite(j.fetchedAt)) return null;
     // Reject a far-future timestamp (corrupt / huge-but-finite) so it cannot
     // pin a stale cache as "fresh" forever (now − fetchedAt < TTL).
     if (j.fetchedAt > Date.now() + CLOCK_SKEW_MS) return null;
@@ -110,7 +156,7 @@ export function readPriceCache(file: string = PRICE_CACHE_FILE): PriceCache | nu
     for (const key of Object.keys(j.prices)) {
       if (!validPrice(j.prices[key])) return null;
     }
-    return { v: 1, fetchedAt: j.fetchedAt, prices: j.prices as PriceMap };
+    return { v: j.v, fetchedAt: j.fetchedAt, prices: j.prices as PriceMap };
   } catch {
     return null;
   }
@@ -164,10 +210,55 @@ export async function fetchOpenRouterPrices(
       if (!Number.isFinite(n) || n < 0) return null;
       return Math.round(n * 1_000_000 * 100) / 100;
     };
+    // Cache rates keep 6 decimals: real cache-read rates reach $0.005/M
+    // (e.g. qwen flash tiers), which 2-decimal rounding would zero out —
+    // the tokenomics cost math consumes these rates directly.
+    const perM6 = (v: unknown): number | null => {
+      const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
+      if (!Number.isFinite(n) || n < 0) return null;
+      return Math.round(n * 1_000_000 * 1e6) / 1e6;
+    };
     const inp = perM(p.prompt);
     const outp = perM(p.completion);
     if (inp === null || outp === null) continue; // skip, don't show as free
-    map[id] = { in: inp, out: outp };
+    const price: ModelPrice = { in: inp, out: outp };
+    // Optional cache rates: a MISSING or INVALID value leaves the field
+    // absent (never coerced to 0 — "absent" and "free" are different facts;
+    // see the ModelPrice doc).
+    const cr = perM6(p.input_cache_read);
+    if (cr !== null) price.cacheRead = cr;
+    const cw = perM6(p.input_cache_write);
+    if (cw !== null) price.cacheWrite = cw;
+    const cw1h = perM6(p.input_cache_write_1h);
+    if (cw1h !== null) price.cacheWrite1h = cw1h;
+    // Long-context override tiers: a tier needs a finite minPromptTokens and
+    // valid in/out to be kept; a tier with an invalid cache rate just drops
+    // that field. A malformed overrides value (non-array / junk items) is
+    // ignored — the base price stands on its own.
+    if (Array.isArray(p.overrides)) {
+      const tiers: PriceOverrideTier[] = [];
+      for (const t of p.overrides) {
+        if (!t || typeof t !== "object") continue;
+        const o = t as Record<string, unknown>;
+        const min = typeof o.min_prompt_tokens === "number" && Number.isFinite(o.min_prompt_tokens) && o.min_prompt_tokens >= 0
+          ? Math.trunc(o.min_prompt_tokens)
+          : null;
+        const tin = perM(o.prompt);
+        const tout = perM(o.completion);
+        if (min === null || tin === null || tout === null) continue;
+        const tier: PriceOverrideTier = { minPromptTokens: min, in: tin, out: tout };
+        const tcr = perM6(o.input_cache_read);
+        if (tcr !== null) tier.cacheRead = tcr;
+        const tcw = perM6(o.input_cache_write);
+        if (tcw !== null) tier.cacheWrite = tcw;
+        tiers.push(tier);
+      }
+      if (tiers.length > 0) {
+        tiers.sort((a, b) => a.minPromptTokens - b.minPromptTokens);
+        price.overrides = tiers;
+      }
+    }
+    map[id] = price;
   }
   return map;
 }
@@ -208,7 +299,7 @@ export async function resolveModelPrices(opts: {
   const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? FETCH_TIMEOUT_MS);
   try {
     const prices = await fetchOpenRouterPrices(OPENROUTER_MODELS_URL, opts.fetchImpl, ac.signal);
-    writePriceCache({ v: 1, fetchedAt: now, prices }, file);
+    writePriceCache({ v: 2, fetchedAt: now, prices }, file);
     return prices;
   } catch {
     // Fail-open: a stale cache still shows last-known prices; otherwise the
