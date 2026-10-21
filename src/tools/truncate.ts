@@ -14,7 +14,7 @@
  *      "Copy"). The implementation is L3.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -139,6 +139,10 @@ export function truncationMarker(
  * Save full (untruncated) output to a temp file; returns the path.
  * Caller decides when (only when truncated) and surfaces the path in
  * `details.fullOutputPath`.
+ *
+ * L3 (audit 2026-10-21): written 0600 (the full output can carry secrets
+ * the page would have truncated) and stale files are pruned (a previous
+ * run's spill used to live forever).
  */
 export async function saveFullOutput(
   prefix: string,
@@ -146,7 +150,30 @@ export async function saveFullOutput(
 ): Promise<string> {
   const dir = path.join(tmpdir(), "coding-agent");
   mkdirSync(dir, { recursive: true });
+  pruneFullOutputDir(dir);
   const file = path.join(dir, `${prefix}-${randomUUID()}.log`);
-  await writeFile(file, content, "utf8");
+  await writeFile(file, content, { encoding: "utf8", mode: 0o600 });
   return file;
+}
+
+/** L3: delete this tool's temp files older than 7 days (best-effort). */
+const FULL_OUTPUT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export function pruneFullOutputDir(
+  dir: string = path.join(tmpdir(), "coding-agent"),
+  now: number = Date.now(),
+): void {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".log")) continue; // only our own files
+      const f = path.join(dir, name);
+      try {
+        const st = statSync(f);
+        if (now - st.mtimeMs > FULL_OUTPUT_TTL_MS) unlinkSync(f);
+      } catch {
+        // raced away / unreadable — nothing to do
+      }
+    }
+  } catch {
+    // dir missing — nothing to prune
+  }
 }

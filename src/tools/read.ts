@@ -20,8 +20,25 @@ import {
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
 
-/** List a directory's entries: `- name` (file) or `d name` (dir) + size. */
-async function listDir(dir: string): Promise<string> {
+/**
+ * L1 (audit 2026-10-21): hard size cap checked on the STAT before the file
+ * is ever materialized. The page caps (2000 lines / 50 KB) only apply
+ * AFTER readFile, so a multi-GB file used to OOM the process before any
+ * cap could fire. 64 MiB is generous for text anyone wants to page through;
+ * above it the tool refuses with the size named (and the binary/FIFO/device
+ * refusal below stops the other "read hangs or explodes" cases).
+ */
+export const MAX_READ_BYTES = 64 * 1024 * 1024;
+
+/** L2: directory listings are capped like file pages (was unbounded — a
+ *  100k-entry dir flooded the context). */
+const MAX_LIST_ENTRIES = MAX_LINES;
+
+/** List a directory's entries: `- name` (file) or `d name` (dir) + size.
+ *  L2: returns at most `limit` lines plus the TOTAL entry count (the caller
+ *  adds the truncation note) — a 100k-entry directory must not flood the
+ *  context the way an uncapped file page would. */
+async function listDir(dir: string, limit: number): Promise<{ text: string; total: number; shown: number }> {
   const entries = await readdir(dir, { withFileTypes: true });
   const lines: string[] = [];
   for (const e of entries) {
@@ -37,7 +54,12 @@ async function listDir(dir: string): Promise<string> {
     lines.push(`${e.isDirectory() ? "d" : "-"} ${e.name}${size}`);
   }
   lines.sort();
-  return lines.join("\n") + (lines.length > 0 ? "\n" : "");
+  const kept = lines.slice(0, limit);
+  return {
+    text: kept.join("\n") + (kept.length > 0 ? "\n" : ""),
+    total: lines.length,
+    shown: kept.length,
+  };
 }
 
 export const readTool: Tool = {
@@ -66,19 +88,56 @@ export const readTool: Tool = {
   executionMode: "parallel",
   async execute(_id, args, _signal, _onUpdate): Promise<ToolResult> {
     const a = args as { path: string; offset?: number; limit?: number };
+    // L1 (audit 2026-10-21): stat BEFORE materializing. A huge file is
+    // refused by size (no OOM path); a FIFO/socket/device is refused
+    // outright (a FIFO without a writer would hang readFile forever — see
+    // also the L5 timeout). Directories fall through to the listing branch.
+    try {
+      const st = await stat(a.path);
+      if (!st.isDirectory() && !st.isFile()) {
+        return {
+          content: text(
+            `read: ${a.path} is not a regular file (it is a ${
+              st.isFIFO() ? "pipe" : st.isSocket() ? "socket" : "device"
+            }) — refusing to read it`,
+          ),
+          isError: true,
+        };
+      }
+      if (st.isFile() && st.size > MAX_READ_BYTES) {
+        return {
+          content: text(
+            `read: ${a.path} is ${(st.size / (1024 * 1024)).toFixed(1)} MB ` +
+              `(cap ${MAX_READ_BYTES / (1024 * 1024)} MB) — too large to read; ` +
+              `use bash (head/tail/grep) to sample it`,
+          ),
+          isError: true,
+        };
+      }
+    } catch {
+      // stat failed (ENOENT/ENOTDIR/EACCES/…) — fall through and let
+      // readFile below produce the canonical error result.
+    }
     let raw: string;
     try {
       raw = await readFile(a.path, "utf8");
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === "EISDIR") {
-        // Directory: list its entries instead of reading it.
+        // Directory: list its entries instead of reading it. L2: capped.
         try {
-          const listing = await listDir(a.path);
+          const listing = await listDir(a.path, MAX_LIST_ENTRIES);
+          const note =
+            listing.total > listing.shown
+              ? `\n[listing truncated: showing ${listing.shown} of ${listing.total} entries — pass a file path to read inside it]`
+              : "";
           return {
             content: text(
-              (listing === "" ? "(empty directory)" : listing) +
-                `\n[${a.path} is a directory — read a file inside it to see its content]`,
+              (listing.text === "" ? "(empty directory)" : listing.text) +
+                note +
+                (note === ""
+                  ? `\n[${a.path} is a directory — read a file inside it to see its content]`
+                  : ""),
             ),
           };
         } catch (derr) {

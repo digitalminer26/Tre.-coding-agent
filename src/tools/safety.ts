@@ -718,8 +718,12 @@ export function systemicSensitiveBashPaths(command: string, root: string): strin
 const READONLY_VERBS = new Set([
   "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "pwd",
   // shell no-ops that start most model commands: cd (changes only the
-  // subshell's cwd), test/[ (evaluate), true/false, sleep, env print
-  "cd", "test", "[", "true", "false", "sleep", "env", "printenv",
+  // subshell's cwd), test/[ (evaluate), true/false, sleep
+  // L4 (audit 2026-10-21): `env`/`printenv` REMOVED — they dump every env
+  // secret (API keys, tokens) and were auto-allowed in `no` mode. They now
+  // fall through to the mutating-bash gate (prompt in "ask", blocked in
+  // "no", allowed in "yes" like any non-read-only command).
+  "cd", "test", "[", "true", "false", "sleep",
   "whoami", "id", "echo", "printf", "which", "type", "date", "uname",
   "grep", "egrep", "fgrep", "rg", "ag", "find", "tree", "sort", "uniq",
   "diff", "cmp", "cut", "column", "basename", "dirname", "realpath",
