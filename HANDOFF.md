@@ -1,4 +1,25 @@
-# Current project status (2026-10-20)
+# Current project status (2026-10-21)
+
+**Open-items session (2026-10-21): model-prices v2 + docs-truth pass.**
+`3dcf842` — the OpenRouter price cache goes **v2**: `ModelPrice` gains
+optional `cacheRead`/`cacheWrite`/`cacheWrite1h` (6-decimal precision — real
+cache-read rates go to $0.005/M; 2-decimal display rounding would destroy
+them) and `overrides` long-context tiers (`minPromptTokens`, sorted
+ascending; unsorted input handled, invalid optionals dropped with the base
+price kept). `PriceCache` is `v: 1 | 2` — v1 files stay READABLE (no cache
+rates), so a version bump never strands an offline host. The consumer loop
+is closed end-to-end: tokenomics' `resolve_price`/`pick_tier`/
+`cache_read_rate` already consume these fields. +8 tests; suite 1294/0/14.
+Also this session: `90ef262` corrected stale H3/H4 status claims (docs/08
+header + the HANDOFF docs/07 summary now record H3 as shipped with D33 and
+H4 as formally not adopted); the PLAN D32 row's stale "Designed, NOT yet
+implemented" tail and docs/08 §7's stale F1 entry were corrected to point
+at the shipped state; the two stray `models.json*.bak` files were deleted;
+the telegram-waiting delegation plan was stamped DONE (its fix shipped —
+`src/telegram/paths.ts` resolves the helper across both skill roots).
+Tokenomics L8 (container ran as root) was VERIFIED and FIXED: the image
+now runs as uid 65534, the ledger volume was chowned, redeployed and
+verified live (see `tokenomics/AUDIT.md`).
 
 **F1 follow-up audit fixes.** Effective execution paths now travel from the
 pipeline via `details.progressTarget` after safety-hook rewriting, fixing

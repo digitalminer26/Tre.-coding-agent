@@ -1,4 +1,4 @@
-# 10 — MCP support: scope (pre-implementation)
+# 10 — MCP support: scope (tier 1 built; this doc remains the scope record)
 
 Status: **tier 1 BUILT + ENABLED (2026-10-15); tier 2 item 1 (resources) BUILT (2026-10-15, commit `78052da`); tiers 2 (prompts, list-changed) and 3 deferred.** **FROZEN 2026-10-14 (tier 1 is the
 build scope; tiers 2–3 deferred — see §4).** Changes to this doc are made as

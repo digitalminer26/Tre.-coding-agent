@@ -227,9 +227,11 @@ completes with `stopReason "stop"`. `npm run build` + `npm test` green.
 
 ## 7. Future items (logged, not designed)
 
-- **F1 — Progress detection.** DESIGNED 2026-10-20 (D32) — see §9. Split into
-  variant B (zero-success turns) landing first and variant A3 (same-target
-  edits with no verification); rollout is measure-only → nudge → stop.
+- **F1 — Progress detection.** DESIGNED 2026-10-20 (D32) — see §9 — and
+  IMPLEMENTED the same day (§9 carries the shipped state). Variant B
+  (zero-success turns) + variant A3 (same-target edits with no verification)
+  landed together; rollout is measure-only → nudge → stop, landing default
+  `progressMode: "watch"`.
 - **F2 — Loop telemetry (implemented — minimal scope).** The TUI counts
   how often the loop guard's autonomous retry (H5) actually RECOVERED, per
   session (the TUI process — the events are not persisted, so the counters
