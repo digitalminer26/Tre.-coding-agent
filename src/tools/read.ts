@@ -66,7 +66,8 @@ export const readTool: Tool = {
   name: "read",
   description:
     "Read a text file from disk. Returns the content (up to 2000 lines / 50KB; " +
-    "truncation keeps the head and tells you how to continue). Use offset " +
+    "truncation keeps the head and tells you how to continue). Files above " +
+    "64MB are refused (use bash head/tail/grep to sample them). Use offset " +
     "(1-based line) and limit to read further into large files. May read any " +
     "file on the system (no project-root restriction, no approval prompt). " +
     "Reading a directory lists its entries (d = directory, - = file, size in bytes).",

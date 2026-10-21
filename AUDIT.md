@@ -7,6 +7,13 @@ built code** (`dist/`), not by reading alone; repros are inline. This is a
 point-in-time audit record — findings are NOT yet fixed; each carries a
 proposed fix shape.
 
+> **REMEDIATION STATUS (2026-10-21, same day): ALL M and L findings fixed.**
+> M2 `f59cd83` · M1 `299ce1a` · M3 `f398df9` · L1–L4 + L5/L6 (two commits
+> below). Every fix carries regression tests pinning the audit's own repros
+> (29 new tests; suite 1330 pass / 0 fail), and the M1/L4 repros were
+> re-verified against built `dist/`. Per-finding notes below; the fix-order
+> section at the end is the index.
+
 ## Automated gates (all green at audit time)
 
 | Gate | Result |

@@ -584,6 +584,16 @@ const SENSITIVE_FILENAME: { label: string; test: (segs: string[]) => boolean }[]
   { label: "*.p12", test: (s) => s.some((x) => x.endsWith(".p12")) },
   { label: "*.pfx", test: (s) => s.some((x) => x.endsWith(".pfx")) },
   { label: ".env*", test: (s) => s.some((x) => x === ".env" || /^\.env\./.test(x) || /\.env$/.test(x)) },
+  // L6 (audit 2026-10-21): tre.'s OWN machine-level credential files (the
+  // telegram bot token; the tokenomics ingest token) and the shell rc files
+  // that routinely carry exported secrets. (models.json itself is NOT here:
+  // it doubles as the workspace-facing catalog name and would over-block;
+  // M3's startup hardening covers its file mode instead.)
+  { label: "telegram.json", test: (s) => s[s.length - 1] === "telegram.json" },
+  { label: "tokenomics.json", test: (s) => s[s.length - 1] === "tokenomics.json" },
+  { label: "~/.bashrc", test: (s) => s[s.length - 1] === ".bashrc" },
+  { label: "~/.zshrc", test: (s) => s[s.length - 1] === ".zshrc" },
+  { label: "~/.profile", test: (s) => s[s.length - 1] === ".profile" },
 ];
 const SENSITIVE_PATH: { label: string; test: (segs: string[]) => boolean }[] = [
   { label: "~/.ssh/", test: (s) => s.includes(".ssh") },
@@ -636,8 +646,8 @@ function sensitiveSegs(token: string): string[] {
 
 /** Sensitive patterns matched by a (possibly relative) path. Used for the
  *  `read` tool's RESOLVED path argument. M1: case-folded + quote-stripped
- *  segments (see sensitiveSegs). */
-function sensitivePathPatterns(p: string): string[] {
+ *  segments (see sensitiveSegs). Exported for tests (L6 pattern coverage). */
+export function sensitivePathPatterns(p: string): string[] {
   const segs = sensitiveSegs(p);
   const hits: string[] = [];
   for (const pat of [...SENSITIVE_FILENAME, ...SENSITIVE_PATH]) {

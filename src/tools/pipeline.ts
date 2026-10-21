@@ -98,6 +98,27 @@ export type AfterToolCall = (
 export interface ToolPipelineHooks {
   beforeToolCall?: BeforeToolCall;
   afterToolCall?: AfterToolCall;
+  /**
+   * L5 (audit 2026-10-21): per-call wall-clock cap. Return a timeout in ms
+   * for `tool`, or undefined for no cap. Default (see defaultToolTimeoutMs):
+   * 30s for the file tools (read/write/edit) — a hung NFS read or a FIFO
+   * without a writer used to wedge the loop forever, because only bash
+   * honored the abort signal. bash/subtask/MCP are exempt (their own,
+   * longer timeouts; subtask legitimately runs for minutes).
+   */
+  toolTimeoutMs?: (tool: Tool) => number | undefined;
+}
+
+/** L5: the default per-call cap for the file tools (generous — a false kill
+ *  is worse than a slow hang). Exported for tests. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+/** L5: tools with their own (longer) timeout machinery — never capped here. */
+const PIPELINE_TIMEOUT_EXEMPT = new Set(["bash", "subtask"]);
+/** The default `toolTimeoutMs`: cap the file tools, exempt bash/subtask/MCP. */
+export function defaultToolTimeoutMs(tool: Tool): number | undefined {
+  if (PIPELINE_TIMEOUT_EXEMPT.has(tool.name)) return undefined;
+  if (tool.name.startsWith("mcp__")) return undefined; // MCP has per-call timeouts
+  return DEFAULT_TOOL_TIMEOUT_MS;
 }
 
 const text = (t: string) => [{ type: "text" as const, text: t }];
@@ -265,11 +286,37 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     //    net for tools that violate the contract (kept in-band: a thrown
     //    tool is a broken tool, and its failure must still feed the
     //    stall guard below).
+    // L5 (audit 2026-10-21): a wall-clock cap (default 30s for the file
+    // tools) so a hung read/write can never wedge the loop. The abandoned
+    // promise keeps running to settle (nothing can cancel it mid-syscall),
+    // but the LOOP moves on with a timeout error result.
+    const timeoutMs = hooks.toolTimeoutMs
+      ? hooks.toolTimeoutMs(tool)
+      : defaultToolTimeoutMs(tool);
     let result: ToolResult;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      result = (await tool.execute(call.id, args, signal, onUpdate)) ?? {
+      const exec = tool.execute(call.id, args, signal, onUpdate) ?? Promise.resolve({
         content: [],
-      };
+      } as ToolResult);
+      result = timeoutMs
+        ? await Promise.race([
+            exec,
+            new Promise<ToolResult>((_, reject) => {
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `timed out after ${Math.round(timeoutMs / 1000)}s ` +
+                        `(the tool may still be running in the background)`,
+                    ),
+                  ),
+                timeoutMs,
+              );
+              timer.unref?.(); // never keep the process alive for the cap
+            }),
+          ])
+        : await exec;
     } catch (err) {
       result = {
         content: text(
