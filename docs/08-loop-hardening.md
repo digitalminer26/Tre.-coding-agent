@@ -2,7 +2,9 @@
 
 Status: **H1 approved 2026-09-30, IMPLEMENTED (commit `2a12ca0` — the
 windowed guard, `STALL_WINDOW` 8 / 3 failures, is in `src/tools/pipeline.ts`);
-H2 + H5 implemented. H3–H4 logged, not yet implemented. F1 (progress
+H2 + H5 implemented. H3 (loop visibility) IMPLEMENTED 2026-10-20 (D33, §10);
+H4 (checkpoint commits) NOT ADOPTED by the D33 ruling (commits stay at the
+current threshold — see §5 H4). F1 (progress
 detection) IMPLEMENTED 2026-10-20 (D32, §9) — variant B + A3 both landed
 together (one turn-level state machine), landing default `progressMode:
 "watch"` (pure observation; promotion is a one-line default flip backed by

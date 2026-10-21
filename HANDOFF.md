@@ -1791,8 +1791,10 @@ implemented (the `msgs` number + `/context` report break down into
 committed, the "uncommitted" qualifier is stale)** — `systemPromptSectionChars`
 + `systemPromptSections` render the `sys` number as `sys N (ctx X · skills Y)`
 (see the top status entry). docs/08: H2 (same-failure repetition) is
-implemented; H3 (loop visibility) and H4 (checkpoint commits) remain logged,
-not designed.
+implemented; the claim "H3 (loop visibility) and H4 (checkpoint commits)
+remain logged, not designed" is STALE (this entry predates D33) — H3 was
+IMPLEMENTED 2026-10-20 (D33, docs/08 §10) and H4 was NOT ADOPTED by the
+D33 ruling.
 
 ---
 
