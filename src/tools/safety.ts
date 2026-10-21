@@ -363,6 +363,21 @@ async function realpathExisting(p: string): Promise<string> {
   }
 }
 
+/**
+ * M1 (audit 2026-10-21): the REAL path of a read target (workspace-relative
+ * or absolute, `~` expanded), or null when it cannot be resolved (missing /
+ * permission). Symlinked secrets resolve here so the sensitive check sees
+ * the true target; a plain file resolves to itself. Never throws.
+ */
+async function resolveSensitiveReadTarget(root: string, p: string): Promise<string | null> {
+  const abs = path.resolve(root, expandHome(p));
+  try {
+    return await realpath(abs);
+  } catch {
+    return null;
+  }
+}
+
 // ─────────────────────────── classification ───────────────────────────
 
 /**
@@ -587,10 +602,43 @@ function expandHome(p: string): string {
   return p;
 }
 
+/**
+ * M1 (audit 2026-10-21): strip ONE layer of matching surrounding shell
+ * quotes from a token before pattern-matching. `cat "<abs>/.env"` previously
+ * kept its quotes in the token, so no pattern matched and the sys-sensitive
+ * block was bypassed. (Deeper shell indirection — `$(…)`, backticks,
+ * base64 pipes — remains out of scope for a token classifier; the honest
+ * posture is defense-in-depth, see AUDIT.md M1.)
+ */
+function stripShellQuotes(t: string): string {
+  if (t.length >= 2) {
+    const first = t[0];
+    const last = t[t.length - 1];
+    if ((first === '"' || first === "'") && last === first) {
+      return t.slice(1, -1);
+    }
+  }
+  return t;
+}
+
+/**
+ * M1: path segments for pattern-matching — home-expanded, shell-quote
+ * stripped, split on "/", empty parts dropped, LOWERCASED. macOS's default
+ * filesystem is case-insensitive, so `~/.tre/tmp/.ENV` IS `.env`; every
+ * pattern test now sees case-folded segments.
+ */
+function sensitiveSegs(token: string): string[] {
+  return expandHome(stripShellQuotes(token))
+    .split("/")
+    .filter((s) => s.length > 0)
+    .map((s) => s.toLowerCase());
+}
+
 /** Sensitive patterns matched by a (possibly relative) path. Used for the
- *  `read` tool's RESOLVED path argument. */
+ *  `read` tool's RESOLVED path argument. M1: case-folded + quote-stripped
+ *  segments (see sensitiveSegs). */
 function sensitivePathPatterns(p: string): string[] {
-  const segs = expandHome(p).split("/").filter((s) => s.length > 0);
+  const segs = sensitiveSegs(p);
   const hits: string[] = [];
   for (const pat of [...SENSITIVE_FILENAME, ...SENSITIVE_PATH]) {
     if (pat.test(segs)) hits.push(pat.label);
@@ -607,8 +655,11 @@ function sensitivePathPatterns(p: string): string[] {
  */
 export function sensitiveBashPatterns(command: string): string[] {
   const hits: string[] = [];
-  for (const t of command.split(/\s+/).filter((x) => x.length > 0)) {
-    const segs = expandHome(t).split("/").filter((s) => s.length > 0);
+  for (const raw of command.split(/\s+/).filter((x) => x.length > 0)) {
+    // M1: strip one layer of shell quotes BEFORE classifying the token —
+    // `cat "<abs>/.env"` must match exactly like the unquoted form.
+    const t = stripShellQuotes(raw);
+    const segs = sensitiveSegs(t);
     const pathLike = t.startsWith("~") || t.startsWith("/") || t.startsWith(".") || t.includes("/");
     const pats = pathLike ? [...SENSITIVE_FILENAME, ...SENSITIVE_PATH] : SENSITIVE_FILENAME;
     for (const pat of pats) {
@@ -648,11 +699,15 @@ export function isSystemicSensitivePath(p: string, root: string): boolean {
  */
 export function systemicSensitiveBashPaths(command: string, root: string): string[] {
   const sys: string[] = [];
-  for (const t of command.split(/\s+/).filter((x) => x.length > 0)) {
+  for (const raw of command.split(/\s+/).filter((x) => x.length > 0)) {
+    // M1: same quote-stripping as sensitiveBashPatterns — the two classifiers
+    // must agree on which tokens are sensitive, or a quoted token matches
+    // as sensitive but never as SYS and lands in the (ws) bucket instead.
+    const t = stripShellQuotes(raw);
     const pathLike = t.startsWith("~") || t.startsWith("/") || t.startsWith(".") || t.includes("/");
     if (!pathLike) continue; // bare filename → (ws)
     // Only tokens that actually match a sensitive pattern are candidates.
-    const segs = expandHome(t).split("/").filter((s) => s.length > 0);
+    const segs = sensitiveSegs(t);
     if (![...SENSITIVE_FILENAME, ...SENSITIVE_PATH].some((p) => p.test(segs))) continue;
     if (isSystemicSensitivePath(t, root) && !sys.includes(t)) sys.push(t);
   }
@@ -1391,9 +1446,36 @@ export function makeSafetyHooks(opts: SafetyOptions): BeforeToolCall {
     if (tool.name === "read") {
       const p = args.path;
       if (typeof p !== "string" || p.length === 0) return undefined; // validation catches it
-      const sensitive = sensitivePathPatterns(p);
+      // M1 (audit 2026-10-21): classify the RESOLVED target, not just the
+      // argument string. A benign-named symlink inside the workspace
+      // (readme.txt -> ~/.aws/credentials) previously read ALLOWED while the
+      // direct secret path was blocked. Every existing component is
+      // realpath'd (mirrors the write/edit path sandbox); a resolution
+      // failure falls back to the lexical path (ENOENT — the read would
+      // fail anyway). The sensitive check runs on BOTH the lexical and the
+      // real path, blocking if either matches.
+      const real = await resolveSensitiveReadTarget(root, p);
+      const sensitive = [
+        ...new Set([...sensitivePathPatterns(p), ...(real ? sensitivePathPatterns(real) : [])]),
+      ];
+      // The (ws)/(sys) split must compare like with like: when the workspace
+      // itself lives under a symlink (macOS /var → /private/var tmpdirs),
+      // the realpath'd target must be compared against the realpath'd root,
+      // or every ws-sensitive read would misclassify as sys.
+      let realRoot = root;
+      if (real !== null) {
+        try {
+          realRoot = await realpath(root);
+        } catch {
+          /* keep the lexical root */
+        }
+      }
       const sysSensitive =
-        sensitive.length > 0 && isSystemicSensitivePath(p, root) ? sensitive : [];
+        sensitive.length > 0 &&
+        (isSystemicSensitivePath(p, root) ||
+          (real !== null && isSystemicSensitivePath(real, realRoot)))
+          ? sensitive
+          : [];
       const wsSensitive = sysSensitive.length > 0 ? [] : sensitive;
       const blocked = await gate("read", args, [], wsSensitive, [], sysSensitive, false, false);
       if (blocked !== undefined) return { blocked };
