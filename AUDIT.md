@@ -35,6 +35,19 @@ EVERY mode**. M1 matters because it silently defeats (2), not (1).
 
 ## M1 — The sensitive-path gate is lexical; three verified bypasses of the "blocked in EVERY mode" guarantee
 
+> **FIXED 2026-10-21 (299ce1a)** — all three bypasses closed and re-verified
+> against built `dist/`: (1) the `read` branch now classifies the
+> realpath-resolved target as well as the argument (a benign-named symlink
+> onto a secret blocks); (2) every pattern test runs on case-folded segments
+> (`.ENV` blocks on macOS's case-insensitive FS); (3) bash tokens are
+> stripped of one layer of shell quotes before matching (quoted absolute
+> paths block). The ws/sys split compares realpath-vs-realpath so a
+> workspace under a symlinked path still PROMPTS instead of misclassifying
+> as sys. 7 regression tests (`test/safety-m1.test.ts`). Accepted residual
+> (documented, reviewer): TOCTOU symlink-swap between gate and open —
+> inherent to a pre-exec classifier; deeper indirection (`$(…)`, base64)
+> stays out of scope as the finding always acknowledged. Original finding below.
+
 `safety.ts` classifies sensitive access by pattern-matching the **argument
 string**, never the resolved target or the real command semantics.
 
@@ -99,6 +112,16 @@ queue. One condition, both bridges, ~10 tests.
 
 ## M3 — Credential files are world-readable
 
+> **FIXED 2026-10-21 (f398df9)** — new `src/config/secret-mode.ts`:
+> `hardenSecretFiles()` runs at startup (before models load) and chmods
+> every known secret file with group/other bits down to `mode & 0o600`,
+> warning on stderr for each fix (and for any chmod failure — never a
+> throw). Covered: `~/.tre/telegram.json`, `~/.tre/tre/models.json`,
+> `~/.tre/models.json`, `chatgpt-auth.json`, `tokenomics.json`. The price
+> cache write dropped its explicit `0644` to `0600`. Live machine: 3 files
+> tightened on first run. 6 tests (`test/secret-mode.test.ts`). Env-based
+> apiKey reading remains a logged, larger config change (unchanged scope).
+
 - `~/.tre/tre/models.json` — **0644, 7 inline `apiKey` values** (the live
   config).
 - `~/.tre/models.json` (legacy) — 0644, 2 inline keys.
@@ -118,6 +141,11 @@ is a larger config change — log, not mandate.)
 
 ## L1 — `read` loads the whole file into memory before any size check
 
+> **FIXED (commit "L1-L4 batch")** — `stat` before `readFile`: files above
+> 64 MiB are refused by size (sparse-file test proves no materialization),
+> and FIFOs/sockets/devices are refused outright (a writer-less FIFO used
+> to hang `readFile` forever). The tool description now promises the cap.
+
 `readFile(a.path, "utf8")` on an arbitrary path (e.g. a multi-GB core
 dump, or `read` of a huge device file) can OOM the process before the
 2000-line/50KB page ever applies. The binary NUL probe only looks at the
@@ -126,12 +154,20 @@ refuse/stream above a size cap (the tool description can promise it).
 
 ## L2 — Directory listings are unbounded
 
+> **FIXED (same commit)** — listings cap at 2000 entries and name the
+> total (`listing truncated: showing 2000 of 2500 entries`); small dirs are
+> byte-identical to before.
+
 The `EISDIR` branch returns `listDir()` output **without** `truncateHead`
 — a directory with 100k entries floods the context (the file path is
 capped; the listing path is not). **Fix:** pipe through the existing
 `truncateHead` + a count note.
 
 ## L3 — Truncation-recovery temp files: world-readable, never pruned
+
+> **FIXED (same commit)** — `saveFullOutput` writes `mode: 0600` and prunes
+> its own `*.log` files older than 7 days on each write (foreign files in
+> the dir are never touched).
 
 `saveFullOutput` writes full (possibly secret) tool output to
 `$TMPDIR/coding-agent/*.log` at default mode (umask 022 → 0644) with no
@@ -141,6 +177,10 @@ than N days on startup.
 
 ## L4 — `printenv`/`env` classified read-only → allowed in `no` mode
 
+> **FIXED (same commit)** — `env`/`printenv` removed from `READONLY_VERBS`;
+> they now fall through to the mutating-bash gate (prompt in "ask", blocked
+> in "no"). `bash printenv` in `no` mode is the pinned repro.
+
 `READONLY_VERBS` includes `env`/`printenv`; `bash printenv` under
 `--no-approve` (the "no human" mode) dumps every env secret — verified
 ALLOWED. **Fix:** drop `env`/`printenv` from the read-only set, or block
@@ -148,12 +188,27 @@ them in `no` mode explicitly.
 
 ## L5 — `read`/`write`/`edit` ignore the abort signal
 
+> **FIXED (commit "L5+L6")** — the pipeline gained a `toolTimeoutMs` hook
+> (default 30s for the file tools; bash/subtask/MCP exempt — they own their
+> timeouts). A hung tool returns an in-band timeout error and the loop
+> moves on; the timer is `unref`'d. Residual (documented): an abandoned
+> write may still land after the timeout — the error text names it.
+
 `execute(_id, args, _signal, …)` — a hung read (NFS, FIFO without a
 writer) can't be interrupted; only bash honors the signal. The loop's
 abort waits for the tool to settle. **Fix:** at minimum a default
 per-call timeout in the pipeline for non-bash tools.
 
 ## L6 — Pattern-list gaps adjacent to M1 (same fix batch)
+
+> **FIXED (commit "L5+L6")** — `SENSITIVE_FILENAME` gained `telegram.json`,
+> `tokenomics.json` (tre.'s own machine-level secrets) and the shell rc
+> files `.bashrc`/`.zshrc`/`.profile`; M1's case-folding covers the case
+> variants. `models.json` deliberately NOT added (the name doubles as the
+> workspace-facing catalog and would over-block; M3's mode-hardening covers
+> it instead). Side effect (intended): the agent can no longer write those
+> config files itself — an attacker-supplied bot token would otherwise
+> redirect every reply.
 
 `~/.tre/*.json` (tre.'s OWN secrets: bot token, apiKeys) are not in
 `SENSITIVE_FILENAME`; case variants bypass; `~/.bashrc`/`~/.profile`
@@ -163,6 +218,8 @@ hanging fruit to add.
 
 ## L7 — `~/.tre/telegram.json` token file perms (folded into M3) and
 helper `poll` consuming updates from all chats (folded into M2).
+
+> **FIXED** via the M2 (f59cd83) and M3 (f398df9) commits.
 
 ---
 
@@ -204,13 +261,18 @@ helper `poll` consuming updates from all chats (folded into M2).
   min-interval, capped backoff) are all present and unit-tested; stop()
   kills the in-flight child; per-message handler guard.
 
-## Suggested fix order
+## Suggested fix order — ALL DONE 2026-10-21
 
 1. **M2** (chat allowlist) — smallest diff, closes an injection front door.
    **DONE 2026-10-21 (f59cd83).**
 2. **M1** (realpath + case + quote normalization in the classifier) —
    restores the documented guarantee; guardrail-zone file, needs a human
    commit (`GUARDRAIL_BYPASS=1`) per repo policy.
+   **DONE 2026-10-21 (299ce1a, human-directed).**
 3. **M3** (0600 on config writes + warn-on-load) — mirrors token-store.
+   **DONE 2026-10-21 (f398df9).**
 4. L1–L4 batch (size caps, listing cap, temp-file mode+prune, printenv).
+   **DONE (commit "L1-L4 batch", human-directed for safety.ts).**
 5. L5/L6 + the info items as design entries.
+   **L5/L6 DONE (commit "L5+L6"). The Info/accepted items stay as designed
+   entries — no code change was proposed for them.**

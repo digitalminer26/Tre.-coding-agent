@@ -1,5 +1,28 @@
 # Current project status (2026-10-21)
 
+**Audit remediation (2026-10-21): every M/L finding in AUDIT.md is FIXED.**
+M2 `f59cd83` — both Telegram bridges enforce a chat allowlist at parse time
+(shared `parseTelegramPollOutput`/`telegramAllowedChatIds` in
+`src/telegram/paths.ts`; fail-closed). M1 `299ce1a` — the sensitive-path
+gate closes all three verified bypasses: `read` classifies the
+realpath-resolved target, pattern tests case-fold (macOS FS), bash tokens
+are quote-stripped, and the ws/sys split compares realpath-vs-realpath (a
+workspace under a symlinked path still PROMPTS — the macOS `/var` tmpdir
+case). M3 `f398df9` — new `src/config/secret-mode.ts` hardens every known
+secret file to 0600 at startup with a stderr warning (live machine: 3 files
+tightened); price-cache write 0644→0600. L1–L4 — `read` stats before
+materializing (64 MB cap + FIFO/socket/device refusal), listings cap at
+2000 entries naming the total, truncation temp files 0600 + 7-day prune,
+`env`/`printenv` out of `READONLY_VERBS` (`bash printenv` no longer passes
+`no` mode). L5/L6 — pipeline `toolTimeoutMs` seam (default 30s for file
+tools; bash/subtask/MCP exempt), pattern list gains `telegram.json`,
+`tokenomics.json`, `.bashrc`/`.zshrc`/`.profile`. 29 new regression tests
+pin the audit's own repros (suite 1330/0/14); the M1/L4 repros were
+re-verified against built `dist/`. Guardrail-zone commits (safety.ts) used
+the human-directed `GUARDRAIL_BYPASS=1` path. Residuals documented in
+AUDIT.md per finding (TOCTOU swap, abandoned-write, agent can no longer
+write its own bot-token config — intended).
+
 **Open-items session (2026-10-21): model-prices v2 + docs-truth pass.**
 `3dcf842` — the OpenRouter price cache goes **v2**: `ModelPrice` gains
 optional `cacheRead`/`cacheWrite`/`cacheWrite1h` (6-decimal precision — real
