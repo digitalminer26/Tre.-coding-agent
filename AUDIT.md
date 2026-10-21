@@ -64,6 +64,16 @@ conflicts with design stance (1); worth an explicit decision entry.
 
 ## M2 — Telegram bridge has NO sender/chat allowlist: any Telegram user who obtains the bot token can inject prompts into live sessions
 
+> **FIXED 2026-10-21 (f59cd83)** — both bridges now filter at parse time
+> against `chatId` from `~/.tre/telegram.json` via the shared
+> `parseTelegramPollOutput` + `telegramAllowedChatIds` helpers in
+> `src/telegram/paths.ts` (fail-closed: empty/invalid config allows no
+> chat). The foreign-chat offset still advances (the helper consumed the
+> update) — ignored, not retried. 7 regression tests in
+> `test/telegram-chat-filter.test.ts` pin the pure helpers and both
+> bridges end-to-end. The helper's own `poll` is unchanged (the filter
+> lives in the consumer, single source of truth). Original finding below.
+
 `~/.tre/telegram.json` carries `{token, chatId}`, but **no layer filters
 incoming messages by `chatId`**: `telegram.py poll` prints every update
 from every chat; `bridge.ts` parses them all; `driver.ts` feeds them all
@@ -190,6 +200,7 @@ helper `poll` consuming updates from all chats (folded into M2).
 ## Suggested fix order
 
 1. **M2** (chat allowlist) — smallest diff, closes an injection front door.
+   **DONE 2026-10-21 (f59cd83).**
 2. **M1** (realpath + case + quote normalization in the classifier) —
    restores the documented guarantee; guardrail-zone file, needs a human
    commit (`GUARDRAIL_BYPASS=1`) per repo policy.
