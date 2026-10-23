@@ -36,7 +36,8 @@ mark) whose progress the TUI renders in a color-coded bottom field
 the workstream is done and quiet — next to a header elapsed-time ticker.
 The TUI's `/display-bottom` opens an interactive field picker (↑/↓ + space
 + enter/esc) for choosing which fields the bottom lines show. See
-`HANDOFF.md` for the dated change log.
+`HANDOFF.md` for the dated change log (entries through 2026-10-19 are in
+`HANDOFF-archive.md`).
 
 ## Docs
 
