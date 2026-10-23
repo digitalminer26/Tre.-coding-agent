@@ -1,5 +1,28 @@
 # Current project status (2026-10-21)
 
+**M4 close-out (2026-10-21, `dfefd84` — HEAD).** The post-remediation
+review filed M4 and it is now FIXED: the write/edit branch of
+`makeSafetyHooks` runs the same sensitive-path check `read` has (M1
+helpers: case-folded patterns, realpath resolution, realpath-vs-realpath-root
+ws/sys split) — sys-sensitive → blocked in every mode, ws-sensitive →
+prompt in `ask`. A new `.tre`-anchored PATH pattern covers the machine
+endpoint catalogs: `~/.tre/models.json` matches, a workspace
+`models.json` never does. 8 regression tests (`test/safety-m4.test.ts`),
+including the filed extra-root takeover repro and the symlink-into-extra-root
+case (the sandbox passes it; only the sensitive check stops it). Bonus
+finding pinned: the path sandbox refuses cross-root symlink writes (each
+root is realpath-checked independently), so a workspace link INTO an extra
+root never reaches the sensitive layer. Guardrail-zone file (safety.ts)
+landed via the human `GUARDRAIL_BYPASS=1` path. Residual: same
+TOCTOU/indirection caveats as M1 (inherent, documented in AUDIT.md).
+Suite **1338 pass / 0 fail / 14 skip** (supersedes the 1330 count below).
+
+**Known-open item (carried; restated 2026-10-21).** D26 compaction: fixed
+prompt overhead is counted in the estimate TRIGGER but is not fully
+reserved against the kept context — a strict-fit guard was attempted and
+removed (it broke valid compaction tests). Do not claim the complete
+next-request estimate is guaranteed to fit; PLAN's D26 row is authoritative.
+
 **Audit remediation (2026-10-21): every M/L finding in AUDIT.md is FIXED.**
 M2 `f59cd83` — both Telegram bridges enforce a chat allowlist at parse time
 (shared `parseTelegramPollOutput`/`telegramAllowedChatIds` in
@@ -138,12 +161,14 @@ the same way.
 `4359bb0`, superseded by the implementation above — see docs/08 §10 for the
 design and its rulings, incl. H4's non-adoption).**
 
-**F1 progress detection — IMPLEMENTED (2026-10-21, D32; `ecd893e`, watch
-default).** The shipped state is docs/08 §9 + the D32 rows in PLAN (the
-2026-10-21 truth pass `4174829` corrected PLAN and docs/08 §7; this section
-is corrected now). The paragraph below is the DESIGN RECORD as written at
-design time (2026-10-20) — kept verbatim; where it says "designed / NOT yet
-implemented", read it as history.
+**F1 progress detection — design record (designed 2026-10-20, D32;
+implemented 2026-10-20 in `ecd893e`, watch default; this section restated
+by the 2026-10-21 truth pass `4174829`).** The shipped state is docs/08 §9
++ the D32 rows in PLAN. The paragraph below is the DESIGN RECORD as written
+at design time (2026-10-20) — kept verbatim; where it says "designed / NOT
+yet implemented", read it as history. (The IMPLEMENTED status, the
+follow-up audit fixes, and the suite counts are the section above — this
+entry exists once, not twice.)
 `docs/08-loop-hardening.md` gains §9: the design pass on the last logged
 loop-hardening item. Unifying principle **act–measure–act** (thrashing that
 never repeats byte-identically / never hits a permission wall / never produces
