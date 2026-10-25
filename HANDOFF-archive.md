@@ -4960,3 +4960,11 @@ bash test/e2e.sh 14 14            # single TUI pinned-layout scenario
 
 History: `.history/snapshots/` + `.history/CHANGELOG.md` (also a git repo —
 commit the WS11 work if you want a tagged checkpoint).
+
+**Closed carry — D26 known-open item (restated 2026-10-21; CLOSED by D34,
+2026-10-25).** D26 compaction: fixed prompt overhead is counted in the
+estimate TRIGGER but was not fully reserved against the kept context — a
+strict-fit guard was attempted and removed (it broke valid compaction tests
+at the time). Do not claim the complete next-request estimate is guaranteed
+to fit; PLAN's D26 row was authoritative. Resolved by PLAN D34 (lossless fit
+policy; docs/06 "D26").

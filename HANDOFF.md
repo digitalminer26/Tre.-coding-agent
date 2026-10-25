@@ -1,6 +1,19 @@
-# Current project status (2026-10-21)
+# Current project status (2026-10-25)
 
-**M4 close-out (2026-10-21, `dfefd84` — HEAD).** The post-remediation
+**D34 — D26 compaction CLOSED (2026-10-25).** The carried
+open item below is resolved: the lossless fit policy is implemented
+(`planCompaction` `{preserveLastUser, shrinkToFit}`; `compactContext`
+`strictFit` bound/floor ladder with the real rule-notice measured before a
+prompt fold, fold output capped at the headroom over its kept tail,
+fold-after-demonstration, `priorityLastUser` transcripts, abort-terminal /
+error-preserves-candidate; `compactNow` strict on the auto trigger, legacy
+best-effort on manual `/compact`). Suite **1354 pass / 0 fail / 14 skip
+(live-only)**; property sweep `scripts/audit-d26-repro.mjs` 168/168 against
+the real `compactContext`. Contract + audit repros: docs/06 "D26"; decision
+row: PLAN D34. Residual: fit is enforced on the calibrated chars/token
+estimate (same tokenizer caveat as the trigger).
+
+**M4 close-out (2026-10-21, `dfefd84`).** The post-remediation
 review filed M4 and it is now FIXED: the write/edit branch of
 `makeSafetyHooks` runs the same sensitive-path check `read` has (M1
 helpers: case-folded patterns, realpath resolution, realpath-vs-realpath-root
@@ -16,12 +29,6 @@ root never reaches the sensitive layer. Guardrail-zone file (safety.ts)
 landed via the human `GUARDRAIL_BYPASS=1` path. Residual: same
 TOCTOU/indirection caveats as M1 (inherent, documented in AUDIT.md).
 Suite **1338 pass / 0 fail / 14 skip** (supersedes the 1330 count below).
-
-**Known-open item (carried; restated 2026-10-21).** D26 compaction: fixed
-prompt overhead is counted in the estimate TRIGGER but is not fully
-reserved against the kept context — a strict-fit guard was attempted and
-removed (it broke valid compaction tests). Do not claim the complete
-next-request estimate is guaranteed to fit; PLAN's D26 row is authoritative.
 
 **Audit remediation (2026-10-21): every M/L finding in AUDIT.md is FIXED.**
 M2 `f59cd83` — both Telegram bridges enforce a chat allowlist at parse time
