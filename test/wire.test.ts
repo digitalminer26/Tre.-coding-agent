@@ -363,6 +363,39 @@ test("parseToolArgs: salvage cases", () => {
   assert.deepEqual(parseToolArgs("[1,2]"), {});
 });
 
+test("parseToolArgs: strips leaked Qwen XML tool protocol suffix from string values", () => {
+  assert.deepEqual(
+    parseToolArgs('{"command":"printf hello\\n</parameter>\\n</function>\\n</tool_call>"}'),
+    { command: "printf hello" },
+  );
+});
+
+// Audit finding 3: the strip must touch ONLY a leaked marker at the END of
+// a value — legitimate arguments containing tag-like content (XML fixtures,
+// heredocs, exact-match edits) are returned verbatim.
+test("parseToolArgs: interior tag-like content is preserved verbatim (audit finding 3)", () => {
+  assert.deepEqual(
+    parseToolArgs(JSON.stringify({ content: "first\n</function>\nlast" })),
+    { content: "first\n</function>\nlast" },
+  );
+  assert.deepEqual(
+    parseToolArgs(JSON.stringify({ newText: "<parameter>example</parameter>\nsomething" })),
+    { newText: "<parameter>example</parameter>\nsomething" },
+  );
+  // A marker in an inner string of a nested object is interior content too.
+  assert.deepEqual(
+    parseToolArgs(JSON.stringify({ outer: { inner: "a</tool_call>b" }, n: 2 })),
+    { outer: { inner: "a</tool_call>b" }, n: 2 },
+  );
+});
+
+test("parseToolArgs: a leaked tail after legitimate interior markers is still stripped", () => {
+  assert.deepEqual(
+    parseToolArgs(JSON.stringify({ command: "cat x\n</function>\necho hi\n</parameter>" })),
+    { command: "cat x\n</function>\necho hi" },
+  );
+});
+
 test("sanitizeCallId: charset + length + fallback", () => {
   assert.equal(sanitizeCallId("call_abc-123"), "call_abc-123");
   assert.equal(sanitizeCallId("a:b/c.d"), "abcd");

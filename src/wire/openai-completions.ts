@@ -149,31 +149,71 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** The leaked closing-protocol tail: a value ending in whitespace, one of
+ *  the Qwen chat-template close markers, and nothing but whitespace after.
+ *  Anchored at the END of the string so interior tag-like content (XML
+ *  fixtures, heredocs, file writes: "first\n</function>\nlast") is NEVER
+ *  matched — only a marker the model leaked at the very end of an argument. */
+const LEAKED_TAIL_RE = /[ \t]*(?:\\n|\n)?[ \t]*<\/(?:parameter|function|tool_call)>[ \t\n]*$/;
+
+/** Remove leaked protocol tails from string VALUES of a parsed args object
+ *  (recursing into nested objects/arrays). Values not ending in a marker
+ *  are returned untouched. */
+function stripLeakedTails(v: unknown): unknown {
+  if (typeof v === "string") {
+    // Loop: leaked markers arrive stacked (`...</parameter>\n</function>\n
+    // </tool_call>`); each pass removes the last one until the tail is clean.
+    let s = v;
+    while (LEAKED_TAIL_RE.test(s)) s = s.replace(LEAKED_TAIL_RE, "");
+    return s;
+  }
+  if (Array.isArray(v)) return v.map(stripLeakedTails);
+  if (isPlainObject(v)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v)) out[k] = stripLeakedTails(val);
+    return out;
+  }
+  return v;
+}
+
+function tryParseObject(s: string): Record<string, unknown> | undefined {
+  try {
+    const v: unknown = JSON.parse(s);
+    return isPlainObject(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Best-effort parse of accumulated tool-call argument JSON.
- *   1. straight JSON.parse
+ *   1. straight JSON.parse (UNTOUCHED — legitimate arguments containing
+ *      tag-like content are never altered)
  *   2. repair of truncation (close a dangling string, then close open
  *      braces/brackets; if still bad, drop the trailing incomplete member
  *      and retry)
  *   3. {} — the loop's `length`→fail-all guard makes salvage best-effort
+ *
+ * llama.cpp's Qwen3.8 chat template asks for XML-like tool calls and its
+ * parser can leak the closing protocol markers into the TAIL of a string
+ * argument, e.g. {"command":"printf hello\n</parameter>"} — that raw string
+ * still parses as valid JSON, so repair happens AFTER parsing: each string
+ * value is checked for a leaked closing marker at its end (LEAKED_TAIL_RE)
+ * and only that tail is removed. Interior content is preserved verbatim.
+ * The text-wide strip below runs ONLY on already-invalid input (salvage),
+ * never on arguments that parsed cleanly.
  */
 export function parseToolArgs(raw: string): Record<string, unknown> {
   if (typeof raw !== "string" || raw.length === 0) return {};
-  try {
-    const v: unknown = JSON.parse(raw);
-    if (isPlainObject(v)) return v;
-    return {};
-  } catch {
-    /* fall through to salvage */
-  }
-  const repaired = repairTruncatedJson(raw);
+  const direct = tryParseObject(raw);
+  if (direct !== undefined) return stripLeakedTails(direct) as Record<string, unknown>;
+  // Invalid JSON (truncated, or markers spliced mid-document): strip
+  // structural leak sequences text-wide for the salvage attempt only.
+  const cleaned = raw.replace(/(?:\\n|\n)[ \t]*<\/(?:parameter|function|tool_call)>/g, "").replace(/(?:\\n|\n)+$/g, "");
+  const repaired = repairTruncatedJson(cleaned);
   if (repaired !== undefined) {
-    try {
-      const v: unknown = JSON.parse(repaired);
-      if (isPlainObject(v)) return v;
-    } catch {
-      /* keep falling back */
-    }
+    const v = tryParseObject(repaired);
+    if (v !== undefined) return stripLeakedTails(v) as Record<string, unknown>;
   }
   return {};
 }
