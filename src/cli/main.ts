@@ -84,6 +84,7 @@ import {
   shouldCompact,
   summarizerMaxTokens,
   SUMMARY_MARKER,
+  type CompactContextResult,
 } from "../context/compact.js";
 import { openAiStream } from "../wire/openai-completions.js";
 import { openAiResponsesStream } from "../wire/openai-responses.js";
@@ -688,11 +689,23 @@ export async function compactNow(deps: {
   promptOverheadTokens?: number;
   /** A6: skip the shouldCompact trigger check (manual /compact). */
   force?: boolean;
+  /** D26 (lossless fit policy): only APPLY a candidate that fits the input
+   *  budget. The LLM rungs run `compactContext` in strict mode (its keep
+   *  plan descends the budget ladder and only folds the live user prompt
+   *  when no preserving plan can fit at all). A candidate that still does
+   *  not fit (the mandatory floor is irreducible) is NOT applied as
+   *  over-budget on the LLM rungs — the ladder falls through to the
+   *  rule-based notice; an irreducible rule-based result is still applied
+   *  (best effort, flagged). The manual `/compact` keeps the legacy
+   *  best-effort behavior: the user explicitly asked, and the kept tail
+   *  (with the prompt) stays verbatim with the `overBudget` event flag. */
+  strictFit?: boolean;
   sinks: PrintSinks;
   onEvent: (ev: AgentEvent) => Promise<void>;
 }): Promise<AgentMessage[] | undefined> {
   const { session, ids, sinks } = deps;
   const cpt = deps.charsPerToken ?? 4;
+  const strictFit = deps.strictFit === true;
   const lastAsst = [...deps.context]
     .reverse()
     .find((m): m is AssistantMessage => m.role === "assistant");
@@ -765,7 +778,7 @@ export async function compactNow(deps: {
   const emit = async (
     rawSummary: string,
     kept: AgentMessage[],
-    kind: "summary" | "degraded" | "over-budget",
+    kind: "summary" | "degraded" | "degraded-over-budget" | "over-budget",
   ): Promise<AgentMessage[] | undefined> => {
     const summaryMsg = makeSummaryMessage(rawSummary);
     if (session) {
@@ -791,8 +804,8 @@ export async function compactNow(deps: {
       messagesKept: kept.length,
       summaryChars: rawSummary.length,
       contextTokens: estimateTokens(newContext, cpt),
-      ...(kind === "degraded" ? { degraded: true } : {}),
-      ...(kind === "over-budget" ? { overBudget: true } : {}),
+      ...(kind === "degraded" || kind === "degraded-over-budget" ? { degraded: true } : {}),
+      ...(kind === "over-budget" || kind === "degraded-over-budget" ? { overBudget: true } : {}),
     });
     return newContext;
   };
@@ -801,10 +814,23 @@ export async function compactNow(deps: {
   // (compactContext / ruleBasedShrink both refuse growth); the difference
   // between rungs is how much of the folded prefix survives:
   //   LLM summary → LLM summary (shrunken transcript) → rule-based notice.
-  // A candidate that still exceeds the window's input budget is NOT a
-  // failure — it is the best available context (the kept tail is atomic and
-  // irreducible), so it is applied and flagged `overBudget` instead of
-  // falling through to a lossier rung.
+  // Legacy policy (manual /compact): a candidate that still exceeds the
+  // window's input budget is NOT a failure — it is the best available
+  // context (the kept tail is atomic and irreducible), so it is applied and
+  // flagged `overBudget` instead of falling through to a lossier rung.
+  // D26 strict-fit policy (the auto trigger): a fitting candidate is always
+  // preferred. `compactContext` in strict mode already descends the keep
+  // ladder (folding oldest units, and — only when nothing preserving the
+  // live prompt fits — folding the prompt itself, task carried by the
+  // summary). A non-fitting summary candidate is retried ONCE with a
+  // shrunken transcript (the only lever left is the summary's own size);
+  // when even that doesn't fit, the smaller non-fitting candidate is
+  // applied best-effort with an honest `overBudget` event flag — it beats
+  // the rule-based notice (a ≤512-char notice is not necessarily smaller
+  // than the narrative summary, and carries far less). The notice rung is
+  // taken when no LLM candidate exists at all, or when it fits while the
+  // summaries don't; a notice that is ITSELF over budget is only applied
+  // when no LLM candidate exists (strict mode).
   const tryLlm = (transcriptOpts?: { perMessageChars?: number; totalChars?: number; toolResultChars?: number }) =>
     compactContext({
       streamFn: deps.streamFn,
@@ -817,42 +843,100 @@ export async function compactNow(deps: {
       transcriptOpts,
       force: deps.force,
       triggered: true,
+      ...(strictFit ? { strictFit: true } : {}),
     });
-
+  let bestOver: CompactContextResult | undefined; // the smaller of the non-fitting LLM candidates
   let r = await tryLlm();
   if (r) {
-    if (r.estimatedTokensAfter <= requestBudget) return await emit(r.summary, r.kept, "summary");
-    sinks.err.write(
-      `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
-    );
-    return await emit(r.summary, r.kept, "over-budget");
+    if (r.fitsInputBudget) return await emit(r.summary, r.kept, "summary");
+    if (!strictFit) {
+      sinks.err.write(
+        `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
+      );
+      return await emit(r.summary, r.kept, "over-budget");
+    }
+    // Strict fit: over budget. The transcript retry only helps through a
+    // SMALLER SUMMARY — when the kept suffix + overhead alone already bust
+    // the budget, even an empty summary can't fix it, so a second call
+    // would burn tokens for nothing: apply this candidate best-effort.
+    const keptFloor = estimateTokens(r.kept, cpt) + promptOverheadTokens;
+    if (keptFloor >= requestBudget) {
+      sinks.err.write(
+        `compaction: summary candidate (~${r.estimatedTokensAfter}) is over the window (~${requestBudget}); the kept tail alone (~${keptFloor}) makes any fit impossible — applying the best candidate\n`,
+      );
+      return await emit(r.summary, r.kept, "over-budget");
+    }
+    bestOver = r; // fall through to the retry; a smaller summary may fit
   }
   // Cancellation is user intent, not a transient summarizer failure: do not
   // retry or apply a lossy fallback after the caller aborted compaction.
   if (deps.signal.aborted) return undefined;
 
   // D1: retry once with a shrunken transcript (halved clips).
-  sinks.err.write("compaction: summary call failed — retrying with a smaller transcript\n");
+  sinks.err.write("compaction: no fitting summary yet — retrying with a smaller transcript\n");
   r = await tryLlm({ perMessageChars: 750, totalChars: 12000, toolResultChars: 1000 });
   if (r) {
-    if (r.estimatedTokensAfter <= requestBudget) return await emit(r.summary, r.kept, "summary");
-    sinks.err.write(
-      `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
-    );
-    return await emit(r.summary, r.kept, "over-budget");
+    if (r.fitsInputBudget) return await emit(r.summary, r.kept, "summary");
+    if (!strictFit) {
+      sinks.err.write(
+        `compaction: summary is smaller than the history but still over the window (~${r.estimatedTokensAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible) — keeping it\n`,
+      );
+      return await emit(r.summary, r.kept, "over-budget");
+    }
+    // Strict fit, neither LLM candidate fits: prefer the SMALLER one, then
+    // the rule-based notice (below) only if it fits while the summaries
+    // don't — otherwise this best candidate is applied flagged overBudget.
+    if (!bestOver || r.estimatedTokensAfter < bestOver.estimatedTokensAfter) bestOver = r;
   }
   if (deps.signal.aborted) return undefined;
 
-  // D2: rule-based fallback (no LLM).
-  const shrink = ruleBasedShrink(deps.context, keepTokens, cpt);
+  // D2: rule-based fallback (no LLM). Always preserves the live prompt.
+  // Under strict fit the keep plan also descends to the budget (shrinkToFit):
+  // compactContext's prompt-fold rung is gated on "even the notice cannot
+  // fit a preserving plan", and that gate is evaluated against the SHRUNK
+  // preserving suffix — this rung must offer exactly that suffix, else the
+  // gate and the applied candidate disagree.
+  const shrink = ruleBasedShrink(deps.context, keepTokens, cpt, {
+    shrinkToFit: strictFit,
+  });
   if (shrink) {
-    sinks.err.write("compaction: summary failed twice — fell back to rule-based shrink\n");
+    // Honest budget verdict for the notice candidate (kept + notice +
+    // overhead).
+    const noticeAfter =
+      estimateTokens([shrink.notice, ...shrink.kept], cpt) + promptOverheadTokens;
+    const noticeOverBudget = noticeAfter > requestBudget;
+    // Strict fit and a non-fitting LLM candidate: the notice wins ONLY if
+    // it fits while the summaries didn't (fitting beats informative). When
+    // the notice is also over budget, the better LLM candidate — smaller
+    // AND carrying the narrative — is applied instead.
+    if (strictFit && bestOver) {
+      if (noticeOverBudget) {
+        sinks.err.write(
+          `compaction: no candidate fits the window (~${requestBudget}); applying the best summary candidate (~${bestOver.estimatedTokensAfter}, kept tail irreducible)\n`,
+        );
+        return await emit(bestOver.summary, bestOver.kept, "over-budget");
+      }
+      // fall through: the fitting notice beats non-fitting summaries
+    }
+    sinks.err.write(
+      strictFit && noticeOverBudget
+        ? `compaction: rule-based notice applied over the window (~${noticeAfter} of ~${requestBudget} budgeted tokens; the kept tail is irreducible)\n`
+        : "compaction: summary failed twice — fell back to rule-based shrink\n",
+    );
     // The notice is a full UserMessage (marker + raw); the session entry
     // stores the raw part so replay re-adds the marker (same as the LLM path).
     const raw = shrink.notice.content.startsWith(SUMMARY_MARKER)
       ? shrink.notice.content.slice(SUMMARY_MARKER.length + 2)
       : shrink.notice.content;
-    return await emit(raw, shrink.kept, "degraded");
+    return await emit(raw, shrink.kept, noticeOverBudget ? "degraded-over-budget" : "degraded");
+  }
+  // D3: context too short to fold — but a non-fitting LLM candidate is
+  // still better than nothing (strict mode: it is the best available).
+  if (strictFit && bestOver) {
+    sinks.err.write(
+      `compaction: no candidate fits the window (~${requestBudget}); applying the best summary candidate (~${bestOver.estimatedTokensAfter})\n`,
+    );
+    return await emit(bestOver.summary, bestOver.kept, "over-budget");
   }
   // D3: context too short to fold — the skip. Emit it as an EVENT (not a
   // direct stderr write) so the TUI, whose sinks are nulled, still surfaces
@@ -943,6 +1027,11 @@ export async function runTurn(opts: {
       }
       // D: the trigger check, retry ladder, rule-based fallback, session
       // entry, and the context_compacted event all live in compactNow.
+      // D26 strict fit: the AUTO path must never send an over-budget
+      // request if any fold sequence fits — the keep ladder folds oldest
+      // first and folds the live prompt (task carried by the summary) only
+      // as the last resort. Manual /compact keeps the legacy best-effort
+      // policy (the user asked explicitly; the tail stays verbatim).
       return compactNow({
         streamFn: opts.streamFn,
         model: opts.model,
@@ -954,6 +1043,7 @@ export async function runTurn(opts: {
         compactKeepTokens: opts.compactKeepTokens,
         charsPerToken: cpt,
         promptOverheadTokens: estimatePromptOverheadTokens(opts.systemPrompt.length, opts.tools, cpt),
+        strictFit: true,
         sinks: opts.sinks,
         onEvent: report,
       });

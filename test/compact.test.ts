@@ -308,6 +308,49 @@ test("planCompaction: last-user preservation extends the kept suffix by more tha
   assert.deepEqual([...plan.toSummarize, ...plan.kept], ctx, "no overlap, no loss");
 });
 
+test("planCompaction shrinkToFit: folds the OLDEST whole units until the suffix fits (never splitting a tool unit)", () => {
+  // 10-token units; a huge atomic toolCall/result unit (2050 tokens) sits at
+  // index 2. With a 30-token keep target the walk overshoots to the huge
+  // unit (suffix 2050 > target); shrinkToFit descends past it — and the
+  // toolCall is never split from its result.
+  const ctx: AgentMessage[] = [
+    user("u0" + "x".repeat(39)), // 10 tok
+    assistantText("a1" + "y".repeat(39)), // 10 tok
+    assistantToolCall("bash", { command: "ls" }), // unit start
+    toolResult("R".repeat(8200)), // ~2050 tok — huge atomic unit
+    user("u4" + "x".repeat(39)), // 10 tok — the live prompt
+    assistantText("a5" + "y".repeat(39)), // 10 tok
+  ];
+  const legacy = planCompaction(ctx, 30);
+  assert.ok(legacy, "legacy plan exists");
+  assert.ok(legacy!.keepFrom <= 2, "the legacy walk's overshoot keeps the huge unit (planning target only)");
+  const shrunk = planCompaction(ctx, 30, 4, { preserveLastUser: true, shrinkToFit: true });
+  assert.ok(shrunk, "shrunk plan exists");
+  assert.ok(shrunk!.keepFrom > 3, "the descent folded the huge atomic unit away");
+  assert.ok(shrunk!.kept.includes(ctx[4]!), "the live prompt survives (preserveLastUser)");
+  assert.ok(!shrunk!.kept.some((m) => m.role === "toolResult"), "no tool result survives the descent");
+});
+
+test("planCompaction shrinkToFit: with preserveLastUser:false the descent may cross the live prompt (the caller proved it cannot fit)", () => {
+  // The live prompt itself is the only thing over budget: the preserving
+  // descent stops at it; the fold descent (preserveLastUser:false — used
+  // only when compactContext proved every preserving rung cannot fit) folds
+  // it too, leaving a suffix that fits.
+  const live = user("C".repeat(12000)); // ~3000 tok, over the descent's 1000 cap
+  const ctx: AgentMessage[] = [
+    user("u0" + "x".repeat(39)),
+    live,
+    assistantText("tail"),
+  ];
+  const preserving = planCompaction(ctx, 1000, 4, { preserveLastUser: true, shrinkToFit: true });
+  assert.ok(preserving, "preserving plan exists");
+  assert.ok(preserving!.kept.includes(live), "the preserving descent stops AT the live prompt");
+  const folding = planCompaction(ctx, 1000, 4, { preserveLastUser: false, shrinkToFit: true });
+  assert.ok(folding, "folding plan exists");
+  assert.ok(folding!.keepFrom > preserving!.keepFrom, "the fold descent goes deeper");
+  assert.ok(!folding!.kept.includes(live), "the fold descent crosses the live prompt (task carried by the summary)");
+});
+
 test("renderTranscript: user text, tool calls with args, results incl. (ERROR)", () => {
   const t = renderTranscript([
     user("do the thing"),
@@ -645,6 +688,108 @@ test("compactContext: the keep plan reserves the summary budget, so the candidat
   );
 });
 
+test("compactContext: strict-fit deep fold — a huge atomic unit behind the prompt folds out and the candidate fits (D26 repro 1)", async () => {
+  // Mid-conversation atomic toolCall/toolResult unit (10k tokens) is the only
+  // reason the kept suffix busts the request budget; the live prompt is small.
+  // The preserving descend rung (b) folds the huge unit away (never crossing
+  // the live prompt), so the applied candidate fits with ONE summarizer call.
+  const model: ModelConfig = { ...MODEL, contextWindow: 5000, maxTokens: 500 };
+  const ctx: AgentMessage[] = [
+    user("old chat"),
+    assistantText("a".repeat(1000)),
+    assistantToolCall("bash", { command: "ls" }),
+    toolResult("R".repeat(40000)), // ~10k tokens — bigger than the whole budget
+    assistantText("done with result"),
+    user("next task"),
+    assistantText("ok"),
+  ];
+  const { fn, ctxs } = withCapture(fakeStream([{ type: "text", text: "S".repeat(200) }]));
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 0,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "compaction happened");
+  assert.equal(ctxs.length, 1, "the rung is chosen before the call — one summarizer call");
+  assert.ok(r!.estimatedTokensAfter <= r!.requestBudget, "the applied candidate fits the request budget");
+  assert.equal(r!.fitsInputBudget, true, "fit reported");
+  assert.ok(!r!.kept.some((m) => m.role === "toolResult"), "the huge atomic tool unit was folded out");
+  assert.ok(r!.kept.includes(ctx[5]!), "the live prompt survives verbatim on the preserving rung");
+});
+
+test("compactContext: strict-fit guard — a prompt fold is NOT selected when the rule-based notice still fits a preserving plan (D26)", async () => {
+  // The kept suffix is the LIVE PROMPT ITSELF (~3000 tokens): it exceeds the
+  // request budget with any LLM summary (cap 500) — so both LLM rungs fail —
+  // yet it fits with the small rule-based notice (≤512 chars ≈ 139 tokens).
+  // Even though the LLM candidate comes back over budget, compactContext
+  // must keep the PRESERVING plan (prompt verbatim in `kept`): the fold would
+  // lose the live prompt for nothing (compactNow can land the fitting
+  // notice). Without the notice-carrier pre-check, the fold rung WOULD be
+  // selected here (its bound fits) and the live prompt would be dropped.
+  const model: ModelConfig = { ...MODEL, contextWindow: 5000, maxTokens: 500 };
+  const live = user("L".repeat(12000)); // ~3000 tok: notice fits (≤3337), summary (cap 500) does not
+  const ctx: AgentMessage[] = [
+    ...Array.from({ length: 300 }, (_, i) => user(`u${i}` + "x".repeat(38))), // 10 tok each
+    live,
+    assistantText("ok"),
+  ];
+  // ~1911-token summary: candidate = suffix + summary busts the budget...
+  const { fn } = withCapture(fakeStream([{ type: "text", text: "S".repeat(7600) }]));
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 0,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "a candidate is still produced (a strict reduction of the history)");
+  assert.ok(r!.kept.includes(live), "the live prompt is NOT folded — the notice carrier preserves it");
+  assert.ok(!r!.fitsInputBudget, "the LLM candidate is honestly reported over budget (compactNow falls through to the fitting notice)");
+});
+
+test("compactContext: strict-fit may fold a huge latest user prompt rather than violate the request budget", async () => {
+  const model: ModelConfig = { ...MODEL, contextWindow: 5000, maxTokens: 500 };
+  const livePrompt = "current task".repeat(8000);
+  const ctx: AgentMessage[] = [
+    user("old".repeat(1000)),
+    assistantText("old answer".repeat(500)),
+    user(livePrompt),
+    assistantText("working"),
+  ];
+  const { fn, ctxs } = withCapture(
+    fakeStream([{ type: "text", text: "The user's current goal is to finish the task." }]),
+  );
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    promptOverheadTokens: 100,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "summary can carry the latest task when its verbatim prompt is too large");
+  assert.ok(r!.estimatedTokensAfter <= r!.requestBudget, "strict fit is enforced after summary");
+  assert.ok(!r!.kept.includes(ctx[2]!), "strict-fit folds the oversized last user message");
+  assert.ok(r!.summary.length > 0, "summary content replaces the folded task");
+  // priorityLastUser: the fold's whole job is carrying the live task, so the
+  // summarizer transcript must deliver it — head AND tail (older turns are
+  // dropped/shrunk first, the prompt is middle-clipped only as a last resort).
+  const transcriptMsg = ctxs[0]?.messages[0];
+  assert.ok(transcriptMsg && transcriptMsg.role === "user", "the summarizer call carries its prompt");
+  const transcript = transcriptMsg.role === "user" ? transcriptMsg.content : "";
+  assert.ok(transcript.includes("[User] " + livePrompt.slice(0, 100)), "the transcript carries the live prompt HEAD");
+  assert.ok(transcript.includes(livePrompt.slice(-100)), "the transcript carries the live prompt TAIL (middle clip, not head-truncation)");
+  assert.ok(!transcript.includes("old answer".repeat(5)), "older turns yield to the priority prompt");
+});
+
 test("compactContext: floor regime — the keep plan targets the reserved headroom, not the 512 floor", async () => {
   // window 3000 / maxTokens 200 → summaryBudget = min(1024, 200) = 200.
   // With a large prompt overhead (1276), the reserved headroom is
@@ -884,6 +1029,65 @@ test("renderTranscript: zero and tiny clip limits never exceed their limit", () 
     const rendered = renderTranscript([user(source)], { totalChars: limit, perMessageChars: limit });
     assert.ok(rendered.length <= limit, `limit ${limit}: got ${rendered.length} chars`);
   }
+});
+
+test("renderTranscript priorityLastUser: the live prompt survives the total budget", () => {
+  const old1 = user("o".repeat(1000));
+  const old2 = assistantText("o".repeat(1000));
+  const live = user("LIVE-PROMPT " + "x".repeat(400));
+  // (preserve) Over the total, OLDEST whole groups drop first: the live
+  // prompt survives whole while the older turns are sacrificed.
+  const t = renderTranscript([old1, old2, user("y".repeat(600)), live], {
+    totalChars: 500,
+    perMessageChars: 50,
+    priorityLastUser: true,
+  });
+  assert.ok(t.includes("LIVE-PROMPT"), "the priority prompt survives");
+  assert.ok(!t.includes("o".repeat(50)), "older turns yield first");
+  // (whole) Without priority mode the same prompt is per-message clipped
+  // like everything else — the flag is what protects it.
+  const plain = renderTranscript([old1, old2, user("y".repeat(600)), live], {
+    totalChars: 500,
+    perMessageChars: 50,
+  });
+  assert.ok(!plain.includes("LIVE-PROMPT" + "x".repeat(100)), "without the flag the live prompt is clipped");
+  // (shrink-oldest) Dropping every older group still overflows: the priority
+  // line shrinks to its share — a plain middle clip that honors the total
+  // exactly (head AND tail of the live prompt survive; audit finding 4).
+  const huge = user("H".repeat(4000) + "TAIL");
+  const t2 = renderTranscript([user("a"), huge], { totalChars: 300, perMessageChars: 50, priorityLastUser: true });
+  assert.ok(t2.length <= 300, `respects the total exactly (${t2.length})`);
+  assert.ok(t2.startsWith("[User] HHH"), "head survives the last-resort middle clip");
+  assert.ok(t2.endsWith("TAIL"), "tail survives the last-resort middle clip");
+});
+
+// Audit finding 4: the priority mode used to only drop groups BEFORE the
+// live prompt — groups after it survived and the priority clip reserved no
+// space for them, so the rendered transcript exceeded `totalChars`
+// (151 chars at a budget of 0). The cap is now hard at any total.
+test("renderTranscript priorityLastUser: totalChars is a hard cap at any budget (audit finding 4)", () => {
+  const big = user("U".repeat(1000));
+  const after = assistantText("A".repeat(1000));
+  for (const total of [0, 1, 3, 20, 100, 300]) {
+    const t = renderTranscript([big, after], { totalChars: total, priorityLastUser: true });
+    assert.ok(t.length <= total, `totalChars ${total}: rendered ${t.length} must not exceed the budget`);
+  }
+  // The live prompt is sacrificed-to-last: at a tight budget the surviving
+  // non-priority group yields its bytes to the prompt (priority first), and
+  // the prompt keeps its head. At a budget that fits both, both survive.
+  const tight = renderTranscript([user("LIVE " + "x".repeat(500)), assistantText("tail-note")], {
+    totalChars: 120,
+    priorityLastUser: true,
+  });
+  assert.ok(tight.length <= 120, `hard cap honored (${tight.length})`);
+  assert.ok(tight.startsWith("[User] LIVE"), "the priority prompt keeps its head");
+  const roomy = renderTranscript([user("LIVE " + "x".repeat(500)), assistantText("tail-note")], {
+    totalChars: 600,
+    priorityLastUser: true,
+  });
+  assert.ok(roomy.length <= 600, "cap honored with room for both");
+  assert.ok(roomy.includes("tail-note"), "the non-priority group survives when everything fits");
+  assert.ok(roomy.startsWith("[User] LIVE"), "priority intact when it fits");
 });
 
 test("summarizePrompt: zero FILES budget omits paths even when fixed instructions do not fit", () => {
@@ -1141,4 +1345,100 @@ test("compactContext: the keep plan reserves the summarizer cap (2048), not the 
     r!.estimatedTokensAfter <= r!.requestBudget + 10,
     `candidate (${r!.estimatedTokensAfter}) is within one atomic unit of the input budget (${r!.requestBudget})`,
   );
+});
+
+
+// ─── Audit follow-ups to D26 (2026-08-10 review findings 1, 2, 5) ───────────
+
+test("compactContext: a failed prompt-fold attempt does NOT suppress the preserving candidate (finding 2)", async () => {
+  // Budget = 4900 − 500 − 1024 = 3376. Tail: a 11800-char last-user unit
+  // (2951) + a 1620-char last-assistant unit (405) = 3355 (+11 wrapper =
+  // 3366 ≤ B: the preserving FLOOR fits, impossibility unproved), but the
+  // rule-based notice does NOT fit (3355+52 = 3407 > B, probe-measured), so
+  // the fold is attempted after the preserving summary demonstrates the bust.
+  // The fold call ERRORS. Before the fix that error returned undefined — the
+  // preserving candidate in hand was discarded and the session fell all the
+  // way to compactNow's notice ladder; the notice's non-fit here proves the
+  // fold was really in play. Now: the candidate survives, honestly over
+  // budget, with the live prompt kept, and compactNow chooses its own best.
+  const model: ModelConfig = { ...MODEL, contextWindow: 4900, maxTokens: 500 };
+  const live = user("u".repeat(11800));
+  const ctx: AgentMessage[] = [user("old"), assistantText("x".repeat(40000)), live, assistantText("w".repeat(1620))];
+  const fn = fakeStream([
+    { type: "text", text: "s".repeat(2000) }, // preserving attempt: fits no budget (busts → fold)
+    { type: "error", message: "fold attempt must not sink the preserving candidate" },
+  ]);
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    promptOverheadTokens: 0,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "the preserving candidate survives a failed fold attempt");
+  assert.ok(r!.kept.includes(live), "the live prompt is preserved");
+  assert.ok(!r!.fitsInputBudget, "honestly reported over budget — compactNow's own ladder (notice, then over-budget candidates) decides from here, not undefined (finding 2)");
+});
+
+test("compactContext: a user abort during the fold attempt is terminal — no candidate (finding 2 edge)", async () => {
+  // Same geometry, but the fold stream ENDS with stopReason "aborted" (the
+  // user pressed ESC while the fold summarizer was streaming). Unlike a
+  // stream error, an abort must NOT fall back to the preserving candidate.
+  const model: ModelConfig = { ...MODEL, contextWindow: 4900, maxTokens: 500 };
+  const live = user("u".repeat(11800));
+  const ctx: AgentMessage[] = [user("old"), assistantText("x".repeat(40000)), live, assistantText("w".repeat(1620))];
+  const fn = fakeStream([
+    { type: "text", text: "s".repeat(2000) },
+    { type: "aborted" },
+  ]);
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    promptOverheadTokens: 0,
+    force: true,
+    strictFit: true,
+  });
+  assert.equal(r, undefined, "an abort during fold-after-demo is final — no candidate, no notice fallback");
+});
+
+test("compactContext: the fold rung caps the summarizer at the headroom over its kept tail (finding 1)", async () => {
+  // Window 4096, maxTokens 2048 → budget 1024; the uncapped summarizer would
+  // be allowed min(2048, 4096) = 2048 — twice the whole request budget!
+  // Tail: the 1000-char last-user unit (250) alone after shrink (the huge
+  // tool unit is folded); headroom = 1024 − 250 suffix − 11 wrapper − 100
+  // overhead = 663. The fold call's maxTokens must EQUAL that headroom (the old code
+  // sent the full 2048, letting an accepted response blow the fit the fold
+  // existed to buy). Floor busts (preserving suffix 1253 > 1013) and the
+  // notice busts too, so the fold runs as the SINGLE call — the one model
+  // observed is the fold rung.
+  const model: ModelConfig = { ...MODEL, contextWindow: 4096, maxTokens: 2048 };
+  const live = user("u".repeat(4000));
+  const ctx: AgentMessage[] = [user("old history"), assistantText("x".repeat(60000)), live, assistantText("w".repeat(1000))];
+  const models: ModelConfig[] = [];
+  const scripted = fakeStream([{ type: "text", text: "goal carried" }]);
+  const fn: StreamFn = (m, c, o) => {
+    models.push(m);
+    return scripted(m, c, o);
+  };
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    promptOverheadTokens: 100,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "a candidate is produced");
+  assert.equal(models.length, 1, "the fold runs as the single summarizer call (floor busts immediately)");
+  assert.equal(models[0]!.maxTokens, 663, "the fold call's max_tokens is exactly the headroom over its kept tail, not the uncapped 2048");
+  assert.ok(r!.fitsInputBudget, "the capped fold candidate fits the request budget");
+  assert.ok(!r!.kept.includes(live), "the fold carried the live task out of the tail (accepted because it bought the fit)");
 });

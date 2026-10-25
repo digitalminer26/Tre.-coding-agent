@@ -1991,6 +1991,103 @@ test("D26: abort during retry does not apply fallback or emit compaction", async
   assert.equal(calls, 2);
 });
 
+test("D26 strict fit: applies a fitting deeper fold instead of the first over-budget candidate (repro 1)", async () => {
+  // A huge atomic tool unit sits behind the live prompt: the shallow plan's
+  // candidate is over budget (its upper bound exceeds it), but folding the
+  // huge unit away — never crossing the live prompt — fits. The strict ladder
+  // picks the deeper preserving rung BEFORE the call: one summarizer call,
+  // the applied candidate fits, no `overBudget` event.
+  const strictCtx: AgentMessage[] = [
+    { role: "user", content: "old chat", timestamp: 1 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }], model: "fake", provider: "fake", stopReason: "toolUse", timestamp: 2 },
+    { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "R".repeat(40000) }], timestamp: 3 }, // ~10k tok
+    { role: "assistant", content: [{ type: "text", text: "done with result" }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 4 },
+    { role: "user", content: "next task", timestamp: 5 },
+    { role: "assistant", content: [{ type: "text", text: "ok" }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 6 },
+  ];
+  const model5k: ModelConfig = { ...SMALL_WINDOW, contextWindow: 5000, maxTokens: 500 }; // budget 3476 < the tool unit
+  const { deps, events, err } = compactNowDeps(fakeStream([{ type: "text", text: "S".repeat(400) }]), {
+    model: model5k,
+    context: strictCtx,
+    strictFit: true,
+    force: true,
+  });
+  const r = await compactNow(deps);
+  assert.ok(r, "compaction applied");
+  assert.equal(events.length, 1);
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.overBudget, undefined, "the applied candidate FITS (repro 1: the deeper fold fits where the first candidate did not)");
+    assert.equal(events[0]!.degraded, undefined, "the applied LLM summary is not degraded");
+  }
+  assert.ok(!r!.some((m) => m.role === "toolResult"), "the huge atomic unit was folded out of the applied context");
+  assert.ok(r!.some((m) => m.role === "user" && typeof m.content === "string" && m.content === "next task"), "the live prompt survived verbatim");
+  assert.doesNotMatch(err(), /over the window/, "no over-budget warning for a fitting candidate");
+});
+
+test("D26 strict fit: a fitting rule-based notice beats an over-budget LLM candidate (repro 3)", async () => {
+  // The strict-descended preserving suffix (2974 tok) fits the budget with
+  // the ≤512-char notice but NOT with the 1911-token LLM summary (cap 500
+  // alone busts it once added to the near-budget suffix — the LLM candidates
+  // come back over budget; the notice, being far smaller than the summary,
+  // still fits). Strict mode must prefer the notice: fitting beats
+  // informative. The live prompt survives verbatim.
+  const current = "live task";
+  const ctx: AgentMessage[] = [
+    ...Array.from({ length: 300 }, (_, i) => ({ role: "user" as const, content: `u${i}` + "x".repeat(38), timestamp: 1 })),
+    { role: "user", content: current, timestamp: 2 },
+    { role: "assistant", content: [{ type: "text", text: "tail" }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 3 },
+  ];
+  const model5k: ModelConfig = { ...SMALL_WINDOW, contextWindow: 5000, maxTokens: 500 };
+  let calls = 0;
+  const fn: StreamFn = (model, c, o) => {
+    calls += 1;
+    // ~1911-token summary: over budget on both LLM rungs, so both are
+    // rejected in favor of the fitting notice.
+    return fakeStream([{ type: "text", text: "S".repeat(7600) }])(model, c, o);
+  };
+  const { deps, events } = compactNowDeps(fn, { model: model5k, context: ctx, strictFit: true, force: true });
+  const r = await compactNow(deps);
+  assert.ok(r, "compaction applied");
+  assert.equal(calls, 2, "both LLM rungs ran (their kept tails allow a fit) and both came back over budget");
+  assert.equal(events.length, 1, "exactly one compaction (the applied notice) was emitted");
+  assert.equal(events[0]!.type, "context_compacted");
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.degraded, true, "the applied candidate is the degraded notice");
+    assert.equal(events[0]!.overBudget, undefined, "the applied notice FITS the budget");
+  }
+  const applied = r!.find((m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith("[Compaction summary"));
+  assert.ok(applied, "a compaction boundary was applied");
+  if (applied && applied.role === "user") assert.match(applied.content, /discarded without an LLM summary/, "the applied boundary is the rule-based notice, not the LLM summary");
+  assert.ok(r!.some((m) => m.role === "user" && m.content === current), "the live prompt survived verbatim on the notice rung");
+});
+
+test("D26 strict fit: an irreducible kept tail skips the transcript retry and applies the best candidate flagged overBudget", async () => {
+  // The kept floor (last user message + the huge irreducible tail assistant)
+  // alone busts the budget: no summary — not even an empty one — can fit, so
+  // the transcript retry must NOT be spent. The single candidate is applied
+  // best-effort, honestly flagged `overBudget`.
+  const ctx: AgentMessage[] = [
+    ...Array.from({ length: 300 }, (_, i) => ({ role: "user" as const, content: `u${i}` + "x".repeat(38), timestamp: 1 })),
+    { role: "assistant", content: [{ type: "text", text: "T".repeat(24000) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 2 }, // ~6000 tok, irreducible
+  ];
+  const model5k: ModelConfig = { ...SMALL_WINDOW, contextWindow: 5000, maxTokens: 500 };
+  let calls = 0;
+  const fn: StreamFn = (model, c, o) => {
+    calls += 1;
+    return fakeStream([{ type: "text", text: "S".repeat(7600) }])(model, c, o);
+  };
+  const { deps, events, err } = compactNowDeps(fn, { model: model5k, context: ctx, strictFit: true, force: true });
+  const r = await compactNow(deps);
+  assert.ok(r, "compaction still applied a strict reduction");
+  assert.equal(calls, 1, "the retry was skipped: the kept tail alone makes any fit impossible (no second call wasted)");
+  assert.match(err(), /makes any fit impossible/);
+  assert.equal(events.length, 1);
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.overBudget, true, "the applied over-budget candidate is flagged honestly");
+    assert.equal(events[0]!.degraded, undefined, "still the informative LLM summary, not the degraded notice");
+  }
+});
+
 test("D: compactNow — first call fails, retry succeeds (no degraded flag)", async () => {
   const { deps, events, err } = compactNowDeps(
     fakeStream([{ type: "error", message: "down" }, { type: "text", text: "SUMMARY." }]),

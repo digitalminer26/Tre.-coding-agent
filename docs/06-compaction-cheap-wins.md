@@ -324,3 +324,139 @@ test includes `compact`.
    (optional field on the `context_compacted` event, `src/types.ts`), commit
    `4595815`.
 2. A6 while busy — RESOLVED 2026-09-29: reject, per spec (commit `3d9d76c`).
+
+---
+
+## D26 — Lossless fit policy (the auto trigger never sends an over-budget request if any fold sequence fits)
+
+Problem the earlier rungs left open: the keep plan was a *planning target*, and
+`compactNow` applied the first LLM candidate that strictly shrank the context —
+even when that candidate still exceeded the request budget, while a deeper fold
+(older units, or finally the live prompt) would have fit. The auto trigger could
+therefore keep sending requests the provider rejects.
+
+Contract (implemented):
+
+- `planCompaction(context, keepTokens, cpt, opts?)` gained
+  `{ preserveLastUser?, shrinkToFit? }`. `shrinkToFit` continues folding the
+  OLDEST WHOLE units (never splitting a toolCall/result unit) until the kept
+  suffix fits the budget or one unit remains; with `preserveLastUser` on the
+  descent stops at the live prompt. Both default off → legacy behavior is
+  byte-identical.
+- `compactContext({ strictFit })` selects the plan over a descending ladder.
+  Two verdicts drive it (audit findings 1+5): the candidate UPPER BOUND
+  (kept suffix + summarizer maxTokens + summary wrapper + overhead) — above
+  it no accepted response can EVER fit; and the FLOOR (kept suffix + the
+  wrapper around an EMPTY summary + overhead) — above it even a zero-token
+  summary cannot fit, the only impossibility proof a summary carrier has.
+  (a) bound-fits → the legacy plan (live prompt verbatim);
+  (b) else bound-fits → the same plan descended to the keep budget;
+  (c) else: FIRST measure the cheap carrier compactNow still owns — the real
+      rule-based NOTICE on the deepest preserving plan, as-is (the old gate
+      bounded it by a hypothetical 512-char notice, proving nothing; the
+      actual notice is usually far smaller — audit finding 2). The notice
+      fits → the preserving plan is KEPT (the caller's notice rung lands that
+      fit with the prompt verbatim). The notice doesn't fit → the prompt-fold
+      rung (`preserveLastUser:false, shrinkToFit:true`) is legitimate ONLY if
+      it BUYS A FIT: strictly deeper AND a usable summary budget is left over
+      its kept tail (headroom = budget − suffix − wrapper − overhead ≥ a
+      64-token stub). Its floor busts → the fold runs NOW as the single call
+      (the preserving rung is provably hopeless); its floor fits but the
+      bound doesn't → attempt the preserving plan first, and if the ACTUAL
+      summary demonstrates the bust, the fold is tried next
+      (fold-after-demonstration — a failed bound is uncertainty, not proof).
+      On the fold rung the call's maxTokens is CAPped at that headroom, so
+      an accepted response is sized to actually fit (audit finding 1: the
+      old code let the fold emit up to the uncapped summarizer max — twice
+      the budget on small windows — then rejected the result, guaranteeing
+      the fallback the fold existed to prevent). A fold-attempt stream ERROR
+      preserves the candidate in hand (compactNow's notice ladder decides);
+      a fold-attempt ABORT is terminal (the user pressed ESC → no candidate).
+      The task survives via the summary (the summarizer prompt requires the
+      user's goal).
+  The result always reports `fitsInputBudget`. On the fold rung the summary's
+  whole job is carrying the live task, so the summarizer transcript is
+  rendered with `priorityLastUser`: the last user message survives the
+  transcript budget first (oldest turns drop, then shrink; the prompt is
+  middle-clipped only when it alone exceeds the budget) — the fold never
+  summarizes blind.
+- `compactNow` owns the application policy: the AUTO trigger runs strict;
+  manual `/compact` keeps the legacy best-effort policy (a smaller-than-history
+  candidate is applied and flagged `overBudget`). Strict mode prefers a
+  fitting candidate always; among non-fitting candidates it retries once with
+  a shrunken transcript (skipped when the kept tail + overhead alone makes any
+  fit impossible — no call is wasted), then applies the SMALLER non-fitting
+  summary flagged `overBudget`. The rule-based notice wins only when it fits
+  while the summaries don't. The auto `ruleBasedShrink` rung descends with
+  `shrinkToFit: true` so the gate in (c) and the applied candidate agree.
+- Token math: everything stays on the calibrated `charsPerToken`; the budget
+  is `contextWindow − maxTokens − 1024` everywhere (trigger, plan, validation
+  — one formula).
+
+Tests (regression for the three audit repros):
+
+1. *Deeper fold fits where the first candidate did not* — mid-conversation
+   atomic tool result over the budget, live prompt small: the ladder descends
+   past the huge unit, the applied candidate fits (`overBudget` absent), one
+   summarizer call. `compactContext: strict-fit deep fold … (D26 repro 1)`
+   and `D26 strict fit: applies a fitting deeper fold instead of the first
+   over-budget candidate (repro 1)`.
+2. *Prompt fold carries the live task* — the latest prompt is huge and nothing
+   preserving fits: the fold rung is selected AND the summarizer transcript
+   carries the live prompt head-to-tail (`priorityLastUser`).
+   `compactContext: strict-fit may fold a huge latest user prompt …`.
+3. *Fitting notice beats an over-budget summary; the fold is provably
+   necessary* — the strict-descended suffix fits the ≤512-char notice but not
+   an LLM summary: `compactContext` keeps the preserving plan (prompt
+   verbatim in `kept`, `fitsInputBudget:false` honestly reported) and
+   `compactNow` lands the fitting notice, never the over-budget summary.
+   Without the notice-carrier pre-check the fold rung WOULD be selected here
+   (its bound fits) and the live prompt would be dropped.
+   `D26 strict-fit guard: a prompt fold is NOT selected when the rule-based
+   notice still fits a preserving plan (D26)`,
+   `D26 strict fit: a fitting rule-based notice beats an over-budget LLM
+   candidate (repro 3)`. Plus `D26 strict fit: an irreducible kept tail skips
+   the transcript retry and applies the best candidate flagged overBudget`.
+   Unit-level support: the two `planCompaction shrinkToFit …` descent tests
+   and `renderTranscript priorityLastUser: the live prompt survives the total
+   budget`. `scripts/audit-d26-repro.mjs` is a property sweep (168 structured
+   cases; the exact compactNow application policy replayed in-script)
+   guarding the contract: exit 0 means no applied candidate exceeds the
+   budget when any fold sequence fits. `test/cli.test.ts` (WS9 end-to-end on
+   the auto path).
+
+### D26 audit follow-up (2026-08-10 review: findings 1, 2, 5)
+
+The first D26 cut still lost fits and burned the fold. Three gaps, three
+regressions (`test/compact.test.ts`, "Audit follow-ups to D26"):
+
+1. *The fold emitted over its own fit* — the fold rung let the summarizer run
+   to the full cap; an accepted oversized summary was then rejected by the
+   final fit check, so the fold lost the live prompt AND still missed the
+   budget. Now the fold call's `max_tokens` is the headroom over its kept
+   tail (`compactContext: the fold rung caps the summarizer at the headroom
+   over its kept tail (finding 1)` — asserts the fold call's model.maxTokens
+   equals budget − suffix − wrapper − overhead, 663 not 2048, and that only
+   the fold rung is capped; the preserving rungs keep the full summarizer
+   cap).
+2. *A failed fold attempt sank the preserving candidate* — fold-after-demo
+   returned `undefined` when the fold stream errored, discarding the fitting
+   or over-but-smaller candidate already in hand (and the notice rung below
+   it). An error now preserves it; an abort stays terminal
+   (`… a failed prompt-fold attempt does NOT suppress the preserving
+   candidate (finding 2)` — candidate survives, honestly `fitsInputBudget:
+   false`; `… a user abort during the fold attempt is terminal — no
+   candidate (finding 2 edge)` — `{ type: "aborted" }` mid-fold yields
+   `undefined`). This needed `summarizeFor` to return "aborted" ahead of
+   "failed": an aborted stream sets both flags, and the caller's move depends
+   on the cause.
+3. *The fold gate bounded by a hypothetical notice, not the real one* — the
+   "even the notice can't fit" gate now runs `ruleBasedShrink` and measures
+   the actual candidate (probe: 205 chars ≈ 52 tokens for the repro context,
+   where the old 512-char bound implied 128); the summary wrapper (~11
+   tokens: marker + separator) is included in every bound and floor so a
+   "bound-fitting" fold can no longer miss by the wrapper while having
+   already dropped the live prompt. Covered by the corrected geometry of the
+   finding-2 test (the preserving floor fits, the real notice does NOT fit,
+   so the fold is provably in play) plus `D26 strict-fit guard …` and
+   `repro 3` from the first cut.

@@ -232,11 +232,20 @@ function unitBoundaries(context: AgentMessage[]): number[] {
  * units, and non-empty on both sides. Returns undefined when there is
  * nothing safe to fold (context too short, or the keep window would swallow
  * everything).
+ *
+ * `opts.preserveLastUser` (default true): keep the most recent user message
+ * verbatim by extending the suffix back to it. `opts.shrinkToFit` (default
+ * false): after the walk (and the last-user extension), keep folding the
+ * oldest whole units until the suffix fits `keepTokens` — see the ladder
+ * below. The combination `shrinkToFit + preserveLastUser:false` is the
+ * D26 "last candidate" (fold everything but one unit); the caller uses it
+ * only when the verbatim tail provably cannot fit the input window.
  */
 export function planCompaction(
   context: AgentMessage[],
   keepTokens = 8192,
   charsPerToken = 4,
+  opts: { preserveLastUser?: boolean; shrinkToFit?: boolean } = {},
 ): CompactionPlan | undefined {
   const bounds = unitBoundaries(context);
   if (bounds.length < 3) return undefined; // need ≥1 unit to fold + ≥2 kept
@@ -256,16 +265,48 @@ export function planCompaction(
 
   // The most recent user message is kept verbatim (it is itself a unit
   // boundary); see the guard below for the single-prompt exception.
+  // D26 (lossless fit policy): `preserveLastUser: false` skips the extension
+  // entirely — the live prompt is then foldable, and it is the CALLER's
+  // contract (compactContext's keep ladder) to only ever use such a plan
+  // when the alternative is dropping the user's task with nothing carried.
   let lastUser = -1;
-  for (let i = context.length - 1; i >= 0; i--) {
-    if (context[i]!.role === "user") {
-      lastUser = i;
-      break;
+  if (opts.preserveLastUser !== false) {
+    for (let i = context.length - 1; i >= 0; i--) {
+      if (context[i]!.role === "user") {
+        lastUser = i;
+        break;
+      }
+    }
+    // (WS10 e2e s12) The task still survives when lastUser === 0: the
+    // summarizer prompt requires the user's goal and constraints in the summary.
+    if (lastUser > 0 && lastUser < keepFrom) keepFrom = lastUser;
+  }
+
+  // D26 (lossless fit policy) — the descend-to-budget ladder. The walk above
+  // stops as soon as the suffix REACHES the budget, and an atomic unit can
+  // overshoot it arbitrarily (one 50k-token tool result = a 50k suffix). When
+  // `shrinkToFit` is set, keep folding the OLDEST WHOLE units of the suffix
+  // (never split a toolCall/result unit) until the suffix fits or one unit
+  // remains. With `preserveLastUser` on, the fold never crosses the live
+  // prompt — the descent stops at it; with it off (the caller proved the
+  // verbatim tail cannot fit the window at all), the live prompt itself may
+  // be folded, carried onward by the summary. Off by DEFAULT: the legacy
+  // walk keeps the overshoot (documented "planning target, not a guard").
+  if (opts.shrinkToFit === true && keepFrom > 0) {
+    let suffix = 0;
+    for (let i = keepFrom; i < context.length; i++) suffix += per[i]!;
+    const cap = Math.max(keepTokens, 0);
+    while (suffix > cap) {
+      let nextStart: number | undefined;
+      for (const b of bounds) if (b > keepFrom && (nextStart === undefined || b < nextStart)) nextStart = b;
+      if (nextStart === undefined) break; // one unit remains — that IS the floor
+      // When preserving the live prompt: a fold whose range contains it would
+      // drop the user's current task — stop the descent at lastUser.
+      if (opts.preserveLastUser !== false && lastUser >= keepFrom && nextStart > lastUser) break;
+      for (let i = keepFrom; i < nextStart; i++) suffix -= per[i]!;
+      keepFrom = nextStart;
     }
   }
-  // (WS10 e2e s12) The task still survives when lastUser === 0: the
-  // summarizer prompt requires the user's goal and constraints in the summary.
-  if (lastUser > 0 && lastUser < keepFrom) keepFrom = lastUser;
 
   if (keepFrom <= 0) return undefined; // the keep window ate everything
   return {
@@ -283,12 +324,19 @@ function clip(s: string, max: number): string {
   if (limit === 0) return "";
   if (limit <= 3) return "…".slice(0, limit);
   const detailedMarker = `\n…[truncated ${s.length - limit} chars]…\n`;
-  const marker = detailedMarker.length < limit ? detailedMarker : "\n…\n";
-  if (marker.length >= limit) return marker.slice(0, limit);
+  let marker = detailedMarker;
+  let finalMarker = detailedMarker;
+  if (detailedMarker.length >= limit) {
+    // Small limits: a marker the size of the budget would leave zero
+    // content. Use a short marker (or plain truncation) so head/tail
+    // survive proportionally instead of the line being all marker.
+    finalMarker = limit >= 9 ? "\n…\n" : "";
+    if (finalMarker.length >= limit) return marker.slice(0, limit); // unreachable guard
+    marker = finalMarker;
+  }
   const remaining = limit - marker.length;
   const head = Math.ceil(remaining / 2);
   const tail = Math.floor(remaining / 2);
-  const finalMarker = marker === detailedMarker ? marker : "…";
   return `${s.slice(0, head)}${finalMarker}${tail > 0 ? s.slice(-tail) : ""}`;
 }
 
@@ -297,7 +345,16 @@ function clip(s: string, max: number): string {
  *  (`includeThinking: true` opts back in). A3: tool results get their own
  *  clip (`toolResultChars`, default 2000) with the existing middle-
  *  truncation shape (head = imports/structure, tail = final error/exit);
- *  user/assistant lines keep the `perMessageChars` clip. */
+ *  user/assistant lines keep the `perMessageChars` clip.
+ *
+ *  `priorityLastUser`: the LAST user message is the live task — when the
+ *  D26 strict-fit ladder folds it into the summary, the summary's whole job
+ *  is to carry it. `totalChars` is a HARD cap: non-priority groups are
+ *  sacrificed oldest-first (and, if that is not enough, shrunk/clipped),
+ *  then the priority lines are middle-clipped to the exact space left
+ *  (head+tail of the live task survive first); a final clip guarantees the
+ *  cap at any total (including 0). Default off (plain renders, e.g. the
+ *  follow-up refresh). */
 export function renderTranscript(
   messages: AgentMessage[],
   opts: {
@@ -305,21 +362,25 @@ export function renderTranscript(
     totalChars?: number;
     includeThinking?: boolean;
     toolResultChars?: number;
+    priorityLastUser?: boolean;
   } = {},
 ): string {
   const per = opts.perMessageChars ?? 1500;
   const toolPer = opts.toolResultChars ?? 2000;
-  const out: string[] = [];
-  for (const m of messages) {
+  // Render one message into its transcript lines (per-message clips applied;
+  // `raw` for the priority message: its user line skips the per-clip so the
+  // live task reaches the summarizer whole, bounded only by the total).
+  const linesFor = (m: AgentMessage, raw = false): string[] => {
+    const out: string[] = [];
     if (m.role === "user") {
-      out.push(`[User] ${m.content}`);
+      out.push(raw ? `[User] ${m.content}` : clip(`[User] ${m.content}`, per));
     } else if (m.role === "assistant") {
       for (const b of m.content) {
-        if (b.type === "text" && b.text) out.push(`[Assistant] ${b.text}`);
+        if (b.type === "text" && b.text) out.push(clip(`[Assistant] ${b.text}`, per));
         if (opts.includeThinking && b.type === "thinking" && b.thinking)
-          out.push(`[Assistant thought] ${b.thinking}`);
+          out.push(clip(`[Assistant thought] ${b.thinking}`, per));
         if (b.type === "toolCall")
-          out.push(`[Assistant → tool] ${b.name} ${JSON.stringify(b.arguments)}`);
+          out.push(clip(`[Assistant → tool] ${b.name} ${JSON.stringify(b.arguments)}`, per));
       }
     } else {
       const status = m.isError ? " (ERROR)" : "";
@@ -327,9 +388,67 @@ export function renderTranscript(
         out.push(`[Tool result: ${m.toolName}${status}] ${clip(b.text, toolPer)}`);
       }
     }
-  }
-  let text = out.map((l) => (l.startsWith("[Tool result:") ? l : clip(l, per))).join("\n");
+    return out;
+  };
+  const joinAll = (groups: string[][]) => groups.flat().join("\n");
+
   const total = opts.totalChars ?? 24000;
+  let priorityIndex = -1;
+  if (opts.priorityLastUser) {
+    for (let i = messages.length - 1; i >= 0; i--)
+      if (messages[i]!.role === "user") {
+        priorityIndex = i;
+        break;
+      }
+  }
+  if (priorityIndex < 0) {
+    let text = joinAll(messages.map((m) => linesFor(m)));
+    if (text.length > total) text = clip(text, total);
+    return text;
+  }
+
+  // Priority mode: the last user message survives the total budget first,
+  // but `totalChars` is a HARD cap (the summarizer's input guard rejects
+  // over-budget transcripts, so the budget must be honored exactly):
+  //  1. sacrifice NON-priority groups oldest-first until the rest could fit;
+  //  2. shrink the priority lines to the budget left over (exact accounting
+  //     for every newline/separator), middle-clipping them (head+tail
+  //     survive) — the live task keeps its head and tail first;
+  //  3. a final hard clip guarantees the contract at any total (incl. 0).
+  const groups = messages.map((m, i) => linesFor(m, i === priorityIndex));
+  let text = joinAll(groups);
+  while (text.length > total) {
+    // Drop the oldest remaining non-priority group.
+    let dropped = false;
+    for (let i = 0; i < groups.length; i++) {
+      if (i === priorityIndex || groups[i]!.length === 0) continue;
+      groups[i] = [];
+      dropped = true;
+      break;
+    }
+    if (!dropped) break; // only the priority message is left
+    text = joinAll(groups);
+  }
+  if (text.length > total) {
+    // Only the priority message's lines can be at fault: size them to what
+    // is left after the surviving non-priority lines and every separator.
+    const pLines = groups[priorityIndex]!;
+    const otherLines = groups.filter((g, i) => i !== priorityIndex).flat();
+    const otherChars = otherLines.length === 0 ? 0 : otherLines.reduce((n, l) => n + l.length, 0) + otherLines.length - 1;
+    const nP = pLines.length;
+    const joinSep = otherLines.length > 0 && nP > 0 ? 1 : 0;
+    const avail = total - otherChars - joinSep - Math.max(0, nP - 1);
+    if (avail <= 0) {
+      groups[priorityIndex] = [];
+    } else {
+      const share = Math.floor(avail / nP);
+      if (share <= 0) groups[priorityIndex] = [];
+      else for (let i = 0; i < nP; i++) pLines[i] = clip(pLines[i]!, share);
+    }
+    text = joinAll(groups);
+  }
+  // Hard-cap guarantee: whatever survives, the result never exceeds `total`
+  // (clip is exact: clip(s, 0) === "").
   if (text.length > total) text = clip(text, total);
   return text;
 }
@@ -452,7 +571,12 @@ function filesSection(plan: CompactionPlan, maxChars?: number): string {
  */
 export function summarizePrompt(
   plan: CompactionPlan,
-  transcriptOpts?: { perMessageChars?: number; totalChars?: number; toolResultChars?: number },
+  transcriptOpts?: {
+    perMessageChars?: number;
+    totalChars?: number;
+    toolResultChars?: number;
+    priorityLastUser?: boolean;
+  },
   contextWindow?: number,
   budget?: { charsPerToken?: number; outputTokens?: number },
 ): string {
@@ -506,6 +630,7 @@ export function summarizePrompt(
     totalChars: transcriptChars,
     perMessageChars: per,
     toolResultChars: Math.min(transcriptOpts?.toolResultChars ?? 2000, transcriptChars),
+    priorityLastUser: transcriptOpts?.priorityLastUser,
   });
   return `${instructions}\n\n${files ? files + "\n\n" : ""}${iterative}TRANSCRIPT:\n${transcript}`;
 }
@@ -524,6 +649,11 @@ export interface CompactContextResult {
   /** The model's conservative input budget (window − maxTokens − slack) —
    *  the hard limit `estimatedTokensAfter` is checked against. */
   requestBudget: number;
+  /** D26 (lossless fit policy): the full candidate ([summary, …kept] +
+   *  prompt overhead) fits `requestBudget`. False only on the legacy
+   *  best-effort path (or when no strict-fit rung produced a reduction) —
+   *  the candidate is still a strict reduction of the old context. */
+  fitsInputBudget: boolean;
 }
 
 /**
@@ -539,8 +669,9 @@ export function ruleBasedShrink(
   context: AgentMessage[],
   keepTokens: number,
   charsPerToken: number,
+  opts: { preserveLastUser?: boolean; shrinkToFit?: boolean } = {},
 ): { notice: UserMessage; kept: AgentMessage[] } | undefined {
-  const plan = planCompaction(context, keepTokens, charsPerToken);
+  const plan = planCompaction(context, keepTokens, charsPerToken, opts);
   if (!plan) return undefined;
   const ops = extractFileOps(plan.toSummarize);
   const lines = [
@@ -586,6 +717,15 @@ export async function compactContext(opts: {
   force?: boolean;
   /** Caller already evaluated the trigger (e.g. compactNow's request estimate). */
   triggered?: boolean;
+  /** D26 (lossless fit policy) — strict fit of the returned candidate. The
+   *  keep plan descends a budget ladder: first keeping the most recent user
+   *  prompt verbatim, and — only when that plan's candidate provably cannot
+   *  fit the input budget — folding the oldest whole units instead (and, as
+   *  the very last resort, folding the prompt itself, with the task carried
+   *  by the summary). See the ladder below. The result always reports
+   *  `fitsInputBudget`; false means the mandatory floor itself is
+   *  irreducible and the caller takes its legacy best-effort path. */
+  strictFit?: boolean;
 }): Promise<CompactContextResult | undefined> {
   let lastAssistant: AssistantMessage | undefined;
   for (let i = opts.context.length - 1; i >= 0; i--) {
@@ -654,56 +794,211 @@ export async function compactContext(opts: {
   const headroom =
     opts.model.contextWindow - opts.model.maxTokens - 1024 - promptOverhead - summaryBudget;
   const windowCap = headroom;
-  const plan = planCompaction(opts.context, Math.min(opts.keepTokens ?? 8192, windowCap), cpt);
-  if (!plan) return undefined;
+  const keepTokens = Math.min(opts.keepTokens ?? 8192, windowCap);
 
-  let text = "";
-  let failed = false;
-  let aborted = false;
-  try {
-    const summarizerModel = { ...opts.model, maxTokens: summarizerMaxTokens(opts.model) };
-    const prompt = summarizePrompt(
-      plan,
-      {
-        perMessageChars: opts.transcriptOpts?.perMessageChars ?? 1500,
-        totalChars: opts.transcriptOpts?.totalChars ?? Math.max(4000, Math.floor(opts.model.contextWindow / cpt)),
-        toolResultChars: opts.transcriptOpts?.toolResultChars ?? 2000,
-      },
-      opts.model.contextWindow,
-      { charsPerToken: cpt, outputTokens: summarizerModel.maxTokens },
-    );
-    // Use the identical calibrated estimate and completion reservation that
-    // summarizePrompt used to construct this request.
-    const summaryInputTokens = Math.ceil((SUMMARIZER_SYSTEM.length + prompt.length) / cpt);
-    if (summaryInputTokens + summarizerModel.maxTokens > opts.model.contextWindow) return undefined;
-    for await (const ev of opts.streamFn(summarizerModel, {
-      systemPrompt: SUMMARIZER_SYSTEM,
-      messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-      tools: [],
-    }, { signal: opts.signal })) {
-      if (ev.type === "text_delta") text += ev.delta;
-      if (ev.type === "done") {
-        // `length` is NOT a failure: the model produced the maximum allowed
-        // output (the summarizer cap) — a truncated but structured summary is
-        // still usable and a strict reduction of the context, so it is
-        // ACCEPTED (the final text.trim() === "" guard below still rejects a
-        // length stop that yielded no text). Treating `length` as total
-        // failure was the root cause of the 100% fallback rate: a structured
-        // GOAL/DONE/STATE/FILES/NEXT summary of a long context regularly
-        // exceeds the old 1024 cap, so every compaction fell through to the
-        // lossy rule-based notice.
-        if (
-          ev.message.stopReason === "error" ||
-          ev.message.stopReason === "aborted"
-        ) failed = true;
-        if (ev.message.stopReason === "aborted") aborted = true;
+  // D26 (lossless fit policy) — the keep ladder. When `strictFit` is set,
+  // the plan is selected over a descending ladder (ONE summarizer call —
+  // the rung is chosen BEFORE the call via an upper bound on the resulting
+  // candidate, so the cost never scales with the ladder):
+  //   (a) the legacy plan (the most recent user message kept verbatim);
+  //   (b) the same plan descended to the keep budget (shrinkToFit) — folds
+  //       the OLDEST whole units of the kept suffix first; it can never
+  //       cross the live prompt, so this rung still preserves the task
+  //       verbatim and only helps when the suffix overshoots the budget for
+  //       reasons other than the prompt itself (e.g. a huge atomic tool
+  //       unit behind it);
+  //   (c) the last rung: fold down to the budget with the prompt foldable
+  //       (preserveLastUser:false) — chosen ONLY when every rung that keeps
+  //       the prompt verbatim provably cannot fit the input budget. The
+  //       task survives via the summary (the summarizer prompt requires the
+  //       user's goal), so this rung is lossless-by-summary, not
+  //       lossless-verbatim; the alternative is an over-budget request that
+  //       the provider rejects.
+  // The upper bound for a rung is its kept suffix + the largest summary an
+  // accepted response can produce (the summarizer's maxTokens) + overhead.
+  // A rung whose bound exceeds requestBudget cannot produce a fitting
+  // candidate at ANY summary size, so the deepest bound-fitting rung is the
+  // shallowest one that can win; the final (actual-summary-size) check
+  // below stays authoritative and may still return `fitsInputBudget:false`.
+  const requestBudget = opts.model.contextWindow - opts.model.maxTokens - 1024;
+  const estimatedTokensBefore = estimateTokens(opts.context, cpt) + promptOverhead;
+  const suffixTokens = (p: CompactionPlan): number =>
+    p.kept.reduce((s, m) => s + estimateMessageTokens(m, cpt), 0);
+  // The summary rides into the context inside its wrapper (SUMMARY_MARKER +
+  // separator + the summary text). The old bound omitted the wrapper, so a
+  // "bound-fitting" fold candidate could still miss the budget by the
+  // wrapper and have dropped the live prompt for nothing (audit finding 5).
+  const summaryWrapperTokens = estimateMessageTokens(makeSummaryMessage(""), cpt);
+  // Upper bound for a rung: kept suffix + the LARGEST summary an accepted
+  // response can produce (the summarizer's maxTokens) + wrapper + overhead.
+  // Above it the candidate can NEVER fit at any summary size; at/below it
+  // the actual candidate (summary ≤ bound) is guaranteed to fit. A FAILED
+  // bound is uncertainty, not proof of impossibility (audit finding 1): a
+  // rung over the bound may still fit with a smaller actual summary.
+  const boundFits = (p: CompactionPlan | undefined): boolean =>
+    p !== undefined && suffixTokens(p) + summarizerMaxTokens(opts.model) + summaryWrapperTokens + promptOverhead <= requestBudget;
+  // Floor for a plan: the smallest candidate it can ever produce — the kept
+  // suffix + the wrapper around an EMPTY summary + overhead. Above the
+  // floor even a zero-token summary cannot make the plan fit: this is proof
+  // of impossibility (the only proof available for a summary carrier).
+  const floorFits = (p: CompactionPlan | undefined): boolean =>
+    p !== undefined && suffixTokens(p) + summaryWrapperTokens + promptOverhead <= requestBudget;
+
+  let plan: CompactionPlan | undefined;
+  let strictFoldRung = false; // true when the prompt-fold rung (c) was selected
+  /** The fold plan to fall to AFTER a preserving candidate demonstrated it
+   *  does not fit (fold-after-demonstration, audit finding 1). */
+  let foldAfterDemo: CompactionPlan | undefined;
+  if (opts.strictFit) {
+    const p1 = planCompaction(opts.context, keepTokens, cpt, { preserveLastUser: true, shrinkToFit: false });
+    const p2 = planCompaction(opts.context, keepTokens, cpt, { preserveLastUser: true, shrinkToFit: true });
+    if (boundFits(p1)) {
+      plan = p1;
+    } else if (boundFits(p2)) {
+      plan = p2;
+    } else {
+      // No prompt-preserving rung can bound-fit. FIRST check the cheapest
+      // carrier compactNow still owns: the REAL rule-based notice (no LLM,
+      // ≤512 chars) for the deepest preserving plan — measured as-is, not
+      // bounded by a hypothetical 512-char notice, which proved nothing
+      // (audit finding 2: the actual notice is usually much smaller, and
+      // when it fits the preserving plan is KEPT and compactNow's notice
+      // rung lands that fit with the live prompt verbatim).
+      const noticePreservingPlan = p2 ?? p1;
+      const realNotice = noticePreservingPlan
+        ? ruleBasedShrink(opts.context, keepTokens, cpt, { preserveLastUser: true, shrinkToFit: true })
+        : undefined;
+      const noticePreservingFits =
+        realNotice !== undefined &&
+        estimateTokens([realNotice.notice, ...realNotice.kept], cpt) + promptOverhead <= requestBudget;
+      plan = noticePreservingFits ? noticePreservingPlan : undefined;
+      if (!noticePreservingFits) {
+        const p3 = planCompaction(opts.context, keepTokens, cpt, {
+          preserveLastUser: false,
+          shrinkToFit: true,
+        });
+        // The prompt fold is legitimate only if it BUYS A FIT: strictly
+        // deeper than the preserving plan AND a real summary budget is
+        // left over its kept tail — the headroom after suffix + wrapper +
+        // overhead. The old gate required the LARGEST summary to fit,
+        // rejecting folds that would have fit with the actual summary
+        // (audit finding 1); the fold rung now CAPS the summarizer's
+        // output at the available headroom, so an accepted response is
+        // guaranteed to fit — the fit is bought, not hoped for. Below a
+        // usable stub (MIN_FOLD_SUMMARY_TOKENS) there is nothing to cap:
+        // folding would lose the task verbatim for nothing, so keep the
+        // preserving plan and let the caller apply the best candidate.
+        const foldHeadroom = (p: CompactionPlan): number =>
+          requestBudget - (suffixTokens(p) + summaryWrapperTokens + promptOverhead);
+        const MIN_FOLD_SUMMARY_TOKENS = 64;
+        const foldable =
+          p3 && p3.keepFrom > (p2?.keepFrom ?? 0) && foldHeadroom(p3) >= MIN_FOLD_SUMMARY_TOKENS ? p3 : undefined;
+        if (foldable && !floorFits(noticePreservingPlan)) {
+          // No preserving summary — whatever its size — can ever fit: the
+          // fold is necessary NOW, so make the single summarizer call on
+          // the fold transcript (which carries the live prompt) instead of
+          // wasting a call on a preserving plan that provably fails.
+          plan = foldable;
+          strictFoldRung = true;
+        } else if (foldable) {
+          // The preserving plan MIGHT fit (its floor does) — impossibility
+          // is not proved, only uncertainty. Attempt the preserving plan
+          // first; if the actual summary demonstrates it does not fit, the
+          // fold is tried next (fold-after-demonstration, below).
+          plan = noticePreservingPlan;
+          foldAfterDemo = foldable;
+        } else {
+          plan = noticePreservingPlan;
+        }
       }
     }
-  } catch {
-    // I3: the stream contract says it never throws, but be defensive.
-    failed = true;
+  } else {
+    plan = planCompaction(opts.context, keepTokens, cpt);
   }
-  if (failed || aborted || opts.signal.aborted || text.trim() === "") return undefined;
+  if (!plan) return undefined;
+
+  // Run the summarizer for one candidate plan. Returns the summary text, or
+  // one of the terminal causes: "failed" (stream error — the caller's retry
+  // ladder owns this), "aborted" (user cancel), "empty" (no text), or
+  // "too-big" (the summarizer's own input doesn't fit the window — the old
+  // `return undefined`; compactNow's shrunken-transcript retry is the cure).
+  const summarizeFor = async (
+    p: CompactionPlan,
+    foldRung: boolean,
+  ): Promise<{ text: string } | "failed" | "aborted" | "empty" | "too-big"> => {
+    let text = "";
+    let failed = false;
+    let aborted = false;
+    try {
+      // Fold rung (strict fit): cap the summarizer's OUTPUT at the headroom
+      // left over the kept suffix, so an accepted response is sized to
+      // actually fit the budget instead of being allowed to blow it (audit
+      // finding 1: "constrain their summary allowance to available
+      // headroom"). The estimate (chars/cpt) and the provider's token count
+      // can still drift, so `fitsInputBudget` below stays honest either way.
+      let maxOut = summarizerMaxTokens(opts.model);
+      if (foldRung && opts.strictFit) {
+        const outHeadroom = requestBudget - (suffixTokens(p) + summaryWrapperTokens + promptOverhead);
+        if (outHeadroom < maxOut) maxOut = Math.max(64, Math.floor(outHeadroom));
+      }
+      const summarizerModel = { ...opts.model, maxTokens: maxOut };
+      const prompt = summarizePrompt(
+        p,
+        {
+          perMessageChars: opts.transcriptOpts?.perMessageChars ?? 1500,
+          totalChars: opts.transcriptOpts?.totalChars ?? Math.max(4000, Math.floor(opts.model.contextWindow / cpt)),
+          toolResultChars: opts.transcriptOpts?.toolResultChars ?? 2000,
+          // D26: on the prompt-fold rung the summary's whole job is to carry
+          // the live task — the transcript must deliver it, so the last user
+          // message survives the transcript budget first (oldest turns are
+          // dropped, then clipped; the prompt is middle-clipped only when it
+          // alone exceeds the budget). On preserving rungs the prompt is kept
+          // verbatim, so the flag is a no-op there and stays off.
+          priorityLastUser: foldRung,
+        },
+        opts.model.contextWindow,
+        { charsPerToken: cpt, outputTokens: summarizerModel.maxTokens },
+      );
+      // Use the identical calibrated estimate and completion reservation that
+      // summarizePrompt used to construct this request.
+      const summaryInputTokens = Math.ceil((SUMMARIZER_SYSTEM.length + prompt.length) / cpt);
+      if (summaryInputTokens + summarizerModel.maxTokens > opts.model.contextWindow) return "too-big";
+      for await (const ev of opts.streamFn(summarizerModel, {
+        systemPrompt: SUMMARIZER_SYSTEM,
+        messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+        tools: [],
+      }, { signal: opts.signal })) {
+        if (ev.type === "text_delta") text += ev.delta;
+        if (ev.type === "done") {
+          // `length` is NOT a failure: the model produced the maximum allowed
+          // output (the summarizer cap) — a truncated but structured summary is
+          // still usable and a strict reduction of the context, so it is
+          // ACCEPTED (the final text.trim() === "" guard below still rejects a
+          // length stop that yielded no text). Treating `length` as total
+          // failure was the root cause of the 100% fallback rate: a structured
+          // GOAL/DONE/STATE/FILES/NEXT summary of a long context regularly
+          // exceeds the old 1024 cap, so every compaction fell through to the
+          // lossy rule-based notice.
+          if (
+            ev.message.stopReason === "error" ||
+            ev.message.stopReason === "aborted"
+          ) failed = true;
+          if (ev.message.stopReason === "aborted") aborted = true;
+        }
+      }
+    } catch {
+      // I3: the stream contract says it never throws, but be defensive.
+      failed = true;
+    }
+    // Abort wins over failure: an aborted stream sets both flags above, and
+    // the CAUSE decides the caller's move (a fold abort is terminal; a fold
+    // failure preserves the candidate in hand).
+    if (aborted || opts.signal.aborted) return "aborted";
+    if (failed) return "failed";
+    if (text.trim() === "") return "empty";
+    return { text: text.trim() };
+  };
+
   // Final fit validation (the keep budget is only a PLANNING target — atomic
   // tool-call/result units can't be split, so the kept suffix may exceed it):
   // the COMPLETE candidate, summary + kept + fixed prompt overhead, is
@@ -712,17 +1007,47 @@ export async function compactContext(opts: {
   // refuses candidates that do not shrink the context at all — a summary
   // larger than the prefix it replaces would ENLARGE the next request,
   // which is strictly worse than skipping the compaction.
-  const summaryMsg = makeSummaryMessage(text.trim());
-  const estimatedTokensAfter = estimateTokens([summaryMsg, ...plan.kept], cpt) + promptOverhead;
-  const estimatedTokensBefore = estimateTokens(opts.context, cpt) + promptOverhead;
-  if (estimatedTokensAfter >= estimatedTokensBefore) return undefined;
-  const requestBudget = opts.model.contextWindow - opts.model.maxTokens - 1024;
+  let outcome = await summarizeFor(plan, strictFoldRung);
+  if (outcome === "failed" || outcome === "aborted" || outcome === "empty") return undefined;
+  if (outcome === "too-big") return undefined;
+  // Fold-after-demonstration (audit finding 1): the preserving plan was
+  // selected because no impossibility proof existed — its floor fit, so a
+  // small summary could fit. If the ACTUAL summary demonstrates the
+  // candidate busts the budget, the fold (whose floor fit) is tried next:
+  // the first call proved the preserving rung impossible, the second gets
+  // the fit. A fitting preserving candidate never reaches the fold.
+  if (
+    opts.strictFit &&
+    foldAfterDemo &&
+    estimateTokens([makeSummaryMessage(outcome.text), ...plan.kept], cpt) + promptOverhead > requestBudget
+  ) {
+    const foldOutcome = await summarizeFor(foldAfterDemo, true);
+    // A user abort during the fold is TERMINAL (the user pressed ESC) — no
+    // candidate, no notice fallback, even though the preserving candidate is
+    // still in hand. A stream failure/empty/too-big fold is different: the
+    // preserving candidate survives (honestly over budget), and compactNow
+    // falls through to the rule-based notice that fits (audit finding 2).
+    if (foldOutcome === "aborted") return undefined;
+    if (foldOutcome !== "failed" && foldOutcome !== "empty" && foldOutcome !== "too-big") {
+      plan = foldAfterDemo;
+      strictFoldRung = true;
+      outcome = foldOutcome;
+    }
+  }
+  let estimatedTokensAfter =
+    estimateTokens([makeSummaryMessage(outcome.text), ...plan.kept], cpt) + promptOverhead;
+  // A candidate must shrink the context — EXCEPT on the strict-fit prompt-
+  // fold rung: that rung was selected because its bound provably fits the
+  // request budget, and the alternative (falling through to compactNow's
+  // lossier notice rung) discards a proven budget fit over a technicality.
+  if (estimatedTokensAfter >= estimatedTokensBefore && !strictFoldRung) return undefined;
   return {
-    summary: text.trim(),
+    summary: outcome.text,
     kept: plan.kept,
     estimatedTokensAfter,
     estimatedTokensBefore,
     tokensBefore: lastAssistant?.usage?.totalTokens ?? 0,
     requestBudget,
+    fitsInputBudget: estimatedTokensAfter <= requestBudget,
   };
 }
