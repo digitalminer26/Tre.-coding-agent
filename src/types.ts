@@ -337,6 +337,12 @@ export type AgentEvent =
        *  cycle fire. Optional: producers from before loop-v2 omit it and
        *  the display falls back to the generic "repeated batch". */
       reason?: "identical" | "cycle";
+      /** Re-audit fix (2026-11-02): the fired guard's own repeat count —
+       *  batches ISSUED including the refused one (the evidence's unit: 3
+       *  identical-stable, 5 alternating-stable, the caps otherwise) — so
+       *  the transcript states the true size instead of a hard-coded "3×".
+       *  Optional on legacy producers (then the line makes no count claim). */
+      repeats?: number;
     }
   | {
       /**
@@ -525,6 +531,28 @@ export function loopStopNote(evidence?: GuardEvidence): string {
     return `loop: ${pattern} ${count} — stopped to avoid a runaway loop${retry} (the repeat was not executed)`;
   }
   return `loop: ${pattern} — stopped to avoid a runaway loop (the repeat was not executed)`;
+}
+
+/** Re-audit fix (2026-11-02) — the shared `guard_retry` transcript line for
+ *  the CLI and the TUI. The old hard-coded "same tool call 3× in a row"
+ *  lied on every non-identical-3 fire: an alternating cycle fire (5
+ *  batches issued), any cap fire (12), and a legacy producer that gives no
+ *  pattern at all. The count is the event's `repeats` (issued batches
+ *  including the refused one — the evidence's unit); without it the line
+ *  makes no count claim. Returns the sentence WITHOUT the trailing
+ *  "(retry N/M)" suffix (each surface appends its own). */
+export function guardRetryNote(
+  reason?: "identical" | "cycle",
+  repeats?: number,
+): string {
+  const pattern =
+    reason === "cycle"
+      ? "loop guard fired (two tool-call batches alternating"
+      : reason === "identical"
+        ? "loop guard fired (same tool call(s) repeated"
+        : "loop guard fired (repeated tool-call batch";
+  const count = repeats !== undefined ? `, ${repeats} batches issued incl. the refused one)` : ")";
+  return `${pattern}${count} — retrying with a changed approach`;
 }
 
 // ─────────────────── 3. The loop's two dependencies ───────────────────

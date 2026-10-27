@@ -240,20 +240,38 @@ export const LOOP_GUARD_TEXT =
   "latest results, pick a different action, or finish with a text-only " +
   "response explaining the situation.";
 
-// The loop guard (same batch 3× in a row) fired, but the run is auto-retrying
-// instead of stopping. This is an APPROACH-CHANGING nudge, not a "keep going"
-// nudge: the whole point is that the model was stuck repeating the same
-// failing action, so a blind "continue" would just re-fire the guard. The
-// model must pick a DIFFERENT action. Bounded by DEFAULT_MAX_GUARD_RETRIES —
-// at the cap the run stops with stopReason "loop" as before, so a genuinely
-// stuck model still terminates in bounded time.
-export const GUARD_RETRY_TEXT =
-  "You just repeated the same tool call(s) 3 times in a row — the repeat was " +
-  "not executed, and the run is continuing automatically. You are stuck on " +
-  "that action. You MUST change your approach: pick a DIFFERENT tool, or " +
-  "different arguments, or a different path. Do NOT re-issue the same call. " +
-  "If the task is actually complete, reply with a final summary and call no " +
-  "more tools.";
+// The loop guard fired, but the run is auto-retrying instead of stopping.
+// This is an APPROACH-CHANGING nudge, not a "keep going" nudge: the whole
+// point is that the model was stuck repeating the same failing action, so a
+// blind "continue" would just re-fire the guard. The model must pick a
+// DIFFERENT action. Bounded by DEFAULT_MAX_GUARD_RETRIES — at the cap the
+// run stops with stopReason "loop" as before, so a genuinely stuck model
+// still terminates in bounded time.
+//
+// Re-audit finding 2 (2026-11-02): the nudge is PATTERN-HONEST. The old
+// constant claimed "the same tool call(s) 3 times in a row" for EVERY fire,
+// which lied to the model on alternating-cycle fires and 12-batch cap fires
+// (the model that trusts the text searches for the wrong pattern). The
+// description names what actually fired, with the fired guard's own repeat
+// count (issued batches including the refused one — the evidence's unit).
+export function guardRetryText(isCycle: boolean, repeats: number): string {
+  const pattern = isCycle
+    ? `the same two tool-call batches have been issued alternately (X, Y, X, Y, X …) ${repeats} times`
+    : `the same tool call(s) have been issued ${repeats} times in a row`;
+  return (
+    `Runaway loop guard: ${pattern} — this last repeat was not executed, ` +
+    "and the run is continuing automatically. You are stuck on that action. " +
+    "You MUST change your approach: pick a DIFFERENT tool, or different " +
+    "arguments, or a different path. Do NOT re-issue the same call(s). If " +
+    "the task is actually complete, reply with a final summary and call no " +
+    "more tools."
+  );
+}
+
+/** The identical-3×-in-a-row nudge (the classic fire) — retained as the
+ *  exact constant for callers/tests that need the canonical text; equals
+ *  `guardRetryText(false, 3)`. */
+export const GUARD_RETRY_TEXT = guardRetryText(false, 3);
 
 /**
  * How many times the loop auto-retries after the loop guard (same batch 3×)
@@ -1020,9 +1038,13 @@ export async function* runLoop(
         if (guardRetries < maxGuardRetries) {
           guardRetries += 1;
           batchHistory = [];
+          // Re-audit finding 2 (2026-11-02): the nudge names the pattern
+          // that actually fired with its own repeat count — the old
+          // constant told the model "3 times in a row" on cycle and cap
+          // fires, sending it hunting for the wrong pattern.
           context.push({
             role: "user",
-            content: GUARD_RETRY_TEXT,
+            content: guardRetryText(cycleFired, repeats),
             timestamp: Date.now(),
           });
           yield {
@@ -1031,8 +1053,11 @@ export async function* runLoop(
             retry: guardRetries,
             maxRetries: maxGuardRetries,
             // Which pattern fired (audit re-fix 2026-11-02): the transcript
-            // must not claim "3× in a row" when an alternating cycle fired.
+            // must not claim "3× in a row" when an alternating cycle fired;
+            // the fired guard's own count rides along (re-audit 2026-11-02)
+            // so the line states the true size, not a hard-coded 3.
             reason: cycleFired ? "cycle" : "identical",
+            repeats,
           };
           continue; // the nudge consumes no turn (it is not an LLM call)
         }
@@ -1095,8 +1120,16 @@ export async function* runLoop(
       }
       // Audit v2: a length-guarded batch never ran and its fill text is a
       // constant — record the synthetic digest so the SAME truncated batch
-      // repeating still trips the guard (3rd stable repeat).
-      pushHistory(signature, JSON.stringify([SYNTHETIC_FILL_DIGEST]), false);
+      // repeating still trips the guard (3rd stable repeat). Recorded as a
+      // FAILED batch (re-audit finding 1, 2026-11-02): this is the same
+      // synthetic in-band answer the unknown-tool/throw paths record as
+      // failed, and the cycle guard's stable rule exempts failed records —
+      // with failed:false here, alternating truncated batches [A,B,A,B] fed
+      // the stable cycle rule their constant fill digest and the 5th batch
+      // was refused (a stable cycle stop) although ZERO calls had run and
+      // no real results ever repeated. The identical rule still fires on
+      // these records (repeat with no new information, as documented).
+      pushHistory(signature, JSON.stringify([SYNTHETIC_FILL_DIGEST]), true);
       continue; // the model re-issues on the next turn
     }
 

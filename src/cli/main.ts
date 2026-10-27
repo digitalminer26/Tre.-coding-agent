@@ -124,7 +124,7 @@ import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type T
 import { TelegramDriver } from "../telegram/driver.js";
 import { workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
-import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, loopStopNote } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, guardRetryNote, lengthEndNote, loopStopNote } from "../types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -576,10 +576,13 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       );
       break;
     case "guard_retry":
-      // The loop guard (same batch 3×) fired; the run auto-retries once with
-      // an approach-changing nudge instead of stopping. Informational.
+      // The loop guard fired (a repeated batch — identical or an alternating
+      // cycle, at the fired guard's own repeat count); the run auto-retries
+      // with an approach-changing nudge instead of stopping. Informational.
+      // Re-audit fix (2026-11-02): shared guardRetryNote — the old
+      // hard-coded "same tool call 3× in a row" lied on cycle/cap fires.
       sinks.err.write(
-        `\n↻ loop guard fired (same tool call 3× in a row) — retrying with a changed approach (retry ${ev.retry}/${ev.maxRetries})\n`,
+        `\n↻ ${guardRetryNote(ev.reason, ev.repeats)} (retry ${ev.retry}/${ev.maxRetries})\n`,
       );
       break;
     case "progress_nudge":

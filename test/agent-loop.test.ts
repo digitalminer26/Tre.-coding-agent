@@ -35,7 +35,7 @@ import {
   runLoop,
   type AgentLoopOptions,
 } from "../src/loop/agent-loop.js";
-import { loopStopNote } from "../src/types.js";
+import { guardRetryNote, loopStopNote } from "../src/types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -792,8 +792,10 @@ test("C26: loop detection — same batch 3× → guarded, auto-retry once, then 
     retry: 1,
     maxRetries: 1,
     // loop-v2: the event names the pattern that fired (audit re-fix
-    // 2026-11-02) so the transcript never claims "3× in a row" for cycles.
+    // 2026-11-02) so the transcript never claims "3× in a row" for cycles;
+    // the fired guard's own repeat count rides along (re-audit 2026-11-02).
     reason: "identical",
+    repeats: 3,
   });
   // The guarded batches (turns 3 and 6) were NOT executed; turns 1,2,4,5 were.
   assert.equal(calls.length, 4, "the two guarded batches were not executed");
@@ -3017,4 +3019,107 @@ test("loopStopNote header: evidence-driven for every stop kind, never '3 times' 
   } as Parameters<typeof loopStopNote>[0]);
   assert.match(legacy, /stopped to avoid a runaway loop/);
   assert.doesNotMatch(legacy, /no change in results|without progress/);
+});
+
+// ── Re-audit 2026-11-02: synthetic-history exemption + honest retry texts ──
+
+test("loop v2: alternating length-guarded batches never trip the stable cycle guard", async () => {
+  // Re-audit finding 1: length-guarded fills are SYNTHETIC (nothing ran).
+  // Recorded as failed batches they are exempt from the stable cycle rule;
+  // before the fix [A,B,A,B] of constant fill digests looked like a stable
+  // alternation and the 5th (COMPLETE) batch was refused with a stable
+  // cycle stop — zero real results ever repeated.
+  const a = makeTool("a");
+  const b = makeTool("b");
+  const turns: FakeTurn[] = [
+    { type: "length", calls: [{ id: "t1", name: "a", args: { path: "x" } }] },
+    { type: "length", calls: [{ id: "t2", name: "b", args: { path: "x" } }] },
+    { type: "length", calls: [{ id: "t3", name: "a", args: { path: "x" } }] },
+    { type: "length", calls: [{ id: "t4", name: "b", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "t5", name: "a", args: { path: "x" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [a.tool, b.tool], {
+    maxTurns: 50,
+    maxGuardRetries: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop", "the complete batch runs; no false cycle stop");
+  assert.equal(a.calls.length, 1, "the complete call executed exactly once");
+  assert.equal(b.calls.length, 0);
+});
+
+test("loop v2: a cycle fire injects the ALTERNATING nudge with its true count", async () => {
+  // Re-audit finding 2: the injected retry nudge names the pattern that
+  // fired (X, Y, X, Y, X …) with the fired guard's own repeat count — not
+  // the old constant's false "3 times in a row".
+  const xa = makeTool("a");
+  const xb = makeTool("b");
+  const alternating = (i: number): FakeTurn => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+  });
+  const turns: FakeTurn[] = [
+    alternating(0),
+    alternating(1),
+    alternating(2),
+    alternating(3),
+    alternating(4),
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [xa.tool, xb.tool], { maxTurns: 50 });
+  const retries = events.filter((e) => e.type === "guard_retry") as Extract<
+    AgentEvent,
+    { type: "guard_retry" }
+  >[];
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0]!.reason, "cycle");
+  assert.equal(retries[0]!.repeats, 5, "5 batches issued incl. the refused one");
+  const end = agentEnd(events);
+  const nudge = end.messages.filter((m) => m.role === "user").at(-1);
+  assert.ok(typeof nudge !== "string" && nudge && typeof nudge.content === "string");
+  const text = nudge!.role === "user" ? String(nudge!.content) : "";
+  assert.match(text, /alternately \(X, Y, X, Y, X …\) 5 times/);
+  assert.doesNotMatch(text, /in a row/, "no false '3 times in a row' on a cycle fire");
+});
+
+test("loop v2: a cap fire nudges with the cap count (12), not 3", async () => {
+  let n = 0;
+  const counter = makeTool("read", {
+    execute: (async () => ({ content: [{ type: "text", text: `rev ${++n}` }] })) as Tool["execute"],
+  });
+  const turns: FakeTurn[] = [
+    ...Array.from({ length: 12 }, (_, i) => ({
+      type: "toolcall" as const,
+      calls: [{ id: `c${i}`, name: "read", args: { path: "x" } }],
+    })),
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [counter.tool], { maxTurns: 50 });
+  const retries = events.filter((e) => e.type === "guard_retry") as Extract<
+    AgentEvent,
+    { type: "guard_retry" }
+  >[];
+  assert.equal(retries.length, 1, "the cap fire auto-retries once (default budget)");
+  assert.equal(retries[0]!.reason, "identical");
+  assert.equal(retries[0]!.repeats, POLL_CAP);
+  const end = agentEnd(events);
+  const nudge = end.messages.filter((m) => m.role === "user").at(-1);
+  const text = nudge && nudge.role === "user" ? String(nudge.content) : "";
+  assert.match(text, new RegExp(`${POLL_CAP} times in a row`));
+  assert.doesNotMatch(text, /3 times in a row/);
+});
+
+test("guardRetryNote: honest per-pattern transcript line (shared CLI/TUI)", () => {
+  const identical = guardRetryNote("identical", 3);
+  assert.match(identical, /same tool call\(s\) repeated, 3 batches issued incl\. the refused one/);
+  const cycle = guardRetryNote("cycle", 5);
+  assert.match(cycle, /two tool-call batches alternating, 5 batches issued/);
+  assert.doesNotMatch(cycle, /3×|3 times|two tool calls/);
+  const cap = guardRetryNote("identical", POLL_CAP);
+  assert.match(cap, /12 batches issued/);
+  // Legacy producer without reason/repeats: no pattern, no count claim.
+  const legacy = guardRetryNote(undefined, undefined);
+  assert.match(legacy, /repeated tool-call batch\) — retrying with a changed approach/);
+  assert.doesNotMatch(legacy, /3×|3 times|alternating|incl\./);
 });

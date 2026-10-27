@@ -305,7 +305,7 @@ Invariants:
 | `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars`; `contextTokens?`, `degraded?` (fallback shrink, docs/06 D), `overBudget?` (strict reduction still over budget — kept anyway) |
 | `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
-| `guard_retry`             | the loop guard fired (a repeated batch — identical 3× or an alternating cycle); the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries`, `reason?` (`"identical"` \| `"cycle"` — loop-v2; absent on older producers) |
+| `guard_retry`             | the loop guard fired (a repeated batch — identical or an alternating cycle); the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries`, `reason?` (`"identical"` \| `"cycle"` — loop-v2), `repeats?` (the fired guard's own count: issued batches incl. the refused one — re-audit 2026-11-02; absent on older producers; displays then make no count claim) |
 | `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
@@ -347,6 +347,9 @@ union (exported from `types.ts`), three homes:
   never says "3 times in a row", a cap stop never claims "changing
   results", and a stable stop says "no change in results"; without
   evidence (older producers) the headline makes no count or results claim.
+  The `guard_retry` transcript line is the shared `guardRetryNote(reason,
+  repeats)` (re-audit 2026-11-02) — pattern-honest with the fired guard's
+  own count, no per-surface ternary.
 
 Privacy: signatures and excerpts are tool arguments/errors already persisted
 in the session's message entries — the entry adds naming, not disclosure.

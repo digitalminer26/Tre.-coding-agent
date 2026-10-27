@@ -222,6 +222,49 @@ const check = (name, cond, detail) => {
   check("P5b trigger line", /alternating ×5 batches, same results, after 1 auto-retry/.test(note), note);
 }
 
+// P6 — synthetic length-guard fills must NOT feed the stable cycle rule
+//      (re-audit finding 1): [lenA, lenB, lenA, lenB] + complete A — the
+//      complete batch must run; no false cycle stop, zero real results.
+{
+  let ran = 0;
+  const tool = {
+    name: "exec2",
+    description: "probe",
+    parameters: { type: "object", properties: { command: { type: "string" } } },
+    async execute() {
+      ran += 1;
+      return { content: [{ type: "text", text: "ok" }] };
+    },
+  };
+  const turns2 = [
+    { type: "length", calls: [{ id: "t1", name: "exec2", args: { command: "a" } }] },
+    { type: "length", calls: [{ id: "t2", name: "exec2", args: { command: "b" } }] },
+    { type: "length", calls: [{ id: "t3", name: "exec2", args: { command: "a" } }] },
+    { type: "length", calls: [{ id: "t4", name: "exec2", args: { command: "b" } }] },
+    { type: "toolcall", calls: [{ id: "t5", name: "exec2", args: { command: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const events = [];
+  for await (const ev of runLoop({
+    model,
+    systemPrompt: "sys",
+    initialMessages: [{ role: "user", content: "go", timestamp: 1 }],
+    tools: [tool],
+    streamFn: fakeStream(turns2, { model }),
+    signal: new AbortController().signal,
+    maxTurns: 50,
+    maxGuardRetries: 0,
+  })) {
+    events.push(ev);
+  }
+  const end = events.find((e) => e.type === "agent_end");
+  check(
+    "P6 synthetic-cycle",
+    end?.stopReason === "stop" && ran === 1,
+    `stop=${end?.stopReason} ran=${ran} (pre-fix: false stable cycle stop, ran=0)`,
+  );
+}
+
 const failed = checks.filter((c) => !c.pass).length;
 console.log(failed === 0 ? "ALL PROBES PASS" : `${failed} PROBE(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

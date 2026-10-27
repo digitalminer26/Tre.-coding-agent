@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, loopStopNote, type AgentEvent, type AgentMessage, type ModelConfig, type ProgressKind, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, guardRetryNote, lengthEndNote, loopStopNote, type AgentEvent, type AgentMessage, type ModelConfig, type ProgressKind, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
 import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
@@ -671,12 +671,12 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           ...state.items,
           {
             kind: "info",
+            // Re-audit fix (2026-11-02): shared guardRetryNote — the old
+            // per-surface ternary miscounted (cycle fires said "3×" for a
+            // 5-batch pattern; cap fires said "3×" for 12) and described
+            // the pattern as "two tool calls" (a batch may hold many).
             text:
-              (ev.reason === "cycle"
-                ? "loop guard fired (two tool calls alternating 3×) — retrying with a changed approach"
-                : ev.reason === "identical"
-                  ? "loop guard fired (same tool call 3× in a row) — retrying with a changed approach"
-                  : "loop guard fired (repeated tool-call batch) — retrying with a changed approach") +
+              guardRetryNote(ev.reason, ev.repeats) +
               ` (retry ${ev.retry}/${ev.maxRetries})`,
           },
         ],
