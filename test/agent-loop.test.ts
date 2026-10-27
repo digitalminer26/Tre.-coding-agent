@@ -3124,41 +3124,70 @@ test("guardRetryNote: honest per-pattern transcript line (shared CLI/TUI)", () =
   assert.doesNotMatch(legacy, /3×|3 times|alternating|incl\./);
 });
 
-test("loop v2: a synthetic SECOND pair cannot complete a stable cycle", async () => {
-  // Audit (2026-11-02): the stable cycle rule must exempt ALL FOUR
-  // history records. X,Y execute successfully ("same"); the NEXT A,B are
-  // answered synthetically (details.notExecuted — a constant/reused text
-  // that digests like the real result). The 5th batch (A again) must NOT
-  // be refused: the second round never produced real results, so no stable
-  // alternation is proven. Pre-fix, only X₁/Y₁ were checked and the run
-  // stopped with a false stable cycle-batch loop.
-  let n = 0;
-  const mk = (name: string) =>
-    makeTool(name, {
-      execute: (async () => ({
-        content: [{ type: "text", text: "same" }],
-        ...(n++ > 1 ? { details: { notExecuted: true } } : {}),
-      })) as Tool["execute"],
+// Parameterized audit coverage (2026-11-02): ONE synthetic record among the
+// four stable-cycle history entries [X, Y, X₂, Y₂] must veto the guard. The
+// original single case (synthetic SECOND pair) caught the shipped bug but
+// could miss a regression dropping just ONE of the four failed-flag checks;
+// iterating all 16 subsets of {X, Y, X₂, Y₂} exercises every check the rule
+// performs individually.
+
+const SYNTHETIC_POS_NAMES = ["X", "Y", "X2", "Y2"];
+
+function syntheticMaskLabel(mask: number): string {
+  if (mask === 0) return "all four genuine — the stable cycle fires";
+  const names = SYNTHETIC_POS_NAMES.filter((_, i) => mask & (1 << i));
+  return `synthetic ${names.join("+")} — the guard must not fire`;
+}
+
+test("loop v2: EVERY synthetic stable-cycle position vetoes the guard (all 16 subsets)", async (t) => {
+  // Executions 0..3 ARE the four history records (batches A, B, A, B of the
+  // alternating run); execution 4 is the 5th batch, whose refusal would be
+  // the guard stop. Every synthetic record answers with the SAME text as the
+  // genuine results ("same") but carries details.notExecuted — it digests
+  // exactly like a real result, so only the failed-flag checks can see it.
+  // Mask bit i marks execution i synthetic. With the empty subset (mask 0:
+  // all four genuine) the stable alternation is proven and the guard MUST
+  // stop before the 5th batch; with any non-empty subset it MUST NOT.
+  for (let mask = 0; mask < 16; mask++) {
+    await t.test(syntheticMaskLabel(mask), async () => {
+      let executions = 0;
+      const mk = (name: string) =>
+        makeTool(name, {
+          execute: (async () => {
+            const i = executions++;
+            return {
+              content: [{ type: "text", text: "same" }],
+              ...(mask & (1 << i) ? { details: { notExecuted: true } } : {}),
+            };
+          }) as Tool["execute"],
+        });
+      const a = mk("a");
+      const b = mk("b");
+      const alternating = (i: number): FakeTurn => ({
+        type: "toolcall",
+        calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+      });
+      const turns: FakeTurn[] = [
+        alternating(0),
+        alternating(1),
+        alternating(2),
+        alternating(3),
+        alternating(4),
+        { type: "text", text: "done" },
+      ];
+      const events = await drainLoop(turns, [a.tool, b.tool], {
+        maxTurns: 50,
+        maxGuardRetries: 0,
+      });
+      const end = agentEnd(events);
+      if (mask === 0) {
+        assert.equal(end.stopReason, "loop", "all-genuine stable alternation still stops");
+        assert.equal(end.evidence?.guard, "cycle-batch");
+        assert.equal(executions, 4, "the 5th batch refused");
+      } else {
+        assert.equal(end.stopReason, "stop", "a synthetic history record vetoes the stable cycle");
+        assert.equal(executions, 5, "the 5th batch executed");
+      }
     });
-  const a = mk("a");
-  const b = mk("b");
-  const alternating = (i: number): FakeTurn => ({
-    type: "toolcall",
-    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
-  });
-  const turns: FakeTurn[] = [
-    alternating(0),
-    alternating(1),
-    alternating(2),
-    alternating(3),
-    alternating(4),
-    { type: "text", text: "done" },
-  ];
-  const events = await drainLoop(turns, [a.tool, b.tool], {
-    maxTurns: 50,
-    maxGuardRetries: 0,
-  });
-  const end = agentEnd(events);
-  assert.equal(end.stopReason, "stop", "no stable cycle stop on a synthetic second pair");
-  assert.equal(a.calls.length + b.calls.length, 5, "the 5th batch executed");
+  }
 });
