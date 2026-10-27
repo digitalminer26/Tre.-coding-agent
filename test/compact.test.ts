@@ -34,6 +34,7 @@ import {
   SUMMARY_MARKER,
   SUMMARIZER_MAX_TOKENS,
   calibrateCharsPerToken,
+  COMPACT_ABORTED,
   compactContext,
   estimatePromptOverheadTokens,
   estimateTokens,
@@ -589,6 +590,7 @@ test("compactContext: over budget → silent summary call (no tools, summarizer 
   );
   const r = await compactContext({ streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.match(r!.summary, /SUMMARY: the agent listed files earlier\.$/);
   assert.equal(r!.tokensBefore, 1900);
   assert.equal(ctxs.length, 1, "exactly one (silent) LLM call");
@@ -631,6 +633,7 @@ test("compactContext: keep target is capped by the model's window (small-window 
   const fn = fakeStream([{ type: "text", text: "SUMMARY." }]);
   const r = await compactContext({ streamFn: fn, model: small, signal: new AbortController().signal, context: ctx });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(r!.kept[0], ctx[2]!, "the keep window stops at the capped size (unit 2)");
   assert.deepEqual(r!.kept, ctx.slice(2), "kept is the suffix from unit 2");
 });
@@ -656,6 +659,7 @@ test("compactContext: the keep budget is a planning target, not a hard guard", a
     force: true,
   });
   assert.ok(r, "the compacted context is returned even over the keep budget");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.ok(estimateTokens(r!.kept) > 5, "the kept suffix exceeds the tiny budget");
   assert.ok(r!.estimatedTokensAfter > 5, "the estimate exceeds the target");
 });
@@ -680,6 +684,7 @@ test("compactContext: the keep plan reserves the summary budget, so the candidat
     force: true,
   });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   const unitTokens = 10; // each message is 40 chars = 10 est tokens
   const summaryTokens = Math.ceil((SUMMARY_MARKER.length + 2 + summary.length) / 4);
   assert.ok(
@@ -714,6 +719,7 @@ test("compactContext: strict-fit deep fold — a huge atomic unit behind the pro
     strictFit: true,
   });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(ctxs.length, 1, "the rung is chosen before the call — one summarizer call");
   assert.ok(r!.estimatedTokensAfter <= r!.requestBudget, "the applied candidate fits the request budget");
   assert.equal(r!.fitsInputBudget, true, "fit reported");
@@ -749,6 +755,7 @@ test("compactContext: strict-fit guard — a prompt fold is NOT selected when th
     strictFit: true,
   });
   assert.ok(r, "a candidate is still produced (a strict reduction of the history)");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.ok(r!.kept.includes(live), "the live prompt is NOT folded — the notice carrier preserves it");
   assert.ok(!r!.fitsInputBudget, "the LLM candidate is honestly reported over budget (compactNow falls through to the fitting notice)");
 });
@@ -776,6 +783,7 @@ test("compactContext: strict-fit may fold a huge latest user prompt rather than 
     strictFit: true,
   });
   assert.ok(r, "summary can carry the latest task when its verbatim prompt is too large");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.ok(r!.estimatedTokensAfter <= r!.requestBudget, "strict fit is enforced after summary");
   assert.ok(!r!.kept.includes(ctx[2]!), "strict-fit folds the oversized last user message");
   assert.ok(r!.summary.length > 0, "summary content replaces the folded task");
@@ -814,6 +822,7 @@ test("compactContext: floor regime — the keep plan targets the reserved headro
     force: true,
   });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   // The headroom is 300, so the keep walk stops at the 30th unit (300 est
   // tokens) — NOT the 512 floor, which would have kept 52 units.
   const unitTokens = 10;
@@ -859,6 +868,7 @@ test("compactContext: calibrated charsPerToken shrinks the keep window for dense
     charsPerToken: 2,
   });
   assert.ok(rDefault && rDense);
+  if (rDefault === COMPACT_ABORTED || rDense === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.ok(
     rDense!.kept.length < rDefault!.kept.length,
     `dense cpt keeps fewer messages (${rDense!.kept.length} < ${rDefault!.kept.length})`,
@@ -984,6 +994,7 @@ test("compactContext: calibrated dense transcripts are clipped to fit before the
   assert.equal(calls, 1, "the request fits after calibrated clipping rather than being rejected");
   assert.ok(promptChars > 0 && promptChars < 12000, `prompt was clipped (${promptChars} chars)`);
   assert.ok(r, "the successful summary is accepted");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
 });
 
 test("compactContext: truncated (length) summary WITH text is ACCEPTED (usable, not a total failure)", async () => {
@@ -1004,6 +1015,7 @@ test("compactContext: truncated (length) summary WITH text is ACCEPTED (usable, 
     streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
   });
   assert.ok(r, "a truncated-but-structured summary is usable — it shrinks the context");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(r!.summary, "partial GOAL only", "the truncated text is kept verbatim");
 });
 
@@ -1252,7 +1264,7 @@ test("compactContext: refuses to call summarizer when fixed prompt exceeds the m
   assert.equal(r, undefined);
 });
 
-test("compactContext: aborted summary with partial text is rejected", async () => {
+test("compactContext: aborted summary with partial text → COMPACT_ABORTED (terminal, audit finding 3)", async () => {
   const ctx: AgentMessage[] = [user("q1"), assistantText("a1"), user("q2"), assistantText("a2")];
   const partial = assistantText("partial");
   const fn: StreamFn = async function* () {
@@ -1262,7 +1274,10 @@ test("compactContext: aborted summary with partial text is rejected", async () =
   const r = await compactContext({
     streamFn: fn, model: MODEL, signal: new AbortController().signal, context: ctx, force: true,
   });
-  assert.equal(r, undefined);
+  // The abort came from the STREAM (the caller's signal is NOT set), so
+  // `undefined` would be indistinguishable from a retryable failure — the
+  // sentinel is the only way for compactNow to learn the user cancelled.
+  assert.equal(r, COMPACT_ABORTED);
 });
 
 test("ruleBasedShrink: refuses a result that would grow the context", () => {
@@ -1312,6 +1327,7 @@ test("compactContext: the summarizer call uses the summarizer cap as its maxToke
   };
   const r = await compactContext({ streamFn: fn, model, signal: new AbortController().signal, context: ctx, force: true });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(seenMax, summarizerMaxTokens(model), "the summarizer call's maxTokens is the summarizer cap");
   assert.equal(seenMax, 2048, "2048 for a model with maxTokens 8000");
 });
@@ -1337,6 +1353,7 @@ test("compactContext: the keep plan reserves the summarizer cap (2048), not the 
     force: true,
   });
   assert.ok(r, "compaction happened");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(
     r!.kept.length, 493,
     "the keep walk keeps 493 units (the 2048 reservation), not 596 (the old 1024 reservation)",
@@ -1379,6 +1396,7 @@ test("compactContext: a failed prompt-fold attempt does NOT suppress the preserv
     strictFit: true,
   });
   assert.ok(r, "the preserving candidate survives a failed fold attempt");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.ok(r!.kept.includes(live), "the live prompt is preserved");
   assert.ok(!r!.fitsInputBudget, "honestly reported over budget — compactNow's own ladder (notice, then over-budget candidates) decides from here, not undefined (finding 2)");
 });
@@ -1404,7 +1422,89 @@ test("compactContext: a user abort during the fold attempt is terminal — no ca
     force: true,
     strictFit: true,
   });
-  assert.equal(r, undefined, "an abort during fold-after-demo is final — no candidate, no notice fallback");
+  assert.equal(r, COMPACT_ABORTED, "an abort during fold-after-demo is final — no candidate, no notice fallback");
+});
+
+// ── Audit findings 1-3 (2026-10-25 review): fold must buy the fit, and a
+// stream abort must be terminal at the compactNow boundary. ──────────────
+
+test("compactContext: a fold that does NOT buy the fit is thrown away — the preserving candidate survives (finding 2)", async () => {
+  // Geometry: budget = 4900 − 500 − 1024 = 3376. The preserving floor fits
+  // (live unit 2951 + tail 405 + wrapper ≈ 3366 ≤ B) but the first summary
+  // demonstrates the bust (2000 chars ≈ 500 tokens). The fold is attempted —
+  // and the scripted fold response RESPECTS the provider cap (its maxTokens
+  // is the headroom over the fold's kept tail, ≈ 663) while the chars/cpt
+  // estimate of that response still busts the budget (unit drift: the audit
+  // repro used 6 chars/token). Before the fix the capped fold replaced the
+  // preserving candidate and compactNow applied an over-budget, live-prompt-
+  // losing result. Now: a fold that does not buy the fit is DISCARDED.
+  const model: ModelConfig = { ...MODEL, contextWindow: 4900, maxTokens: 500 };
+  const live = user("u".repeat(11800));
+  const ctx: AgentMessage[] = [user("old"), assistantText("x".repeat(40000)), live, assistantText("w".repeat(1620))];
+  const foldSummary = "f".repeat(13000); // ≈2167 provider tokens (cap ~2960 is respected) while the chars/cpt ESTIMATE (3250) busts the fold's 2960 headroom — the unit-drift scenario
+  const fn = fakeStream([
+    { type: "text", text: "s".repeat(2000) }, // preserving attempt: busts → fold
+    { type: "text", text: foldSummary },       // fold attempt: caps, estimates over
+  ]);
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 5,
+    promptOverheadTokens: 0,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(r, "a candidate is produced");
+  if (r === COMPACT_ABORTED) throw new Error("not an abort");
+  assert.ok(r!.kept.includes(live), "the live prompt SURVIVES — the non-fitting fold did not replace the preserving candidate");
+  assert.match(r!.summary, /^s+$/, "the preserving summary is kept, not the discarded fold's summary");
+  assert.ok(!r!.fitsInputBudget, "honestly over budget — compactNow's notice rung owns the decision");
+});
+
+test("compactContext: a cap-ignoring fold response over budget is rejected — the live prompt survives via the notice rung (audit round 2, finding 1)", async () => {
+  // Direct fold rung (the preserving floor provably cannot fit): budget
+  // 5000 − 500 − 1024 = 3476; the live prompt (~3195 tok) + tail (~405) +
+  // wrapper + 500 overhead bust any preserving candidate, and even the real
+  // rule-based notice does not fit — so the fold is selected as the SINGLE
+  // call. The scripted response IGNORES the provider cap (the cap rides on
+  // the summarizer model's maxTokens; compat.extraParams can override it or
+  // the endpoint can ignore it): 12000 chars ≈ 3916 est tokens > budget.
+  // A fold that does not buy the fit discards the live prompt for nothing,
+  // so the candidate is REJECTED (undefined) — compactNow's ladder then
+  // applies its notice rung, which keeps the live prompt verbatim. Before
+  // the round-2 guard this returned the over-budget, prompt-losing fold.
+  const model: ModelConfig = { ...MODEL, contextWindow: 5000, maxTokens: 500 };
+  const live = user("u".repeat(12780));
+  const ctx: AgentMessage[] = [user("old"), assistantText("x".repeat(40000)), live, assistantText("w".repeat(1620))];
+  const busting = fakeStream([{ type: "text", text: "S".repeat(12000) }]);
+  const rOver = await compactContext({
+    streamFn: busting,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 500,
+    force: true,
+    strictFit: true,
+  });
+  assert.equal(rOver, undefined, "the over-budget direct fold is rejected — nothing prompt-losing is returned");
+  // The guard is a budget guard, not a fold ban: the same geometry with a
+  // summary that actually fits is adopted (live prompt carried by summary).
+  const fitting = fakeStream([{ type: "text", text: "goal carried" }]);
+  const rFit = await compactContext({
+    streamFn: fitting,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    promptOverheadTokens: 500,
+    force: true,
+    strictFit: true,
+  });
+  assert.ok(rFit, "a fold that buys the fit is still adopted");
+  if (rFit === COMPACT_ABORTED) throw new Error("not an abort");
+  assert.ok(rFit!.estimatedTokensAfter <= rFit!.requestBudget, "the adopted fold fits");
+  assert.ok(!rFit!.kept.includes(live), "the fitting fold still folds the oversized live prompt");
 });
 
 test("compactContext: the fold rung caps the summarizer at the headroom over its kept tail (finding 1)", async () => {
@@ -1437,6 +1537,7 @@ test("compactContext: the fold rung caps the summarizer at the headroom over its
     strictFit: true,
   });
   assert.ok(r, "a candidate is produced");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
   assert.equal(models.length, 1, "the fold runs as the single summarizer call (floor busts immediately)");
   assert.equal(models[0]!.maxTokens, 663, "the fold call's max_tokens is exactly the headroom over its kept tail, not the uncapped 2048");
   assert.ok(r!.fitsInputBudget, "the capped fold candidate fits the request budget");

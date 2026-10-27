@@ -7,7 +7,7 @@
  * pure functions at the bottom (char / backspace / history / submit /
  * approval) — the keybinding table itself lives in app.tsx.
  */
-import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, type AgentEvent, type AgentMessage, type ModelConfig, type ProgressKind, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, loopStopNote, type AgentEvent, type AgentMessage, type ModelConfig, type ProgressKind, type SubtaskInfo, type Usage, type WorkerStatus } from "../types.js";
 import { DEFAULT_COMPACTION_RESERVE, SUMMARY_MARKER, estimateMessageTokens } from "../context/compact.js";
 import { renderEditDiff } from "./diff.js";
 import { itemLines } from "./lines.js";
@@ -555,16 +555,17 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             : "turns";
         items = [...items, { kind: "error", text: `budget: ${cap} reached — send another prompt to continue` }];
       } else if (ev.stopReason === "loop") {
-        // C26: runaway-loop detection (3 identical batches in a row). The
-        // third repeat was NOT executed; a new prompt breaks the pattern.
-        // D33: with evidence the line names the trigger (which batch
-        // repeated); without (older producers) it stays the static string.
+        // C26 loop-v2 (audit re-fix 2026-11-02): evidence-driven headline —
+        // the old hard-coded "3 times in a row" lied for cycle stops
+        // (alternating pattern) and the 12-batch caps. The refused repeat
+        // was NOT executed; a new prompt breaks the pattern.
         items = [
           ...items,
           {
             kind: "error",
             text:
-              "loop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop — send another prompt to continue" +
+              loopStopNote(ev.evidence) +
+              " — send another prompt to continue" +
               (ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""),
           },
         ];
@@ -651,9 +652,13 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         ],
       };
     case "guard_retry":
-      // The loop guard (same batch 3×) fired; the run auto-retries once with
-      // an approach-changing nudge instead of stopping. Informational — the
+      // The loop guard fired (a repeated batch — identical 3× or an
+      // alternating cycle pattern); the run auto-retries once with an
+      // approach-changing nudge instead of stopping. Informational — the
       // run keeps going (the model must pick a different action).
+      // loop-v2 (audit re-fix 2026-11-02): the text names the pattern that
+      // fired — the old "3× in a row" lied for cycle fires (and legacy
+      // producers without `reason` get the neutral phrasing).
       // F2: count the fire (session total) and mark the current run as
       // having fired (per-run; the recovery is decided at agent_end).
       // `fired` is per-RUN: a run that fires N retries counts once (the
@@ -666,7 +671,13 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           ...state.items,
           {
             kind: "info",
-            text: `loop guard fired (same tool call 3× in a row) — retrying with a changed approach (retry ${ev.retry}/${ev.maxRetries})`,
+            text:
+              (ev.reason === "cycle"
+                ? "loop guard fired (two tool calls alternating 3×) — retrying with a changed approach"
+                : ev.reason === "identical"
+                  ? "loop guard fired (same tool call 3× in a row) — retrying with a changed approach"
+                  : "loop guard fired (repeated tool-call batch) — retrying with a changed approach") +
+              ` (retry ${ev.retry}/${ev.maxRetries})`,
           },
         ],
         guardRetry: {

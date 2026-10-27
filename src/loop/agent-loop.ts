@@ -294,6 +294,106 @@ export function batchSignature(calls: ToolCallBlock[]): string {
   return calls.map((c) => `${c.name}:${stableJson(c.arguments)}`).join("\u0000");
 }
 
+// ─────────────────────── audit fix 2026-10-31: loop detection v2 ────────────
+// The v1 detector compared batch SIGNATURES only, which had two failure
+// modes found in the 2026-10-31 audit:
+//
+//  1. ALTERNATING loops evade it. `A → B → A → B → …` never puts three
+//     IDENTICAL batches in a row, so a model ping-ponging between two
+//     stuck actions ran until the turn budget. The cycle guard below
+//     catches the same pattern at period 2: the last four executed
+//     batches are [X, Y, X, Y] and the model is issuing the third
+//     occurrence of X (CYCLE_MIN_HISTORY + current = 5 batches = 2.5
+//     cycles; the run stops BEFORE executing the 5th, exactly as the
+//     identical guard stops before the 3rd repeat).
+//
+//  2. Repeats with CHANGING results are progress, not loops. Polling a
+//     file/status that keeps changing is the same batch every turn, and
+//     v1 stopped it as a runaway even though every call returned NEW
+//     information. Both guards still STOP fresh-result repeats but only
+//     at the hard caps (POLL_CAP / CYCLE_CAP: bounded churn that never
+//     acts on the information); before the caps, fresh results are
+//     allowed to keep running. Repeats whose results STOPPED changing
+//     (stable digests across the compared batches) stop early (3rd
+//     identical / 3rd cycle of the current position).
+//
+// The result of a batch is the digest of its per-call results
+// (resultEntryDigest: JSON error-flag + text, JSON-encoded per call and
+// per batch so arbitrary text can never collide) plus a SEPARATE failure
+// flag (any call isError or synthetic in-band) — result text is never
+// parsed for failure. Synthetic in-band fills (length guard, unknown
+// tool) record the constant synthetic digest; a repeat of the same fill
+// is as stuck as a repeat of the same failure.
+
+/** Audit fix — the minimum executed-batch history the cycle guard
+ *  compares (the four batches [X, Y, X, Y] before the current one). */
+export const CYCLE_MIN_HISTORY = 4;
+/** Audit fix — the cycle guard's pattern length (period 2: alternating). */
+export const CYCLE_PATTERN_LEN = 2;
+/** Audit fix — the hard repeat caps: even a repeat whose results keep
+ *  arriving FRESH is stopped once it runs this many batches in a row
+ *  (identical POLL_CAP; strict alternation CYCLE_CAP). Generous enough
+ *  that no legitimate poll/retry discipline hits it, small enough that
+ *  bounded-churn loops die without waiting for the (huge) turn budget.
+ *  The batch history keeps this many records. */
+export const POLL_CAP = 12;
+export const CYCLE_CAP = 12;
+/** Audit fix — how many executed batches the loop remembers (the longest
+ *  window any guard rule reads). */
+export const LOOP_HISTORY_DEPTH = Math.max(POLL_CAP, CYCLE_CAP, CYCLE_MIN_HISTORY);
+
+/**
+ * The cycle guard's in-band answers (the alternating-pattern repeat, never
+ * executed). Same "not executed" contract as LOOP_GUARD_TEXT (I3: every
+ * call gets a result). STABLE means the pattern's results stopped changing
+ * (stuck loop); EXHAUSTED means the pattern kept arriving fresh and hit the
+ * hard cap (bounded churn that never acts on the information).
+ */
+export const CYCLE_GUARD_TEXT =
+  "Runaway loop detected: the same two tool-call batches have been issued " +
+  "alternately (X, Y, X, Y, X …) with unchanged results. This repeat was " +
+  "not executed. Change your approach — re-read the latest results, pick a "
+  + "different action, or finish with a text-only response explaining the " +
+  "situation.";
+export const CYCLE_CAP_GUARD_TEXT =
+  `Runaway loop detected: the same two tool-call batches have been issued ` +
+  `alternately (X, Y, X, Y, X …) ${CYCLE_CAP} times. Repeating is bounded: ` +
+  `this repeat was not executed. Act on the information already gathered, ` +
+  `pick a different action, or finish with a text-only response explaining ` +
+  `the situation.`;
+
+/** Cap-exhausted in-band answer for the identical-batch poll cap. */
+export const LOOP_CAP_GUARD_TEXT =
+  `Runaway loop detected: the same tool call(s) were issued ${POLL_CAP} ` +
+  `times in a row. Repeating is bounded: this repeat was not executed. Act ` +
+  `on the information already gathered, pick a different action, or finish ` +
+  `with a text-only response explaining the situation.`;
+
+
+
+/** Digest of one executed call's result. Each content block is encoded as
+ *  its OWN JSON element ([type, text] / [type]) and the whole structure
+ *  (isError flag + block array) is JSON-encoded in one step — no raw
+ *  joins anywhere, so block boundaries survive even when block text
+ *  contains separators, NULs, or JSON syntax (audit re-fix 2026-11-02:
+ *  the previous version joined texts with \u0000 BEFORE encoding, so
+ *  ["a","b"] and ["a\u0000b"] still digested identically). */
+function resultEntryDigest(entry: {
+  result: ToolResult;
+  isError: boolean;
+}): string {
+  const blocks = (entry.result.content ?? []).map(
+    (b): [string, string?] =>
+      b.type === "text" ? ["t", b.text] : [b.type],
+  );
+  return JSON.stringify([entry.isError, blocks]);
+}
+
+/** Digest of a SYNTHETIC in-band fill (length guard, unknown tool): the
+ *  text is a constant, so a repeated guarded batch is by definition a
+ *  repeat with no new information — the same fill digest every time. */
+const SYNTHETIC_FILL_DIGEST = "S:in-band-fill";
+
 // ───────────────────────────────────────────────────────────────────────────
 // F1 — progress detection (docs/08 §9, D32). The act–measure–act guards:
 // thrashing that never repeats byte-identically (C26 misses), never hits a
@@ -350,20 +450,31 @@ export function progressTargetOf(call: ToolCallBlock): string | undefined {
 }
 
 /** Deep JSON.stringify with sorted object keys (argument identity that
- *  does not depend on key order). */
+ *  does not depend on key order).
+ *
+ *  Audit fix (2026-10-30): builds the JSON string DIRECTLY instead of
+ *  rebuilding an object tree. The previous version assigned keys into a
+ *  `{}` literal, so an argument object containing a JSON `__proto__` key
+ *  (which `JSON.parse` produces as an OWN property) did not create a data
+ *  key — it changed the temp object's prototype, the key vanished from the
+ *  serialization, and two DIFFERENT argument objects (differing only under
+ *  `__proto__`) got identical signatures. Emitting the string per key
+ *  (keys sorted, `JSON.stringify` for both keys and scalar values) has no
+ *  prototype to clobber: `{"__proto__":…}` serializes like any other key.
+ */
 function stableJson(value: unknown): string {
-  const sort = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(sort);
+  const sort = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(sort).join(",")}]`;
     if (v !== null && typeof v === "object") {
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-        out[k] = sort((v as Record<string, unknown>)[k]);
-      }
-      return out;
+      const obj = v as Record<string, unknown>;
+      const keys = Object.keys(obj).sort();
+      return `{${keys
+        .map((k) => `${JSON.stringify(k)}:${sort(obj[k])}`)
+        .join(",")}}`;
     }
-    return v;
+    return JSON.stringify(v) ?? String(v);
   };
-  return JSON.stringify(sort(value));
+  return sort(value);
 }
 
 function resultMessage(
@@ -426,8 +537,26 @@ export async function* runLoop(
       ? options.maxGuardRetries
       : DEFAULT_MAX_GUARD_RETRIES;
   let guardRetries = 0;
-  // C26 — loop detection: signatures of the last two issued batches.
-  let sigHistory: string[] = [];
+  // Loop detection (audit 2026-10-31 v2): the last up-to-LOOP_HISTORY_DEPTH
+  // EXECUTED batches, each as a record with the batch signature, an
+  // unambiguous JSON digest of its results, and whether any call failed.
+  // The identical guard fires when a repeat stops bringing new information
+  // (stable results); the cycle guard catches period-2 alternation
+  // (X,Y,X,Y,X …) the same way. See the "loop detection v2" section above.
+  let batchHistory: { sig: string; digest: string; failed: boolean }[] = [];
+
+  /** Push one completed batch (signature + result digest + failure flag),
+   *  keeping the last LOOP_HISTORY_DEPTH records. */
+  const pushHistory = (
+    sig: string,
+    digest: string,
+    failed: boolean,
+  ): void => {
+    batchHistory = [
+      ...batchHistory.slice(-(LOOP_HISTORY_DEPTH - 1)),
+      { sig, digest, failed },
+    ];
+  };
 
   // F1 (docs/08 §9, D32) — per-run no-progress state (act–measure–act).
   // Nothing here is persisted; the nudge rides the context only (like the
@@ -462,7 +591,7 @@ export async function* runLoop(
    * identity). Returns true when at least one steer was delivered.
    *
    * D27 Finding 2: a delivery RESETS the identical-batch loop guard
-   * (`sigHistory`) — fresh user input can make a previously-repeated action
+   * (`batchHistory`) — fresh user input can make a previously-repeated action
    * legitimate ("I changed a externally; read it again"). The per-cycle turn
    * budget is NOT reset (that counter is the runaway guard, not the loop
    * detector).
@@ -480,7 +609,7 @@ export async function* runLoop(
     if (pending.length > 0) {
       // D27 Finding 2 — external guidance makes a repeated batch legitimate
       // again; clear the consecutive-batch history (not the turn budget).
-      sigHistory = [];
+      batchHistory = [];
       // F1 (docs/08 §9): the same rule for variant B — fresh user input can
       // legitimize failing attempts (the guidance may explain the wall), so
       // the no-success streak and its episode state reset too.
@@ -753,17 +882,114 @@ export async function* runLoop(
       break; // normal stop — or length with the nudge already spent
     }
 
-    // C26 loop detection: the same batch 3× in a row is a runaway loop.
-    // The third repeat is failed in-band (I3: every call still gets a
-    // result) and NOT executed, then the run stops with stopReason "loop".
+    // C26 loop detection (audit v2, 2026-10-31): STABLE repeats (results
+    // stopped changing) stop early (3rd identical / 3rd cycle of the
+    // current position); FRESH-result repeats are bounded by the hard caps
+    // (POLL_CAP / CYCLE_CAP batches of the same pattern). The current
+    // batch is failed in-band (I3: every call still gets a result) and
+    // NOT executed; the run then stops with stopReason "loop" (after the
+    // bounded H5 auto-retry below). Cap stops get their own in-band text
+    // (LOOP_CAP_GUARD_TEXT / CYCLE_CAP_GUARD_TEXT) so the model is told the
+    // true reason (bounded polling), not a false "3 in a row" / "unchanged
+    // results". See "loop detection v2" above.
+    //
+    // Cycle-rule exemption (same audit): a pattern containing a FAILED
+    // batch is exempt from the STABLE cycle rule — repeated failures are
+    // the H2 retry-stall / permission-stall guards' domain (they annotate
+    // the 3rd failure in place and stop with "stall", carrying richer
+    // evidence); a plain-identical failing batch still trips the identical
+    // rule below, exactly as before v2.
     const signature = batchSignature(calls);
     {
-      const n = sigHistory.length;
-      if (
+      const n = batchHistory.length;
+      // Stable-result identical repeat: the last two executed batches ARE
+      // this batch and their results were identical — the repeat stopped
+      // bringing new information. (Unchanged from the C26 contract: this
+      // fires on failed repeats too — the guard precedes execution, so it
+      // deliberately never lets the pipeline see a 3rd identical batch.)
+      const identicalStable =
         n >= 2 &&
-        sigHistory[n - 1] === signature &&
-        sigHistory[n - 2] === signature
-      ) {
+        batchHistory[n - 1]!.sig === signature &&
+        batchHistory[n - 2]!.sig === signature &&
+        batchHistory[n - 1]!.digest === batchHistory[n - 2]!.digest;
+      // Fresh-result cap: even when every repeat brought NEW results,
+      // POLL_CAP identical batches in a row is bounded stopping — a model
+      // polling forever never acts on the information. Only when the latest
+      // digests are NOT stable (otherwise the stable rule already caught it).
+      const identicalCapped =
+        POLL_CAP > 2 &&
+        n >= POLL_CAP - 1 &&
+        !identicalStable &&
+        batchHistory.slice(n - (POLL_CAP - 1)).every((b) => b.sig === signature);
+      // Stable-result alternation: [X, Y, X, Y] executed (X ≠ Y) and the
+      // current batch is the third X — and each position's results repeat
+      // across cycles (dX1 === dX2, dY1 === dY2).
+      const alternatingStable =
+        n >= CYCLE_MIN_HISTORY &&
+        (() => {
+          const h = batchHistory;
+          const X = h[n - 4]!;
+          const Y = h[n - 3]!;
+          return (
+            X.sig !== Y.sig &&
+            h[n - 2]!.sig === X.sig &&
+            h[n - 1]!.sig === Y.sig &&
+            signature === X.sig &&
+            h[n - 2]!.digest === X.digest &&
+            h[n - 1]!.digest === Y.digest &&
+            !X.failed &&
+            !Y.failed
+          );
+        })();
+      // Fresh-result alternation cap: 11 executed batches strictly
+      // alternating X,Y (any results) and the current one continues the
+      // pattern (the 12th) — alternating polling is bounded too. Only when
+      // the stable rule did not already catch this turn (its results would
+      // have to be fresh per position).
+      const alternatingCapped =
+        n >= CYCLE_CAP - 1 &&
+        !alternatingStable &&
+        (() => {
+          const h = batchHistory.slice(n - (CYCLE_CAP - 1));
+          if (h[0]!.sig === h[1]!.sig) return false;
+          for (let i = 2; i < h.length; i++) if (h[i]!.sig !== h[i - 2]!.sig) return false;
+          return signature === h[h.length - 2]!.sig;
+        })();
+      const cycleFired = alternatingStable || alternatingCapped;
+      const capFired = identicalCapped || alternatingCapped;
+      const fired = identicalStable || identicalCapped || cycleFired;
+      if (fired) {
+        const guardText = alternatingStable
+          ? CYCLE_GUARD_TEXT
+          : alternatingCapped
+            ? CYCLE_CAP_GUARD_TEXT
+            : identicalCapped
+              ? LOOP_CAP_GUARD_TEXT
+              : LOOP_GUARD_TEXT;
+        // ONE counting unit everywhere: repeats = batches ISSUED in the
+        // pattern including the refused one (identical-stable 3;
+        // alternating-stable CYCLE_MIN_HISTORY + 1; caps POLL_CAP /
+        // CYCLE_CAP).
+        const repeats = alternatingStable
+          ? CYCLE_MIN_HISTORY + 1
+          : alternatingCapped
+            ? CYCLE_CAP
+            : identicalStable
+              ? 3
+              : POLL_CAP;
+        // WHY a cap fired when "results stopped changing" is not the truth:
+        // capReason failed = the capped repeats were early-exiting failures
+        // (exempt from the STABLE rules; the stall guards own them); fresh
+        // = at least some repeats succeeded (a live poll that never acts).
+        // Window = the fired guard's own pattern length (the constants may
+        // diverge one day).
+        const capReason: "fresh" | "failed" | undefined = capFired
+          ? batchHistory
+              .slice(n - ((alternatingCapped ? CYCLE_CAP : POLL_CAP) - 1))
+              .every((b) => b.failed)
+            ? "failed"
+            : "fresh"
+          : undefined;
         for (const call of calls) {
           yield { type: "tool_execution_start", toolCall: call };
         }
@@ -771,7 +997,7 @@ export async function* runLoop(
           const msg = resultMessage(
             call,
             {
-              content: [{ type: "text", text: LOOP_GUARD_TEXT }],
+              content: [{ type: "text", text: guardText }],
               // F1 (docs/08 §9): synthetic in-band fill — the call never
               // ran, so it is not ground contact for A3's bash reset
               // either (a guarded `bash` must not look like a measurement).
@@ -787,12 +1013,13 @@ export async function* runLoop(
         // restores the old hard stop). The in-band error results above are
         // already in context, so the model sees exactly what was not executed
         // and why; the nudge tells it to pick a DIFFERENT action (not "keep
-        // going" — that would just re-fire the guard). Resetting sigHistory
-        // gives the model a fresh 3-attempt window; the turn budget still
-        // bounds the run, so a genuinely stuck model still terminates.
+        // going" — that would just re-fire the guard). Clearing the batch
+        // history gives the model a fresh window (both rules); the turn
+        // budget still bounds the run, so a genuinely stuck model still
+        // terminates.
         if (guardRetries < maxGuardRetries) {
           guardRetries += 1;
-          sigHistory = [];
+          batchHistory = [];
           context.push({
             role: "user",
             content: GUARD_RETRY_TEXT,
@@ -803,22 +1030,48 @@ export async function* runLoop(
             turn,
             retry: guardRetries,
             maxRetries: maxGuardRetries,
+            // Which pattern fired (audit re-fix 2026-11-02): the transcript
+            // must not claim "3× in a row" when an alternating cycle fired.
+            reason: cycleFired ? "cycle" : "identical",
           };
           continue; // the nudge consumes no turn (it is not an LLM call)
         }
         stopReason = "loop";
-        // D33: name the trigger. `signature` + `guardRetries` are already
-        // in scope at the stop site — the evidence rides out on agent_end.
-        guardEvidence = {
-          guard: "identical-batch",
-          signature,
-          repeats: 3,
-          guardRetries,
-        };
+        // D33: name the trigger. The batch/pattern + `guardRetries` are
+        // already in scope at the stop site — the evidence rides out on
+        // agent_end. The cycle guard reports the pattern's two signatures;
+        // the identical guard, the repeated batch (unchanged shape).
+        // `repeats` = issued batches in the pattern including the refused
+        // one (one counting unit for both guards); `stable` distinguishes
+        // stuck from cap stops; `capReason` explains cap stops honestly
+        // ("failed" repeats are not "changing results").
+        guardEvidence = cycleFired
+          ? {
+              guard: "cycle-batch",
+              signature: batchHistory.length >= 2
+                ? `${batchHistory[n - 1]!.sig}\u0001${signature}`
+                : signature,
+              cycleLength: CYCLE_PATTERN_LEN,
+              repeats,
+              stable: !capFired,
+              ...(capReason !== undefined ? { capReason } : {}),
+              guardRetries,
+            }
+          : {
+              guard: "identical-batch",
+              signature,
+              repeats,
+              stable: !capFired,
+              ...(capReason !== undefined ? { capReason } : {}),
+              guardRetries,
+            };
         break;
       }
     }
-    sigHistory = [...sigHistory.slice(-1), signature];
+    // Not executed by a guard: the batch runs below and is recorded WITH
+    // its result digest once execution completes (see the results loop
+    // after `runOne`). The length guard records SYNTHETIC_FILL_DIGEST
+    // above; there is no other path between here and the results loop.
 
     // §4.1 guard: truncated args may parse yet be incomplete — never execute.
     if (message.stopReason === "length") {
@@ -840,6 +1093,10 @@ export async function* runLoop(
         context.push(msg);
         yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
       }
+      // Audit v2: a length-guarded batch never ran and its fill text is a
+      // constant — record the synthetic digest so the SAME truncated batch
+      // repeating still trips the guard (3rd stable repeat).
+      pushHistory(signature, JSON.stringify([SYNTHETIC_FILL_DIGEST]), false);
       continue; // the model re-issues on the next turn
     }
 
@@ -907,6 +1164,7 @@ export async function* runLoop(
     // Results (and their end events) always land in call order.
     let allTerminate = true;
     let stalled = false;
+    const digestParts: { digest: string; failure: boolean }[] = [];
     for (const call of calls) {
       const entry = results.get(call.id);
       const msg = resultMessage(
@@ -914,6 +1172,17 @@ export async function* runLoop(
         entry?.result ?? { content: [{ type: "text", text: "(no result)" }] },
         entry?.isError ?? true,
       );
+      digestParts.push({
+        digest: resultEntryDigest(
+          entry ?? {
+            result: { content: [{ type: "text", text: "(no result)" }] },
+            isError: true,
+          },
+        ),
+        failure:
+          entry !== undefined &&
+          (entry.isError || entry.result.details?.notExecuted === true),
+      });
       context.push(msg);
       for (const text of updates.get(call.id) ?? []) {
         yield { type: "tool_execution_update", toolCallId: call.id, text };
@@ -941,6 +1210,17 @@ export async function* runLoop(
         }
       }
     }
+    // Audit v2: record this executed batch (signature + result digest +
+    // failure flag) for the loop/cycle guards. Digest parts are in call
+    // order, matching the signature; JSON-encoded so block-boundary text
+    // cannot collide. A batch is "failed" when any call errored OR was
+    // answered synthetically in-band (unknown tool / I3 throw — never
+    // executed): the cycle rule exempts those (the stall guards' domain).
+    pushHistory(
+      signature,
+      JSON.stringify(digestParts.map((part) => part.digest)),
+      digestParts.some((part) => part.failure),
+    );
     if (stalled) {
       stopReason = "stall";
       break;

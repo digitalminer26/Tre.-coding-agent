@@ -197,8 +197,42 @@ export type GuardEvidence =
       guard: "identical-batch";
       /** batchSignature() output of the repeated batch. */
       signature: string;
-      /** The guard's repeat threshold (3). */
+      /** Total batches ISSUED in the pattern including the refused one:
+       *  3 for a stuck (stable-result) repeat, POLL_CAP when fresh-result
+       *  polling hit the hard cap. */
       repeats: number;
+      /** true = the repeats stopped bringing new results (stuck loop);
+       *  false = the run was stopped only by the polling cap (results may
+       *  still have been changing — see `capReason`). */
+      stable: boolean;
+      /** Cap stops only (stable false, optional on old sessions): WHY the
+       *  cap fired when "results stopped changing" is not the whole truth —
+       *  fresh = every repeat brought new results; failed = the repeats
+       *  were failing early exits (the stall guards' domain). */
+      capReason?: "fresh" | "failed";
+      /** H5 auto-retries spent before the stop (0 = legacy hard stop). */
+      guardRetries: number;
+    }
+  | {
+      /** C26 cycle guard (audit 2026-10-31) → stopReason "loop": the same
+       *  ALTERNATING 2-batch pattern issued repeatedly. When `stable`, the
+       *  pattern's results repeated too (no new information); otherwise the
+       *  run hit the CYCLE_CAP alternation cap. */
+      guard: "cycle-batch";
+      /** The two batch signatures of the repeating pattern, joined with
+       *  \u0001 (each batch signature joins its calls with \u0000). */
+      signature: string;
+      /** The pattern's cycle length (always 2 today). */
+      cycleLength: number;
+      /** Total batches ISSUED in the pattern including the refused one
+       *  (5 for the stable stop [X, Y, X, Y, X]; CYCLE_CAP at the cap).
+       *  Counting unit shared with identical-batch `repeats` — one unit,
+       *  issued batches, everywhere. */
+      repeats: number;
+      /** true = stable (stuck) stop; false = cap-exhaustion stop. */
+      stable: boolean;
+      /** Cap stops only (see the identical-batch variant). */
+      capReason?: "fresh" | "failed";
       /** H5 auto-retries spent before the stop (0 = legacy hard stop). */
       guardRetries: number;
     }
@@ -298,6 +332,11 @@ export type AgentEvent =
       retry: number;
       /** Total autonomous retries allowed before the run stops. */
       maxRetries: number;
+      /** loop-v2 (audit re-fix 2026-11-02): WHICH pattern fired, so the
+       *  transcript line never claims "3× in a row" for an alternating
+       *  cycle fire. Optional: producers from before loop-v2 omit it and
+       *  the display falls back to the generic "repeated batch". */
+      reason?: "identical" | "cycle";
     }
   | {
       /**
@@ -388,19 +427,50 @@ export function lengthEndNote(messages: AgentMessage[]): string {
 /** D33 (docs/08 §10) — the display's one-line evidence summary, shared by
  *  the TUI error item and the CLI stderr stop line: loop → the repeated
  *  batch's first line (tool + truncated args); stall → tool + count/window
- *  + the error excerpt. Each part is clamped so the whole line stays one
- *  terminal-friendly line (~160 chars max). Exported for tests. */
+ *  + the error excerpt. The signature part is hard-clamped to ~110 chars;
+ *  with the static affixes the whole line stays within one terminal line
+ *  for realistic triggers (~180 chars max). Exported for tests. */
 export function guardEvidenceNote(evidence: GuardEvidence): string {
   const clip = (s: string, max: number): string =>
     s.length > max ? `${s.slice(0, Math.max(0, max - 1))}…` : s;
   if (evidence.guard === "identical-batch") {
     // batchSignature joins calls with \u0000; "name:json" may itself embed
     // newlines (string args). Show the FIRST call, flattened to one line.
+    // `repeats` = batches issued incl. the refused one (3 stable, POLL_CAP
+    // capped); the suffix says which — cap never claims "changing results"
+    // (failed repeats digest as constant too), and legacy evidence without
+    // `stable` (pre-loop-v2 sessions) makes no results claim either.
     const firstCall = (evidence.signature.split("\u0000", 1)[0] ?? "").replace(
       /[\n\r]+/g,
       " ",
     );
-    return `trigger: ${clip(firstCall, 110)} (×${evidence.repeats} in a row${
+    const mode =
+      evidence.stable === true
+        ? `×${evidence.repeats} identical, same results`
+        : evidence.stable === false
+          ? `stopped at the ${evidence.repeats}-repeat cap`
+          : `×${evidence.repeats} identical`;
+    return `trigger: ${clip(firstCall, 110)} (${mode}${
+      evidence.guardRetries > 0 ? `, after ${evidence.guardRetries} auto-retr${evidence.guardRetries > 1 ? "ies" : "y"}` : ""
+    })`;
+  }
+  if (evidence.guard === "cycle-batch") {
+    // The cycle guard's signature is the pattern's batches joined with
+    // \u0001 (each batch signature joins its calls with \u0000): show the
+    // first call of each pattern position, one flattened line. Same
+    // counting unit as identical-batch: `repeats` = batches issued incl.
+    // the refused one (5 stable, CYCLE_CAP capped).
+    const parts = evidence.signature.split("\u0001");
+    const shown = parts
+      .map((p) => (p.split("\u0000", 1)[0] ?? "").replace(/[\n\r]+/g, " "))
+      .map((p) => clip(p, 60));
+    const mode =
+      evidence.stable === true
+        ? `alternating ×${evidence.repeats} batches, same results`
+        : evidence.stable === false
+          ? `stopped at the ${evidence.repeats}-alternating-batch cap`
+          : `alternating ×${evidence.repeats} batches`;
+    return `trigger: ${shown.join(" ⇄ ")} (${mode}${
       evidence.guardRetries > 0 ? `, after ${evidence.guardRetries} auto-retr${evidence.guardRetries > 1 ? "ies" : "y"}` : ""
     })`;
   }
@@ -411,6 +481,50 @@ export function guardEvidenceNote(evidence: GuardEvidence): string {
   return `trigger: ${clip(evidence.tool, 30)} failed ${count}${
     evidence.errorExcerpt !== "" ? ` — ${clip(evidence.errorExcerpt, 90)}` : ""
   }`;
+}
+
+/** C26 loop-v2 (audit re-fix 2026-11-02) — the evidence-driven loop-stop
+ *  headline, shared by the CLI banner and the TUI notice. The old
+ *  hard-coded "repeated the same tool call(s) 3 times in a row" lied for
+ *  cycle stops (an ALTERNATING pattern) and cap stops (12 issued batches,
+ *  results possibly still changing — or failing, which digests as
+ *  constant). `repeats` is one counting unit everywhere: batches ISSUED
+ *  in the pattern including the refused one. Three-way phrasing, never
+ *  over-claiming: stable → results stopped changing; cap (stable false) →
+ *  repeating is bounded, no claim about results (fresh polls AND failed
+ *  repeats digest the same way — the stall guards own failures); legacy
+ *  evidence without `stable` (pre-evidence sessions) → generic phrasing. */
+export function loopStopNote(evidence?: GuardEvidence): string {
+  // Restrict to the loop guard variants (stall evidence never reaches this
+  // display path, and only these variants carry stable/guardRetries).
+  const loopEv =
+    evidence?.guard === "identical-batch" || evidence?.guard === "cycle-batch"
+      ? evidence
+      : undefined;
+  const isCycle = loopEv?.guard === "cycle-batch";
+  const pattern = isCycle
+    ? "the same two tool-call batches alternated"
+    : "the model repeated the same tool call(s)";
+  const count = loopEv
+    ? `${loopEv.repeats} times${isCycle ? " (X, Y, X, Y, X …)" : " in a row"}`
+    : "the same tool call(s) repeatedly";
+  const retry =
+    loopEv !== undefined && loopEv.guardRetries > 0
+      ? ` after ${loopEv.guardRetries} auto-retr${loopEv.guardRetries === 1 ? "y" : "ies"}`
+      : "";
+  if (loopEv?.stable === true) {
+    return `loop: ${pattern} ${count} with no change in results — stopped to avoid a runaway loop${retry} (the repeat was not executed)`;
+  }
+  if (loopEv !== undefined && loopEv.stable === false) {
+    // Honest cap phrasing: never "changing results" — see the union docs.
+    return `loop: ${pattern} ${count} without progress — repeating is bounded, so the loop stopped${retry} (this repeat was not executed)`;
+  }
+  // Legacy evidence without `stable` (pre-loop-v2 sessions): the count is
+  // known but no claim about results either way.
+  if (loopEv !== undefined) {
+    return `loop: ${pattern} ${count} — stopped to avoid a runaway loop${retry} (the repeat was not executed)`;
+  }
+  return `loop: ${pattern} — stopped to avoid a runaway loop (the repeat was not executed)`;
 }
 
 // ─────────────────── 3. The loop's two dependencies ───────────────────
@@ -520,6 +634,16 @@ export interface ModelCompat {
   promptCaching?: boolean;
   /** Merged verbatim into every request body (e.g. enable_thinking). */
   extraParams?: Record<string, unknown>;
+  /**
+   * true → the wire layer repairs llama.cpp's leaked Qwen chat-template
+   * closing markers (`</parameter>`, `</function>`, `</tool_call>`) in streamed
+   * tool-call argument JSON. Off by DEFAULT: valid JSON arguments are
+   * applied VERBATIM, because a string value legitimately ending in one of
+   * those tags (a file write, an edit target, an XML fixture) is
+   * indistinguishable from a leak without the endpoint's cooperation. Only
+   * set this on endpoints known to leak (the lab's Qwen llama.cpp servers).
+   */
+  repairsLeakedToolProtocol?: boolean;
 }
 
 export interface ModelConfig {

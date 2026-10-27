@@ -56,7 +56,15 @@ Rules:
   the run stop with `budget`. Independently, the same tool-call batch
   (tool names + stable-JSON arguments, in order) issued 3 times in a row
   is a runaway-loop signature: the third repeat is failed in-band with
-  `LOOP_GUARD_TEXT` (never executed). Before stopping, the loop AUTO-RETRIES
+  `LOOP_GUARD_TEXT` (never executed). Since the 2026-10-31 audit (loop
+  detection v2, docs/08) the guard is RESULT-AWARE and PATTERN-aware: a
+  repeat whose results keep arriving fresh is progress, not a loop — it is
+  only capped at `POLL_CAP` (12) identical batches / `CYCLE_CAP` (12)
+  strictly-alternating batches; a stable-period-2 ALTERNATION (X,Y,X,Y,X…
+  with unchanged per-position results) trips a `cycle-batch` guard with
+  `CYCLE_GUARD_TEXT` (evidence variant `cycle-batch`); and failed repeats
+  stay exempt from the cycle rule (the stall guards' domain). Two identical
+  batches remain allowed (legit retries exist). Before stopping, the loop AUTO-RETRIES
   ONCE with an approach-changing nudge (`GUARD_RETRY_TEXT`, emitting the
   `guard_retry` event; bounded by `maxGuardRetries`, default 1 — see
   `docs/08-loop-hardening.md` H5): the identical-batch history is reset for
@@ -297,7 +305,7 @@ Invariants:
 | `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars`; `contextTokens?`, `degraded?` (fallback shrink, docs/06 D), `overBudget?` (strict reduction still over budget — kept anyway) |
 | `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
-| `guard_retry`             | the loop guard (same batch 3×) fired; the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries` |
+| `guard_retry`             | the loop guard fired (a repeated batch — identical 3× or an alternating cycle); the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries`, `reason?` (`"identical"` \| `"cycle"` — loop-v2; absent on older producers) |
 | `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
@@ -306,23 +314,39 @@ Invariants:
 A guard stop names its trigger instead of discarding it. One discriminated
 union (exported from `types.ts`), three homes:
 
-- **The event:** `agent_end.evidence` (above). `identical-batch` →
-  `signature` (batchSignature output), `repeats`, `guardRetries` (H5 retries
-  spent); `permission-stall` / `repeat-failure` → `tool`, count
+- **The event:** `agent_end.evidence` (above). `identical-batch` /
+  `cycle-batch` → `signature` (batchSignature output; the cycle variant
+  joins the pattern's two batch signatures with `\u0001` and adds
+  `cycleLength`), `repeats`, `stable`, optional `capReason`, `guardRetries`
+  (H5 retries spent); `permission-stall` / `repeat-failure` → `tool`, count
   (`denials`/`repeats`) + `window`, `errorExcerpt` (one line, capped at
   `GUARD_EXCERPT_MAX` = 2000). The pipeline feeds the stall variants via
   the additive `details.stallEvidence` on the in-band result —
   `details.stall` keeps its exact meaning; the loop copies the evidence off
   it.
+  - **Loop-v2 fields (audit re-fix 2026-11-02).** `repeats` is ONE counting
+    unit for both loop variants: batches ISSUED in the pattern including the
+    refused one (identical-stable 3; alternating-stable 5; the caps at
+    `POLL_CAP`/`CYCLE_CAP`). `stable` distinguishes a stuck stop (the
+    pattern stopped bringing new results — `true`) from a cap stop
+    (`false`); `capReason` (`"fresh"` | `"failed"`, cap stops only) says
+    WHY the cap fired when "results stopped changing" is not the truth —
+    `"failed"` repeats digest as constant too and belong to the stall
+    guards. Evidence from before loop-v2 has neither field (sessions on
+    disk stay valid; the display degrades to claims it can still prove).
 - **The session:** a `guardStop` entry (`{ type, id, timestamp, evidence }`)
   written by the DRIVER on the evidence-carrying `agent_end` — harness
   metadata, NOT LLM context: replay ignores it (like `modelChange`), it is
   never a compaction `firstKeptEntryId`. `SESSION_FORMAT_VERSION` stays 1:
   additive entry types are two-way compatible (loaders cast blindly;
   replay skips unknown types by fall-through).
-- **The display:** the TUI error item and the CLI stderr stop line append
-  `guardEvidenceNote(evidence)` — one clamped line (`trigger: …`); no
-  evidence (older producers) keeps the static strings.
+- **The display:** the TUI error item and the CLI stderr stop line render
+  `loopStopNote(evidence)` (loop) / the static stall headline, each
+  appending `guardEvidenceNote(evidence)` — one clamped line
+  (`trigger: …`). Headlines are EVIDENCE-DRIVEN (loop-v2): a cycle stop
+  never says "3 times in a row", a cap stop never claims "changing
+  results", and a stable stop says "no change in results"; without
+  evidence (older producers) the headline makes no count or results claim.
 
 Privacy: signatures and excerpts are tool arguments/errors already persisted
 in the session's message entries — the entry adds naming, not disclosure.

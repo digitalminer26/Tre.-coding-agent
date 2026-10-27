@@ -479,6 +479,7 @@ test("D33: appendGuardStop round-trips through loadSession; replay ignores the e
     guard: "identical-batch",
     signature: 'read:{"path":"x"}',
     repeats: 3,
+    stable: true,
     guardRetries: 1,
   } as const;
   const entryId = await s.appendGuardStop(evidence);

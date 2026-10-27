@@ -33,7 +33,7 @@
  *   --max-continuations <n>
  *                      C26: how many times the loop auto-continues when a
  *                      cycle's budget is exhausted (default 3 → 4 cycles).
- *                      The runaway-loop guard (3 identical batches in a row)
+ *                      The runaway-loop guard (repeated batch patterns: identical 3× / alternating)
  *                      is always on, regardless of this value. Durable in
  *                      tre.json as "maxContinuations" — the flag overrides.
  *
@@ -76,6 +76,7 @@ import { hardenSecretFiles } from "../config/secret-mode.js";
 import {
   calibrateCharsPerToken,
   compactContext,
+  COMPACT_ABORTED,
   estimatePromptOverheadTokens,
   estimateTokens,
   compactionReserve,
@@ -123,7 +124,7 @@ import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type T
 import { TelegramDriver } from "../telegram/driver.js";
 import { workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
-import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote } from "../types.js";
+import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, lengthEndNote, loopStopNote } from "../types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -494,8 +495,8 @@ export function exitCodeFor(stopReason: StopReason): number {
       // done, 1 = provider error, 2 = usage error).
       return 3;
     case "loop":
-      // C26: runaway-loop detection stopped the run (3 identical batches
-      // in a row) — resumable like budget: a new prompt breaks the pattern.
+      // C26: runaway-loop detection stopped the run (repeated batch
+      // pattern: identical 3× / alternating) — resumable like budget: a new prompt breaks the pattern.
       return 3;
     case "stall":
       // The same tool failed 3× with a permission denial within its recent
@@ -614,9 +615,12 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(`\n${note}${resume}\n`);
       } else if (ev.stopReason === "loop") {
+        // loop-v2 (audit re-fix 2026-11-02): the headline is evidence-driven
+        // — the old hard-coded "3 times in a row" lied for cycle stops and
+        // 12-batch cap stops.
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(
-          `\nloop: the model repeated the same tool call(s) 3 times in a row — stopped to avoid a runaway loop (the repeat was not executed)${
+          `\n${loopStopNote(ev.evidence)}${
             ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""
           }${resume}\n`,
         );
@@ -847,6 +851,11 @@ export async function compactNow(deps: {
     });
   let bestOver: CompactContextResult | undefined; // the smaller of the non-fitting LLM candidates
   let r = await tryLlm();
+  // A user abort (ESC) inside the summarizer stream — even when it left the
+  // caller's signal unset — is terminal intent: stop the whole ladder, do
+  // not retry and do not apply a lossy fallback right after the cancel
+  // (audit finding 3).
+  if (r === COMPACT_ABORTED) return undefined;
   if (r) {
     if (r.fitsInputBudget) return await emit(r.summary, r.kept, "summary");
     if (!strictFit) {
@@ -875,6 +884,8 @@ export async function compactNow(deps: {
   // D1: retry once with a shrunken transcript (halved clips).
   sinks.err.write("compaction: no fitting summary yet — retrying with a smaller transcript\n");
   r = await tryLlm({ perMessageChars: 750, totalChars: 12000, toolResultChars: 1000 });
+  // Same as above: an abort in the retry is terminal for the ladder.
+  if (r === COMPACT_ABORTED) return undefined;
   if (r) {
     if (r.fitsInputBudget) return await emit(r.summary, r.kept, "summary");
     if (!strictFit) {
@@ -1183,7 +1194,7 @@ Options:
                      budget is exhausted (default 3 → 4 cycles; 0 = stop at
                      the first budget hit). Durable in tre.json as
                      "maxContinuations" — the flag overrides it. The
-                     runaway-loop guard (3 identical batches in a row)
+                     runaway-loop guard (repeated batch patterns)
                      is always on, regardless of these values.
   --ask              prompt for SENSITIVE + DESTRUCTIVE (workspace-scoped)
                      and mutating bash; read-only bash, reversible

@@ -22,10 +22,12 @@ import { fakeStream, type FakeTurn } from "./fake-stream.js";
 import {
   ABORTED_CALL_TEXT,
   BUDGET_CONTINUE_TEXT,
+  CYCLE_CAP,
   GUARD_RETRY_TEXT,
   MAX_PROGRESS_NUDGES,
   NO_SUCCESS_NUDGE_TEXT,
   NO_SUCCESS_TURNS,
+  POLL_CAP,
   UNVERIFIED_EDITS,
   batchSignature,
   deriveMaxTurns,
@@ -33,6 +35,7 @@ import {
   runLoop,
   type AgentLoopOptions,
 } from "../src/loop/agent-loop.js";
+import { loopStopNote } from "../src/types.js";
 import type {
   AgentEvent,
   AgentMessage,
@@ -788,6 +791,9 @@ test("C26: loop detection — same batch 3× → guarded, auto-retry once, then 
     turn: 3,
     retry: 1,
     maxRetries: 1,
+    // loop-v2: the event names the pattern that fired (audit re-fix
+    // 2026-11-02) so the transcript never claims "3× in a row" for cycles.
+    reason: "identical",
   });
   // The guarded batches (turns 3 and 6) were NOT executed; turns 1,2,4,5 were.
   assert.equal(calls.length, 4, "the two guarded batches were not executed");
@@ -994,6 +1000,336 @@ test("C26: batchSignature — stable across key order, sensitive to tool/args", 
     ]),
     "different batch shape → different signature",
   );
+});
+
+// ────────────────── loop detection v2 (2026-10-31 audit) ──────────────────
+// Result-aware identical guard, period-2 cycle guard, hard poll caps, and
+// the digest/evidence hardening from the 2026-11-02 re-audit.
+
+test("loop v2: stable identical repeat still stops at 3 (notExecuted, retry, evidence)", async () => {
+  const { tool, calls } = makeTool("read");
+  const same = { id: "c1", name: "read", args: { path: "x" } };
+  const turns: FakeTurn[] = Array.from({ length: 6 }, () => ({
+    type: "toolcall",
+    calls: [same],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  // 4 executed (1,2 + 4,5 after the single retry), 3rd + 6th guarded.
+  assert.equal(calls.length, 4, "guarded batches were not executed");
+  for (const turn of [3, 6]) {
+    const fill = events.filter(
+      (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+        e.type === "tool_execution_end" &&
+        e.result.details?.notExecuted === true &&
+        e.result.content.some((c) => c.text.includes("Runaway loop detected")),
+    );
+    assert.equal(fill.length, 2, `both guard fills present (turns ${turn} context)`);
+    for (const f of fill) assert.equal(f.result.details?.notExecuted, true);
+  }
+  assert.deepEqual(end.evidence, {
+    guard: "identical-batch",
+    signature: batchSignature([
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "x" } },
+    ]),
+    repeats: 3,
+    stable: true,
+    guardRetries: 1,
+  });
+});
+
+test("loop v2: fresh-result identical repeats are progress until the poll cap", async () => {
+  // 11 fresh-result identical batches + a text finish: allowed through
+  // (progress), no guard text in context.
+  let n = 0;
+  const probe2 = makeTool("read", {
+    execute: (async () => ({
+      content: [{ type: "text", text: `revision ${++n}` }],
+    })) as Tool["execute"],
+  });
+  const fresh2 = probe2.tool;
+  const turns: FakeTurn[] = [
+    ...Array.from({ length: 11 }, () => ({
+      type: "toolcall" as const,
+      calls: [{ id: "c1", name: "read", args: { path: "x" } }],
+    })),
+    { type: "text" as const, text: "done" },
+  ];
+  const events = await drainLoop(turns, [fresh2], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop", "fresh results are progress, not a loop");
+  assert.equal(probe2.calls.length, 11, "all 11 executed (none refused)");
+  assert.ok(
+    !events.some(
+      (e) =>
+        e.type === "tool_execution_end" &&
+        e.result.content.some((c) => c.text.includes("Runaway loop detected")),
+    ),
+    "no guard text",
+  );
+});
+
+test("loop v2: fresh-result identical repeats stop at the cap with cap text + cap evidence", async () => {
+  let n = 0;
+  const probe2b = makeTool("read", {
+    execute: (async () => ({
+      content: [{ type: "text", text: `revision ${++n}` }],
+    })) as Tool["execute"],
+  });
+  const fresh3 = probe2b.tool;
+  const turns: FakeTurn[] = Array.from({ length: 30 }, () => ({
+    type: "toolcall",
+    calls: [{ id: "c1", name: "read", args: { path: "x" } }],
+  }));
+  const events = await drainLoop(turns, [fresh3], {
+    maxTurns: 100,
+    maxGuardRetries: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  assert.equal(probe2b.calls.length, POLL_CAP - 1, `the first ${POLL_CAP - 1} execute; the ${POLL_CAP}th is refused`);
+  const fills = events.filter(
+    (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+      e.type === "tool_execution_end" && e.result.isError === true,
+  );
+  assert.equal(fills.length, 1, "one cap fill");
+  assert.match(
+    fills[0]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join(" "),
+    /issued 12 times[\s\S]*Repeating is bounded/,
+    "cap text names the pattern size neutrally (no results claim either way)",
+  );
+  assert.deepEqual(end.evidence, {
+    guard: "identical-batch",
+    signature: batchSignature([
+      { type: "toolCall", id: "c1", name: "read", arguments: { path: "x" } },
+    ]),
+    repeats: POLL_CAP,
+    stable: false,
+    capReason: "fresh",
+    guardRetries: 0,
+  });
+});
+
+test("loop v2: stable alternation stops at the 3rd cycle of the current position", async () => {
+  // X,Y,X,Y then the third X is refused (5th batch issued in-pattern).
+  const xa = makeTool("a");
+  const xb = makeTool("b");
+  const alternating = (i: number): FakeTurn => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+  });
+  const turns: FakeTurn[] = [
+    alternating(0),
+    alternating(1),
+    alternating(2),
+    alternating(3),
+    alternating(4),
+  ];
+  const tools = [xa.tool, xb.tool];
+  const events = await drainLoop(turns, tools, {
+    maxTurns: 50,
+    maxGuardRetries: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  assert.equal(
+    xa.calls.length + xb.calls.length,
+    4,
+    "X,Y,X,Y executed; the 3rd X refused",
+  );
+  assert.match(
+    events
+      .filter(
+        (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+          e.type === "tool_execution_end" && e.result.isError === true,
+      )[0]!
+      .result.content.map((c) => (c.type === "text" ? c.text : ""))
+      .join(" "),
+    /alternately[\s\S]*unchanged results/,
+    "stable cycle text",
+  );
+  const ev = end.evidence;
+  assert.equal(ev?.guard, "cycle-batch");
+  if (ev?.guard === "cycle-batch") {
+    assert.equal(ev.cycleLength, 2);
+    assert.equal(ev.repeats, 5, "unified unit: 4 issued + the refused batch");
+    assert.equal(ev.stable, true);
+    assert.equal(ev.guardRetries, 0);
+  }
+});
+
+test("loop v2: fresh-result alternation is progress until the cycle cap", async () => {
+  const mkCounter = (name: string, prefix: string) => {
+    let n = 0;
+    return makeTool(name, {
+      execute: (async () => ({
+        content: [{ type: "text", text: `${prefix}${++n}` }],
+      })) as Tool["execute"],
+    });
+  };
+  const xa = mkCounter("a", "A");
+  const xb = mkCounter("b", "B");
+  // 10 fresh alternating batches + finish: allowed (below the cap).
+  const turns: FakeTurn[] = [
+    ...Array.from({ length: 10 }, (_, i) => ({
+      type: "toolcall" as const,
+      calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+    })),
+    { type: "text" as const, text: "done" },
+  ];
+  const events = await drainLoop(turns, [xa.tool, xb.tool], { maxTurns: 50 });
+  assert.equal(agentEnd(events).stopReason, "stop", "changing A/B results are progress");
+});
+
+test("loop v2: fresh-result alternation stops at the cycle cap with cap text", async () => {
+  const mkCounter = (name: string, prefix: string) => {
+    let n = 0;
+    return makeTool(name, {
+      execute: (async () => ({
+        content: [{ type: "text", text: `${prefix}${++n}` }],
+      })) as Tool["execute"],
+    });
+  };
+  const xa = mkCounter("a", "A");
+  const xb = mkCounter("b", "B");
+  const turns: FakeTurn[] = Array.from({ length: 30 }, (_, i) => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+  }));
+  const events = await drainLoop(turns, [xa.tool, xb.tool], {
+    maxTurns: 100,
+    maxGuardRetries: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop");
+  assert.equal(
+    xa.calls.length + xb.calls.length,
+    CYCLE_CAP - 1,
+    `${CYCLE_CAP - 1} executed; the ${CYCLE_CAP}th refused`,
+  );
+  const ev = end.evidence;
+  assert.equal(ev?.guard, "cycle-batch");
+  if (ev?.guard === "cycle-batch") {
+    assert.equal(ev.stable, false, "cap stop, not stable");
+    assert.equal(ev.repeats, CYCLE_CAP, "unified unit: issued batches incl. the refused one");
+    assert.equal(ev.capReason, "fresh", "live results were still arriving");
+  }
+  assert.match(
+    events
+      .filter(
+        (e): e is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+          e.type === "tool_execution_end" && e.result.isError === true,
+      )[0]!
+      .result.content.map((c) => (c.type === "text" ? c.text : ""))
+      .join(" "),
+    /alternately/,
+    "cap cycle text names the pattern (neutral: no results claim)",
+  );
+});
+
+test("loop v2: multi-block results cannot collide across block boundaries", async () => {
+  // Batch 1: ["a", "b"] as TWO blocks; batch 2: ["a\u0000b"] as ONE block;
+  // batch 3 repeats batch 1's exact blocks. The old raw-join digest made
+  // batch 2 look identical to batches 1/3 and fired; JSON digests keep
+  // them distinct (comparison is batch1 === batch3: 2 apart, not 2 in a row).
+  let n = 0;
+  const shapedProbe = makeTool("read", {
+    execute: (async () => {
+      n += 1;
+      return n === 2
+        ? { content: [{ type: "text", text: "a\u0000b" }] }
+        : {
+            content: [
+              { type: "text", text: "a" },
+              { type: "text", text: "b" },
+            ],
+          };
+    }) as Tool["execute"],
+  });
+  const shaped = shapedProbe.tool;
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "c2", name: "read", args: { path: "x" } }] },
+    { type: "toolcall", calls: [{ id: "c3", name: "read", args: { path: "x" } }] },
+    { type: "text", text: "done" },
+  ];
+  // maxGuardRetries: 0 — WITH the default auto-retry a false guard hit is
+  // masked (history clears, the run finishes) and this test would pass on
+  // the buggy digest. Hard stop: only a correct digest keeps the run green.
+  const events = await drainLoop(turns, [shaped], { maxTurns: 50, maxGuardRetries: 0 });
+  assert.equal(agentEnd(events).stopReason, "stop", "no false stable match from block-boundary text");
+});
+
+test("loop v2: successful text resembling the failure marker is not failure", async () => {
+  // Stable X,Y cycles whose SUCCESSFUL text contains "\u0001E:" — the old
+  // regex failure test on the raw joined digest mistook these for FAILED
+  // batches and exempted them; the stored flag keeps the stable cycle
+  // guard firing.
+  const mk = (name: string, marker: string) =>
+    makeTool(name, {
+      execute: (async (_id: string, args: Record<string, unknown>) => ({
+        content: [{ type: "text", text: `${String(args.q)}${marker}` }],
+      })) as Tool["execute"],
+    });
+  const xa = mk("a", "\u0001E:decoy");
+  const xb = mk("b", "\u0001E:decoy");
+  const alternating = (i: number): FakeTurn => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+  });
+  const events = await drainLoop(
+    [alternating(0), alternating(1), alternating(2), alternating(3), alternating(4)],
+    [xa.tool, xb.tool],
+    { maxTurns: 50, maxGuardRetries: 0 },
+  );
+  assert.equal(agentEnd(events).stopReason, "loop", "decoy text does not hide success-stable cycling");
+});
+
+test("loop v2: failed repeats stay exempt from the stable cycle rule", async () => {
+  // Alternating X,Y where every call FAILS identically: the cycle guard
+  // must not fire (the H2/pipeline stall path owns repeated failures).
+  // Each batch errors; the guard's identical rule (pre-execution) matches
+  // the v1 contract — exercise with distinct args so only the cycle rule
+  // could fire, and expect NO loop stop within the scripted turns.
+  const fail = (name: string) =>
+    makeTool(name, {
+      execute: (async () => ({
+        content: [{ type: "text", text: `${name} exploded` }],
+        isError: true,
+      })) as Tool["execute"],
+    });
+  const xa = fail("a");
+  const xb = fail("b");
+  const turns: FakeTurn[] = [
+    ...Array.from({ length: 4 }, (_, i) => ({
+      type: "toolcall" as const,
+      calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+    })),
+    { type: "text" as const, text: "done" },
+  ];
+  const events = await drainLoop(turns, [xa.tool, xb.tool], { maxTurns: 50 });
+  assert.equal(agentEnd(events).stopReason, "stop", "failed alternation never trips the cycle guard");
+});
+
+test("loop v2: batchSignature treats __proto__ args as ordinary keys", async () => {
+  const s1 = batchSignature([
+    {
+      type: "toolCall",
+      id: "x",
+      name: "read",
+      arguments: JSON.parse('{"__proto__":{"evil":1}}') as Record<string, unknown>,
+    },
+  ]);
+  const s2 = batchSignature([
+    {
+      type: "toolCall",
+      id: "x",
+      name: "read",
+      arguments: JSON.parse('{"__proto__":{"evil":2}}') as Record<string, unknown>,
+    },
+  ]);
+  assert.notEqual(s1, s2, "different __proto__ payloads → different signatures");
 });
 
 // ─────────────────────────────── steering ───────────────────────────────────
@@ -1951,6 +2287,7 @@ test("D33: a loop stop carries the identical-batch evidence (signature, repeats,
       { type: "toolCall", id: "c1", name: "read", arguments: { path: "x" } },
     ]),
     repeats: 3,
+    stable: true,
     guardRetries: 1,
   });
 });
@@ -2619,4 +2956,65 @@ test("F1: progressTargetOf — write/edit paths resolve, reads and non-strings d
   assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "bash", arguments: { path: "x" } }), undefined);
   assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "edit", arguments: {} }), undefined);
   assert.equal(progressTargetOf({ type: "toolCall", id: "x", name: "write", arguments: { path: "" } }), undefined);
+});
+test("loopStopNote header: evidence-driven for every stop kind, never '3 times' for caps or cycles", () => {
+  const stable = loopStopNote({
+    guard: "identical-batch",
+    signature: "bash:{}\u0000read:{}",
+    repeats: 3,
+    stable: true,
+    guardRetries: 1,
+  });
+  assert.match(stable, /^loop: the model repeated/);
+  assert.match(stable, /3 times in a row with no change in results/);
+  assert.match(stable, /after 1 auto-retry/);
+  assert.doesNotMatch(stable, /without progress/);
+
+  const cap = loopStopNote({
+    guard: "identical-batch",
+    signature: "bash:{}",
+    repeats: POLL_CAP,
+    stable: false,
+    capReason: "fresh",
+    guardRetries: 0,
+  });
+  assert.match(cap, /12 times in a row without progress/);
+  assert.doesNotMatch(cap, /changing results/);
+  assert.doesNotMatch(cap, /no change in results/);
+  assert.doesNotMatch(cap, /3 times/);
+
+  const cycle = loopStopNote({
+    guard: "cycle-batch",
+    signature: "a:{}\u0001b:{}",
+    cycleLength: 2,
+    repeats: 5,
+    stable: true,
+    guardRetries: 0,
+  });
+  assert.match(cycle, /^loop: the same two tool-call batches alternated/);
+  assert.match(cycle, /5 times \(X, Y, X, Y, X …\) with no change in results/);
+  assert.doesNotMatch(cycle, /repeated the same tool call\(s\)/);
+
+  const capCycle = loopStopNote({
+    guard: "cycle-batch",
+    signature: "a:{}\u0001b:{}",
+    cycleLength: 2,
+    repeats: CYCLE_CAP,
+    stable: false,
+    capReason: "fresh",
+    guardRetries: 0,
+  });
+  assert.match(capCycle, /12 times \(X, Y, X, Y, X …\) without progress/);
+  assert.doesNotMatch(capCycle, /no change in results|changing results/);
+
+  // Legacy: evidence without `stable` (pre-loop-v2 session) makes no claim
+  // about results either way.
+  const legacy = loopStopNote({
+    guard: "identical-batch",
+    signature: "bash:{}",
+    repeats: 3,
+    guardRetries: 0,
+  } as Parameters<typeof loopStopNote>[0]);
+  assert.match(legacy, /stopped to avoid a runaway loop/);
+  assert.doesNotMatch(legacy, /no change in results|without progress/);
 });

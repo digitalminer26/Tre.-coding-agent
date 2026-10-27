@@ -29,7 +29,7 @@ three guards, and the loop walked through the gaps between them:
 
 | Guard | Where | Catches | Stops on |
 |---|---|---|---|
-| C26 loop guard | `agent-loop.ts` | byte-identical tool-call batch (names + stable-JSON args + order) 3× in a row | `loop` |
+| C26 loop guard | `agent-loop.ts` | byte-identical tool-call batch (names + stable-JSON args + order) 3× in a row — AND, since the 2026-10-31 audit (loop detection v2), the same pair ALTERNATING (X,Y,X,Y,X…) with unchanged results, plus fresh-result caps (POLL_CAP/CYCLE_CAP) so bounded churn still dies | `loop` |
 | Stall guard | `pipeline.ts` | same TOOL failing with a PERMISSION signature 3× within the last 8 calls (windowed, NOT consecutive — H1) | `stall` |
 | Turn budget | `agent-loop.ts` | anything, eventually (per-cycle cap + 3 auto-continuations) | `budget` |
 
@@ -182,7 +182,7 @@ into an autonomous retry only when the retry is (1) **bounded** and
   (`GUARD_RETRY_TEXT`: "you are stuck on that action; you MUST pick a
   DIFFERENT tool / arguments / path; do NOT re-issue the same call"), not a
   "keep going" nudge. A blind continue would just re-fire the guard. The
-  identical-batch history (`sigHistory`) is RESET for the retry, so the model
+  identical-batch history (`batchHistory`) is RESET for the retry, so the model
   gets a fresh 3-attempt window (the same reset D27 Finding 2 applies when a
   steer lands).
 
@@ -195,7 +195,7 @@ on the user.
 
 **Mechanics.** At the guard site (after the in-band `LOOP_GUARD_TEXT` results
 are already in context), if `guardRetries < maxGuardRetries`: increment, reset
-`sigHistory`, push the nudge as a user message, emit a `guard_retry` event
+`batchHistory`, push the nudge as a user message, emit a `guard_retry` event
 (`turn`, `retry`, `maxRetries`), and `continue` (the nudge consumes no turn).
 Otherwise stop with `stopReason "loop"`. The nudge rides the context only
 (not persisted to the session — the real resume path is a fresh prompt, as
@@ -325,7 +325,7 @@ the ladder, the `watch` default — not the sequence.
 carried `isError: true` counts as a **no-success turn**. `NO_SUCCESS_TURNS`
 (default **3**) consecutive such turns trigger. Reset on any turn with at
 least one successful call, and on steer delivery (the D27 Finding 2 rule that
-already resets `sigHistory`: fresh user input can legitimize repetition).
+already resets `batchHistory`: fresh user input can legitimize repetition).
 
 **Counted from:** the per-batch results the loop already collects
 (`agent-loop.ts`, the `results` map — no new plumbing; `isError` is the single

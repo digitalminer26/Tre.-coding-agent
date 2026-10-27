@@ -154,7 +154,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  *  Anchored at the END of the string so interior tag-like content (XML
  *  fixtures, heredocs, file writes: "first\n</function>\nlast") is NEVER
  *  matched — only a marker the model leaked at the very end of an argument. */
-const LEAKED_TAIL_RE = /[ \t]*(?:\\n|\n)?[ \t]*<\/(?:parameter|function|tool_call)>[ \t\n]*$/;
+const LEAKED_TAIL_RE = /[ \t]{0,64}(?:\r?\n)?[ \t]{0,64}<\/(?:parameter|function|tool_call)>(?:\r?\n|[ \t])*$/;
 
 /** Remove leaked protocol tails from string VALUES of a parsed args object
  *  (recursing into nested objects/arrays). Values not ending in a marker
@@ -194,32 +194,174 @@ function tryParseObject(s: string): Record<string, unknown> | undefined {
  *      and retry)
  *   3. {} — the loop's `length`→fail-all guard makes salvage best-effort
  *
- * llama.cpp's Qwen3.8 chat template asks for XML-like tool calls and its
- * parser can leak the closing protocol markers into the TAIL of a string
- * argument, e.g. {"command":"printf hello\n</parameter>"} — that raw string
- * still parses as valid JSON, so repair happens AFTER parsing: each string
- * value is checked for a leaked closing marker at its end (LEAKED_TAIL_RE)
- * and only that tail is removed. Interior content is preserved verbatim.
- * The text-wide strip below runs ONLY on already-invalid input (salvage),
- * never on arguments that parsed cleanly.
+ * PROTOCOL-LEAK REPAIR IS OPT-IN (`repairLeakedProtocol`, i.e.
+ * `compat.repairsLeakedToolProtocol` on the model): llama.cpp's Qwen3.8
+ * chat template asks for XML-like tool calls and its parser can leak the
+ * closing markers into the TAIL of a string argument, e.g.
+ * {"command":"printf hello\n</parameter>"}. A value legitimately ENDING in
+ * one of those tags (a file write, an edit target, an XML fixture — e.g.
+ * {"content":"<function>hello</function>"}) is textually indistinguishable
+ * from a leak, so stripping unconditionally corrupted valid arguments
+ * (audit finding 1). OFF (the default): parsed values are returned
+ * verbatim. ON (only for known-leaking endpoints): after parsing, each
+ * string value's leaked tail (LEAKED_TAIL_RE) is removed, and the
+ * salvage path first strips structural leak sequences text-wide from
+ * already-invalid input. Truncation repair (2) runs either way — closing
+ * open containers never alters complete values.
  */
-export function parseToolArgs(raw: string): Record<string, unknown> {
+export function parseToolArgs(
+  raw: string,
+  opts?: { repairLeakedProtocol?: boolean },
+): Record<string, unknown> {
   if (typeof raw !== "string" || raw.length === 0) return {};
+  const repair = opts?.repairLeakedProtocol === true;
   const direct = tryParseObject(raw);
-  if (direct !== undefined) return stripLeakedTails(direct) as Record<string, unknown>;
-  // Invalid JSON (truncated, or markers spliced mid-document): strip
-  // structural leak sequences text-wide for the salvage attempt only.
-  const cleaned = raw.replace(/(?:\\n|\n)[ \t]*<\/(?:parameter|function|tool_call)>/g, "").replace(/(?:\\n|\n)+$/g, "");
-  const repaired = repairTruncatedJson(cleaned);
-  if (repaired !== undefined) {
-    const v = tryParseObject(repaired);
-    if (v !== undefined) return stripLeakedTails(v) as Record<string, unknown>;
+  if (direct !== undefined) {
+    return (repair ? stripLeakedTails(direct) : direct) as Record<string, unknown>;
   }
+  // Invalid JSON (truncated, or — on leaking endpoints — markers spliced
+  // mid-document): strip structural leak sequences text-wide for the
+  // salvage attempt only, and only when the endpoint is known to leak.
+  // Two cleaning variants, tried in LOSSLESS-FIRST order. (1) Plain strip:
+  // markers spliced inside an unterminated value (`{"command":"echo\n
+  // </function>\n, keep-going`) — deleting the marker keeps the value
+  // intact and truncation repair closes the string, so ALL the content
+  // survives. (2) Quote-restoring, only when variant 1 yields no parse:
+  // llama.cpp swallows the value's CLOSING QUOTE when it leaks —
+  // `{"command":"ls\n</parameter>\n,"path":"a.ts"` — so the whole
+  // `<newline></marker><newline>` sequence is replaced WITH the quote the
+  // endpoint ate. Variant 1 cannot parse that shape (the swallowed quote
+  // leaves `"ls,"path"`), and variant 2 is lossy for variant-1-shaped input
+  // (it closes the value early and drops the trailing member), so the
+  // order is: preserve content whenever possible, restore the quote when
+  // that is provably the leak shape. Without repair only the plain text
+  // is tried.
+  // The quote-restoring variant matches a RUN of consecutive leaked markers
+  // (audit round 4, finding 1): the endpoint often emits the whole closing
+  // chain (`</parameter>\n</function>\n</tool_call>`) and swallowed exactly ONE
+  // closing quote — replacing each marker with a quote produced `"ls""` +
+  // stray tags (no parse), and the first match eating its trailing newline
+  // made the NEXT marker unmatched (no leading newline). One run → one
+  // restored quote, so `ls\n</parameter>\n</function>\n,"path":"a.ts"` becomes
+  // `ls","path":"a.ts"`.
+  //
+  // Round 5 (finding 1): the restoration is RUN-AWARE, not unconditional.
+  // In one document some values may have lost their closing quote while
+  // others kept theirs (`"command":"ls\n</parameter>\n,"path":"a.ts
+  // </parameter>\n"`); inserting a quote into an INTACT run corrupts the
+  // survivor (`a.ts""` → no parse, both fields lost to the drop salvage).
+  // A run is therefore repaired by what FOLLOWS it: a surviving `"` right
+  // after the run means the quote was never eaten → DELETE the run (the
+  // quote stays); anything else (`,` `}` EOF, junk) means the quote was
+  // swallowed → insert exactly ONE quote.
+  // Round 5 (finding 2): the separator between markers in a run allows
+  // REPEATED newlines/whitespace — a blank line between `</parameter>` and
+  // `</function>` must not split the chain (else neither marker matches
+  // with a leading separator and the whole run fails to restore).
+  // Leaked-run grammar. A protocol separator is a real newline or an UNPAIRED
+  // JSON `\n` escape (an even number of backslashes precedes its backslash).
+  // A marker may ALSO follow literal user text `\\n` (an escaped backslash
+  // then `n`) directly: LITERAL_LEAD is a zero-width assertion, so the user's
+  // escape pair is never consumed and is kept by every replacement below.
+  const SEP_RE = String.raw`(?<=(?:^|[^\\])(?:\\\\)*)\\r\\n|(?<=(?:^|[^\\])(?:\\\\)*)\\n|(?<=(?:^|[^\\])(?:\\\\)*)\\t|\r?\n`;
+  const LITERAL_LEAD_RE = "(?<=(?:^|[^\\\\])(?:\\\\\\\\)*\\\\\\\\n)";
+  const MARK_RE = "<\\/(?:parameter|function|tool_call)>";
+  const LEAD_RE = "(?:" + SEP_RE + "|" + LITERAL_LEAD_RE + ")";
+  const RUN_MARK_RE = "<\\/(?:parameter|function|tool_call)>";
+  // Bounded filler around separators: unbounded whitespace runs inside this
+  // grammar made matching superlinear (an 8k-space run ≈ 1s, 32k ≈ 20s — the
+  // lookbehind in SEP_RE re-scans per position, audit finding 1). The bounds
+  // are a MEASURED LIMIT, not an observed-shape survey: gaps cap at 64 chars
+  // and a chain at 64 separator units / 64 markers (raising 8→64 costs
+  // nothing measurable — well under 1ms even on a 32k-newline input — so the
+  // generous chain bound is free). A longer run simply fails to match and
+  // falls through to `{}` salvage, the same as HEAD.
+  const GAP_RE = "[ \\t]{0,64}";
+  const SEP_UNIT_RE = GAP_RE + "(?:" + SEP_RE + ")" + GAP_RE;
+  // A whole leaked run: lead, marker, further (separator-linked) markers,
+  // and trailing separators/gaps.
+  const runRe = new RegExp(
+    GAP_RE + LEAD_RE + GAP_RE + MARK_RE +
+      "(?:" + SEP_UNIT_RE + "(?:" + SEP_UNIT_RE + ")*" + MARK_RE + "){0,64}" +
+      "(?:" + SEP_UNIT_RE + "){0,64}" + GAP_RE,
+    "g",
+  );
+  // The plain strip removes each lead+marker pair and keeps everything else.
+  const markerRe = new RegExp(LEAD_RE + "[ \\t]*" + MARK_RE, "g");
+  // Trailing separator run at the END of the document. Bounded like the run
+  // grammar: `(?:SEP)+` on a 32k-newline tail scanned superlinearly (each
+  // repeat re-runs SEP's lookbehind over the consumed prefix). 64 separators
+  // matches the chain bound; raising 8→64 measured free.
+  const trailingSepRe = new RegExp("(?:" + GAP_RE + "(?:" + SEP_RE + ")){0,64}" + GAP_RE + "$", "g");
+  // A run immediately followed by a surviving quote is an intact leaked tail
+  // (delete it); normalizing it in both variants keeps blank-line separators
+  // from inflating the plain variant's payload score.
+  const intactRunsCleaned = repair
+    ? raw.replace(runRe, (run: string, offset: number, s: string) =>
+        s[offset + run.length] === '"' ? (run.includes("</") ? "" : run) : run,
+      )
+    : raw;
+  const cleanedVariants = repair
+    ? [
+        // Plain strip: markers removed, the rest kept verbatim.
+        intactRunsCleaned.replace(markerRe, "").replace(trailingSepRe, ""),
+        // Quote restore: a run followed by non-quote context had its quote swallowed.
+        intactRunsCleaned
+          .replace(runRe, (run: string, offset: number, s: string) => (s[offset + run.length] === '"' ? (run.includes("</") ? "" : '"') : '"'))
+          .replace(trailingSepRe, ""),
+      ]
+    : [raw];
+  // Two passes over the cleaning variants (audit round 3, finding 1): PASS 1
+  // accepts only NON-DROPPING repairs (the whole document closed) — a
+  // member-dropping salvage of the plain variant must never suppress a full
+  // recovery the quote-restoring variant could still parse (e.g.
+  // `{"other":1,"command":"ls\n</parameter>\n,"path":"a.ts"}`: the plain strip
+  // drops `path` at a stray comma, quote restore recovers all three fields).
+  // PASS 2 allows the lossy member-drop fallback for genuinely truncated
+  // input where nothing else parses.
+  //
+  // Within a pass, if both variants parse, prefer the candidate that retains
+  // the most semantic payload AFTER leaked tails are stripped. Document
+  // length is not a safe proxy: a shorter quote-restored variant can close an
+  // intact string early, causing trailing members to be dropped (audit
+  // finding: an intact command followed by a malformed later member). Break
+  // ties by shortest repaired document, which favors treating adjacent
+  // marker/newline runs as protocol rather than user text. This is still a
+  // heuristic for ambiguous malformed JSON, but it preserves the fuller
+  // argument value when repair paths disagree.
+  const repairPass = (allowDrop: boolean): Record<string, unknown> | undefined => {
+    let candidates: { doc: string; v: Record<string, unknown>; score: number }[] = [];
+    for (const cleaned of cleanedVariants) {
+      const repaired = repairTruncatedJson(cleaned, allowDrop);
+      if (repaired === undefined) continue;
+      const parsed = tryParseObject(repaired);
+      if (parsed === undefined) continue;
+      const v = (repair ? stripLeakedTails(parsed) : parsed) as Record<string, unknown>;
+      // Lossless repair keeps the established shortest-document preference:
+      // it treats adjacent marker/newline runs as protocol. In the lossy
+      // member-dropping pass, however, a longer parsed value is evidence that
+      // the repair preserved more of an intact argument rather than closing
+      // it prematurely at a marker.
+      const score = allowDrop ? JSON.stringify(v).length : 0;
+      candidates.push({ doc: repaired, v, score });
+    }
+    if (candidates.length === 0) return undefined;
+    const maxScore = Math.max(...candidates.map((candidate) => candidate.score));
+    candidates = candidates.filter((candidate) => candidate.score === maxScore);
+    candidates.sort((a, b) => a.doc.length - b.doc.length);
+    return candidates[0]!.v;
+  };
+  const won = repairPass(false) ?? repairPass(true);
+  if (won !== undefined) return (repair ? stripLeakedTails(won) : won) as Record<string, unknown>;
   return {};
 }
 
-/** Close a JSON string truncated mid-value/mid-key. Returns undefined if hopeless. */
-function repairTruncatedJson(raw: string): string | undefined {
+/** Close a JSON string truncated mid-value/mid-key. Returns undefined if hopeless.
+ *  `allowDropMember: false` disables the trailing-member-dropping fallback, so
+ *  a result is then provably NON-LOSSY (the whole document closed) — used by
+ *  the leak-repair loop, which must not let a member-dropping salvage of one
+ *  cleaning variant suppress a full recovery of another (audit round 3). */
+function repairTruncatedJson(raw: string, allowDropMember = true): string | undefined {
   const attempt = (s: string): string | undefined => {
     let inStr = false;
     let esc = false;
@@ -234,9 +376,25 @@ function repairTruncatedJson(raw: string): string | undefined {
       else if (c === "{" || c === "[") stack.push(c);
       else if (c === "}" || c === "]") stack.pop();
     }
+    // Manual whitespace/comma suffix trim. The previous regex form ended in
+    // a dollar anchor and V8 re-ran that match at every start index, so a
+    // long whitespace/quote tail made attempt() superlinear (64k spaces took
+    // about one second per call, audit finding 1). A backward scan is linear
+    // in the suffix, not quadratic in the document.
     let out = s;
     if (inStr) out += '"';
-    const trimmed = out.replace(/[\s,]+$/, "");
+    let end = out.length;
+    while (
+      end > 0 &&
+      (out[end - 1] === " " ||
+        out[end - 1] === "\t" ||
+        out[end - 1] === "\n" ||
+        out[end - 1] === "\r" ||
+        out[end - 1] === ",")
+    ) {
+      end--;
+    }
+    const trimmed = out.slice(0, end);
     if (trimmed.endsWith(":")) out = trimmed + "null";
     for (let i = stack.length - 1; i >= 0; i--) out += stack[i] === "{" ? "}" : "]";
     return out;
@@ -263,7 +421,7 @@ function repairTruncatedJson(raw: string): string | undefined {
     } else if (c === '"') inStr = true;
     else if (c === ",") lastComma = i;
   }
-  if (lastComma > 0) {
+  if (lastComma > 0 && allowDropMember) {
     const second = attempt(raw.slice(0, lastComma));
     if (second !== undefined) {
       try {
@@ -507,8 +665,11 @@ export const openAiStream: StreamFn = (model, ctx, opts) => {
     }
 
     // Authoritative parse of tool-call args (the partials were best-effort).
+    // Protocol-leak repair only for endpoints flagged as leaking (opt-in):
+    // parsed values are verbatim everywhere else.
+    const repairProtocol = model.compat?.repairsLeakedToolProtocol === true;
     for (const entry of tools.values()) {
-      entry.block.arguments = parseToolArgs(entry.raw);
+      entry.block.arguments = parseToolArgs(entry.raw, { repairLeakedProtocol: repairProtocol });
     }
 
     const done: AssistantMessage = { ...snap(), stopReason: finish.reason };

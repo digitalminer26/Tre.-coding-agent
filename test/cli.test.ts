@@ -2088,6 +2088,219 @@ test("D26 strict fit: an irreducible kept tail skips the transcript retry and ap
   }
 });
 
+// ── Audit findings 2/3 (2026-10-25 review): the application boundary ───────
+
+test("compactNow: a prompt fold that busts the estimate is never applied — the live prompt survives (finding 2 boundary)", async () => {
+  // The audit's exact repro driven through the REAL compactNow. Budget =
+  // 4900 − 500 − 1024 = 3376. Tail: a 11800-char live prompt (~2951) + a
+  // 1620-char tail assistant (~405) — the preserving floor fits, but the
+  // scripted summaries bust. The fold attempt RESPECTS the provider cap (its
+  // maxTokens is the headroom over the fold's kept tail) while its chars/cpt
+  // estimate still busts (unit drift: 6 chars per token here). Before the
+  // fix that fold replaced the preserving candidate and was applied flagged
+  // overBudget — the live prompt lost verbatim with the next request STILL
+  // over budget. Now such a fold buys nothing: the live prompt survives in
+  // whatever is applied.
+  const live = "u".repeat(11800);
+  const ctx: AgentMessage[] = [
+    { role: "user", content: "old", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "x".repeat(40000) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 2 },
+    { role: "user", content: live, timestamp: 3 },
+    { role: "assistant", content: [{ type: "text", text: "w".repeat(1620) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 4 },
+  ];
+  const fn = fakeStream([
+    { type: "text", text: "s".repeat(2000) }, // preserving attempt: busts → fold-after-demo
+    { type: "text", text: "f".repeat(13000) }, // fold attempt: within the provider cap, chars/cpt estimate busts (drift)
+    { type: "text", text: "t".repeat(13000) }, // transcript retry: same shape
+    { type: "text", text: "t2".repeat(6500) }, // final retry candidate
+  ]);
+  const { deps, events } = compactNowDeps(fn, {
+    model: { ...SMALL_WINDOW, contextWindow: 4900, maxTokens: 500 },
+    context: ctx,
+    strictFit: true,
+    force: true,
+  });
+  const r = await compactNow(deps);
+  // The guard must be judged on a REAL application: before the fix this
+  // same geometry applied an over-budget, live-prompt-LOSING fold. An
+  // `if (r)`-only check would also pass if the ladder applied nothing at
+  // all — pin the application itself, then its shape.
+  assert.ok(r, "the ladder applied a candidate (not a silent skip)");
+  assert.ok(
+    r.some((m) => m.role === "user" && m.content === live),
+    "the live prompt survives — a fold that fails to buy the fit is never applied",
+  );
+  assert.equal(events.length, 1, "exactly one compaction event");
+  assert.equal(events[0]!.type, "context_compacted");
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.degraded, undefined, "a real LLM summary (the preserving candidate), not the rule-based notice");
+    assert.equal(events[0]!.overBudget, true, "honestly flagged over budget — the fit could not be bought here, and the preserving candidate beats a prompt-losing over-budget fold");
+  }
+});
+
+test("compactNow: a stream-reported abort (caller signal unset) stops the ladder — no retry, no degraded notice (finding 3 boundary)", async () => {
+  // The stream's done event says stopReason "aborted" while deps.signal was
+  // never aborted. compactNow's `deps.signal.aborted` checks cannot see it —
+  // only the COMPACT_ABORTED sentinel can. The whole ladder (transcript retry
+  // AND the rule-based notice) must halt: a user cancel is not a transient
+  // summarizer failure.
+  let calls = 0;
+  const fn: StreamFn = (model, c, o) => {
+    calls += 1;
+    return fakeStream([{ type: "aborted" }])(model, c, o);
+  };
+  // A recording session stub: the audit asked the abort coverage to prove
+  // NOTHING is persisted (a compaction entry would rewrite the session's
+  // replay chain), not only that no event/context came back.
+  const compactions: { summary: string; firstId: string }[] = [];
+  const stubSession = {
+    appendCompaction: async (rawSummary: string, firstId: string) => {
+      compactions.push({ summary: rawSummary, firstId });
+      return "entry-should-never-be-used";
+    },
+  } as unknown as Session;
+  const { deps, events } = compactNowDeps(fn, { force: true, strictFit: true, session: stubSession });
+  // The kept messages need entry ids for the emit path to reach appendCompaction
+  // (this is exactly the branch where a silent fallback would rewrite history).
+  for (const m of deps.context) deps.ids.set(m, "id-" + (deps.ids.size + 1));
+  const r = await compactNow(deps);
+  assert.equal(r, undefined, "no context applied");
+  assert.equal(calls, 1, "the ladder stopped — no retry after the user-cancelled stream");
+  assert.equal(events.length, 0, "no compaction applied, no degraded notice, no skip event");
+  assert.equal(compactions.length, 0, "NOTHING was appended to the session — the abort cannot rewrite history");
+});
+
+test("compactNow: a stream abort with a REAL session leaves the replay chain untouched (finding 4)", async (t) => {
+  // The stub above proves appendCompaction was not called; this proves it
+  // against the on-disk session: the pre-compaction replay (context + compaction
+  // entries) is byte-identical after an aborted compaction attempt.
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "abort-replay.jsonl");
+  const session = await Session.create(sessionPath, { cwd: dir, model: { id: MODEL.id, provider: "fake" } });
+  t.after(() => session.close());
+  // Seed a REAL conversation (the shape a compaction would rewrite): two
+  // exchanges persisted through the session API, then rebuild the context
+  // with the REAL entry ids — an append by the ladder would be visible in
+  // both the file bytes and the replayed chain.
+  const seeded: AgentMessage[] = [
+    { role: "user", content: "old task " + "y".repeat(500), timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "old answer" }], model: "fake-model", provider: "fake", stopReason: "stop", timestamp: 2, usage: { input: 100, output: 10, totalTokens: 110 } },
+    { role: "user", content: "current task", timestamp: 3 },
+    { role: "assistant", content: [{ type: "text", text: "working" }], model: "fake-model", provider: "fake", stopReason: "stop", timestamp: 4, usage: { input: 200, output: 20, totalTokens: 220 } },
+  ];
+  const realIds = new Map<AgentMessage, string>();
+  for (const m of seeded) realIds.set(m, await session.appendMessage(m));
+  const replayBefore = await replaySession(sessionPath);
+  const before = await readFile(sessionPath, "utf8");
+
+  let calls = 0;
+  const base = fakeStream([{ type: "aborted" }]);
+  const fn: StreamFn = (model, c, o) => {
+    calls += 1;
+    return base(model, c, o);
+  };
+  const { deps, events } = compactNowDeps(fn, {
+    force: true,
+    strictFit: true,
+    session,
+    context: seeded,
+    model: { ...SMALL_WINDOW, contextWindow: 700, maxTokens: 50, compactionReserve: 50 },
+    compactKeepTokens: 5,
+  });
+  deps.ids.clear();
+  for (const [m, id] of realIds) deps.ids.set(m, id);
+  const r = await compactNow(deps);
+  assert.equal(calls, 1, "the summarizer WAS called and aborted (the sentinel path ran, not a no-plan skip)");
+  assert.equal(r, undefined, "no context applied");
+  assert.equal(events.length, 0);
+  const after = await readFile(sessionPath, "utf8");
+  assert.equal(after, before, "the session file is byte-identical — an aborted compaction persists nothing");
+  const replayed = await replaySession(sessionPath);
+  assert.deepEqual(replayed.context, replayBefore.context, "the replayed conversation chain is unchanged");
+  assert.equal(replayed.context.length, 4, "the seeded chain still replays intact");
+  assert.equal(replayed.context.filter((m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith("Compaction summary")).length, 0, "no compaction summary in replay");
+});
+
+// ── Audit finding 5: the unchanged policies, protected explicitly ───────────
+
+test("compactNow manual policy: /compact keeps a huge live prompt verbatim (never folds it) (finding 5)", async () => {
+  // The fold would be CHEAPER (the live prompt is the biggest unit) — but
+  // the manual path (strictFit:false) never folds the user's live prompt:
+  // the kept tail stays verbatim and an over-budget result is applied with
+  // the honest overBudget event flag. Geometry: budget 3376; the live
+  // prompt alone is ~2951 tokens behind a 405-token tail — the preserving
+  // candidate busts, yet it is what the manual policy applies.
+  const live = "u".repeat(11800);
+  const ctx: AgentMessage[] = [
+    { role: "user", content: "old", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "x".repeat(40000) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 2 },
+    { role: "user", content: live, timestamp: 3 },
+    { role: "assistant", content: [{ type: "text", text: "w".repeat(1620) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 4 },
+  ];
+  const { deps, events } = compactNowDeps(fakeStream([{ type: "text", text: "S.".repeat(50) }]), {
+    model: { ...SMALL_WINDOW, contextWindow: 4900, maxTokens: 500 },
+    context: ctx,
+    strictFit: false,
+    force: true,
+  });
+  const r = await compactNow(deps);
+  assert.ok(r, "the manual path applies its best-effort candidate");
+  assert.ok(
+    r!.some((m) => m.role === "user" && m.content === live),
+    "the live prompt is kept VERBATIM — manual /compact never folds it",
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.type, "context_compacted", "a real compaction was applied (not a skip)");
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.degraded, undefined, "a real LLM summary, not the rule-based notice");
+    assert.equal(events[0]!.overBudget, true, "the candidate is over budget and HONESTLY flagged (manual best-effort)");
+  }
+});
+
+test("compactNow auto policy: a normal small overflow applies a fitting preserving candidate (finding 5)", async () => {
+  // The everyday case the D26 ladder must NOT disturb: a MODEST overflow —
+  // budget 3376, the context ~3550 est tokens (~5% over, no force: the
+  // estimate-based auto trigger fires) — the oldest unit folds away, and
+  // the FIRST LLM candidate fits with the live prompt kept verbatim: one
+  // summarizer call, no retry, no notice, no flags.
+  const live = "current task";
+  const ctx: AgentMessage[] = [
+    { role: "user", content: "a".repeat(6000), timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "b".repeat(6000) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 2, usage: { input: 3400, output: 100, totalTokens: 3500 } },
+    { role: "user", content: live, timestamp: 3 },
+    { role: "assistant", content: [{ type: "text", text: "c".repeat(2000) }], model: "fake", provider: "fake", stopReason: "stop", timestamp: 4, usage: { input: 3500, output: 100, totalTokens: 3600 } },
+  ];
+  assert.ok(
+    estimateTokens(ctx) > 3376,
+    "the fixture is a MODEST overflow: just over the 3376-token budget, not multiples of it",
+  );
+  let calls = 0;
+  const base = fakeStream([{ type: "text", text: "GOAL: the task continues." }]);
+  const fn: StreamFn = (m, c, o) => {
+    calls += 1;
+    return base(m, c, o);
+  };
+  const { deps, events } = compactNowDeps(fn, {
+    model: { ...SMALL_WINDOW, contextWindow: 4900, maxTokens: 500 },
+    context: ctx,
+    strictFit: true,
+    // NO force: the auto trigger (estimate-based) must fire on this overflow.
+  });
+  const r = await compactNow(deps);
+  assert.ok(r, "the overflow compacted");
+  assert.equal(calls, 1, "the first candidate fit — no transcript retry, no fold attempt");
+  assert.ok(
+    r!.some((m) => m.role === "user" && m.content === live),
+    "the live prompt survived verbatim",
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.type, "context_compacted", "a real compaction was applied (not a skip)");
+  if (events[0]!.type === "context_compacted") {
+    assert.equal(events[0]!.degraded, undefined, "a real LLM summary, not the rule-based notice");
+    assert.equal(events[0]!.overBudget, undefined, "the applied candidate fits the budget");
+  }
+});
+
 test("D: compactNow — first call fails, retry succeeds (no degraded flag)", async () => {
   const { deps, events, err } = compactNowDeps(
     fakeStream([{ type: "error", message: "down" }, { type: "text", text: "SUMMARY." }]),
@@ -2232,6 +2445,7 @@ test("printEvent: loop agent_end WITH evidence → the trigger line joins the st
         guard: "identical-batch",
         signature: 'bash:{"command":"ls"}\u0000read:{"path":"a"}',
         repeats: 3,
+        stable: true,
         guardRetries: 0,
       },
     },
@@ -2239,7 +2453,7 @@ test("printEvent: loop agent_end WITH evidence → the trigger line joins the st
     "/tmp/s.jsonl",
   );
   assert.match(err, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
-  assert.match(err, /trigger: bash:\{"command":"ls"\} \(×3 in a row\)/);
+  assert.match(err, /trigger: bash:\{"command":"ls"\} \(×3 identical, same results\)/);
   assert.doesNotMatch(err, /auto-retr/, "0 retries spent — no retry clause");
   assert.match(err, /resume: --resume \/tmp\/s\.jsonl/, "the resume hint follows the trigger line");
 });
@@ -2275,15 +2489,17 @@ test("D33: guardEvidenceNote clamps every part to one terminal-friendly line", (
     guard: "identical-batch",
     signature: `write:{"content":"${"x".repeat(500)}"}`,
     repeats: 3,
+    stable: true,
     guardRetries: 2,
   });
   assert.ok(long.includes("…"), "the clipped signature segment ends with an ellipsis");
-  assert.ok(long.length <= 160, `the note stays one line (${long.length} chars)`);
+  assert.ok(long.length <= 180, `the note stays one line (${long.length} chars)`);
   assert.ok(!long.includes("\n"));
   const plural = guardEvidenceNote({
     guard: "identical-batch",
     signature: "read:{}",
     repeats: 3,
+    stable: true,
     guardRetries: 2,
   });
   assert.match(plural, /after 2 auto-retries/);
@@ -2339,6 +2555,10 @@ test("D33: a loop stop with a session writes a guardStop entry after the run's m
   if (guard && guard.type === "guardStop") {
     assert.equal(guard.evidence.guard, "identical-batch");
     assert.equal(guard.evidence.repeats, 3);
+    assert.equal(
+      guard.evidence.guard === "identical-batch" ? guard.evidence.stable : undefined,
+      true,
+    );
     assert.match(guard.evidence.signature, /echo:/);
   }
   // The entry lands AFTER the run's messages (the stop is the last thing).

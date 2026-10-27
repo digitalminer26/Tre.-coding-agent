@@ -635,6 +635,18 @@ export function summarizePrompt(
   return `${instructions}\n\n${files ? files + "\n\n" : ""}${iterative}TRANSCRIPT:\n${transcript}`;
 }
 
+/**
+ * Sentinel outcome of `compactContext`: the summarizer stream reported
+ * `stopReason: "aborted"` (the user pressed ESC). Distinct from `undefined`
+ * ("nothing to compact / no candidate") because the CALLER's abort signal may
+ * not be set — the abort came from the stream — and an aborted compaction is
+ * USER INTENT: `compactNow` must stop its entire retry/fallback ladder
+ * (audit finding 3: collapsing the abort into `undefined` let the ladder
+ * retry and apply a lossy fallback right after the user cancelled).
+ */
+export const COMPACT_ABORTED: unique symbol = Symbol("compact-aborted");
+export type CompactAborted = typeof COMPACT_ABORTED;
+
 export interface CompactContextResult {
   summary: string;
   kept: AgentMessage[];
@@ -696,9 +708,12 @@ export function ruleBasedShrink(
 /**
  * Run a compaction if `context` needs it: check the trigger on the last
  * assistant message's usage, plan the split, and make ONE silent summarizer
- * call (no tools). Returns undefined — never throws — when compaction is not
+ * call (no tools). Never throws. Returns undefined when compaction is not
  * needed, the plan is empty, the stream fails, or the model produced no text
- * (I3: the caller then keeps the context as-is).
+ * (I3: the caller then keeps the context as-is). Returns the
+ * {@link COMPACT_ABORTED} sentinel when the summarizer stream reported a user
+ * abort — the caller must treat that as terminal intent, NOT as "try
+ * something else".
  */
 export async function compactContext(opts: {
   streamFn: StreamFn;
@@ -726,7 +741,9 @@ export async function compactContext(opts: {
    *  `fitsInputBudget`; false means the mandatory floor itself is
    *  irreducible and the caller takes its legacy best-effort path. */
   strictFit?: boolean;
-}): Promise<CompactContextResult | undefined> {
+  /** See {@link COMPACT_ABORTED}: a user abort during the summarizer stream
+   *  is reported as the sentinel (not `undefined`) so the caller can stop. */
+}): Promise<CompactContextResult | CompactAborted | undefined> {
   let lastAssistant: AssistantMessage | undefined;
   for (let i = opts.context.length - 1; i >= 0; i--) {
     const m = opts.context[i]!;
@@ -1008,7 +1025,13 @@ export async function compactContext(opts: {
   // larger than the prefix it replaces would ENLARGE the next request,
   // which is strictly worse than skipping the compaction.
   let outcome = await summarizeFor(plan, strictFoldRung);
-  if (outcome === "failed" || outcome === "aborted" || outcome === "empty") return undefined;
+  // A user abort at any summarizer call is TERMINAL (audit finding 3): the
+  // stream's abort reason can be invisible to the caller (its own signal may
+  // not be set), so `undefined` must not absorb it — report the sentinel and
+  // let compactNow stop its ladder instead of retrying lossy fallbacks right
+  // after the user cancelled.
+  if (outcome === "aborted") return COMPACT_ABORTED;
+  if (outcome === "failed" || outcome === "empty") return undefined;
   if (outcome === "too-big") return undefined;
   // Fold-after-demonstration (audit finding 1): the preserving plan was
   // selected because no impossibility proof existed — its floor fit, so a
@@ -1027,20 +1050,60 @@ export async function compactContext(opts: {
     // still in hand. A stream failure/empty/too-big fold is different: the
     // preserving candidate survives (honestly over budget), and compactNow
     // falls through to the rule-based notice that fits (audit finding 2).
-    if (foldOutcome === "aborted") return undefined;
+    if (foldOutcome === "aborted") return COMPACT_ABORTED;
     if (foldOutcome !== "failed" && foldOutcome !== "empty" && foldOutcome !== "too-big") {
-      plan = foldAfterDemo;
-      strictFoldRung = true;
-      outcome = foldOutcome;
+      // A fold replaces the preserving candidate ONLY when it BUYS THE FIT
+      // on the ACTUAL summary (audit finding 2): the call is capped in
+      // PROVIDER tokens, the fit is judged in chars/cpt, and those units
+      // drift — a capped response can still estimate over the budget. A
+      // fold that does not fit discards the live prompt for nothing, so it
+      // is thrown away and the preserving candidate is kept (honestly
+      // over budget; compactNow's ladder owns the rest).
+      const foldEstimate =
+        estimateTokens([makeSummaryMessage(foldOutcome.text), ...foldAfterDemo.kept], cpt) + promptOverhead;
+      if (foldEstimate <= requestBudget) {
+        plan = foldAfterDemo;
+        strictFoldRung = true;
+        outcome = foldOutcome;
+      }
     }
   }
   let estimatedTokensAfter =
     estimateTokens([makeSummaryMessage(outcome.text), ...plan.kept], cpt) + promptOverhead;
+  // D26 audit round 2 (finding 1): the "fold must buy the fit" guard covers
+  // the DIRECT fold rung too. The fold-after-demo path above already rejects
+  // a drift-busted fold; the directly-selected fold (the preserving floor
+  // provably cannot fit) ran under the same non-enforceable cap — the cap
+  // rides on the summarizer model's maxTokens, which a compat.extraParams
+  // override or a cap-ignoring endpoint can defeat. A response whose REAL
+  // estimated size busts the request budget discards the live prompt for
+  // NOTHING (the whole point of folding was to fit), so it is rejected:
+  // `undefined` hands compactNow's ladder the notice rung, which keeps the
+  // live prompt verbatim (over budget itself — the preserving floor proved
+  // that irreducible — but never strictly worse than a prompt-losing
+  // over-budget fold). The check covers EVERY strictFoldRung outcome: the
+  // direct rung AND a fold adopted after demonstration.
+  if (strictFoldRung && estimatedTokensAfter > requestBudget) return undefined;
   // A candidate must shrink the context — EXCEPT on the strict-fit prompt-
-  // fold rung: that rung was selected because its bound provably fits the
-  // request budget, and the alternative (falling through to compactNow's
-  // lossier notice rung) discards a proven budget fit over a technicality.
-  if (estimatedTokensAfter >= estimatedTokensBefore && !strictFoldRung) return undefined;
+  // fold rung that ACTUALLY folded the live prompt: that rung was selected
+  // because its bound provably fits the request budget, and the alternative
+  // (falling through to compactNow's lossier notice rung) discards a proven
+  // budget fit over a technicality. Audit round 2 (finding 2): a
+  // preserveLastUser:false plan only ALLOWS folding the live prompt — the
+  // descent can stop short of it (the suffix reaches the target first), so
+  // `strictFoldRung` alone never proved the prompt was consumed. A fold
+  // candidate that kept the live prompt verbatim is an ordinary candidate
+  // and must clear the ordinary shrink bar (it is still budget-guarded
+  // above); the growth exemption belongs solely to the case where the
+  // prompt really crossed into the summary — there the candidate may be
+  // larger than the original (the live prompt alone can exceed it) and is
+  // still strictly better than an over-budget request.
+  const liveUserIndex = (() => {
+    for (let i = opts.context.length - 1; i >= 0; i--) if (opts.context[i]!.role === "user") return i;
+    return -1;
+  })();
+  const livePromptFolded = liveUserIndex < 0 || plan.keepFrom > liveUserIndex;
+  if (estimatedTokensAfter >= estimatedTokensBefore && !(strictFoldRung && livePromptFolded)) return undefined;
   return {
     summary: outcome.text,
     kept: plan.kept,

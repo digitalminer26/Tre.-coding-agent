@@ -1271,7 +1271,11 @@ test("agent_end: loop → error item explaining the runaway stop (C26)", () => {
   const last = s.items[s.items.length - 1]!;
   assert.equal(last.kind, "error");
   const text = last.kind === "error" ? last.text : "<not an error item>";
-  assert.match(text, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
+  // loop-v2 (audit re-fix 2026-11-02): WITHOUT evidence the headline makes
+  // no count claim (it cannot know the pattern) — the old hard-coded
+  // "3 times in a row" lied whenever the producer was a cycle/cap stop.
+  assert.match(text, /loop: the model repeated the same tool call\(s\)/);
+  assert.doesNotMatch(text, /3 times in a row/);
   assert.match(text, /send another prompt to continue/);
   assert.equal(s.busy, false);
 });
@@ -3208,6 +3212,7 @@ test("D33: agent_end loop WITH evidence → the error item names the trigger", (
         guard: "identical-batch",
         signature: 'read:{"path":"x"}',
         repeats: 3,
+        stable: true,
         guardRetries: 1,
       },
     },
@@ -3216,7 +3221,7 @@ test("D33: agent_end loop WITH evidence → the error item names the trigger", (
   assert.equal(last.kind, "error");
   const text = last.kind === "error" ? last.text : "<not an error item>";
   assert.match(text, /loop: the model repeated the same tool call\(s\) 3 times in a row/);
-  assert.match(text, /trigger: read:\{"path":"x"\} \(×3 in a row, after 1 auto-retry\)/);
+  assert.match(text, /trigger: read:\{"path":"x"\} \(×3 identical, same results, after 1 auto-retry\)/);
 });
 
 test("D33: agent_end stall WITH permission evidence → tool, count, and the denial text", () => {

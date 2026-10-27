@@ -531,8 +531,11 @@ export const openAiResponsesStream: StreamFn = (model, ctx, opts) => {
     }
 
     // Authoritative parse of tool-call args (the partials were best-effort).
+    // Protocol-leak repair only for endpoints flagged as leaking (opt-in):
+    // parsed values are verbatim everywhere else.
+    const repairProtocol = model.compat?.repairsLeakedToolProtocol === true;
     for (const entry of tools.values()) {
-      entry.block.arguments = parseToolArgs(entry.raw);
+      entry.block.arguments = parseToolArgs(entry.raw, { repairLeakedProtocol: repairProtocol });
     }
 
     const done: AssistantMessage = { ...snap(), stopReason: finish.reason };

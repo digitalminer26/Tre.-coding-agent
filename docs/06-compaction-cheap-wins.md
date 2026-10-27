@@ -460,3 +460,44 @@ regressions (`test/compact.test.ts`, "Audit follow-ups to D26"):
    finding-2 test (the preserving floor fits, the real notice does NOT fit,
    so the fold is provably in play) plus `D26 strict-fit guard …` and
    `repro 3` from the first cut.
+
+### D26 audit follow-up 2 (2026-10-26 review: abort sentinel, the direct fold, the live-prompt exemption)
+
+A third review pass (auditor: gpt-6.1-sol, read-only, over the uncommitted
+diff) drove four changes:
+
+1. *A user abort must be terminal, not "nothing happened"* — `compactContext`
+   now returns the `COMPACT_ABORTED` sentinel when the summarizer stream
+   reports `stopReason: "aborted"` (the stream's abort can be invisible to
+   the caller's own signal). `compactNow` stops its ENTIRE ladder at the
+   sentinel — no transcript retry, no rule-based notice right after the
+   user pressed ESC. Covered by `compactNow: a stream-reported abort
+   (caller signal unset) stops the ladder…` plus a real-session variant
+   (`… with a REAL session leaves the replay chain untouched`): the session
+   file is byte-identical after an aborted attempt — nothing is appended,
+   replay never gains a compaction summary.
+2. *The direct fold rung must respect the budget it exists to buy* — the
+   fold-after-demo path already rejected a drift-busted fold, but the
+   directly-selected fold (preserving floor provably cannot fit) trusted
+   the provider cap alone — a cap `compat.extraParams` can override or an
+   endpoint can ignore. A fold response whose REAL estimated size busts the
+   request budget is now rejected outright (`strictFoldRung &&
+   estimatedTokensAfter > requestBudget → undefined`), handing compactNow's
+   ladder the notice rung — which keeps the live prompt verbatim instead of
+   dropping it for a result that is over budget anyway. Pinned by
+   `compactContext: a cap-ignoring fold response over budget is rejected —
+   the live prompt survives via the notice rung` and the sweep's tightFloor
+   geometry (1512 cases, all invariants green).
+3. *The growth exemption belongs to the prompt-folding case only* — a
+   `preserveLastUser:false` plan only ALLOWS folding the live prompt; the
+   descent can stop short of it. The shrink-bar exemption on the strict fold
+   rung now requires the prompt to be genuinely folded (`livePromptFolded`);
+   a fold candidate that kept it verbatim is an ordinary candidate and clears
+   the ordinary bar (always budget-guarded first).
+4. *The unchanged policies get explicit guards* — manual `/compact` keeps a
+   huge live prompt verbatim (never folds; the over-budget flag is honest),
+   and a normal small-overflow auto-compaction still lands its FIRST
+   candidate (one call, prompt verbatim, no flags). The wire tests pin the
+   cap precedence: `compat.extraParams` merges last and can override
+   `max_tokens`/`max_completion_tokens` — why the real-size guard, not the
+   request cap, is the authority.
