@@ -3123,3 +3123,42 @@ test("guardRetryNote: honest per-pattern transcript line (shared CLI/TUI)", () =
   assert.match(legacy, /repeated tool-call batch\) — retrying with a changed approach/);
   assert.doesNotMatch(legacy, /3×|3 times|alternating|incl\./);
 });
+
+test("loop v2: a synthetic SECOND pair cannot complete a stable cycle", async () => {
+  // Audit (2026-11-02): the stable cycle rule must exempt ALL FOUR
+  // history records. X,Y execute successfully ("same"); the NEXT A,B are
+  // answered synthetically (details.notExecuted — a constant/reused text
+  // that digests like the real result). The 5th batch (A again) must NOT
+  // be refused: the second round never produced real results, so no stable
+  // alternation is proven. Pre-fix, only X₁/Y₁ were checked and the run
+  // stopped with a false stable cycle-batch loop.
+  let n = 0;
+  const mk = (name: string) =>
+    makeTool(name, {
+      execute: (async () => ({
+        content: [{ type: "text", text: "same" }],
+        ...(n++ > 1 ? { details: { notExecuted: true } } : {}),
+      })) as Tool["execute"],
+    });
+  const a = mk("a");
+  const b = mk("b");
+  const alternating = (i: number): FakeTurn => ({
+    type: "toolcall",
+    calls: [{ id: `c${i}`, name: i % 2 ? "b" : "a", args: { q: 1 } }],
+  });
+  const turns: FakeTurn[] = [
+    alternating(0),
+    alternating(1),
+    alternating(2),
+    alternating(3),
+    alternating(4),
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [a.tool, b.tool], {
+    maxTurns: 50,
+    maxGuardRetries: 0,
+  });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop", "no stable cycle stop on a synthetic second pair");
+  assert.equal(a.calls.length + b.calls.length, 5, "the 5th batch executed");
+});

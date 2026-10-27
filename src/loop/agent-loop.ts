@@ -942,21 +942,35 @@ export async function* runLoop(
       // Stable-result alternation: [X, Y, X, Y] executed (X ≠ Y) and the
       // current batch is the third X — and each position's results repeat
       // across cycles (dX1 === dX2, dY1 === dY2).
+      // Re-audit (2026-11-02): the failure exemption must cover ALL FOUR
+      // history records, not just the first pair (X, Y). A second-pair
+      // record (X₂/Y₂) answered SYNTHETICALLY (a guard fill, an unknown
+      // tool, an I3 throw — a constant or reused text) can digest the same
+      // as the first pair's real result; checking only !X.failed &&
+      // !Y.failed then declared a "stable" cycle from a run where the
+      // second round never actually produced results. Same reasoning as the
+      // length-fill fix (failed-record flag): repeated FAILURES are the
+      // stall guards' domain, so the stable cycle rule stops only when all
+      // four rounds were genuine, successful, repeating results.
       const alternatingStable =
         n >= CYCLE_MIN_HISTORY &&
         (() => {
           const h = batchHistory;
           const X = h[n - 4]!;
           const Y = h[n - 3]!;
+          const X2 = h[n - 2]!;
+          const Y2 = h[n - 1]!;
           return (
             X.sig !== Y.sig &&
-            h[n - 2]!.sig === X.sig &&
-            h[n - 1]!.sig === Y.sig &&
+            X2.sig === X.sig &&
+            Y2.sig === Y.sig &&
             signature === X.sig &&
-            h[n - 2]!.digest === X.digest &&
-            h[n - 1]!.digest === Y.digest &&
+            X2.digest === X.digest &&
+            Y2.digest === Y.digest &&
             !X.failed &&
-            !Y.failed
+            !Y.failed &&
+            !X2.failed &&
+            !Y2.failed
           );
         })();
       // Fresh-result alternation cap: 11 executed batches strictly

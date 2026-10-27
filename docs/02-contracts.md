@@ -63,7 +63,11 @@ Rules:
   strictly-alternating batches; a stable-period-2 ALTERNATION (X,Y,X,Y,X…
   with unchanged per-position results) trips a `cycle-batch` guard with
   `CYCLE_GUARD_TEXT` (evidence variant `cycle-batch`); and failed repeats
-  stay exempt from the cycle rule (the stall guards' domain). Two identical
+  stay exempt from the cycle rule (the stall guards' domain) — the stable
+  cycle check exempts ALL FOUR history records, not just the pattern's
+  first pair (audit 2026-11-02: a synthetically-answered second pair can
+  digest like a real result and must not complete a "stable" alternation).
+  Two identical
   batches remain allowed (legit retries exist). Before stopping, the loop AUTO-RETRIES
   ONCE with an approach-changing nudge (`GUARD_RETRY_TEXT`, emitting the
   `guard_retry` event; bounded by `maxGuardRetries`, default 1 — see

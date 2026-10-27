@@ -265,6 +265,53 @@ const check = (name, cond, detail) => {
   );
 }
 
+// P7 — a SYNTHETIC second pair must not complete a stable cycle (audit
+//      2026-11-02): X,Y executed; the next X,Y answered with the same text
+//      but details.notExecuted; the 5th batch must RUN (pre-fix: false
+//      stable cycle-batch loop, because only the first pair's failed flags
+//      were checked).
+{
+  let n = 0;
+  const tools = ["a", "b"].map((name) => ({
+    name,
+    description: "probe",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      n += 1;
+      return {
+        content: [{ type: "text", text: "same" }],
+        ...(n > 2 ? { details: { notExecuted: true } } : {}),
+      };
+    },
+  }));
+  const turns7 = [
+    ...Array.from({ length: 5 }, (_, i) => ({
+      type: "toolcall",
+      calls: [{ id: `k${i}`, name: i % 2 ? "b" : "a", args: {} }],
+    })),
+    { type: "text", text: "done" },
+  ];
+  const events = [];
+  for await (const ev of runLoop({
+    model,
+    systemPrompt: "sys",
+    initialMessages: [{ role: "user", content: "go", timestamp: 1 }],
+    tools,
+    streamFn: fakeStream(turns7, { model }),
+    signal: new AbortController().signal,
+    maxTurns: 40,
+    maxGuardRetries: 0,
+  })) {
+    events.push(ev);
+  }
+  const end = events.find((e) => e.type === "agent_end");
+  check(
+    "P7 mixed-synthetic-cycle",
+    end?.stopReason === "stop" && n === 5,
+    `stop=${end?.stopReason} executed=${n} (pre-fix: false stable cycle loop, executed=4)`,
+  );
+}
+
 const failed = checks.filter((c) => !c.pass).length;
 console.log(failed === 0 ? "ALL PROBES PASS" : `${failed} PROBE(S) FAILED`);
 process.exit(failed === 0 ? 0 : 1);
