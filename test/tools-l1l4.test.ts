@@ -130,7 +130,13 @@ test("L3: prune removes >7d-old .log files, keeps fresh ones and foreign files",
     const foreign = path.join(dir, "someone-else.txt");
     for (const f of [stale, fresh, foreign]) fs.writeFileSync(f, "x");
     const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
-    execFileSync("touch", ["-a", "-m", String(Math.floor(old)), stale]);
+    // Deterministic mtime via utimesSync. This used to shell out to
+    // `touch -a -m <epoch> <file>`, which is ambiguous: BSD touch has no
+    // epoch-seconds form, so the digits were sometimes consumed as a
+    // TIME operand (mtime ~1962/1969) and sometimes as a FILE NAME
+    // (leaving `stale` fresh) — a real ~1-in-6 suite flake on macOS
+    // (2026-11-28: L3 failed "stale .log pruned: true !== false").
+    fs.utimesSync(stale, old, old);
     pruneFullOutputDir(dir);
     assert.equal(fs.existsSync(stale), false, "stale .log pruned");
     assert.equal(fs.existsSync(fresh), true, "fresh .log kept");
