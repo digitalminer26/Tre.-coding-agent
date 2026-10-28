@@ -328,19 +328,39 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     Map<string, { call: number; text: string }[]>
   >();
   const FAMILY_MAX_TRACKED = 32;
+  // Per-tool OUTCOME sequence (2026-11-28 auditor cycle 2): the windowed
+  // guards record state when a result EXISTS, but the executor is entered
+  // in dispatch order and returns in completion order — a parallel batch
+  // (or any concurrent caller) used to allocate indices at entry while
+  // recording later, producing NEGATIVE window deltas (`idx - stale` is
+  // always < the window) so entries never pruned: the family window
+  // retained one pair per call, and H2 false-stalled on three completions
+  // no real "last 8" contained. The index is now allocated at the single
+  // outcome seam each call takes (the three pre-execution returns or
+  // step 5) — monotonic per tool, non-negative deltas everywhere. The
+  // observable semantics become "the last N OUTCOMES of this tool", the
+  // only order the guard can honestly see under concurrency; in serial
+  // use (the loop's sequential lane, single-call turns) outcome order IS
+  // call order, so behavior is unchanged there.
   const callsByTool = new Map<string, number>();
+  const nextCallIndex = (toolName: string): number => {
+    const n = (callsByTool.get(toolName) ?? 0) + 1;
+    callsByTool.set(toolName, n);
+    return n;
+  };
   // 2026-11-28 auditor cycle 1, finding 1: pre-execution outcomes
   // (validation failure, blocked call, broken beforeToolCall hook) ARE
   // calls of this tool — the windowed guards promise "within its last N
   // calls", and until now every early return skipped both the per-tool
   // call index and the H1 slot, so arbitrarily many blocked calls between
   // two real failures left the failures adjacent for H1/H2/family (an 8
-  // "blocked" sandwich kept 3 denials firing H1). The call index is now
-  // allocated at the TOP of the executor for every path; this helper lets
-  // the early returns occupy their H1 window slot as the NON-permission
-  // outcome they are (the tool never ran — its failure text is the gate's,
-  // not a denial or a tool error, and must not feed any failure counter).
+  // "blocked" sandwich kept 3 denials firing H1). The three early returns
+  // go through this helper: they consume their call index AND occupy the
+  // H1 window slot as the NON-permission outcome they are (the tool never
+  // ran — its failure text is the gate's, not a denial or a tool error,
+  // and must not feed any failure counter).
   const occupyNonPermissionSlot = (toolName: string): void => {
+    nextCallIndex(toolName);
     const entry = stallByTool.get(toolName) ?? { window: [] as boolean[], count: 0 };
     entry.window.push(false);
     if (entry.window.length > STALL_WINDOW) entry.window.shift();
@@ -348,12 +368,6 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     stallByTool.set(toolName, entry);
   };
   return async (tool, call, signal, onUpdate) => {
-    // Every call of this tool — INCLUDING the pre-execution outcomes
-    // below — consumes exactly one per-tool call index (the window
-    // contract's "calls", 2026-11-28 auditor cycle 1). Step 5/family
-    // bookkeeping use this index; nothing may return before it.
-    const repeatCallIndex = (callsByTool.get(tool.name) ?? 0) + 1;
-    callsByTool.set(tool.name, repeatCallIndex);
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
     if (validationError !== undefined) {
@@ -512,6 +526,14 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     // skip the push. The warn rung used to return here first, so warned
     // calls never shifted the window and stale denials stayed counted —
     // H1 then fired on a call whose real last-8 history held one denial.
+    //
+    // The per-tool OUTCOME INDEX (2026-11-28 auditor cycle 2) is
+    // allocated here — at the single seam every executed outcome passes —
+    // so window deltas are non-negative even when parallel batches
+    // complete out of dispatch order. This is the only seam: the three
+    // pre-execution returns already allocated theirs (with a false H1
+    // slot) inside occupyNonPermissionSlot.
+    const repeatCallIndex = nextCallIndex(tool.name);
     const stallEntry =
       stallByTool.get(tool.name) ?? { window: [] as boolean[], count: 0 };
     const permission =

@@ -398,6 +398,100 @@ test("family-window: a NEW family after 32 tracked families is admitted, not evi
     "the newly-admitted family records its first call instead of self-evicting",
   );
 });
+
+test("family-window: out-of-order parallel completions cannot fake a window (2026-11-28 auditor cycle 2)", async () => {
+  // The defect: the executor recorded guard state on completion but the
+  // per-tool call index was allocated on ENTRY, so a parallel batch
+  // finishing in reverse order produced NEGATIVE window deltas (never
+  // pruned): the family window retained one pair per call (12 completions
+  // -> sameFamilyWarn: 12) and H2 stalled on completions no real "last 8"
+  // ever contained. Fix: the outcome index is allocated at the single
+  // outcome seam (5a / occupyNonPermissionSlot), monotonic per tool.
+  // Reverse-finishing batch: 12 same-family failures complete 12..1.
+  const releases: (() => void)[] = [];
+  const { tool } = makeTool("reverse", async (_id, args) => {
+    await new Promise<void>((resolve) => {
+      releases[args.n as number] = resolve;
+    });
+    return {
+      content: [{ type: "text" as const, text: `boom ${args.n}` }],
+      isError: true,
+    };
+  });
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const pending: Promise<ToolResult>[] = [];
+  for (let n = 1; n <= 12; n++) pending.push(executor(tool, call(String(n), "reverse", { n }), sig));
+  for (let n = 12; n >= 1; n--) releases[n]?.();
+  const results = await Promise.all(pending);
+  const warnCounts = results
+    .map((r) => r.details?.sameFamilyWarn)
+    .filter((w): w is number => typeof w === "number");
+  assert.ok(warnCounts.length > 0, "the loop does warn somewhere in the batch");
+  assert.ok(
+    warnCounts.every((w) => w <= 8),
+    `family warn stays window-bounded under reverse completion (saw ${warnCounts.join(",")})`,
+  );
+  // H2 sandwich: identical args+text on calls 1,2,9; successes between;
+  // call 1 completes LAST. No 8-completion window contains all three
+  // failures -> no stall, no repeat warn.
+  let releaseFirst: () => void = () => {};
+  const { tool: par } = makeTool("par2", async (_id, args) => {
+    if (args.hold) await new Promise<void>((resolve) => (releaseFirst = resolve));
+    return args.fail
+      ? { content: [{ type: "text" as const, text: "boom" }], isError: true }
+      : { content: [{ type: "text" as const, text: "ok" }] };
+  });
+  const ex2 = makeToolExecutor();
+  const p1 = ex2(par, call("1", "par2", { hold: true, fail: true }), sig);
+  const rest: Promise<ToolResult>[] = [];
+  for (let n = 2; n <= 9; n++) rest.push(ex2(par, call(String(n), "par2", { fail: n === 2 || n === 9 }), sig));
+  const restResults = await Promise.all(rest); // 2..9 complete first
+  releaseFirst(); // call 1 completes dead last
+  const r1 = await p1;
+  assert.equal(r1.details?.stall, undefined, "no false H2/streak stall on out-of-order completion");
+  assert.equal(r1.details?.repeatFailure, undefined);
+  assert.equal(r1.details?.sameFamilyWarn, undefined);
+  assert.ok(!restResults.some((r) => r.details?.stall === true), "no stall among the in-order calls either");
+});
+
+test("windowed guards: blocked / invalid / broken-hook calls expire real failures (2026-11-28 auditor cycle 1 follow-up)", async () => {
+  // The pre-execution returns must consume their call index AND their H1
+  // slot (cycle 1, finding 1) — pinned for all three windowed guards.
+  const blocked = { active: false };
+  const { tool } = makeTool("gate", async () => ({
+    content: [{ type: "text" as const, text: "Operation not permitted" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor({
+    beforeToolCall: async (_t, c) => (blocked.active && !c.arguments.allow ? { blocked: "gated" } : undefined),
+  });
+  const sig = new AbortController().signal;
+  // Two real denials, then EIGHT blocked calls, then a third denial:
+  // inside the last-8 window at call 11 only ONE denial is alive -> no H1.
+  await executor(tool, call("1", "gate", { allow: true }), sig);
+  await executor(tool, call("2", "gate", { allow: true }), sig);
+  blocked.active = true;
+  for (let n = 3; n <= 10; n++) await executor(tool, call(String(n), "gate", {}), sig);
+  const r11 = await executor(tool, call("11", "gate", { allow: true }), sig);
+  assert.equal(r11.details?.stall, undefined, "8 blocked calls slide the old denials out of H1's window");
+  // Invalid-args calls occupy their slots too (validation runs before the
+  // hook, so a missing required arg is rejected even when unblocked).
+  const strict: typeof tool = {
+    ...tool,
+    parameters: {
+      type: "object",
+      required: ["must"],
+      properties: { must: { type: "string" } },
+    } as typeof tool.parameters,
+  };
+  const ex2 = makeToolExecutor();
+  await ex2(strict, call("1", "gate", { allow: true }), sig);
+  await ex2(strict, call("2", "gate", { allow: true }), sig);
+  for (let n = 3; n <= 10; n++) await ex2(strict, call(String(n), "gate", {}), sig); // 8 invalid
+  const r11b = await ex2(strict, call("11", "gate", { allow: true, must: "s" }), sig);
+  assert.equal(r11b.details?.stall, undefined, "8 invalid calls slide the old denials out too");
+});
 //
 // Two rungs (the hard stop at 3 false-positived legitimate per-target
 // probing — audit finding): warn at 3 IN A ROW (notice appended, run
