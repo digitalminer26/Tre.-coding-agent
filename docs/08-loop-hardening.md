@@ -660,7 +660,14 @@ strings, unchanged.
 > (distinct texts never expiring; eviction deleting the just-added
 > family after 32 tracked families) — both fixed with regression tests
 > ("stale distinct text must expire" / "newly-admitted family is not
-> evicted" in test/tools.test.ts).
+> evicted" in test/tools.test.ts). A further 3-cycle independent audit
+> (gpt-6.1-sol, read-only against compiled dist/) fixed three more:
+> pre-execution outcomes (validation/blocked/broken-hook) now consume
+> their per-tool call index and H1 slot; guard windows count per-tool
+> OUTCOMES allocated at a single completion-order seam (out-of-order
+> parallel completions could previously defeat every sliding window via
+> negative deltas); and the regression tests themselves were hardened so
+> none can pass via a different guard than the one it pins.
 
 **Symptom (observed live).** A session ran the malformed BSD-sed command
 `sed -n ",+Np"` 15 times over ~500 tool calls before it ended. The failing
@@ -738,7 +745,10 @@ repeats remain its job.
 **Landed with this audit (warn rung only):** `familyFailureKey` + a
 third, ADDITIVE rung in the pipeline — SAME_FAMILY_WARN_THRESHOLD
 failures of one family within SAME_FAMILY_WINDOW calls of the tool
-(default 3/8), announced only when ≥2 DISTINCT texts share the family
+(default 3/8; "calls" = per-tool OUTCOMES recorded in completion order —
+the only order the guard can honestly observe when a parallel batch
+finishes out of dispatch order, auditor cycle 2), announced only when
+≥2 DISTINCT texts share the family
 (byte-identical repeats stay H2's; a single repeating text stays the
 consecutive ladder's, including the alternating-identical case pinned
 silent by test/tools.test.ts). The consecutive-5 STALL and H2 are

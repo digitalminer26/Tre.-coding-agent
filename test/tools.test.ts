@@ -434,18 +434,23 @@ test("family-window: out-of-order parallel completions cannot fake a window (202
   );
   // H2 sandwich: identical args+text on calls 1,2,9; successes between;
   // call 1 completes LAST. No 8-completion window contains all three
-  // failures -> no stall, no repeat warn.
+  // failures -> no stall, no repeat warn. Delay/fail/succeed is chosen by
+  // the external pending-set (2026-11-28 auditor cycle 3): ALL failing
+  // calls share ONE argument shape, or H2's args key would split them and
+  // the assertion could never see the regression it pins.
+  const failing = new Set(["1", "2", "9"]);
+  const held = new Set(["1"]);
   let releaseFirst: () => void = () => {};
-  const { tool: par } = makeTool("par2", async (_id, args) => {
-    if (args.hold) await new Promise<void>((resolve) => (releaseFirst = resolve));
-    return args.fail
+  const { tool: par } = makeTool("par2", async (id) => {
+    if (held.has(id)) await new Promise<void>((resolve) => (releaseFirst = resolve));
+    return failing.has(id)
       ? { content: [{ type: "text" as const, text: "boom" }], isError: true }
       : { content: [{ type: "text" as const, text: "ok" }] };
   });
   const ex2 = makeToolExecutor();
-  const p1 = ex2(par, call("1", "par2", { hold: true, fail: true }), sig);
+  const p1 = ex2(par, call("1", "par2", {}), sig);
   const rest: Promise<ToolResult>[] = [];
-  for (let n = 2; n <= 9; n++) rest.push(ex2(par, call(String(n), "par2", { fail: n === 2 || n === 9 }), sig));
+  for (let n = 2; n <= 9; n++) rest.push(ex2(par, call(String(n), "par2", {}), sig));
   const restResults = await Promise.all(rest); // 2..9 complete first
   releaseFirst(); // call 1 completes dead last
   const r1 = await p1;
@@ -477,6 +482,8 @@ test("windowed guards: blocked / invalid / broken-hook calls expire real failure
   assert.equal(r11.details?.stall, undefined, "8 blocked calls slide the old denials out of H1's window");
   // Invalid-args calls occupy their slots too (validation runs before the
   // hook, so a missing required arg is rejected even when unblocked).
+  // 2026-11-28 auditor cycle 3: the SEED denials must really execute -
+  // they carry the required arg; only the eight intervening calls omit it.
   const strict: typeof tool = {
     ...tool,
     parameters: {
@@ -486,11 +493,40 @@ test("windowed guards: blocked / invalid / broken-hook calls expire real failure
     } as typeof tool.parameters,
   };
   const ex2 = makeToolExecutor();
-  await ex2(strict, call("1", "gate", { allow: true }), sig);
-  await ex2(strict, call("2", "gate", { allow: true }), sig);
-  for (let n = 3; n <= 10; n++) await ex2(strict, call(String(n), "gate", {}), sig); // 8 invalid
+  const seed1 = await ex2(strict, call("1", "gate", { allow: true, must: "s" }), sig);
+  assert.equal(seed1.details?.notExecuted, undefined, "seed denial 1 really executed");
+  assert.match(seed1.content.map((c) => c.text).join(""), /not permitted/);
+  const seed2 = await ex2(strict, call("2", "gate", { allow: true, must: "s" }), sig);
+  assert.equal(seed2.details?.notExecuted, undefined, "seed denial 2 really executed");
+  for (let n = 3; n <= 10; n++) {
+    const inv = await ex2(strict, call(String(n), "gate", {}), sig); // 8 invalid
+    assert.match(inv.content.map((c) => c.text).join(""), /Invalid arguments/);
+  }
   const r11b = await ex2(strict, call("11", "gate", { allow: true, must: "s" }), sig);
   assert.equal(r11b.details?.stall, undefined, "8 invalid calls slide the old denials out too");
+
+  // Broken-hook calls occupy their slots as well (the third pre-execution
+  // path - completing the matrix the test name claims).
+  let hookBroken = false;
+  const { tool: hookTool } = makeTool("hooky", async () => ({
+    content: [{ type: "text" as const, text: "Operation not permitted" }],
+    isError: true,
+  }));
+  const ex3 = makeToolExecutor({
+    beforeToolCall: async (_t, c) => {
+      if (hookBroken && c.arguments.broken === true) throw new Error("hook exploded");
+      return undefined;
+    },
+  });
+  await ex3(hookTool, call("1", "hooky", {}), sig);
+  await ex3(hookTool, call("2", "hooky", {}), sig);
+  hookBroken = true;
+  for (let n = 3; n <= 10; n++) {
+    const bh = await ex3(hookTool, call(String(n), "hooky", { broken: true }), sig);
+    assert.match(bh.content.map((c) => c.text).join(""), /hook failed/);
+  }
+  const r11c = await ex3(hookTool, call("11", "hooky", {}), sig);
+  assert.equal(r11c.details?.stall, undefined, "8 broken-hook calls slide the old denials out");
 });
 //
 // Two rungs (the hard stop at 3 false-positived legitimate per-target

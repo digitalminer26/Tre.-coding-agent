@@ -547,9 +547,9 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     // 5. H2 same-failure guard — strict same tool + canonical args +
     // normalized non-permission error text. The bounded call-index history
     // prevents stale repeats from accumulating; changing diagnostics do not
-    // match. (repeatCallIndex was allocated at the TOP of the executor —
-    // 2026-11-28 auditor cycle 1 — so the pre-execution returns consumed
-    // their indices too.)
+    // match. (repeatCallIndex is the per-tool OUTCOME index allocated at
+    // the 5a seam above - 2026-11-28 auditor cycle 2, completion order;
+    // the pre-execution returns consumed theirs in occupyNonPermissionSlot.)
     if (result.isError === true) {
       const errorText = normalizeFailure(result.content.map((c) => c.text));
       if (errorText && !isPermissionStallText([errorText])) {
