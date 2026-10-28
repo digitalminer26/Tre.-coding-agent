@@ -323,6 +323,70 @@ test("family-window: window expiry — same-family failures spaced >8 calls apar
   const r10 = await executor(tool, call("10", "spread", { kind: "a", n: 10 }), sig);
   assert.equal(r10.details?.sameFamilyWarn, undefined, "family window pruned: indices 1-2 are >8 calls old");
 });
+
+test("family-window: a distinct text EXPIRES with its call — stale texts never satisfy the >=2 rule (2026-11-28 audit, finding 2)", async () => {
+  // The defect: `texts` lived forever while call indices pruned, so one
+  // long-expired distinct text let three SAME-text failures warn — the
+  // >=2-distinct-texts rule must hold INSIDE the window, not across
+  // history. Sequence: fail "boom 1", expire it with 8 successes, then
+  // three "boom 2" failures (distinct args, successes between so the
+  // consecutive ladder and H2 stay silent). Inside the window at the
+  // third failure only "boom 2" is alive → one distinct text → SILENT.
+  let fail = true;
+  let text = "boom 1";
+  const { tool } = makeTool("staleTxt", async () => ({
+    content: [{ type: "text" as const, text }],
+    isError: fail,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "staleTxt", { n: 1 }), sig); // "boom 1" (family "boom #")
+  fail = false;
+  for (let n = 2; n <= 9; n++) await executor(tool, call(String(n), "staleTxt", { n }), sig); // 8 successes: "boom 1" expires
+  fail = true;
+  text = "boom 2";
+  await executor(tool, call("10", "staleTxt", { n: 10 }), sig);
+  await executor(tool, call("11", "staleTxt", { n: 0 }), sig); // success
+  await executor(tool, call("12", "staleTxt", { n: 12 }), sig);
+  await executor(tool, call("13", "staleTxt", { n: 0 }), sig); // success
+  const r14 = await executor(tool, call("14", "staleTxt", { n: 14 }), sig);
+  // Family "boom #": three live failures at calls 10/12/14, all with the
+  // SAME text ("boom 2" — args vary so H2 stays silent; successes break
+  // the consecutive ladder). "boom 1" left the window, so distinct texts
+  // inside the window = 1. With the pre-fix code its text lived forever
+  // -> distinct 2 -> a false warn here.
+  assert.equal(r14.details?.sameFamilyWarn, undefined, "stale distinct text must expire with its window entry");
+});
+
+test("family-window: a NEW family after 32 tracked families is admitted, not evicted before its first call (2026-11-28 audit, finding 1)", async () => {
+  // The defect: eviction ranked families by newest call and ran BEFORE
+  // the first pair was pushed, so the brand-new family (empty history)
+  // ranked oldest and self-evicted — after 32 families no new family
+  // ever warned. Sequence: 32 distinct single-failure families, then a
+  // 33rd family failing 3 times in 3 calls -> must warn on the third.
+  const { tool } = makeTool("famCap", async (_id, args) => ({
+    content: [{ type: "text" as const, text: `fam ${args.letter} err ${args.n}` }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  // 32 distinct families (distinct LETTERS survive digit masking), one
+  // failure each.
+  for (let i = 0; i < 32; i++) {
+    await executor(tool, call(`o${i}`, "famCap", { letter: String.fromCharCode(65 + i), n: 0 }), sig);
+  }
+  // The 33rd family: three digit-varying failures back-to-back.
+  const r1 = await executor(tool, call("n1", "famCap", { letter: "Z9", n: 1 }), sig);
+  const r2 = await executor(tool, call("n2", "famCap", { letter: "Z9", n: 2 }), sig);
+  const r3 = await executor(tool, call("n3", "famCap", { letter: "Z9", n: 3 }), sig);
+  assert.equal(r1.details?.sameFamilyWarn, undefined);
+  assert.equal(r2.details?.sameFamilyWarn, undefined);
+  assert.equal(
+    r3.details?.sameFamilyWarn,
+    3,
+    "the newly-admitted family records its first call instead of self-evicting",
+  );
+});
 //
 // Two rungs (the hard stop at 3 false-positived legitimate per-target
 // probing — audit finding): warn at 3 IN A ROW (notice appended, run

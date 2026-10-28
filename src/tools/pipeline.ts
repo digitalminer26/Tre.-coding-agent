@@ -316,12 +316,16 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     sameErrorStreaks.delete(toolName);
   };
   // Family-window state (docs/08 §10): per tool, per error FAMILY, the
-  // call indices inside the window and the DISTINCT normalized texts seen.
-  // Pruned to the window on every call, and each tool caps its tracked
-  // families, so state stays bounded like H1's window.
+  // (call index, error text) pairs inside the window. Pruned to the
+  // window on EVERY recorded failure — for all families, not just the
+  // current one — so both the pairs AND the distinct-text set expire
+  // together (2026-11-28 audit, finding 2: texts used to live forever,
+  // letting one stale distinct text satisfy the ≥2-texts rule long after
+  // its call left the window), and each tool caps its tracked families
+  // so state stays bounded like H1's window.
   const familyWindows = new Map<
     string,
-    Map<string, { calls: number[]; texts: Set<string> }>
+    Map<string, { call: number; text: string }[]>
   >();
   const FAMILY_MAX_TRACKED = 32;
   const callsByTool = new Map<string, number>();
@@ -519,30 +523,46 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         // H2/stall early-return cannot leave the family window a call
         // behind. The VERDICT stays below, after H2 and the consecutive
         // stall own their signatures.
+        //
+        // 2026-11-28 audit (finding 1): the FIRST pass pushed the new
+        // pair only AFTER eviction — and eviction ranked families by
+        // their newest call, so a brand-new family (empty history) ranked
+        // oldest and was evicted before its first call landed, silently
+        // stopping admission after FAMILY_MAX_TRACKED families. The order
+        // below is the fix: prune expired entries, record the pair, then
+        // evict — the call being recorded can never be the eviction
+        // victim. Eviction ranks by the family's NEWEST call (the
+        // long-dead family leaves first; the busy one stays).
         const famKey = familyFailureKey(errorText);
         if (famKey) {
-          const famByTool = familyWindows.get(tool.name) ?? new Map();
-          let fam = famByTool.get(famKey);
-          if (!fam) {
-            fam = { calls: [], texts: new Set<string>() };
-            famByTool.set(famKey, fam);
-            if (famByTool.size > FAMILY_MAX_TRACKED) {
-              // Drop the entry whose newest call is oldest (bounded state).
-              let oldest: string | undefined;
-              let oldestCall = Infinity;
-              for (const [k, v] of famByTool) {
-                const lastCall = v.calls[v.calls.length - 1] ?? 0;
-                if (lastCall < oldestCall) {
-                  oldest = k;
-                  oldestCall = lastCall;
-                }
-              }
-              if (oldest !== undefined) famByTool.delete(oldest);
-            }
+          const famByTool: Map<string, { call: number; text: string }[]> =
+            familyWindows.get(tool.name) ?? new Map();
+          // Prune EVERY family to the current window first, so no family
+          // keeps pairs (or the distinct texts derived from them) past
+          // its expiry (2026-11-28 audit, finding 2).
+          for (const [k, entries] of famByTool) {
+            const live = entries.filter((e) => repeatCallIndex - e.call < SAME_FAMILY_WINDOW);
+            if (live.length === 0) famByTool.delete(k);
+            else if (live.length !== entries.length) famByTool.set(k, live);
           }
-          fam.calls.push(repeatCallIndex);
-          fam.calls = fam.calls.filter((n: number) => repeatCallIndex - n < SAME_FAMILY_WINDOW);
-          fam.texts.add(errorText);
+          const entries = famByTool.get(famKey) ?? [];
+          entries.push({ call: repeatCallIndex, text: errorText });
+          famByTool.set(famKey, entries);
+          if (famByTool.size > FAMILY_MAX_TRACKED) {
+            // Drop the family whose NEWEST call is oldest (bounded state).
+            let oldest: string | undefined;
+            let oldestCall = Infinity;
+            for (const [k, v] of famByTool) {
+              const lastCall = v[v.length - 1]?.call ?? 0;
+              if (lastCall < oldestCall) {
+                oldest = k;
+                oldestCall = lastCall;
+              }
+            }
+            // The family just recorded has the newest call of all, so it
+            // can never be `oldest` — admission never self-evicts.
+            if (oldest !== undefined && oldest !== famKey) famByTool.delete(oldest);
+          }
           familyWindows.set(tool.name, famByTool);
         }
         if (entry.calls.length >= REPEAT_FAILURE_THRESHOLD) {
@@ -650,24 +670,29 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         // ≥2 DISTINCT error texts of the same family within the window:
         // the loop the exact key and the consecutive counter both miss.
         // (The window was already updated above, before the verdicts.)
+        // 2026-11-28 audit, finding 2: distinctness is computed from the
+        // LIVE window entries only — a text whose calls have all expired
+        // no longer counts, so the ≥2-texts rule really means "two
+        // distinct texts inside the last SAME_FAMILY_WINDOW calls".
         if (famKey) {
           const fam = familyWindows.get(tool.name)?.get(famKey);
+          const distinctTexts = new Set((fam ?? []).map((e) => e.text));
           if (
-            fam &&
-            fam.calls.length >= SAME_FAMILY_WARN_THRESHOLD &&
-            fam.texts.size >= 2
+            fam !== undefined &&
+            fam.length >= SAME_FAMILY_WARN_THRESHOLD &&
+            distinctTexts.size >= 2
           ) {
             return {
               ...result,
               content: [
                 ...result.content,
                 ...text(
-                  `(guard: the "${tool.name}" tool returned ${fam.calls.length} failures of the SAME error family within its last ${SAME_FAMILY_WINDOW} calls — the messages differ only in digits/incidental output, so the approach has not changed. The error names the cause: read the file/class it points at, or switch tool/approach before retrying.)`,
+                  `(guard: the "${tool.name}" tool returned ${fam.length} failures of the SAME error family within its last ${SAME_FAMILY_WINDOW} calls — the messages differ only in digits/incidental output, so the approach has not changed. The error names the cause: read the file/class it points at, or switch tool/approach before retrying.)`,
                 ),
               ],
               details: {
                 ...result.details,
-                sameFamilyWarn: fam.calls.length,
+                sameFamilyWarn: fam.length,
                 sameFamilyWindow: SAME_FAMILY_WINDOW,
               },
             };

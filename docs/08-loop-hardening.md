@@ -651,7 +651,16 @@ strings, unchanged.
 5. Gate green; suite grows by the above only.
 
 
-## 10. Audit F-6: the sed loop none of the guards caught (2026-11-28, measured — fix NOT yet implemented)
+## 10. Audit F-6: the sed loop none of the guards caught (2026-11-28 — WARN RUNG LANDED; windowed STALL still deferred)
+
+> Status: the measurement below stands as written. Its last paragraph
+> ("Landed with this audit") records the shipped warn rung; the windowed
+> 5-in-12 STALL remains unlanded pending the per-fire FP audit. A
+> follow-up code review of the landed rung found two window-state defects
+> (distinct texts never expiring; eviction deleting the just-added
+> family after 32 tracked families) — both fixed with regression tests
+> ("stale distinct text must expire" / "newly-admitted family is not
+> evicted" in test/tools.test.ts).
 
 **Symptom (observed live).** A session ran the malformed BSD-sed command
 `sed -n ",+Np"` 15 times over ~500 tool calls before it ended. The failing
