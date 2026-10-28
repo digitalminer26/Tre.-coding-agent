@@ -183,8 +183,14 @@ function computeItemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[]
         // explicitly instead of implying "thinking finished, then the
         // answer": a dim suffix on the thinking block. Pure turns
         // (thinking-only, text-only) render exactly as before.
+        // Round-3 auditor cycle 1, finding 1: the marker is a fixed
+        // 38-column string — at terminal widths under 38 it wraps into 2+
+        // physical rows while counting as 1, overflowing the viewport.
+        // Wrap it through the same width−2 path as the gutter so every
+        // emitted RLine fits the frame.
         if (item.text !== "") {
-          body.push({ spans: [{ text: "· split here (server-assigned channels)", dim: true }] });
+          for (const l of wrapRows("· split here (server-assigned channels)", Math.max(1, width - 2)))
+            body.push({ spans: [{ text: l, dim: true }] });
         }
         body.push({ spans: [{ text: " " }] }); // blank line: thinking | reply
       }

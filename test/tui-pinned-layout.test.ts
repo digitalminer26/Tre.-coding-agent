@@ -1152,6 +1152,22 @@ test("C31: itemLines shapes — icons, hanging indents, separators", () => {
     { spans: [{ text: "│ hmm, check", dim: true }] },
     { spans: [{ text: " " }] },
   ]);
+  // Round-3 auditor cycle 1, finding 1: at narrow widths the 38-column
+  // seam marker wraps — every emitted RLine must fit the frame, and
+  // height must equal the rendered line count.
+  for (const w of [20, 36, 37]) {
+    const narrow = itemLines(
+      { kind: "assistant", text: "ok", streaming: false, thinking: false, thinkingText: "hmm" },
+      w,
+    );
+    for (const line of narrow) {
+      for (const s of line.spans) assert.ok(s.text.length <= w, `seam line fits width ${w}: ${JSON.stringify(s.text)}`);
+    }
+    assert.equal(itemHeight(
+      { kind: "assistant", text: "ok", streaming: false, thinking: false, thinkingText: "hmm" },
+      w,
+    ), narrow.length, `height matches rendered lines at width ${w}`);
+  }
   // tool running: colored mark span (YELLOW = in flight) + blue name span
   // + plain args; hard wrap splits the line (the header is unchanged by C31).
   const run = itemLines({ kind: "tool", id: "t", name: "bash", argsText: "a".repeat(100), running: true }, 80);

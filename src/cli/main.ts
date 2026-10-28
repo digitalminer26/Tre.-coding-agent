@@ -540,10 +540,15 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       // with one dim line (same condition as the TUI marker in
       // tui/lines.ts) instead of implying "thinking finished, then the
       // answer". Pure turns (thinking-only, text-only) print as before.
+      // Round-3 auditor cycle 1, finding 2: the text predicate requires a
+      // NON-EMPTY text block, matching the TUI exactly (existence alone
+      // fired the seam on thinking + empty-text, which the TUI renders
+      // seam-free).
       const hasThinking = ev.message.content.some(
         (b) => b.type === "thinking" && b.thinking !== "",
       );
-      if (hasThinking && ev.message.content.some((b) => b.type === "text")) {
+      const hasText = ev.message.content.some((b) => b.type === "text" && b.text !== "");
+      if (hasThinking && hasText) {
         sinks.out.write("\n· split here (server-assigned channels)\n");
       } else if (ev.message.content.some((b) => b.type === "text")) {
         sinks.out.write("\n");

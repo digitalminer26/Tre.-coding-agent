@@ -740,6 +740,28 @@ test("printEvent: done with thinking + text → seam marker; pure turns unchange
     sinks,
   );
   assert.equal(out, "\n");
+  // Round-3 auditor cycle 1, finding 2: the CLI seam condition must match
+  // the TUI exactly — thinking + EMPTY text is not a mixed turn (the TUI
+  // renders no seam there), so the CLI prints the plain newline.
+  out = "";
+  printEvent(
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hmm" },
+          { type: "text", text: "" },
+        ],
+        model: "m",
+        provider: "p",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    },
+    sinks,
+  );
+  assert.equal(out, "\n");
 });
 
 test("printEvent: budget agent_end → stderr note (resume hint only with a session file)", () => {

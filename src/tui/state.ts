@@ -1679,11 +1679,22 @@ export function itemHeight(item: TuiItem, width: number, prev?: TuiItem): number
       // reply (lines.ts): one dim header line ("◦ thinking…"), the
       // reasoning under a "│ " gutter wrapped at width−2, an optional
       // dim seam-marker line on mixed turns (thinkingText + text —
-      // "· split here…"), and a blank line before the reply — count
-      // exactly what the renderer draws.
+      // "· split here…", wrapped at width−2 like the gutter), and a blank
+      // line before the reply — count exactly what the renderer draws.
+      // Round-3 auditor cycle 1, finding 3: this arithmetic is NOT the
+      // authority — itemLines(item, width).length below is (the renderer
+      // wraps the seam marker, so a fixed "+1" undercounts narrow frames).
+      // Kept as a cross-checkable formula; the mutation "drop the seam
+      // term" survives the suite precisely because itemLines is what
+      // matters, not this number.
       const think =
         item.thinkingText !== ""
-          ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + (item.text !== "" ? 1 : 0) + 1
+          ? 1 +
+            wrapLineCount(item.thinkingText, Math.max(1, width - 2)) +
+            (item.text !== ""
+              ? wrapLineCount("· split here (server-assigned channels)", Math.max(1, width - 2))
+              : 0) +
+            1
           : 0;
       // The renderer expands Markdown table blocks into aligned rows (and
       // retains the assistant gutter), so count those exact rendered rows.
