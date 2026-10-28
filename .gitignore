@@ -48,3 +48,5 @@ tre.json
 # worker scratch files (gate/build output) — never in git.
 .gate.out
 .build.out
+# measurement scratch space for guard audits — never in git.
+.audit-tmp/

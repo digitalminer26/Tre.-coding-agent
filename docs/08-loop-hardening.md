@@ -649,3 +649,94 @@ strings, unchanged.
    signature excerpt when evidence is present, and the old static string
    when absent.
 5. Gate green; suite grows by the above only.
+
+
+## 10. Audit F-6: the sed loop none of the guards caught (2026-11-28, measured — fix NOT yet implemented)
+
+**Symptom (observed live).** A session ran the malformed BSD-sed command
+`sed -n ",+Np"` 15 times over ~500 tool calls before it ended. The failing
+calls differed only in the range digit (`+18p` … `+2p`) and in surrounding
+text (an extra `grep` clause each time). Nothing stopped it.
+
+**Why every guard missed it — established by replaying real sessions, not
+by reasoning about the code.** Method: 985 session logs, tool calls paired
+to results, per-tool counters, guard/synthetic notice results excluded
+(they appear in logs AS tool results — naive replay re-keys them as
+failures; this artifact polluted the first measurement pass and inflated
+counts).
+
+- H2 repeat-failure (exact args + exact error, 3-in-8-of-tool): args
+  changed every call; error text changed every call (the digit + the grep
+  clause).
+- same-error guard (consecutive, exact key): the error key differs by one
+  character each time — the streak never survived call 1.
+- F1 no-success and the identical-batch guard: each failing turn also
+  contained succeeding calls, so neither "all failed" nor "identical batch"
+  was ever true.
+- H1 permission stall: not a permission failure.
+
+**Hypothesis tested and REFUTED.** The initial diagnosis blamed
+`normalizeFailure` preserving digits, and the proposed fix was a
+digit-masking "family key" (`/\d+/g` → `#`). Measured against the corpus:
+
+| policy (stop = 5 in a row per tool) | stop events across 985 sessions | catches the sed loop |
+|---|---|---|
+| CURRENT (exact key, consecutive) | 4 | no |
+| family key, consecutive | 4 | **no** |
+| family key + stdout exemption, consecutive | 4 | no |
+
+Digit masking changes the raw text of 78.4% of failed calls (1,199/1,529),
+but under a CONSECUTIVE counter it adds zero stops and catches nothing —
+the masked keys still never sat adjacent, because between every sed
+failure there was a different failure or a success. The stdout-exemption
+nuance (60/40 split of digit-varying calls) was moot before it mattered:
+FAM vs FAM-stdout-exempt differed by one fire across 985 sessions.
+
+**The actual root cause is two-axis, and the fix must be on BOTH:**
+1. **Key breadth** — errors of one broken approach differ by digits and
+   incidental stdout (`grep` output, counts). Exact keys miss.
+2. **Consecutiveness** — a loop interleaves other work (every other call
+   succeeds or fails differently), so ANY strictly-consecutive counter
+   resets before threshold. The max consecutive same-family bash-failure
+   streak inside the loop session was 4; the stall rung wants 5.
+
+| policy (non-consecutive: T same-family failures within W calls of the tool) | fires | catches the sed loop |
+|---|---|---|
+| exact 3/8 | 53 | yes |
+| family 3/8 | 57 | **yes, at bash call ~271 — the loop's first third (sed errors at 264/268/271)** |
+| family 4/10 | 33 | yes |
+
+Windowed exact misses the sed cluster (its keys differ by digit); windowed
+family catches it. Both axes are necessary; neither alone suffices.
+
+**Direction (specified, NOT landed):** make the same-error guard's
+counter a sliding-window count per tool over the family key
+(`tool + digit-masked normalized error`), warn at 3-in-8, stall at
+5-in-12 — thresholds from the two tables above, tuned so existing
+behavior is preserved and the loop-session catch happens within its first
+third. Cost of the window: the 3/8 rung roughly triples fire count vs
+today's 4 lifetime stops (~50 across 21k turns ≈ 0.2%/turn) — every
+sampled fire was a genuine repeated-shape failure (edit `no exact match`
+retries, repeated identical tracebacks, a `tail:` loop that fired 7 times
+in one session prod never stopped), but the 3-rung's FP surface has not
+been audited target-by-target; the audit finding behind the current
+consecutive-only design (legitimate per-target probing false-positived a
+hard stop) applies to the WARN rung at 3 and needs the same eyeball pass
+before stall=5-in-12 ships. Keep the existing consecutive-5 stall
+untouched; ADD the window as a third rung. H2 stays exact-args — byte
+repeats remain its job.
+
+**Landed with this audit (warn rung only):** `familyFailureKey` + a
+third, ADDITIVE rung in the pipeline — SAME_FAMILY_WARN_THRESHOLD
+failures of one family within SAME_FAMILY_WINDOW calls of the tool
+(default 3/8), announced only when ≥2 DISTINCT texts share the family
+(byte-identical repeats stay H2's; a single repeating text stays the
+consecutive ladder's, including the alternating-identical case pinned
+silent by test/tools.test.ts). The consecutive-5 STALL and H2 are
+untouched; the windowed STALL rung (5-in-12) is deliberately NOT landed
+until the per-fire audit above is done — promote-by-commit convention.
+Tests (test/tools.test.ts, "family-window" block): the key contract
+(all digit runs mask, including sed's line number — `sed: 1: ",+18p"`
+and `sed: 1: ",+2p"` collapse to one family), the sed-loop warn at 3,
+success-occupies-a-slot-without-reset, distinct-text suppression, and
+window expiry.

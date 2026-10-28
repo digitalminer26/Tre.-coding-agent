@@ -17,7 +17,12 @@
  *      Added: the stall guard (permission-denial failures of one tool
  *      within its recent window stop the run; 2026-09-27, windowed per
  *      docs/08 H1 2026-09-30; H2 identical non-permission failures are
- *      also stopped by strict tool/args/error matching).
+ *      also stopped by strict tool/args/error matching; same-error
+ *      guard 2026-11-27 (redesigned per audit): the SAME non-permission
+ *      error text CONSECUTIVELY under any args — in-band warning at 3
+ *      in a row, hard stall at 5; ANY other outcome resets the streak.
+ *      All guards act AFTER the call executed: they replace or annotate
+ *      the failing call's result in-band; they never un-run a call).
  *
  * I3: this never throws. Every failure path returns a ToolResult with
  * `isError: true` whose text the model reads (D7).
@@ -133,10 +138,59 @@ export const STALL_WINDOW = 8;
  *  within its window. 3 (two identical retries remain legitimate). */
 export const STALL_THRESHOLD = 3;
 
-/** H2 — identical non-permission failures are tracked over each tool's
+/** H3 — identical non-permission failures are tracked over each tool's
  * last eight calls, with the same conservative threshold as H1. */
 export const REPEAT_FAILURE_WINDOW = 8;
 export const REPEAT_FAILURE_THRESHOLD = 3;
+/** Same-error guard (added 2026-11-05 as "H3", redesigned 2026-11-27
+ * per audit) — the args-insensitive same-error streak: the same tool
+ * returning the SAME error text (whitespace-normalized) BACK-TO-BACK.
+ * One record per tool ({errorText, streak}): ANY other outcome for the
+ * tool — success, permission denial, empty text, or a DIFFERENT error
+ * — deletes the record, so independent targets that merely share a
+ * generic error cannot accumulate across unrelated work; only a genuine
+ * rephrase-while-stuck run keeps climbing (the 2026-10-27 burst:
+ * "sed … ,+30p" → "sed … ,+32p" → … landing on the identical message,
+ * which H2's args key and the loop's identical-batch guard both miss).
+ * Two rungs (the hard stop at 3 false-positived on legitimate
+ * per-target probing — the audit finding; two identical retries stay
+ * fully silent):
+ *   - SAME_ERROR_WARN_THRESHOLD (3): the failing result is returned
+ *     VERBATIM plus an appended in-band guard notice (details.
+ *     sameErrorWarn) — an approach-changing nudge; the run CONTINUES.
+ *   - SAME_ERROR_STALL_THRESHOLD (5): the result is REPLACED in-band
+ *     with details.stall + guard "same-error-stall" and the loop stops
+ *     the run (stopReason "stall"). Like H1/H2 the triggering call WAS
+ *     executed — the guard acts after execution and can never prevent
+ *     one (only the loop's sequential stall-skip avoids running calls
+ *     already queued in the same batch). */
+export const SAME_ERROR_WARN_THRESHOLD = 3;
+export const SAME_ERROR_STALL_THRESHOLD = 5;
+
+/**
+ * Family-window warn rung (docs/08 §10, 2026-11-28 audit — measured on 985
+ * session logs). The consecutive guard above keys on the EXACT error text
+ * and requires it IN A ROW; the 2026-11-28 sed loop
+ * (`sed -n ",+Np"`, 15 failures across ~90 bash calls, only the digit and
+ * incidental grep output varying) reset it on every call. Neither the key
+ * (digit-exact) nor the counter (consecutive) alone fixes that — both axes
+ * are needed, and measurements showed digit masking with a consecutive
+ * counter adds ZERO stops across 985 sessions (the masked failures are
+ * never adjacent). This rung keeps the existing guard untouched and adds:
+ *   - key: familyFailureKey (digits masked) — catches the sed shape;
+ *   - counter: SAME_FAMILY_WARN_THRESHOLD failures of ONE family within
+ *     SAME_FAMILY_WINDOW calls of that tool — interleaved successes and
+ *     unrelated failures occupy slots but never reset (the probe-loop
+ *     semantics already proven by H1).
+ * Suppresses itself unless ≥2 DISTINCT error texts share the family:
+ * byte-identical repeats are H2's job (args-keyed), and a single
+ * repeatedly-identical text is the consecutive guard's job — this rung
+ * announces only the varied-but-same-shape signature.
+ * WARN ONLY (no stall rung): the hard-stop thresholds here have not had
+ * the per-fire audit the consecutive ladder got; landing follows the
+ * promote-by-commit convention. */
+export const SAME_FAMILY_WARN_THRESHOLD = 3;
+export const SAME_FAMILY_WINDOW = 8;
 
 function stableArgs(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableArgs).join(",")}]`;
@@ -151,6 +205,23 @@ function stableArgs(value: unknown): string {
  * such as paths, codes, or changing network diagnostics. */
 function normalizeFailure(texts: string[]): string {
   return texts.map((text) => text.trim().replace(/\s+/g, " ")).join("\n");
+}
+
+/**
+ * Family key (docs/08 §10, 2026-11-28 audit): the whitespace-normalized
+ * error with every digit RUN masked ("#+#"). Digits are masked, not
+ * removed — ",+18p" → ",+#p" keeps every character around the variable
+ * part, so only errors of the same SHAPE collide. Rationale (measured on
+ * 985 session logs, not assumed): the commonest way models rephrase a
+ * broken approach is to vary a digit (sed ranges, line numbers, timeouts,
+ * byte offsets), so digit-preserving keys miss exactly the loops the
+ * same-error guard exists to catch. normalizeFailure stays digit-exact —
+ * it describes ONE error; this key groups a FAMILY of them.
+ * Exported for contract tests.
+ */
+export function familyFailureKey(text: string): string {
+  const norm = text.trim().replace(/\s+/g, " ");
+  return norm.length === 0 ? "" : norm.replace(/\d+/g, "#");
 }
 
 /** Permission-denial signatures in tool error text (case-insensitive).
@@ -232,11 +303,37 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
   // occupies a slot in the window. Each tool is counted independently.
   const stallByTool = new Map<string, { window: boolean[]; count: number }>();
   const repeatFailures = new Map<string, { calls: number[] }>();
+  // Same-error streak (2026-11-27 redesign): ONE record per tool — the
+  // error text of the tool's most recent consecutive non-permission
+  // failure and how many in a row match it. Deleted by any other
+  // outcome, so no unbounded per-errorText map and no stale streaks.
+  // Declared up here (2026-11-27 audit, finding 2) because the
+  // pre-execution paths — validation failure, blocked gate, broken hook —
+  // are "other outcomes" too and must break the streak, exactly like a
+  // success.
+  const sameErrorStreaks = new Map<string, { errorText: string; streak: number }>();
+  const breakSameErrorStreak = (toolName: string): void => {
+    sameErrorStreaks.delete(toolName);
+  };
+  // Family-window state (docs/08 §10): per tool, per error FAMILY, the
+  // call indices inside the window and the DISTINCT normalized texts seen.
+  // Pruned to the window on every call, and each tool caps its tracked
+  // families, so state stays bounded like H1's window.
+  const familyWindows = new Map<
+    string,
+    Map<string, { calls: number[]; texts: Set<string> }>
+  >();
+  const FAMILY_MAX_TRACKED = 32;
   const callsByTool = new Map<string, number>();
   return async (tool, call, signal, onUpdate) => {
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
     if (validationError !== undefined) {
+      // 2026-11-27 audit, finding 2: a rejected call is "another outcome"
+      // — it breaks the same-error streak, or a malformed call between two
+      // identical failures would let the streak climb across unrelated
+      // work (a false warn/stall one call early).
+      breakSameErrorStreak(tool.name);
       return {
         content: text(`Invalid arguments for "${tool.name}": ${validationError}`),
         isError: true,
@@ -255,7 +352,11 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       try {
         decision = await hooks.beforeToolCall(tool, call);
       } catch (err) {
-        // A broken hook must not kill the run (I3) — fail the call.
+        // A broken hook must not kill the run (I3) — fail the call. It
+        // also breaks the same-error streak (2026-11-27 audit, finding 2):
+        // the failure is the HOOK's, not the tool's, so it must not extend
+        // a streak of the tool's own errors.
+        breakSameErrorStreak(tool.name);
         return {
           content: text(
             `beforeToolCall hook failed for "${tool.name}": ${
@@ -268,6 +369,9 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         };
       }
       if (decision && "blocked" in decision) {
+        // A blocked call never ran — another outcome, so the streak breaks
+        // (2026-11-27 audit, finding 2).
+        breakSameErrorStreak(tool.name);
         return {
           content: text(`Tool "${tool.name}" was blocked: ${decision.blocked}`),
           isError: true,
@@ -348,6 +452,41 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       result = { ...result, details: { ...result.details, notExecuted: true } };
     }
 
+    // 4b. Expose the effective target AFTER hook rewriting, not the
+    //     original model path: safety resolves relative paths against the
+    //     workspace, which can differ from process.cwd() (--cwd).
+    //     2026-11-27 audit fix: this used to sit at the very END of the
+    //     executor, so every guard verdict that returns before it (notably
+    //     the same-error WARN rung, whose result the loop keeps and feeds
+    //     into F1's progress scan) silently dropped `progressTarget` — the
+    //     loop then fell back to the model's original path
+    //     (agent-loop.ts:1403-1407) and split a run's unverified-edit
+    //     counts across two keyspaces. Attaching it here (still after the
+    //     result hooks, so redaction cannot drop the execution fact) means
+    //     every path below either carries it (the warn rung spreads
+    //     `...result`) or replaces the whole result to stop the run.
+    if ((tool.name === "write" || tool.name === "edit") && typeof args.path === "string") {
+      result = { ...result, details: { ...result.details, progressTarget: resolve(args.path) } };
+    }
+
+    // 5a. H1 window bookkeeping — MUST run before any verdict below can
+    // return (2026-11-27 audit, finding 1). Every call of the tool
+    // occupies a slot in the window (success, permission failure, or
+    // non-permission failure) and the count is the number of permission
+    // failures inside it; the verdict is evaluated later, but nothing may
+    // skip the push. The warn rung used to return here first, so warned
+    // calls never shifted the window and stale denials stayed counted —
+    // H1 then fired on a call whose real last-8 history held one denial.
+    const stallEntry =
+      stallByTool.get(tool.name) ?? { window: [] as boolean[], count: 0 };
+    const permission =
+      result.isError === true &&
+      isPermissionStallText(result.content.map((c) => c.text));
+    stallEntry.window.push(permission);
+    if (stallEntry.window.length > STALL_WINDOW) stallEntry.window.shift();
+    stallEntry.count = stallEntry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
+    stallByTool.set(tool.name, stallEntry);
+
     // 5. H2 same-failure guard — strict same tool + canonical args +
     // normalized non-permission error text. The bounded call-index history
     // prevents stale repeats from accumulating; changing diagnostics do not match.
@@ -361,6 +500,51 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         entry.calls = entry.calls.filter((n) => repeatCallIndex - n < REPEAT_FAILURE_WINDOW);
         entry.calls.push(repeatCallIndex);
         repeatFailures.set(signatureKey, entry);
+        // Same-error streak bookkeeping (2026-11-27 redesign): one
+        // record per tool. The SAME normalized error as the tool's last
+        // consecutive non-permission failure continues the streak; a
+        // different error starts a fresh one of 1. Recorded BEFORE the
+        // H2 verdict so the count stays exact on the path where H2
+        // returns first (byte-identical repeats also climb this streak —
+        // an exact-repeat loop is the same-error pattern with args fixed).
+        const streak = sameErrorStreaks.get(tool.name);
+        const sameErrorCount =
+          streak !== undefined && streak.errorText === errorText
+            ? streak.streak + 1
+            : 1;
+        sameErrorStreaks.set(tool.name, { errorText, streak: sameErrorCount });
+        // Family-window bookkeeping (docs/08 §10) — recorded BEFORE any
+        // verdict below may return (the 2026-11-27 audit finding 1
+        // principle): every failure occupies its slot exactly once, so an
+        // H2/stall early-return cannot leave the family window a call
+        // behind. The VERDICT stays below, after H2 and the consecutive
+        // stall own their signatures.
+        const famKey = familyFailureKey(errorText);
+        if (famKey) {
+          const famByTool = familyWindows.get(tool.name) ?? new Map();
+          let fam = famByTool.get(famKey);
+          if (!fam) {
+            fam = { calls: [], texts: new Set<string>() };
+            famByTool.set(famKey, fam);
+            if (famByTool.size > FAMILY_MAX_TRACKED) {
+              // Drop the entry whose newest call is oldest (bounded state).
+              let oldest: string | undefined;
+              let oldestCall = Infinity;
+              for (const [k, v] of famByTool) {
+                const lastCall = v.calls[v.calls.length - 1] ?? 0;
+                if (lastCall < oldestCall) {
+                  oldest = k;
+                  oldestCall = lastCall;
+                }
+              }
+              if (oldest !== undefined) famByTool.delete(oldest);
+            }
+          }
+          fam.calls.push(repeatCallIndex);
+          fam.calls = fam.calls.filter((n: number) => repeatCallIndex - n < SAME_FAMILY_WINDOW);
+          fam.texts.add(errorText);
+          familyWindows.set(tool.name, famByTool);
+        }
         if (entry.calls.length >= REPEAT_FAILURE_THRESHOLD) {
           // F1 (docs/08 §9, audit fix): the replacement must not erase the
           // execution fact — a never-executed call (e.g. a bash spawn
@@ -394,65 +578,153 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
             },
           };
         }
+        // Same-error guard (added 2026-11-05, ladder redesigned 2026-11-27
+        // per audit) — the rephrase-while-stuck pattern: the model reads
+        // the error, "changes something", but the error is a fixed
+        // property of its approach (wrong sed range syntax, wrong
+        // constructor signature), so every rephrase lands on the
+        // identical message. H2 (args-keyed) and the loop's
+        // identical-batch guard both miss this. Two rungs on the
+        // consecutive streak (a hard stop at 3 false-positived on
+        // legitimate per-target probing — audit finding):
+        //   - warn (3 in a row): return the REAL error verbatim plus an
+        //     appended approach-changing notice; the run continues.
+        //   - stall (5 in a row): replace the result in-band with
+        //     details.stall; the loop maps it onto stopReason "stall".
+        // Both rungs act AFTER execution: the triggering call ran (its
+        // result is annotated or replaced) — the guard never prevents a
+        // call from running. Neither rung can skip H1's window bookkeeping
+        // (5a runs first, 2026-11-27 audit finding 1).
+        if (
+          sameErrorCount >= SAME_ERROR_STALL_THRESHOLD &&
+          entry.calls.length < REPEAT_FAILURE_THRESHOLD // H2 already owns exact repeats
+        ) {
+          const wasExecuted = result.details?.notExecuted !== true;
+          return {
+            content: text(
+              `Same-error stall: the "${tool.name}" tool returned the same error ${sameErrorCount} times IN A ROW, under different arguments (rephrasing did not change the outcome). ${
+                wasExecuted
+                  ? "This call WAS executed; its result is REPLACED by this notice"
+                  : "This call was NOT executed; its result is REPLACED by this notice"
+              }, and the run stops here (stopReason 'stall'). Stop rephrasing: the error message names the cause — read the file/class it points at, or switch tool/approach, or explain the unresolved failure.`,
+            ),
+            isError: true,
+            details: {
+              ...(wasExecuted ? {} : { notExecuted: true }),
+              stall: true,
+              // NOT `repeatFailure` — that flag is H2's (same args too);
+              // the same-error guard announces itself with `sameError` +
+              // the evidence guard.
+              sameError: true,
+              stallEvidence: {
+                guard: "same-error-stall",
+                tool: tool.name,
+                repeats: sameErrorCount,
+                consecutive: true,
+                errorExcerpt: guardExcerpt(errorText),
+              } satisfies GuardEvidence,
+            },
+          };
+        }
+        if (sameErrorCount >= SAME_ERROR_WARN_THRESHOLD) {
+          // Warn rung: the real error stays verbatim (the model must
+          // still read it); the notice rides along in-band. Additive
+          // details only — the execution fact and every other detail
+          // pass through untouched.
+          return {
+            ...result,
+            content: [
+              ...result.content,
+              ...text(
+                `(guard: the "${tool.name}" tool has returned this SAME error ${sameErrorCount} times in a row under different arguments — rephrasing is not changing the outcome. The error names the cause: read the file/class it points at, or switch to a different tool/approach before retrying. ${SAME_ERROR_STALL_THRESHOLD} in a row stops the run.)`,
+              ),
+            ],
+            details: { ...result.details, sameErrorWarn: sameErrorCount },
+          };
+        }
+        // Family-window warn rung (docs/08 §10) — ADDITIVE: the exact-text
+        // consecutive ladder above owns its signatures untouched (byte
+        // repeats defer to H2; one text IN A ROW is the consecutive
+        // guard's domain — including alternating identical texts, which
+        // test/tools.test.ts pins as silent). This rung announces only
+        // ≥2 DISTINCT error texts of the same family within the window:
+        // the loop the exact key and the consecutive counter both miss.
+        // (The window was already updated above, before the verdicts.)
+        if (famKey) {
+          const fam = familyWindows.get(tool.name)?.get(famKey);
+          if (
+            fam &&
+            fam.calls.length >= SAME_FAMILY_WARN_THRESHOLD &&
+            fam.texts.size >= 2
+          ) {
+            return {
+              ...result,
+              content: [
+                ...result.content,
+                ...text(
+                  `(guard: the "${tool.name}" tool returned ${fam.calls.length} failures of the SAME error family within its last ${SAME_FAMILY_WINDOW} calls — the messages differ only in digits/incidental output, so the approach has not changed. The error names the cause: read the file/class it points at, or switch tool/approach before retrying.)`,
+                ),
+              ],
+              details: {
+                ...result.details,
+                sameFamilyWarn: fam.calls.length,
+                sameFamilyWindow: SAME_FAMILY_WINDOW,
+              },
+            };
+          }
+        }
+      } else {
+        // Outcome is not a same-error candidate (success, permission
+        // denial — H1's domain — or empty error text): the streak is
+        // broken. ONE record per tool, deleted outright — no stale
+        // streaks and no unbounded per-errorText state (the previous
+        // design kept zeroed entries forever; the audit found its reset
+        // branch was unreachable dead code inside the error-only `if`).
+        breakSameErrorStreak(tool.name);
       }
+    } else {
+      // Success: same broken-streak rule as above.
+      breakSameErrorStreak(tool.name);
     }
 
-    // 6. stall guard (docs/08 H1) — permission failures of one tool within
-    //    its last STALL_WINDOW calls are a model banging on the sandbox
-    //    boundary (arguments may vary — rephrasing is exactly the stall
-    //    pattern; interleaved successes must NOT reset — the probe loop).
-    //    Every call of the tool occupies a slot in the window (success,
-    //    permission failure, or non-permission failure); the count is the
-    //    number of permission failures inside it, so a stale failure slides
-    //    out after STALL_WINDOW calls. The failing call is replaced
+    // 6. stall guard (docs/08 H1) — the VERDICT only: the window and count
+    //    were advanced in 5a, before any guard could return (2026-11-27
+    //    audit, finding 1), so every call occupies its slot exactly once
+    //    and no early return can leave stale denials counted. Permission
+    //    failures of one tool within its last STALL_WINDOW calls are a
+    //    model banging on the sandbox boundary (arguments may vary —
+    //    rephrasing is exactly the stall pattern; interleaved successes
+    //    must NOT reset — the probe loop). The failing call is replaced
     //    in-band with STALL_TEXT (I3: every call gets a result) +
     //    details.stall; the loop maps that detail onto stopReason "stall"
     //    and stops. The call WAS executed (a denial is a harmless no-op).
     //    Each tool is counted independently — a different tool has its own
     //    window and count.
-    {
-      const entry =
-        stallByTool.get(tool.name) ?? { window: [] as boolean[], count: 0 };
-      const permission =
-        result.isError === true &&
-        isPermissionStallText(result.content.map((c) => c.text));
-      entry.window.push(permission);
-      if (entry.window.length > STALL_WINDOW) entry.window.shift();
-      entry.count = entry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
-      stallByTool.set(tool.name, entry);
-      if (permission && entry.count >= STALL_THRESHOLD) {
-        // F1 (docs/08 §9, audit fix): same rule as the H2 replacement —
-        // never erase the execution fact. A permission denial normally IS
-        // an execution (the kernel answered), but a result that says it
-        // never ran stays marked, and the notice says so honestly.
-        const wasExecuted = result.details?.notExecuted !== true;
-        return {
-          content: text(stallText(tool.name, wasExecuted)),
-          isError: true,
-          // D33: the denial's OWN text (the raw result, not STALL_TEXT —
-          // the notice is boilerplate; the evidence is what was denied).
-          details: {
-            ...(wasExecuted ? {} : { notExecuted: true }),
-            stall: true,
-            stallEvidence: {
-              guard: "permission-stall",
-              tool: tool.name,
-              denials: entry.count,
-              window: STALL_WINDOW,
-              errorExcerpt: guardExcerpt(result.content.map((c) => c.text).join("\n")),
-            } satisfies GuardEvidence,
-          },
-        };
-      }
+    if (permission && stallEntry.count >= STALL_THRESHOLD) {
+      // F1 (docs/08 §9, audit fix): same rule as the H2 replacement —
+      // never erase the execution fact. A permission denial normally IS
+      // an execution (the kernel answered), but a result that says it
+      // never ran stays marked, and the notice says so honestly.
+      const wasExecuted = result.details?.notExecuted !== true;
+      return {
+        content: text(stallText(tool.name, wasExecuted)),
+        isError: true,
+        // D33: the denial's OWN text (the raw result, not STALL_TEXT —
+        // the notice is boilerplate; the evidence is what was denied).
+        details: {
+          ...(wasExecuted ? {} : { notExecuted: true }),
+          stall: true,
+          stallEvidence: {
+            guard: "permission-stall",
+            tool: tool.name,
+            denials: stallEntry.count,
+            window: STALL_WINDOW,
+            errorExcerpt: guardExcerpt(result.content.map((c) => c.text).join("\n")),
+          } satisfies GuardEvidence,
+        },
+      };
     }
 
-    // Expose the effective target AFTER hook rewriting, not the original
-    // model path: safety resolves relative paths against the workspace,
-    // which can differ from process.cwd() (--cwd). Attach after result hooks
-    // so annotations/redaction cannot accidentally drop this execution fact.
-    if ((tool.name === "write" || tool.name === "edit") && typeof args.path === "string") {
-      result = { ...result, details: { ...result.details, progressTarget: resolve(args.path) } };
-    }
     return result;
   };
 }

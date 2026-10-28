@@ -13,6 +13,7 @@ import {
   bashTool,
   defaultRegistry,
   editTool,
+  familyFailureKey,
   isPermissionStallText,
   makeToolExecutor,
   readTool,
@@ -223,6 +224,393 @@ test("H2: repeat window expires and whitespace-only error differences normalize"
   await executor(tool, call("2", "repeat", { n: 1 }), sig);
   const r = await executor(tool, call("3", "repeat", { n: 1 }), sig);
   assert.equal(r.details?.repeatFailure, true);
+});
+
+// ─────────── Family-window warn rung (docs/08 §10, 2026-11-28 audit) ───────────
+//
+// The 2026-11-28 sed loop: a malformed BSD-sed range, 15 failures, each
+// message differing ONLY in the range digit (+18p … +2p) with successes
+// interleaved. The exact-key consecutive ladder and H2's args key both
+// miss it; the family key (digits masked) + sliding window catches it.
+// Warn-only rung — announced when ≥2 DISTINCT texts share the family.
+
+test("familyFailureKey: masks digit runs, keeps shape; normalizeFailure stays exact", () => {
+  // EVERY digit run masks — including the line number in "sed: 1:" — so
+  // all messages of one command shape collapse to one family key.
+  assert.equal(familyFailureKey('sed: 1: ",+18p": invalid command code ,'), 'sed: #: ",+#p": invalid command code ,');
+  assert.equal(familyFailureKey('sed: 1: ",+2p": invalid command code ,'), 'sed: #: ",+#p": invalid command code ,');
+  // whitespace collapse rides along (trim first, then runs of whitespace
+  // → single space); "code 1"'s digit masks too.
+  assert.equal(familyFailureKey("exit   code 1\n[stderr]  boom 42 "), "exit code # [stderr] boom #");
+  // empty stays empty (an empty failure carries no family)
+  assert.equal(familyFailureKey("   "), "");
+  // no digits → identity (modulo whitespace)
+  assert.equal(familyFailureKey("no digits here"), "no digits here");
+});
+
+test("family-window: the sed loop warns at 3 same-family failures despite interleaved successes", async () => {
+  const { tool } = makeTool("sedloop", async (_id, args) => ({
+    // The real loop: only the range digit changes; successes in between.
+    content: [{ type: "text" as const, text: `sed: 1: ",+${args.n}p": invalid command code ,` }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  // failures at calls 1,2 — no warn yet (2 < 3).
+  const r1 = await executor(tool, call("1", "sedloop", { n: 18 }), sig);
+  const r2 = await executor(tool, call("2", "sedloop", { n: 24 }), sig);
+  assert.equal(r1.details?.sameFamilyWarn, undefined);
+  assert.equal(r2.details?.sameFamilyWarn, undefined);
+  // a SUCCESS between failures does not reset the window (non-consecutive
+  // by design) — see the dedicated test below; here the three failures
+  // land at calls 1..3 directly.
+  const r3 = await executor(tool, call("3", "sedloop", { n: 20 }), sig);
+  assert.equal(r3.details?.sameFamilyWarn, 3, "3 same-family failures within 8 calls warns");
+  assert.match(resultText(r3), /SAME error family/);
+  // the real error still rides through (warn never replaces the result)
+  assert.match(resultText(r3), /invalid command code/);
+});
+
+test("family-window: success between failures does NOT reset the window", async () => {
+  let fail = true;
+  const { tool } = makeTool("mixwin", async (_id, args) => ({
+    content: [{ type: "text" as const, text: fail ? `boom v${args.n}` : String(args.n) }],
+    isError: fail,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "mixwin", { n: 1 }), sig); // fail #1 (boom v1)
+  fail = false;
+  await executor(tool, call("2", "mixwin", { n: 2 }), sig); // success
+  fail = true;
+  await executor(tool, call("3", "mixwin", { n: 3 }), sig); // fail #2 (boom v3)
+  const r4 = await executor(tool, call("4", "mixwin", { n: 4 }), sig); // fail #3 (boom v4)
+  assert.equal(r4.details?.sameFamilyWarn, 3, "success occupies a slot but does not reset");
+});
+
+test("family-window: repeats of ONE identical text stay silent (H2/consecutive own that)", async () => {
+  const { tool } = makeTool("ident", async (_id, args) => ({
+    content: [{ type: "text" as const, text: "exactly the same message" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const r3 = await executor(tool, call("1", "ident", { a: 1 }), sig);
+  const r4 = await executor(tool, call("2", "ident", { a: 2 }), sig);
+  const r5 = await executor(tool, call("3", "ident", { a: 3 }), sig);
+  // DISTINCT-texts >= 2 requirement: one text repeating never triggers the
+  // family rung (the consecutive guard warns at 3 IN A ROW; alternating
+  // identical texts stay fully silent per the 2026-11-27 audit).
+  assert.equal(r3.details?.sameFamilyWarn, undefined);
+  assert.equal(r4.details?.sameFamilyWarn, undefined);
+  assert.equal(r5.details?.sameFamilyWarn, undefined);
+});
+
+test("family-window: window expiry — same-family failures spaced >8 calls apart never warn", async () => {
+  const { tool } = makeTool("spread", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.kind === "a" ? `bad-a ${args.n}` : `zzz ${args.n}` }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  // family "bad-#" twice at calls 1,2; then family "zzz #" at 3..9 (seven
+  // calls, all outside family "bad-#"'s last-8 window once call 10 lands);
+  // call 10 returns to family "bad-#" → the pruned window holds only this
+  // call → streak 1, silent.
+  await executor(tool, call("1", "spread", { kind: "a", n: 1 }), sig);
+  await executor(tool, call("2", "spread", { kind: "a", n: 2 }), sig);
+  for (let n = 3; n <= 9; n++) await executor(tool, call(String(n), "spread", { kind: "b", n }), sig);
+  const r10 = await executor(tool, call("10", "spread", { kind: "a", n: 10 }), sig);
+  assert.equal(r10.details?.sameFamilyWarn, undefined, "family window pruned: indices 1-2 are >8 calls old");
+});
+//
+// Two rungs (the hard stop at 3 false-positived legitimate per-target
+// probing — audit finding): warn at 3 IN A ROW (notice appended, run
+// continues), stall at 5 IN A ROW. ANY other outcome (success, permission
+// denial, different error) resets the streak, so unrelated targets sharing
+// a generic error cannot accumulate across unrelated work.
+
+test("same-error: warn at 3 IN A ROW (appends guard notice, run continues)", async () => {
+  const { tool } = makeTool("rephrase", async () => ({
+    content: [{ type: "text" as const, text: "TypeError: __init__() takes 2-3 args" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  for (const id of ["1", "2"]) {
+    const r = await executor(tool, call(id, "rephrase", { cmd: `sed ,+${id}p` }), sig);
+    assert.equal(r.details?.stall, undefined);
+    assert.equal(r.details?.sameErrorWarn, undefined);
+  }
+  const c = await executor(tool, call("3", "rephrase", { cmd: "sed ,+99p" }), sig);
+  assert.equal(c.details?.stall, undefined, "warn rung does NOT stop the run");
+  assert.equal(c.details?.sameErrorWarn, 3, "the warn rung fired at 3 in a row");
+  assert.match(resultText(c), /3 times in a row/);
+  // the real error is still there (verbatim, not replaced).
+  assert.match(resultText(c), /__init__/);
+});
+
+test("same-error: stall at 5 IN A ROW with varying args (rephrase-while-stuck)", async () => {
+  const { tool } = makeTool("stuck", async () => ({
+    content: [{ type: "text" as const, text: "sed: invalid command code ," }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  for (let n = 1; n <= 4; n++) {
+    const r = await executor(tool, call(String(n), "stuck", { v: n }), sig);
+    assert.equal(r.details?.stall, undefined);
+  }
+  const e = await executor(tool, call("5", "stuck", { v: 5 }), sig);
+  assert.equal(e.details?.stall, true);
+  assert.equal(e.details?.sameError, true);
+  assert.equal(e.details?.repeatFailure, undefined, "streak guard defers to H2 on exact repeats");
+  const ev = e.details?.stallEvidence as { guard: string; repeats: number; consecutive: boolean };
+  assert.equal(ev.guard, "same-error-stall");
+  assert.equal(ev.repeats, 5);
+  assert.equal(ev.consecutive, true, "marks the count as a consecutive streak");
+  assert.match(resultText(e), /5 times IN A ROW/);
+});
+
+test("same-error: success RESETS the streak (audit finding 1)", async () => {
+  let first = false;
+  const { tool } = makeTool("mixer", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.ok ? "ok" : "not found" }],
+    isError: args.ok !== true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  let n = 0;
+  const run = async (ok: boolean) => {
+    const r = await executor(tool, call(String(++n), "mixer", { ok, target: n }), sig);
+    return r.details?.stall === true || r.details?.sameErrorWarn !== undefined;
+  };
+  assert.equal(await run(false), false);
+  assert.equal(await run(false), false);
+  assert.equal(await run(true), false, "success");
+  // streak broken: the next two identical failures must NOT warn/stall.
+  assert.equal(await run(false), false, "post-success 1");
+  assert.equal(await run(false), false, "post-success 2");
+  // and on to the warn rung after three consecutive again.
+  assert.equal(await run(false), true, "post-success 3 (warn)");
+  void first;
+});
+
+test("same-error: DIFFERENT error between failures resets the streak (audit finding 4)", async () => {
+  const { tool } = makeTool("prog", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.e as string }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  // Args VARY so H2's args-keyed window cannot fire — this isolates the
+  // consecutive-streak guard: alternating error texts never reach 3 IN A
+  // ROW of the same one, so neither warn nor stall may appear.
+  const errs = ["a", "a", "b", "a", "a", "b"];
+  for (const [i, e] of errs.entries()) {
+    const r = await executor(tool, call(String(i), "prog", { e, i }), sig);
+    assert.equal(r.details?.stall, undefined, `no stall across alternating "${e}"`);
+    assert.equal(r.details?.sameErrorWarn, undefined, `no warn across alternating "${e}"`);
+  }
+});
+
+test("same-error: independent targets with the SAME generic error (no success between) DO stall", async () => {
+  // By design: back-to-back identical failures — even under the plausible
+  // reading of "independent targets" — is exactly the rephrase-while-stuck
+  // signature. The warning rung gives the model three clear signals before
+  // the hard stop at 5; legitimate per-target work interleaves successes.
+  const { tool } = makeTool("probe", async (_id, args) => ({
+    content: [{ type: "text" as const, text: "not found" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const results = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await executor(tool, call(String(i), "probe", { target: i }), sig);
+    results.push(r.details?.stall === true);
+  }
+  assert.deepEqual(results, [false, false, false, false, true], "warn×2 then stall@5");
+});
+
+test("same-error: exact repeats still belong to H2 (repeatFailure flag preserved)", async () => {
+  const { tool } = makeTool("exact", async () => ({
+    content: [{ type: "text" as const, text: "boom" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  await executor(tool, call("1", "exact", { x: 1 }), sig);
+  await executor(tool, call("2", "exact", { x: 1 }), sig);
+  const r = await executor(tool, call("3", "exact", { x: 1 }), sig);
+  assert.equal(r.details?.repeatFailure, true);
+  assert.equal(r.details?.sameError, undefined, "streak guard defers to H2 on byte-identical repeats");
+});
+
+test("same-error: permission denials RESET the streak (H1 owns that pattern)", async () => {
+  const { tool } = makeTool("wall", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.perm ? "Operation not permitted" : "sed: bad flag --" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  let n = 0;
+  const run = async (perm: boolean) =>
+    executor(tool, call(String(++n), "wall", { perm }), sig);
+  await run(true); await run(true); await run(true); // 3 denials → H1 stall
+  // after H1's stall, the same-error streak must start fresh:
+  const a = await run(false); const b = await run(false);
+  assert.equal(a.details?.stall, undefined);
+  assert.equal(a.details?.sameErrorWarn, undefined, "H1 reset the streak: first non-perm failure is 1");
+  assert.equal(b.details?.stall, undefined);
+  assert.equal(b.details?.sameErrorWarn, undefined);
+});
+
+test("same-error: PRE-EXECUTION outcomes reset the streak (finding 2)", async () => {
+  // Validation failure / blocked gate / broken hook never reach the
+  // tool — they are "another outcome" and must break the streak, exactly
+  // like a success. Before the fix they returned before the streak
+  // maintenance, so "boom, boom, <invalid>, boom" reported warn=3.
+  // A schema with a REQUIRED arg, so "{}" is a validation failure rather
+  // than a pass-through (makeTool's own object schema accepts anything).
+  const okTool = (name: string): { tool: Tool } => {
+    const { tool } = makeTool(name, async () => ({
+      content: [{ type: "text" as const, text: "boom" }],
+      isError: true,
+    }));
+    return {
+      tool: {
+        ...tool,
+        parameters: {
+          type: "object",
+          properties: { v: { type: "number" } },
+          required: ["v"],
+        },
+      },
+    };
+  };
+  const sig = new AbortController().signal;
+  let n = 0;
+  const nextId = () => String(++n);
+
+  // (a) validation failure in the middle.
+  {
+    const { tool } = okTool("v");
+    const executor = makeToolExecutor();
+    const boom = () => executor(tool, call(nextId(), "v", { v: n }), sig);
+    await boom();
+    await boom();
+    // malformed: required arg missing → validateArgs rejects it.
+    const bad = await executor(tool, call(nextId(), "v", {}), sig);
+    assert.equal(bad.details?.notExecuted, true, "the malformed call never ran");
+    const after = await boom();
+    assert.equal(after.details?.sameErrorWarn, undefined, "streak reset by validation failure");
+    assert.equal(after.details?.stall, undefined);
+  }
+
+  // (b) blocked gate in the middle.
+  {
+    const { tool } = okTool("b");
+    const executor = makeToolExecutor({
+      beforeToolCall: (t) =>
+        (t as unknown as { name: string }).name === "b" && blockedNext
+          ? { blocked: "audit block" }
+          : undefined,
+    });
+    let blockedNext = false;
+    const boom = () => executor(tool, call(nextId(), "b", { v: n }), sig);
+    await boom();
+    await boom();
+    blockedNext = true;
+    const blocked = await boom();
+    blockedNext = false;
+    assert.equal(blocked.details?.notExecuted, true);
+    const after = await boom();
+    assert.equal(after.details?.sameErrorWarn, undefined, "streak reset by the blocked gate");
+  }
+
+  // (c) broken hook in the middle.
+  {
+    const { tool } = okTool("h");
+    let throwNext = false;
+    const executor = makeToolExecutor({
+      beforeToolCall: () => {
+        if (throwNext) throw new Error("hook broke");
+        return undefined;
+      },
+    });
+    const boom = () => executor(tool, call(nextId(), "h", { v: n }), sig);
+    await boom();
+    await boom();
+    throwNext = true;
+    const broke = await boom();
+    throwNext = false;
+    assert.equal(broke.details?.notExecuted, true);
+    const after = await boom();
+    assert.equal(after.details?.sameErrorWarn, undefined, "streak reset by the broken hook");
+  }
+});
+
+test("H1 window advances even when the same-error rung fires (finding 1)", async () => {
+  // The warn/stall rungs return before H1's verdict. Before the fix they
+  // also returned before H1's BOOKKEEPING, so warned calls never shifted
+  // the window: permission denials slid out too slowly and H1 fired on a
+  // call whose real last-8 history held only one denial.
+  const { tool } = makeTool("mix", async (_id, args) => ({
+    content: [{ type: "text" as const, text: args.out as string }],
+    isError: args.out !== "success",
+  }));
+  const executor = makeToolExecutor();
+  const sig = new AbortController().signal;
+  const perm = "bash: exit code 1\nOperation not permitted";
+  // Distinct args on every call so H2 never owns the repetition.
+  const seq = [
+    perm, perm, // two denials, no verdict yet
+    "boom", "boom", "boom", "boom", // warn at 3 and 4 — these must still
+    // occupy window slots
+    "success", "success", "success",
+    perm, // the 10th call: its last 8 calls hold ONE denial → no H1 stall
+  ];
+  const details = [];
+  for (const [i, out] of seq.entries()) {
+    const r = await executor(tool, call(String(i), "mix", { out, i }), sig);
+    details.push(r.details ?? {});
+  }
+  assert.equal(details[4]?.sameErrorWarn, 3, "warn rung fired at 3 in a row");
+  assert.equal(details[5]?.sameErrorWarn, 4, "warn continues at 4");
+  assert.equal(
+    details[9]?.stallEvidence,
+    undefined,
+    "H1 must NOT fire: the two early denials slid out of the 8-call window",
+  );
+});
+
+test("warn rung keeps progressTarget when a hook rewrote the path (2026-11-27 audit)", async () => {
+  // F1's unverified-edit scan keys on details.progressTarget, falling back
+  // to the model's original path when it is missing (agent-loop.ts:1403-
+  // 1407). The progressTarget attach used to sit at the very END of the
+  // executor — the warn rung returned before it, splitting a run's edit
+  // counts across the effective and model paths. Four varying-arg failures
+  // on the SAME effective path: every result, warned or not, must carry
+  // the hook-rewritten path.
+  const eff = path.join(dir, "effective-target.ts");
+  const { tool } = makeTool("edit", async () => ({
+    content: [{ type: "text" as const, text: "oldText not found" }],
+    isError: true,
+  }));
+  const executor = makeToolExecutor({
+    beforeToolCall: (_t, c) => ({ args: { ...c.arguments, path: eff } }),
+  });
+  const sig = new AbortController().signal;
+  for (let n = 1; n <= 4; n++) {
+    const r = await executor(
+      tool,
+      call(String(n), "edit", { path: "/model/original/target.ts", oldText: `v${n}` }),
+      sig,
+    );
+    assert.equal(r.details?.progressTarget, eff, `call ${n} keeps the effective path`);
+    assert.equal(r.details?.sameErrorWarn, n >= 3 ? n : undefined);
+  }
 });
 
 // ─────────────────────────── stall guard (sandbox wall) ───────────────────────
