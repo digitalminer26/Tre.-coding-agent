@@ -588,19 +588,30 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       } else if (ev.stopReason === "stall") {
         // The same tool failed 3× with a permission denial within its
         // recent calls (the deterministic sandbox wall — docs/08 H1: the
-        // count is windowed, so interleaved successes don't hide it). The
-        // failing call was NOT executed; a different approach (or
-        // --no-sandbox) breaks the pattern. D33: evidence names the tool,
-        // the count, and the denial text (H2 repeat-failure stalls say so).
+        // count is windowed, so interleaved successes don't hide it).
+        // 2026-11-27 audit fix: the guard fires AFTER the triggering
+        // call executed (its result is replaced in-band); only the
+        // sequential stall-skip prevents queued calls, and only then
+        // does `evidence.skipped` appear. D33: evidence names the tool,
+        // the count, and the denial text (the same-error guard's stall
+        // says so too).
         const h2 = ev.evidence?.guard === "repeat-failure";
+        const h3 = ev.evidence?.guard === "same-error-stall";
+        const skipped =
+          ev.evidence && "skipped" in ev.evidence && (ev.evidence.skipped ?? 0) > 0
+            ? ` ${ev.evidence.skipped} further queued call(s) in the batch were skipped (not executed).`
+            : "";
         items = [
           ...items,
           {
             kind: "error",
             text:
-              (h2
-                ? "stall: the same tool returned the identical error 3 times within its last 8 calls — the repeat was not re-executed. Change the operation or explain the unresolved failure"
-                : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox") +
+              (h3
+                ? "stall: the same tool returned the same error 5 times IN A ROW even as the arguments varied — rephrasing does not change the outcome. The error names the cause: read what it points at, change approach, or explain the unresolved failure"
+                : h2
+                ? "stall: the same tool returned the identical error 3 times within its last 8 calls for identical arguments. Change the operation or explain the unresolved failure"
+                : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox") +
+              skipped +
               " — send another prompt to continue" +
               (ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""),
           },

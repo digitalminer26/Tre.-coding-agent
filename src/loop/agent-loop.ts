@@ -37,6 +37,12 @@
  *  - Tool batches run in parallel by default; if ANY tool in the batch is
  *    `executionMode: "sequential"`, the whole batch runs in call order.
  *    Results are appended to context in call order, always.
+ *    2026-11-27 audit fix — stall-aware sequential dispatch: once a call
+ *    returns `details.stall`, later calls in a SEQUENTIAL batch are
+ *    skipped with synthetic `notExecuted` in-band results (the only path
+ *    that prevents a call from running; `evidence.skipped` counts them).
+ *    Parallel batches cannot do this — the calls are in flight before any
+ *    result exists; the pipeline guards stop the run after the batch.
  *  - Batch `terminate`: if EVERY result carries `terminate: true`, the run
  *    stops after the batch.
  *  - `prepareNextTurn` hook between turns (WS5 auto-compaction lands here).
@@ -208,6 +214,19 @@ const LENGTH_GUARD_TEXT =
   "Tool call arguments may be truncated: the response hit the output token " +
   "limit, so they may be incomplete. Do not rely on them — re-issue the " +
   "tool call with complete arguments.";
+
+// 2026-11-27 audit fix — the sequential stall-skip notice. When one call
+// in a sequential batch returns `details.stall`, the run is decided; every
+// LATER call in the same batch is skipped with this in-band result
+// (`notExecuted` + `stallSkipped`). Wording is honest: these calls were
+// never dispatched — the only path where a call is prevented from running.
+function stallSkipText(toolName: string): string {
+  return (
+    `Not executed: an earlier tool call in this batch stopped the run ` +
+    `(stopReason 'stall'), so this queued "${toolName}" call was skipped. ` +
+    "No need to re-issue it as-is — the stall must be resolved first."
+  );
+}
 
 // C22 — a `length` stop with no tool calls means the reply died inside
 // text/thinking: nothing to salvage as a call. One nudge lets the model
@@ -1157,6 +1176,10 @@ export async function* runLoop(
 
     const results = new Map<string, { result: ToolResult; isError: boolean }>();
     const updates = new Map<string, string[]>();
+    // 2026-11-27 audit fix: how many calls this batch skipped because an
+    // earlier sequential call stalled (the honest "was prevented from
+    // running" count; the stall banner names it when > 0).
+    let skippedByStall = 0;
     const runOne = async (call: ToolCallBlock): Promise<void> => {
       const tool = byName.get(call.name);
       if (!tool) {
@@ -1203,7 +1226,38 @@ export async function* runLoop(
     };
 
     if (sequential) {
-      for (const call of calls) await runOne(call);
+      // 2026-11-27 audit fix — stall-aware sequential dispatch: once a
+      // call in the batch returns `details.stall`, the run is already
+      // decided, so every LATER call in this batch is skipped with a
+      // synthetic in-band result (I3: every call gets a result; F1:
+      // `notExecuted` so the skip is never mistaken for ground contact).
+      // Parallel batches cannot do this — their calls are in flight
+      // before any result exists (the honest limit, documented in the
+      // module header); sequential mode ("any sequential tool opts the
+      // whole batch in") is the deterministic lane.
+      let stallSeen = false;
+      for (const call of calls) {
+        // The stall can come from a guard the LOOP itself synthesizes
+        // (unknown tool / I3 throw inside runOne carry details too when a
+        // custom executor sets them); check the stored result before
+        // skipping anything.
+        if (stallSeen) {
+          results.set(call.id, {
+            result: {
+              content: [{ type: "text", text: stallSkipText(call.name) }],
+              isError: true,
+              details: { notExecuted: true, stallSkipped: true },
+            },
+            isError: true,
+          });
+          skippedByStall += 1;
+          continue;
+        }
+        await runOne(call);
+        if (results.get(call.id)?.result.details?.stall === true) {
+          stallSeen = true;
+        }
+      }
     } else {
       await Promise.all(calls.map((call) => runOne(call)));
     }
@@ -1220,12 +1274,19 @@ export async function* runLoop(
         entry?.isError ?? true,
       );
       digestParts.push({
-        digest: resultEntryDigest(
-          entry ?? {
-            result: { content: [{ type: "text", text: "(no result)" }] },
-            isError: true,
-          },
-        ),
+        // A stall-skipped call is a synthetic in-band fill (never ran):
+        // record it with the SYNTHETIC_FILL_DIGEST so a re-issued batch
+        // still digests as constant and the cycle guard sees "failed,
+        // exempt" records rather than fabricated per-call digests.
+        digest:
+          entry !== undefined && entry.result.details?.stallSkipped === true
+            ? SYNTHETIC_FILL_DIGEST
+            : resultEntryDigest(
+                entry ?? {
+                  result: { content: [{ type: "text", text: "(no result)" }] },
+                  isError: true,
+                },
+              ),
         failure:
           entry !== undefined &&
           (entry.isError || entry.result.details?.notExecuted === true),
@@ -1256,6 +1317,21 @@ export async function* runLoop(
           guardEvidence = raw as GuardEvidence;
         }
       }
+    }
+    // 2026-11-27 audit fix: when the sequential stall-skip prevented calls
+    // in this batch, say so on the evidence — the stall banner then states
+    // the honest execution fact ("N further call(s) were skipped"). Only
+    // the stall guards reach this point with evidence (the loop guards
+    // break before dispatch), narrowed here for the type; legacy custom
+    // executors without stallEvidence get no note (the headline makes no
+    // execution claim either way).
+    if (
+      guardEvidence !== undefined &&
+      skippedByStall > 0 &&
+      guardEvidence.guard !== "identical-batch" &&
+      guardEvidence.guard !== "cycle-batch"
+    ) {
+      guardEvidence = { ...guardEvidence, skipped: skippedByStall };
     }
     // Audit v2: record this executed batch (signature + result digest +
     // failure flag) for the loop/cycle guards. Digest parts are in call

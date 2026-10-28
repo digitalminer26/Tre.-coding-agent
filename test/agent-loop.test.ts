@@ -903,6 +903,94 @@ test("stall: a result with details.stall → run stops with stopReason stall", a
   assert.match(guarded[0]!.result.content[0]!.text, /STALL_TEXT/);
 });
 
+test("stall-skip (2026-11-27 audit): a sequential batch stops dispatching AFTER a stall result", async () => {
+  // A sequential tool (edit) in the batch opts the WHOLE batch into call
+  // order; when the first call comes back details.stall, every LATER call
+  // is skipped with a synthetic notExecuted result — the only path where
+  // a queued call is prevented from running, and evidence.skipped says
+  // how many.
+  const executed: string[] = [];
+  const staller = makeTool("staller", {
+    executionMode: "sequential",
+    execute: async () => ({
+      content: [{ type: "text" as const, text: "stalled" }],
+      isError: true,
+      details: {
+        stall: true,
+        stallEvidence: {
+          guard: "same-error-stall",
+          tool: "staller",
+          repeats: 5,
+          consecutive: true as const,
+          errorExcerpt: "boom",
+        },
+      },
+    }),
+  });
+  const later = makeTool("later", {
+    execute: async (id) => {
+      executed.push(id);
+      return { content: [{ type: "text" as const, text: "ran" }] };
+    },
+  });
+  const turns: FakeTurn[] = [
+    {
+      type: "toolcall",
+      calls: [
+        { id: "s1", name: "staller", args: {} },
+        { id: "l1", name: "later", args: {} },
+        { id: "l2", name: "later", args: {} },
+      ],
+    },
+    { type: "text", text: "should not be reached" },
+  ];
+  const events = await drainLoop(turns, [staller.tool, later.tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall");
+  assert.deepEqual(executed, [], "calls queued AFTER the stall never ran");
+  const skipped = toolResultMessages(end.messages).filter((m) =>
+    /call was skipped/.test(m.content.map((c) => ("text" in c ? c.text : "")).join("")),
+  );
+  assert.equal(skipped.length, 2, "both queued calls got in-band skip results (I3)");
+  assert.equal(end.evidence?.guard, "same-error-stall");
+  assert.equal(
+    "skipped" in (end.evidence ?? {}) ? (end.evidence as { skipped?: number }).skipped : undefined,
+    2,
+    "evidence names how many calls were prevented",
+  );
+});
+
+test("stall-skip: a PARALLEL batch runs all calls (documented limit)", async () => {
+  // Parallel dispatch is in flight before any result exists — the guards
+  // cannot un-run it. The stall still stops the run AFTER the batch, but
+  // every call executed. Pinned so the limitation stays explicit and any
+  // future change to it is a deliberate contract change.
+  let executed = 0;
+  const failing = makeTool("par", {
+    execute: async () => {
+      executed += 1;
+      return {
+        content: [{ type: "text" as const, text: "boom" }],
+        isError: true,
+        details: { stall: true },
+      };
+    },
+  });
+  const turns: FakeTurn[] = [
+    {
+      type: "toolcall",
+      calls: [
+        { id: "p1", name: "par", args: {} },
+        { id: "p2", name: "par", args: {} },
+      ],
+    },
+  ];
+  const events = await drainLoop(turns, [failing.tool], { maxTurns: 50 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stall");
+  assert.equal(executed, 2, "parallel calls are already in flight — both ran (honest limit)");
+});
+
 test("stall: a stall stop is NOT a budget or loop stop", async () => {
   const { tool } = makeTool("bash");
   const executor: ExecuteToolCall = async (t, c, sig, onUpdate) => {

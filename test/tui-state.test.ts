@@ -3259,6 +3259,7 @@ test("D33: agent_end stall with repeat-failure evidence → the H2 wording, not 
         repeats: 3,
         window: 8,
         errorExcerpt: "test failed: expected 1, got 2",
+        skipped: 2,
       },
     },
   );
@@ -3266,6 +3267,9 @@ test("D33: agent_end stall with repeat-failure evidence → the H2 wording, not 
   const text = last.kind === "error" ? last.text : "<not an error item>";
   assert.match(text, /identical error 3 times/);
   assert.doesNotMatch(text, /--no-sandbox/, "an H2 stall is not the sandbox wall");
+  // 2026-11-27 audit fix: queued calls the sequential skip prevented are
+  // named honestly; a stall without evidence.skipped claims nothing.
+  assert.match(text, /2 further queued call\(s\) in the batch were skipped/);
   assert.match(text, /trigger: bash failed 3\/8 calls — test failed: expected 1, got 2/);
 });
 

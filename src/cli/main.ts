@@ -640,12 +640,24 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       } else if (ev.stopReason === "stall") {
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         const h2 = ev.evidence?.guard === "repeat-failure";
+        const h3 = ev.evidence?.guard === "same-error-stall";
+        // 2026-11-27 audit fix: every stall guard fires AFTER its
+        // triggering call executed (the result is replaced, not
+        // prevented) — the old "the repeat was not re-executed" wording
+        // was false. Only the sequential skip prevents queued calls; when
+        // it did, `evidence.skipped` says how many.
+        const skipped =
+          ev.evidence && "skipped" in ev.evidence && (ev.evidence.skipped ?? 0) > 0
+            ? ` ${ev.evidence.skipped} further queued call(s) in the batch were skipped (not executed).`
+            : "";
         sinks.err.write(
           `\n${
-            h2
-              ? "stall: the same tool returned the identical error 3 times within its last 8 calls — the repeat was not re-executed. Change the operation or explain the unresolved failure"
-              : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic, so the repeat was not executed. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox"
-          }${ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""}${resume}\n`,
+            h3
+              ? "stall: the same tool returned the same error 5 times IN A ROW even as the arguments varied — rephrasing does not change the outcome. The error names the cause: read what it points at, change approach, or explain the unresolved failure"
+              : h2
+              ? "stall: the same tool returned the identical error 3 times within its last 8 calls for identical arguments. Change the operation or explain the unresolved failure"
+              : "stall: the same tool failed 3 times with a permission denial within its last 8 calls — the sandbox boundary is deterministic. Change approach (a workspace path / a command the sandbox allows) or re-run with --no-sandbox"
+          }${skipped}${ev.evidence ? `\n${guardEvidenceNote(ev.evidence)}` : ""}${resume}\n`,
         );
       }
       break;

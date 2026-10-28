@@ -1,3 +1,57 @@
+**Same-error streak guard — final form + sequential stall-skip (2026-11-27,
+third round).** The first `same-error-stall` cut (3 windowed hits, hard stop)
+failed its own audit on four counts: the reset branch was unreachable dead
+code inside the error-only `if` (successes never reset the streak); a
+generic error across independent targets hard-stalled legitimate probing;
+the CLI/TUI/prompt claimed "the repeat was not re-executed" when every
+guard fires AFTER its triggering call executed; and parallel batches
+dispatched everything before any guard spoke. Fixed in three parts,
+superseding the 2026-11-05 entry it replaces: **(1)** `tools/pipeline.ts` —
+the guard is now a CONSECUTIVE streak: one `{errorText, streak}` record per
+tool, deleted by ANY other outcome (success, permission denial, different
+error — no per-errorText map, no stale state), and a LADDER: warn in-band
+at 3 in a row (real error returned VERBATIM + appended approach-changing
+notice, run continues), hard stall at 5 (`guard: "same-error-stall"`,
+`repeats` = the true streak, `consecutive: true`; exact byte-identical
+repeats still belong to H2). **(2)** `loop/agent-loop.ts` — sequential
+batches skip every call AFTER one returns `details.stall` (synthetic
+`notExecuted` in-band result recorded with the SYNTHETIC_FILL_DIGEST so the
+cycle guard treats skips as exempt fills); parallel batches still run all
+(the honest limit: calls are in flight before results exist — documented in
+the module header, pinned by a test). `agent_end.evidence.skipped` counts
+prevented calls; CLI + TUI banners gained the honest skipped-note and lost
+the false "not re-executed" claims (a guard never prevents a dispatched
+call; only the sequential skip prevents queued ones). **(3)** the system
+prompt's repeated-failure discipline now says the harness stops the run as
+stalled — never promises refusal. Tests: 7 streak (warn@3/run-continues,
+stall@5, success-reset, different-error-reset, independent-targets-defer,
+H2-owns-exact-repeats, permission-resets) + 2 stall-skip (sequential skips
+later calls + evidence.skipped; parallel runs all — pinned limit) + TUI
+skip-note + prompt honesty; suite **1406 pass / 0 fail / 14 skip
+(live-only)**. A follow-up audit found and fixed two bookkeeping defects in
+that redesign: **(a)** the warn rung returned before H1's window push, so
+warned calls never occupied window slots and stale permission denials
+stayed counted (H1 then fired on a call whose real last-8 history held one
+denial) — H1 bookkeeping now runs in a dedicated step BEFORE any verdict
+return; **(b)** the pre-execution returns (validation failure, blocked
+gate, broken hook) skipped the streak reset, so a malformed call between
+two identical failures let the streak climb across unrelated work — all
+three now break the streak through one `breakSameErrorStreak` helper. The
+prompt's "third repeat earns a warning" claim was also scoped (exact
+repeats still hard-stop via H2 at 3). Regression tests pin both sequences.
+A second audit pass caught two more: **(c)** the `progressTarget` attach
+sat at the very end of the executor, so the warn rung (whose result the
+loop keeps) returned before it — a hook-rewritten edit path lost its
+effective target and F1's unverified-edit scan split counts across the
+effective and model paths; the attach moved to step 4b (after result
+hooks, before any guard verdict). **(d)** the prompt still promised the
+3-in-a-row warning to exact repeats; it now states the warning is for
+VARYING-argument streaks and that an identical re-issue can stop with no
+warning. Suite **1409 pass / 0 fail / 14 skip (live-only)**. Residuals: parallel
+dispatch cannot be guarded pre-execution (inherent to Promise.all); F1
+`progressMode` still defaults to `"watch"` — promotion to `nudge` is a
+one-line flip backed by `/stats_progress`.
+
 # Current project status (2026-10-25)
 
 **D34 — D26 compaction CLOSED (2026-10-25).** The carried

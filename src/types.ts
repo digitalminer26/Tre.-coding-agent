@@ -246,6 +246,10 @@ export type GuardEvidence =
       window: number;
       /** Raw denial text (one line, capped). */
       errorExcerpt: string;
+      /** 2026-11-27 audit fix: calls queued AFTER the stalling call in
+       *  the same SEQUENTIAL batch, skipped without executing (the only
+       *  path that prevents a call from running). Absent/0 = none. */
+      skipped?: number;
     }
   | {
       /** H2 repeat-failure guard → stopReason "stall". */
@@ -256,6 +260,28 @@ export type GuardEvidence =
       window: number;
       /** Normalized error text (capped). */
       errorExcerpt: string;
+      /** See permission-stall.skipped. */
+      skipped?: number;
+    }
+  | {
+      /** Same-error guard (added 2026-11-05, streak redesigned 2026-11-27
+       *  per audit) → stopReason "stall": the same tool returned the same
+       *  normalized error text SAME_ERROR_STALL_THRESHOLD times CONSECUTIVELY
+       *  under varying arguments (the rephrase-while-stuck pattern; a warn
+       *  notice rides the result in-band from 3 in a row). Any other outcome
+       *  for the tool resets the streak, so unrelated targets sharing a
+       *  generic error cannot accumulate. */
+      guard: "same-error-stall";
+      tool: string;
+      /** The true consecutive streak at stall (>= 5). */
+      repeats: number;
+      /** Marks the count as a consecutive streak (not a windowed count —
+       *  distinguishes it from repeat-failure's "3/8 calls" display). */
+      consecutive: true;
+      /** Normalized error text (capped). */
+      errorExcerpt: string;
+      /** See permission-stall.skipped. */
+      skipped?: number;
     };
 
 /**
@@ -483,7 +509,9 @@ export function guardEvidenceNote(evidence: GuardEvidence): string {
   const count =
     evidence.guard === "permission-stall"
       ? `${evidence.denials}/${evidence.window} calls`
-      : `${evidence.repeats}/${evidence.window} calls`;
+      : evidence.guard === "same-error-stall"
+        ? `${evidence.repeats} in a row`
+        : `${evidence.repeats}/${evidence.window} calls`;
   return `trigger: ${clip(evidence.tool, 30)} failed ${count}${
     evidence.errorExcerpt !== "" ? ` — ${clip(evidence.errorExcerpt, 90)}` : ""
   }`;

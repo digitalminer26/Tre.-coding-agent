@@ -224,6 +224,36 @@ test("prompt: guidelines are derived from the enabled tool set", () => {
   assert.ok(extra.includes("Custom rule Z"));
 });
 
+test("prompt: error-handling section carries the repeated-failure discipline (2026-11-05, honest wording 2026-11-27)", async () => {
+  const p = buildSystemPrompt({ cwd: dir, tools: [READ] });
+  assert.match(p, /Repeated-failure discipline/);
+  assert.match(
+    p,
+    /five in a row\s+stops the run as stalled/,
+    "names the streak ladder's stop rung",
+  );
+  assert.match(
+    p,
+    /three times in a row WITH\s+VARYING ARGUMENTS earns an in-band guard warning/,
+    "the warning is scoped to the varying-argument streak — exact repeats\n     stall via H2 at 3 with NO warning (2026-11-27 audit finding 2)",
+  );
+  assert.match(
+    p,
+    /identical call re-issued twice can stop\s+the run immediately with no warning/,
+    "the exact-repeat path is stated honestly (no warning is promised)",
+  );
+  assert.doesNotMatch(
+    p,
+    /even with varying arguments/,
+    "the old phrasing promised a warning to exact repeats too",
+  );
+  assert.doesNotMatch(
+    p,
+    /the harness refuses it/,
+    "the guard replaces results AFTER execution — the prompt must not promise prevention",
+  );
+});
+
 test("prompt: project context files appear verbatim; missing files are skipped", () => {
   const ctxFile = path.join(dir, "PROJECT.md");
   writeFileSync(ctxFile, "UNIQUE-PROJECT-CONTEXT-MARKER\n");
