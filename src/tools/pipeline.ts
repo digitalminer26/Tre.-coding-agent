@@ -224,6 +224,29 @@ export function familyFailureKey(text: string): string {
   return norm.length === 0 ? "" : norm.replace(/\d+/g, "#");
 }
 
+/**
+ * Prune expired entries from EVERY family of one tool's window map
+ * (in place): entries whose call index fell outside
+ * `currentIndex - window` drop; families left with no live entries are
+ * removed entirely. The sweep is GLOBAL by contract — a prune limited
+ * to the currently-recording family passes every behavioral test
+ * (round-2 audit, cycle 1: that mutation survived 1,420 tests) yet
+ * retains expired pairs/texts of every family not currently queried
+ * until the defensive cap evicts them. Exported for a direct contract
+ * test; the executor calls it on every recorded failure.
+ */
+export function pruneExpiredFamilyEntries(
+  famByTool: Map<string, { call: number; text: string }[]>,
+  currentIndex: number,
+  window: number = SAME_FAMILY_WINDOW,
+): void {
+  for (const [k, entries] of famByTool) {
+    const live = entries.filter((e) => currentIndex - e.call < window);
+    if (live.length === 0) famByTool.delete(k);
+    else if (live.length !== entries.length) famByTool.set(k, live);
+  }
+}
+
 /** Permission-denial signatures in tool error text (case-insensitive).
  *  Covers the kernel-sandbox EPERM spellings (bash + file tools) and the
  *  classic EACCES/EPERM messages. Exported for tests. */
@@ -593,14 +616,11 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         if (famKey) {
           const famByTool: Map<string, { call: number; text: string }[]> =
             familyWindows.get(tool.name) ?? new Map();
-          // Prune EVERY family to the current window first, so no family
-          // keeps pairs (or the distinct texts derived from them) past
-          // its expiry (2026-11-28 audit, finding 2).
-          for (const [k, entries] of famByTool) {
-            const live = entries.filter((e) => repeatCallIndex - e.call < SAME_FAMILY_WINDOW);
-            if (live.length === 0) famByTool.delete(k);
-            else if (live.length !== entries.length) famByTool.set(k, live);
-          }
+          // Prune EVERY family to the current window first (the exported
+          // helper is the contract; round-2 cycle 1 pinned it directly),
+          // so no family keeps pairs (or the distinct texts derived from
+          // them) past its expiry (2026-11-28 audit, finding 2).
+          pruneExpiredFamilyEntries(famByTool, repeatCallIndex);
           const entries = famByTool.get(famKey) ?? [];
           entries.push({ call: repeatCallIndex, text: errorText });
           famByTool.set(famKey, entries);

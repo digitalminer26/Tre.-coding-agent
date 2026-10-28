@@ -16,6 +16,8 @@ import {
   familyFailureKey,
   isPermissionStallText,
   makeToolExecutor,
+  pruneExpiredFamilyEntries,
+  SAME_FAMILY_WINDOW,
   readTool,
   writeTool,
 } from "../src/tools/index.js";
@@ -369,21 +371,58 @@ test("family-window: a distinct text EXPIRES with its call — stale texts never
   assert.equal(r14.isError, true, "the real error still rides through");
 });
 
+test("family-window: pruneExpiredFamilyEntries sweeps EVERY family, not just one (round-2 audit, cycle 1 finding 1)", () => {
+  // The contract the executor relies on: a prune limited to the
+  // currently-recording family passes every behavioral test (round-2
+  // cycle-1 mutation "if (k !== famKey) continue" survived all 1,420)
+  // yet retains expired pairs/texts of families not currently queried —
+  // outcome 31 positions old kept inside an 8-outcome window. This
+  // direct test pins the sweep itself: after one call, NO family keeps
+  // an entry older than the window and no family keeps zero entries.
+  const entries = (from: number, to: number): { call: number; text: string }[] => {
+    const out: { call: number; text: string }[] = [];
+    for (let c = from; c <= to; c++) out.push({ call: c, text: `boom ${c}` });
+    return out;
+  };
+  const famByTool = new Map<string, { call: number; text: string }[]>();
+  // A stale family entirely outside the window at index 20 (window 8:
+  // live means call > 12).
+  famByTool.set("staleFamily", entries(1, 4));
+  // A mixed family: expired head + live tail.
+  famByTool.set("mixedFamily", entries(5, 18));
+  // A fully-live family.
+  famByTool.set("liveFamily", entries(15, 20));
+  pruneExpiredFamilyEntries(famByTool, 20);
+  assert.equal(famByTool.has("staleFamily"), false, "expired family of a NON-current key is deleted");
+  const mixed = famByTool.get("mixedFamily");
+  assert.ok(mixed !== undefined && mixed.every((e) => 20 - e.call < SAME_FAMILY_WINDOW), "mixed family keeps only live entries");
+  assert.deepEqual(famByTool.get("liveFamily"), entries(15, 20), "live family untouched");
+  // Boundary: an entry exactly window-old (index 12 at index 20) is EXPIRED.
+  const boundary = new Map<string, { call: number; text: string }[]>();
+  boundary.set("edge", [{ call: 12, text: "x" }, { call: 13, text: "y" }]);
+  pruneExpiredFamilyEntries(boundary, 20);
+  assert.deepEqual(boundary.get("edge"), [{ call: 13, text: "y" }], "expiry is currentIndex - call < window (exactly-old entry drops)");
+});
+
 test("family-window: a NEW family is admitted and records its first call (2026-11-28 audit, finding 1)", async () => {
   // The defect: eviction ranked families by newest call and ran BEFORE
   // the first pair was pushed, so the brand-new family (empty history)
   // ranked oldest and self-evicted — a family admitted after 32 other
   // families never warned.
   //
-  // 2026-11-28 review, finding 2 — honest scope note: the global prune
-  // added by the SAME fix round drops families with no live pairs, so
-  // only <=SAME_FAMILY_WINDOW (8) families are ever concurrently tracked
-  // and the FAMILY_MAX_TRACKED eviction is now unreachable defensive
-  // code. This test therefore exercises admission after 32 HISTORICAL
-  // families (each pruned when it expires), which still catches the
-  // self-eviction bug (the mutation "evict before push" fails it), but
-  // it does NOT exercise live eviction of 32 TRACKED families — that
-  // path only reactivates if the window cap constants change.
+  // 2026-11-28 review, finding 2 (wording fixed after round-2 audit
+  // cycle 1) — honest scope note: the global prune (pruneExpiredFamily-
+  // Entries, pinned by its own contract test below) drops families with
+  // no live pairs, so only <=SAME_FAMILY_WINDOW (8) families are ever
+  // concurrently tracked and the FAMILY_MAX_TRACKED eviction is
+  // unreachable defensive code under current constants. What THIS test
+  // pins is admission+recording after many HISTORICAL families (32, each
+  // expired and pruned). It caught the ORIGINAL self-eviction defect as
+  // that code shipped (no global prune, families survived, the 33rd
+  // self-evicted); re-introducing "evict before push" today would NOT
+  // reactivate it unless the global prune were ALSO removed — this test
+  // is not that test. The eviction branch itself is pinned only by
+  // reading (unreachable), by design.
   // Sequence: 32 distinct single-failure families, then a 33rd family
   // failing 3 times in 3 calls -> must warn on the third.
   const { tool } = makeTool("famCap", async (_id, args) => ({

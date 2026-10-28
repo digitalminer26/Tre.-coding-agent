@@ -25,6 +25,7 @@ export {
   REPEAT_FAILURE_WINDOW,
   REPEAT_FAILURE_THRESHOLD,
   familyFailureKey,
+  pruneExpiredFamilyEntries,
   SAME_FAMILY_WARN_THRESHOLD,
   SAME_FAMILY_WINDOW,
   type ToolPipelineHooks,
