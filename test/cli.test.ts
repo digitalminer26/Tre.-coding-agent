@@ -660,6 +660,88 @@ test("printEvent: text deltas, tool lines, end diagnostics", () => {
   assert.match(err, /error: boom/);
 });
 
+test("printEvent: done with thinking + text → seam marker; pure turns unchanged", () => {
+  let out = "";
+  const sinks: PrintSinks = {
+    out: { write: (s) => (out += s) },
+    err: { write: () => {} },
+  };
+  // Mixed turn: thinking block + text block → one seam line, not a bare newline.
+  printEvent(
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hmm, check" },
+          { type: "text", text: "ok" },
+        ],
+        model: "m",
+        provider: "p",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    },
+    sinks,
+  );
+  assert.equal(out, "\n· split here (server-assigned channels)\n");
+  // Text-only turn: exactly the old behavior (bare newline).
+  out = "";
+  printEvent(
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Hello" }],
+        model: "m",
+        provider: "p",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    },
+    sinks,
+  );
+  assert.equal(out, "\n");
+  // Thinking-only turn: nothing printed (no text block → no newline, no seam).
+  out = "";
+  printEvent(
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm" }],
+        model: "m",
+        provider: "p",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    },
+    sinks,
+  );
+  assert.equal(out, "");
+  // Empty thinking block + text: no seam (the marker fires only when the
+  // thinking block is non-empty — same condition as the TUI).
+  out = "";
+  printEvent(
+    {
+      type: "done",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "text", text: "ok" },
+        ],
+        model: "m",
+        provider: "p",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    },
+    sinks,
+  );
+  assert.equal(out, "\n");
+});
+
 test("printEvent: budget agent_end → stderr note (resume hint only with a session file)", () => {
   let err = "";
   const sinks: PrintSinks = {

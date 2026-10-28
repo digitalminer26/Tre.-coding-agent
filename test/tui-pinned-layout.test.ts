@@ -161,10 +161,13 @@ test("itemHeight per kind at width 80", () => {
   // dim header, the reasoning under a "│ " gutter wrapped at width−2, and a
   // blank line before the reply — the height counts all of it.
   const asstThink: TuiItem = { ...asstPlain, thinking: true, thinkingText: "hmm" };
-  assert.equal(itemHeight(asstThink, 80), 1 + 1 + 1 + itemHeight(asstPlain, 80)); // header + "hmm" + blank + 3
+  assert.equal(itemHeight(asstThink, 80), 1 + 1 + 1 + 1 + itemHeight(asstPlain, 80)); // header + "hmm" + seam + blank + 3 (mixed turn: thinkingText + text)
   // A bare `thinking` flag with NO accumulated text renders nothing extra.
   const asstFlagOnly: TuiItem = { ...asstPlain, thinking: true };
   assert.equal(itemHeight(asstFlagOnly, 80), itemHeight(asstPlain, 80));
+  // Thinking-only turn: no seam marker (seam fires only on mixed turns).
+  const asstThinkOnly: TuiItem = { ...asstPlain, text: "", thinking: true, thinkingText: "hmm" };
+  assert.equal(itemHeight(asstThinkOnly, 80), 1 + 1 + 1); // header + "hmm" + blank, no reply
 
   // tool (running): '→ bash a…a' (7 prefix cols + 100 args) hard-wraps to 2
   const toolRun: TuiItem = {
@@ -1113,8 +1116,11 @@ test("C31: itemLines shapes — icons, hanging indents, separators", () => {
   assert.deepEqual(streamed, [{ spans: [{ text: "◆ ab▍" }] }]);
   // reasoning: a distinct block above the reply — a dim "◦ thinking…"
   // header, the reasoning under a dim "│ " gutter (wrapped at width−2), a
-  // blank line before the reply, and the reply under its ◆. Live
-  // ("thinking…") while streaming, settled ("thinking") after done.
+  // dim seam marker on mixed turns (thinking + reply: the split is
+  // upstream-assigned, so mark the seam instead of implying "thinking
+  // finished"), a blank line before the reply, and the reply under its ◆.
+  // Live ("thinking…") while streaming, settled ("thinking") after done.
+  // Thinking-only turns (empty reply) carry no seam marker.
   const think = itemLines(
     { kind: "assistant", text: "ok", streaming: true, thinking: true, thinkingText: "hmm, check" },
     80,
@@ -1122,6 +1128,7 @@ test("C31: itemLines shapes — icons, hanging indents, separators", () => {
   assert.deepEqual(think, [
     { spans: [{ text: "◦ thinking…", dim: true }] },
     { spans: [{ text: "│ hmm, check", dim: true }] },
+    { spans: [{ text: "· split here (server-assigned channels)", dim: true }] },
     { spans: [{ text: " " }] },
     { spans: [{ text: "◆ ok▍" }] },
   ]);
@@ -1132,8 +1139,18 @@ test("C31: itemLines shapes — icons, hanging indents, separators", () => {
   assert.deepEqual(thinkDone, [
     { spans: [{ text: "◦ thinking", dim: true }] },
     { spans: [{ text: "│ hmm, check", dim: true }] },
+    { spans: [{ text: "· split here (server-assigned channels)", dim: true }] },
     { spans: [{ text: " " }] },
     { spans: [{ text: "◆ ok" }] },
+  ]);
+  const thinkOnly = itemLines(
+    { kind: "assistant", text: "", streaming: false, thinking: false, thinkingText: "hmm, check" },
+    80,
+  );
+  assert.deepEqual(thinkOnly, [
+    { spans: [{ text: "◦ thinking", dim: true }] },
+    { spans: [{ text: "│ hmm, check", dim: true }] },
+    { spans: [{ text: " " }] },
   ]);
   // tool running: colored mark span (YELLOW = in flight) + blue name span
   // + plain args; hard wrap splits the line (the header is unchanged by C31).

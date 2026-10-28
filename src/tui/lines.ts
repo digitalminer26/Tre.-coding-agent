@@ -177,6 +177,15 @@ function computeItemLines(item: TuiItem, width: number, prev?: TuiItem): RLine[]
         body.push({ spans: [{ text: "◦ " + (item.thinking ? "thinking…" : "thinking"), dim: true }] });
         for (const l of wrapRows(item.thinkingText, Math.max(1, width - 2)))
           body.push({ spans: [{ text: "│ " + l, dim: true }] });
+        // Mixed turn (thinking AND reply): the thinking/text split is
+        // upstream-assigned (the server stripped the delimiter, so tre.
+        // cannot tell a quoted tag from protocol framing). Mark the seam
+        // explicitly instead of implying "thinking finished, then the
+        // answer": a dim suffix on the thinking block. Pure turns
+        // (thinking-only, text-only) render exactly as before.
+        if (item.text !== "") {
+          body.push({ spans: [{ text: "· split here (server-assigned channels)", dim: true }] });
+        }
         body.push({ spans: [{ text: " " }] }); // blank line: thinking | reply
       }
       // The streaming cursor is part of the rendered text — and of the

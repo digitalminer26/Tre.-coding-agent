@@ -1677,14 +1677,20 @@ export function itemHeight(item: TuiItem, width: number, prev?: TuiItem): number
       const text = item.text + (item.streaming ? "\u258d" : "");
       // The accumulated reasoning renders as a distinct block above the
       // reply (lines.ts): one dim header line ("◦ thinking…"), the
-      // reasoning under a "│ " gutter wrapped at width−2, and a blank line
-      // before the reply — count exactly what the renderer draws.
+      // reasoning under a "│ " gutter wrapped at width−2, an optional
+      // dim seam-marker line on mixed turns (thinkingText + text —
+      // "· split here…"), and a blank line before the reply — count
+      // exactly what the renderer draws.
       const think =
         item.thinkingText !== ""
-          ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + 1
+          ? 1 + wrapLineCount(item.thinkingText, Math.max(1, width - 2)) + (item.text !== "" ? 1 : 0) + 1
           : 0;
       // The renderer expands Markdown table blocks into aligned rows (and
       // retains the assistant gutter), so count those exact rendered rows.
+      // Mixed turn (thinkingText + text): the seam-marker line ("· split
+      // here…") is part of itemLines output, so the length already counts
+      // it — the lockstep contract holds with no extra math (same as the
+      // thinking block itself, counted via itemLines, not via `think`).
       return blank + itemLines(item, width).length;
     }
     case "tool": {

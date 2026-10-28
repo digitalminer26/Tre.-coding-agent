@@ -534,9 +534,22 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
     case "text_delta":
       sinks.out.write(ev.delta);
       break;
-    case "done":
-      if (ev.message.content.some((b) => b.type === "text")) sinks.out.write("\n");
+    case "done": {
+      // Mixed turn (thinking + text): the thinking/text split is
+      // upstream-assigned and tre. renders it verbatim — mark the seam
+      // with one dim line (same condition as the TUI marker in
+      // tui/lines.ts) instead of implying "thinking finished, then the
+      // answer". Pure turns (thinking-only, text-only) print as before.
+      const hasThinking = ev.message.content.some(
+        (b) => b.type === "thinking" && b.thinking !== "",
+      );
+      if (hasThinking && ev.message.content.some((b) => b.type === "text")) {
+        sinks.out.write("\n· split here (server-assigned channels)\n");
+      } else if (ev.message.content.some((b) => b.type === "text")) {
+        sinks.out.write("\n");
+      }
       break;
+    }
     case "tool_execution_start":
       // D19: file-access tools (read/write/edit) are silent on success —
       // only a denial earns a line.
