@@ -28,6 +28,7 @@ export {
   pruneExpiredFamilyEntries,
   SAME_FAMILY_WARN_THRESHOLD,
   SAME_FAMILY_WINDOW,
+  type ToolExecutor,
   type ToolPipelineHooks,
   type BeforeToolCall,
   type AfterToolCall,

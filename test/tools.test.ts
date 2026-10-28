@@ -18,6 +18,7 @@ import {
   makeToolExecutor,
   pruneExpiredFamilyEntries,
   SAME_FAMILY_WINDOW,
+  type ToolExecutor,
   readTool,
   writeTool,
 } from "../src/tools/index.js";
@@ -402,6 +403,62 @@ test("family-window: pruneExpiredFamilyEntries sweeps EVERY family, not just one
   boundary.set("edge", [{ call: 12, text: "x" }, { call: 13, text: "y" }]);
   pruneExpiredFamilyEntries(boundary, 20);
   assert.deepEqual(boundary.get("edge"), [{ call: 13, text: "y" }], "expiry is currentIndex - call < window (exactly-old entry drops)");
+});
+
+test("family-window: EXECUTOR retains no expired non-current family (integration probe, round-2 cycle 2 finding 1)", () => {
+  // The direct helper test cannot see the call site: a mutant that
+  // hands the sweep a current-family-only Map passes every behavioral
+  // test (it prunes each family just before it would be observable
+  // again) — proven survivor of the 1,421-test suite. This test reads
+  // the executor's OWN state via the read-only probe after a real
+  // sequence of recorded failures.
+  const sig = new AbortController().signal;
+  const executor = makeToolExecutor();
+  const probe = (executor as unknown as ToolExecutor).__familyWindowProbe;
+  assert.ok(probe !== undefined, "probe is attached to the executor");
+  const tool: Tool = {
+    name: "famProbe",
+    description: "family retention probe",
+    parameters: { type: "object" },
+    execute: async (_id, args) => ({
+      // The leading LETTER survives key masking (only digit RUNS become
+      // "#"), so each letter is its OWN family; the trailing digit makes
+      // texts distinct within one letter, if ever repeated.
+      content: [{ type: "text" as const, text: `${args.letter} boom ${args.n}` }],
+      isError: true,
+    }),
+  };
+  const call = (id: string, letter: string, n: number): ToolCallBlock => ({
+    type: "toolCall",
+    id,
+    name: tool.name,
+    arguments: { letter, n },
+  });
+  // Record family "A boom #" once (outcome index 1), then 8 calls from 8
+  // DIFFERENT letter families P..W (indices 2..9; distinct letters ->
+  // distinct keys): A's pair is 8 outcomes old at index 9, so the last
+  // sandwich recording must sweep it OUT of the map entirely.
+  const SANDWICH = ["P", "Q", "R", "S", "T", "U", "V", "W"];
+  return (async () => {
+    await executor(tool, call("a", "A", 1), sig);
+    for (let j = 0; j < 8; j++) await executor(tool, call(`s${j}`, SANDWICH[j]!, j + 2), sig);
+    let fams = probe!().get(tool.name);
+    assert.ok(fams !== undefined, "tool has a family map after recordings");
+    assert.equal(fams!.has("A boom #"), false, "expired non-current family pruned from EXECUTOR state");
+    const allIndices = [...fams!.values()].flat();
+    assert.ok(allIndices.length <= SAME_FAMILY_WINDOW, `live pairs stay within the window (${allIndices.length})`);
+    // Then a fresh recording still sweeps: record family B (index 10);
+    // every retained pair must be window-live against index 10.
+    await executor(tool, call("b", "B", 1), sig);
+    fams = probe!().get(tool.name);
+    const nowOldest = Math.min(...[...fams!.values()].flat());
+    assert.ok(10 - nowOldest < SAME_FAMILY_WINDOW, "no pair older than the window survives a recording");
+    // Probe returns copies: mutating it must not touch executor state.
+    const snap = probe!();
+    snap.get(tool.name)!.clear();
+    snap.delete(tool.name);
+    assert.ok(probe!().get(tool.name) !== undefined && probe!().get(tool.name)!.size > 0, "probe snapshots are copies");
+  })();
 });
 
 test("family-window: a NEW family is admitted and records its first call (2026-11-28 audit, finding 1)", async () => {

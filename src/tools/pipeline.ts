@@ -318,7 +318,17 @@ export function guardExcerpt(text: string): string {
  * per tool, the window of its last STALL_WINDOW calls (any outcome) and
  * how many of those were permission failures (docs/08 H1).
  */
-export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall {
+/**
+ * The executor returned by makeToolExecutor: the plain ExecuteToolCall
+ * seam plus an optional, test-only family-window probe (see the
+ * defineProperty site at the bottom of makeToolExecutor). Production
+ * call sites treat it as a plain ExecuteToolCall.
+ */
+export type ToolExecutor = ExecuteToolCall & {
+  __familyWindowProbe?: () => Map<string, Map<string, number[]>>;
+};
+
+export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
   // Stall-guard state (see the module header; docs/08 H1): per tool, a
   // window of its last STALL_WINDOW calls (true = permission failure) and
   // the count of permission failures within it. A success or a
@@ -392,7 +402,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
     entry.count = entry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
     stallByTool.set(toolName, entry);
   };
-  return async (tool, call, signal, onUpdate) => {
+  const execute: ExecuteToolCall = async (tool, call, signal, onUpdate) => {
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
     if (validationError !== undefined) {
@@ -833,4 +843,27 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
 
     return result;
   };
+  // Test-only observation seam (2026-11-28 round-2 auditor, cycle 2
+  // finding 1): the family-retention invariant is INVISIBLE behaviorally
+  // — a "prune only the current family" mutant prunes each family just
+  // before it would become observable again, so every behavioral test
+  // passes (proven: that mutant survived the full 1,421-test suite).
+  // This read-only snapshot lets an integration test assert the
+  // executor's OWN state directly: after recording another family, an
+  // expired non-current family must be gone. Returns COPIES (call
+  // indices per family per tool); mutating them cannot affect the
+  // executor. Not part of the ExecuteToolCall contract — production
+  // code never calls it.
+  const probe: ToolExecutor = execute as ToolExecutor;
+  Object.defineProperty(probe, "__familyWindowProbe", {
+    value: (): Map<string, Map<string, number[]>> =>
+      new Map(
+        [...familyWindows].map(([t, fams]) => [
+          t,
+          new Map([...fams].map(([k, es]) => [k, es.map((e) => e.call)])),
+        ]),
+      ),
+    enumerable: false,
+  });
+  return probe;
 }
