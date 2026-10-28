@@ -590,6 +590,14 @@ export interface LlmContext {
   systemPrompt: string;
   messages: AgentMessage[];
   tools: Tool[];
+  /**
+   * Optional prompt-cache affinity key (see ModelCompat.slotAffinity). The
+   * wire layer sends it as the request's `user` field when the model opts
+   * in. Callers don't set it per call — the session-lifetime dispatcher
+   * (main.ts) injects its own key into every context, so loop/compaction/
+   * summarizer calls all pin to the same slot without knowing about it.
+   */
+  affinityKey?: string;
 }
 
 /**
@@ -688,6 +696,20 @@ export interface ModelCompat {
    * to omit elsewhere. Leave unset for all other endpoints.
    */
   promptCaching?: boolean;
+  /**
+   * true → send a top-level `user: <session affinity key>` in every
+   * chat/completions request when the caller supplied `ctx.affinityKey`.
+   * llama-server's multi-slot mode (`--parallel N`) assigns each request a
+   * slot by hash of `user` (server/README, "HTTP Multiple slots"): without
+   * it requests round-robin across slots, so concurrent tre. sessions
+   * (TUI + auditor one-shots + delegation) evict each other's prompt-cache
+   * prefix on every call — the `cached_tokens=0` cliff-lines in the ledger.
+   * With it, each session pins to ONE slot and its prefix stays warm.
+   * `user` is an official OpenAI chat/completions field, so OpenAI-compatible
+   * servers accept (and typically ignore) it; set this on llama.cpp endpoints
+   * running with --parallel.
+   */
+  slotAffinity?: boolean;
   /** Merged verbatim into every request body (e.g. enable_thinking). */
   extraParams?: Record<string, unknown>;
   /**

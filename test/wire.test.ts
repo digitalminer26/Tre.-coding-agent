@@ -321,6 +321,17 @@ test("buildParams: compat flags steer the request body", () => {
   const extra = buildParams({ ...MODEL, compat: { extraParams: { enable_thinking: false } } }, ctx);
   assert.equal(extra.enable_thinking, false);
 
+  // Slot affinity (prompt-cache): `user` is sent only when the model opts
+  // in AND the context carries an affinityKey — never before either holds.
+  const affCtx = { ...ctx, affinityKey: "tre-abc" };
+  assert.equal(buildParams(MODEL, affCtx).user, undefined); // no compat: never sent
+  const aff = buildParams({ ...MODEL, compat: { slotAffinity: true } }, affCtx);
+  assert.equal(aff.user, "tre-abc");
+  assert.equal(
+    buildParams({ ...MODEL, compat: { slotAffinity: true } }, ctx).user,
+    undefined, // compat without a key: not sent
+  );
+
   // D26 fold cap (audit round 2): compat.extraParams merges LAST, so an
   // endpoint config CAN override the output cap (this is why the compaction
   // fold's real-size guard, not the cap, is the authority). Pin the

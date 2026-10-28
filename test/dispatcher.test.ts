@@ -85,3 +85,38 @@ test("dispatcher: unknown api falls through to the completions wire (default)", 
   })();
   assert.deepEqual(seen, ["completions"]);
 });
+
+test("dispatcher: affinity key injects into every completions call, never responses", async () => {
+  const got: Array<{ api: string; key: string | undefined }> = [];
+  const streamFn = makeStreamDispatcher(
+    (m, c, o) => {
+      got.push({ api: "completions", key: c.affinityKey });
+      return fake("c", []);
+    },
+    (m, c, o) => {
+      got.push({ api: "responses", key: c.affinityKey });
+      return fake("r", []);
+    },
+    "tre-session-42",
+  );
+  await (async () => {
+    const it = streamFn(completionsModel, ctx, opts)[Symbol.asyncIterator]();
+    await it.next();
+  })();
+  await (async () => {
+    const it = streamFn(responsesModel, ctx, opts)[Symbol.asyncIterator]();
+    await it.next();
+  })();
+  // A dispatcher-built key always wins over any key the context carries:
+  // every completions call from this process — including the compaction
+  // summarizer, which builds its own context — pins to the same slot.
+  await (async () => {
+    const it = streamFn(completionsModel, { ...ctx, affinityKey: "inner" }, opts)[Symbol.asyncIterator]();
+    await it.next();
+  })();
+  assert.deepEqual(got, [
+    { api: "completions", key: "tre-session-42" },
+    { api: "responses", key: undefined }, // Responses wire never sees the local key
+    { api: "completions", key: "tre-session-42" }, // dispatcher key wins
+  ]);
+});

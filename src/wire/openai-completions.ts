@@ -130,6 +130,14 @@ export function buildParams(model: ModelConfig, ctx: LlmContext): Record<string,
   if (compat.promptCaching) {
     params.cache_control = { type: "ephemeral" };
   }
+  // Slot affinity (prompt-cache): llama-server --parallel assigns slots by
+  // hash of the official OpenAI `user` field. When the model opts in and the
+  // session dispatcher injected an affinityKey, send it — this pins the
+  // session's requests to one slot so concurrent sessions stop evicting each
+  // other's prefix cache. Only sent when both are set: absent = old behavior.
+  if (compat.slotAffinity && ctx.affinityKey !== undefined) {
+    params.user = ctx.affinityKey;
+  }
   params[compat.maxTokensField ?? "max_tokens"] = model.maxTokens;
   if (typeof model.temperature === "number") params.temperature = model.temperature;
   if (compat.supportsUsageInStreaming !== false) {

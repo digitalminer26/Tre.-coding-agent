@@ -20,7 +20,16 @@ import type { StreamFn } from "../types.js";
 export function makeStreamDispatcher(
   completionsFn: StreamFn,
   responsesFn: StreamFn,
+  affinityKey?: string,
 ): StreamFn {
-  return (model, ctx, opts) =>
-    model.api === "openai-responses" ? responsesFn(model, ctx, opts) : completionsFn(model, ctx, opts);
+  return affinityKey === undefined
+    ? (model, ctx, opts) =>
+        model.api === "openai-responses" ? responsesFn(model, ctx, opts) : completionsFn(model, ctx, opts)
+    : (model, ctx, opts) =>
+        model.api === "openai-responses"
+          ? responsesFn(model, ctx, opts)
+          : // Session-lifetime affinity: every chat/completions call from this
+            // process carries the same key (models opt in via
+            // compat.slotAffinity), so llama-server pins them to one slot.
+            completionsFn(model, { ...ctx, affinityKey }, opts);
 }

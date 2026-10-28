@@ -49,6 +49,7 @@
  *   - I3: run failures are data (exit codes), never uncaught throws.
  */
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
@@ -1941,8 +1942,19 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // ModelConfig on a switch and passes it to runTurn, and the dispatcher
   // picks the wire per call. Nothing is pinned at startup. `deps.streamFn`
   // (tests) wins.
+  //
+  // Prompt-cache slot affinity: a session-lifetime key handed to every
+  // chat/completions call (as `user`, for models with compat.slotAffinity).
+  // Derived from the session file name (stable across resume of the same
+  // session) or one random UUID per process (keyless runs) — two concurrent
+  // tre. processes never share a key, so llama-server --parallel never maps
+  // them to the same slot, and neither evicts the other's cached prefix.
+  const affinityKey =
+    sessionFile !== undefined
+      ? `tre-${path.basename(sessionFile, ".jsonl")}`
+      : `tre-${crypto.randomUUID()}`;
   const streamFn: StreamFn =
-    deps.streamFn ?? makeStreamDispatcher(openAiStream, openAiResponsesStream);
+    deps.streamFn ?? makeStreamDispatcher(openAiStream, openAiResponsesStream, affinityKey);
 
   // WS7: safety hooks (path sandbox + approval gate) wired into the loop's
   // tool pipeline. The DEFAULT mode is "yes" (auto-approve): the kernel
