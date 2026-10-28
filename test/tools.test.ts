@@ -340,15 +340,20 @@ test("family-window: a distinct text EXPIRES with its call — stale texts never
   }));
   const executor = makeToolExecutor();
   const sig = new AbortController().signal;
-  await executor(tool, call("1", "staleTxt", { n: 1 }), sig); // "boom 1" (family "boom #")
+  const executed = await executor(tool, call("1", "staleTxt", { n: 1 }), sig); // "boom 1" (family "boom #")
+  assert.equal(executed.details?.sameFamilyWarn, undefined);
   fail = false;
   for (let n = 2; n <= 9; n++) await executor(tool, call(String(n), "staleTxt", { n }), sig); // 8 successes: "boom 1" expires
   fail = true;
   text = "boom 2";
   await executor(tool, call("10", "staleTxt", { n: 10 }), sig);
-  await executor(tool, call("11", "staleTxt", { n: 0 }), sig); // success
+  fail = false; // 2026-11-28 auditor cycle 1: the "successes" must REALLY
+  await executor(tool, call("11", "staleTxt", { n: 0 }), sig); // succeed — a silent failure would climb the consecutive ladder and mask this verdict
+  fail = true;
   await executor(tool, call("12", "staleTxt", { n: 12 }), sig);
+  fail = false;
   await executor(tool, call("13", "staleTxt", { n: 0 }), sig); // success
+  fail = true;
   const r14 = await executor(tool, call("14", "staleTxt", { n: 14 }), sig);
   // Family "boom #": three live failures at calls 10/12/14, all with the
   // SAME text ("boom 2" — args vary so H2 stays silent; successes break
@@ -356,6 +361,12 @@ test("family-window: a distinct text EXPIRES with its call — stale texts never
   // inside the window = 1. With the pre-fix code its text lived forever
   // -> distinct 2 -> a false warn here.
   assert.equal(r14.details?.sameFamilyWarn, undefined, "stale distinct text must expire with its window entry");
+  // And pin the whole path: no guard at all may fire here (a passing test
+  // that passes because an EARLIER guard short-circuited would hide a
+  // stale-text regression — auditor cycle 1).
+  assert.equal(r14.details?.sameErrorWarn, undefined, "consecutive ladder must stay silent: successes break it");
+  assert.equal(r14.details?.stall, undefined, "no stall on this path");
+  assert.equal(r14.isError, true, "the real error still rides through");
 });
 
 test("family-window: a NEW family after 32 tracked families is admitted, not evicted before its first call (2026-11-28 audit, finding 1)", async () => {

@@ -329,15 +329,41 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
   >();
   const FAMILY_MAX_TRACKED = 32;
   const callsByTool = new Map<string, number>();
+  // 2026-11-28 auditor cycle 1, finding 1: pre-execution outcomes
+  // (validation failure, blocked call, broken beforeToolCall hook) ARE
+  // calls of this tool — the windowed guards promise "within its last N
+  // calls", and until now every early return skipped both the per-tool
+  // call index and the H1 slot, so arbitrarily many blocked calls between
+  // two real failures left the failures adjacent for H1/H2/family (an 8
+  // "blocked" sandwich kept 3 denials firing H1). The call index is now
+  // allocated at the TOP of the executor for every path; this helper lets
+  // the early returns occupy their H1 window slot as the NON-permission
+  // outcome they are (the tool never ran — its failure text is the gate's,
+  // not a denial or a tool error, and must not feed any failure counter).
+  const occupyNonPermissionSlot = (toolName: string): void => {
+    const entry = stallByTool.get(toolName) ?? { window: [] as boolean[], count: 0 };
+    entry.window.push(false);
+    if (entry.window.length > STALL_WINDOW) entry.window.shift();
+    entry.count = entry.window.reduce((n, f) => n + (f ? 1 : 0), 0);
+    stallByTool.set(toolName, entry);
+  };
   return async (tool, call, signal, onUpdate) => {
+    // Every call of this tool — INCLUDING the pre-execution outcomes
+    // below — consumes exactly one per-tool call index (the window
+    // contract's "calls", 2026-11-28 auditor cycle 1). Step 5/family
+    // bookkeeping use this index; nothing may return before it.
+    const repeatCallIndex = (callsByTool.get(tool.name) ?? 0) + 1;
+    callsByTool.set(tool.name, repeatCallIndex);
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
     if (validationError !== undefined) {
       // 2026-11-27 audit, finding 2: a rejected call is "another outcome"
       // — it breaks the same-error streak, or a malformed call between two
       // identical failures would let the streak climb across unrelated
-      // work (a false warn/stall one call early).
+      // work (a false warn/stall one call early). It also occupies its
+      // window slot (2026-11-28 auditor cycle 1).
       breakSameErrorStreak(tool.name);
+      occupyNonPermissionSlot(tool.name);
       return {
         content: text(`Invalid arguments for "${tool.name}": ${validationError}`),
         isError: true,
@@ -359,8 +385,10 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
         // A broken hook must not kill the run (I3) — fail the call. It
         // also breaks the same-error streak (2026-11-27 audit, finding 2):
         // the failure is the HOOK's, not the tool's, so it must not extend
-        // a streak of the tool's own errors.
+        // a streak of the tool's own errors — and it occupies its window
+        // slot (2026-11-28 auditor cycle 1).
         breakSameErrorStreak(tool.name);
+        occupyNonPermissionSlot(tool.name);
         return {
           content: text(
             `beforeToolCall hook failed for "${tool.name}": ${
@@ -374,8 +402,11 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
       }
       if (decision && "blocked" in decision) {
         // A blocked call never ran — another outcome, so the streak breaks
-        // (2026-11-27 audit, finding 2).
+        // (2026-11-27 audit, finding 2) and it occupies its window slot
+        // (2026-11-28 auditor cycle 1: eight blocked calls between two
+        // denials must slide them out of H1's last-8 window).
         breakSameErrorStreak(tool.name);
+        occupyNonPermissionSlot(tool.name);
         return {
           content: text(`Tool "${tool.name}" was blocked: ${decision.blocked}`),
           isError: true,
@@ -493,9 +524,10 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
 
     // 5. H2 same-failure guard — strict same tool + canonical args +
     // normalized non-permission error text. The bounded call-index history
-    // prevents stale repeats from accumulating; changing diagnostics do not match.
-    const repeatCallIndex = (callsByTool.get(tool.name) ?? 0) + 1;
-    callsByTool.set(tool.name, repeatCallIndex);
+    // prevents stale repeats from accumulating; changing diagnostics do not
+    // match. (repeatCallIndex was allocated at the TOP of the executor —
+    // 2026-11-28 auditor cycle 1 — so the pre-execution returns consumed
+    // their indices too.)
     if (result.isError === true) {
       const errorText = normalizeFailure(result.content.map((c) => c.text));
       if (errorText && !isPermissionStallText([errorText])) {
