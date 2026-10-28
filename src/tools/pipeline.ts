@@ -321,8 +321,10 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
   // current one — so both the pairs AND the distinct-text set expire
   // together (2026-11-28 audit, finding 2: texts used to live forever,
   // letting one stale distinct text satisfy the ≥2-texts rule long after
-  // its call left the window), and each tool caps its tracked families
-  // so state stays bounded like H1's window.
+  // its call left the window). The global prune bounds live families per
+  // tool at SAME_FAMILY_WINDOW; FAMILY_MAX_TRACKED below is a defensive
+  // cap that only reactivates if the window constant outgrows it
+  // (2026-11-28 review, finding 2).
   const familyWindows = new Map<
     string,
     Map<string, { call: number; text: string }[]>
@@ -603,7 +605,12 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ExecuteToolCall
           entries.push({ call: repeatCallIndex, text: errorText });
           famByTool.set(famKey, entries);
           if (famByTool.size > FAMILY_MAX_TRACKED) {
-            // Drop the family whose NEWEST call is oldest (bounded state).
+            // Defensive belt, UNREACHABLE under current constants (2026-11-28
+            // review, finding 2): the global prune above drops every family
+            // with no live pairs, so at most SAME_FAMILY_WINDOW (8) families
+            // are alive per tool at once — never more than the 32 cap. The
+            // cap only becomes live policy if SAME_FAMILY_WINDOW is ever
+            // raised past it. Drop the family whose NEWEST call is oldest.
             let oldest: string | undefined;
             let oldestCall = Infinity;
             for (const [k, v] of famByTool) {

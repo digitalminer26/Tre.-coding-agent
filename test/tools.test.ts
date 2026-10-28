@@ -369,12 +369,23 @@ test("family-window: a distinct text EXPIRES with its call — stale texts never
   assert.equal(r14.isError, true, "the real error still rides through");
 });
 
-test("family-window: a NEW family after 32 tracked families is admitted, not evicted before its first call (2026-11-28 audit, finding 1)", async () => {
+test("family-window: a NEW family is admitted and records its first call (2026-11-28 audit, finding 1)", async () => {
   // The defect: eviction ranked families by newest call and ran BEFORE
   // the first pair was pushed, so the brand-new family (empty history)
-  // ranked oldest and self-evicted — after 32 families no new family
-  // ever warned. Sequence: 32 distinct single-failure families, then a
-  // 33rd family failing 3 times in 3 calls -> must warn on the third.
+  // ranked oldest and self-evicted — a family admitted after 32 other
+  // families never warned.
+  //
+  // 2026-11-28 review, finding 2 — honest scope note: the global prune
+  // added by the SAME fix round drops families with no live pairs, so
+  // only <=SAME_FAMILY_WINDOW (8) families are ever concurrently tracked
+  // and the FAMILY_MAX_TRACKED eviction is now unreachable defensive
+  // code. This test therefore exercises admission after 32 HISTORICAL
+  // families (each pruned when it expires), which still catches the
+  // self-eviction bug (the mutation "evict before push" fails it), but
+  // it does NOT exercise live eviction of 32 TRACKED families — that
+  // path only reactivates if the window cap constants change.
+  // Sequence: 32 distinct single-failure families, then a 33rd family
+  // failing 3 times in 3 calls -> must warn on the third.
   const { tool } = makeTool("famCap", async (_id, args) => ({
     content: [{ type: "text" as const, text: `fam ${args.letter} err ${args.n}` }],
     isError: true,
@@ -460,9 +471,12 @@ test("family-window: out-of-order parallel completions cannot fake a window (202
   assert.ok(!restResults.some((r) => r.details?.stall === true), "no stall among the in-order calls either");
 });
 
-test("windowed guards: blocked / invalid / broken-hook calls expire real failures (2026-11-28 auditor cycle 1 follow-up)", async () => {
+test("windowed guards: blocked / invalid / broken-hook calls expire real H1 denials (2026-11-28 auditor cycle 1 follow-up)", async () => {
   // The pre-execution returns must consume their call index AND their H1
-  // slot (cycle 1, finding 1) — pinned for all three windowed guards.
+  // slot (cycle 1, finding 1) — pinned here for the PERMISSION (H1) guard;
+  // the H2/family expiry across all three pre-execution paths is pinned
+  // by the matrix test below (the mutation "H1 slot push kept, index
+  // advance dropped" left THIS test green yet let H2/family regress).
   const blocked = { active: false };
   const { tool } = makeTool("gate", async () => ({
     content: [{ type: "text" as const, text: "Operation not permitted" }],
@@ -527,6 +541,95 @@ test("windowed guards: blocked / invalid / broken-hook calls expire real failure
   }
   const r11c = await ex3(hookTool, call("11", "hooky", {}), sig);
   assert.equal(r11c.details?.stall, undefined, "8 broken-hook calls slide the old denials out");
+});
+
+// The pre-execution expiry pin for the two NON-permission windowed
+// guards (2026-11-28 code review, finding 1): the H1 test above cannot
+// cover them (permission failures bypass their bookkeeping), and the
+// mutation "H1 slot push kept, shared call-index advance dropped" kept
+// the whole suite green while BOTH guards regressed (reproduced: 2
+// identical failures + 8 blocked + a 3rd = false H2 stall; 2 same-family
+// failures + 8 blocked + a 3rd = false family warn). Each pre-execution
+// path x each guard is exercised below: two real seed failures, EIGHT
+// intervening calls ending pre-execution, then a third seed-shaped
+// failure whose outcome index must be 11 — the seeds (indices 1,2) are
+// then outside the last-8 window and no guard may fire.
+type PrePath = "blocked" | "invalid" | "broken-hook";
+
+async function preExecExpiryMatrix(kind: "h2" | "family", path: PrePath): Promise<void> {
+  const requiresMust = path === "invalid";
+  const tool: Tool = {
+    name: `prex-${kind}-${path}`,
+    description: `pre-execution expiry matrix probe (${kind}/${path})`,
+    parameters: requiresMust
+      ? ({ type: "object", required: ["must"], properties: { must: { type: "string" } }}) as Tool["parameters"]
+      : { type: "object" },
+    execute: async (_id, args) => ({
+      // h2: identical text for identical args; family: text varies only
+      // in a digit (one family key, distinct texts).
+      content: [{ type: "text" as const, text: kind === "h2" ? "boom" : `boom ${args.n}` }],
+      isError: true,
+    }),
+  };
+  const executor = makeToolExecutor({
+    beforeToolCall: async (_t, c) => {
+      if (path === "broken-hook" && c.arguments.broken === true) throw new Error("hook exploded");
+      if (path === "blocked" && c.arguments.block === true) return { blocked: "gated" };
+      return undefined;
+    },
+  });
+  const sig = new AbortController().signal;
+  // Seed args carry the required property when the path needs one; the
+  // sandwich args deliberately OMIT it (invalid) or trip the gate/hook.
+  // For h2 ALL seeds share ONE arg shape (cycle-3 lesson: args that
+  // differ split H2's key and the assertion goes vacuous); the family
+  // case varies `n` so the TEXT varies within one family key.
+  const seedArgs = (n: number): Record<string, unknown> =>
+    kind === "h2"
+      ? requiresMust
+        ? { must: "s" }
+        : {}
+      : requiresMust
+        ? { must: "s", n }
+        : { n };
+  const seed = (id: string, n: number): ToolCallBlock => call(id, tool.name, seedArgs(n));
+  const blocked = (id: string, n: number): ToolCallBlock =>
+    call(
+      id,
+      tool.name,
+      path === "invalid" ? {} : path === "blocked" ? { block: true, n } : { broken: true, n },
+    );
+  const s1 = await executor(tool, seed("s1", 1), sig);
+  assert.equal(s1.details?.notExecuted, undefined, `${kind}/${path}: seed 1 executed`);
+  assert.match(s1.content.map((c) => c.text).join(""), /boom/);
+  const s2 = await executor(tool, seed("s2", 2), sig);
+  assert.equal(s2.details?.notExecuted, undefined, `${kind}/${path}: seed 2 executed`);
+  for (let j = 0; j < 8; j++) {
+    const pre = await executor(tool, blocked(`b${j}`, j), sig);
+    assert.equal(pre.details?.notExecuted, true, `${kind}/${path}: sandwich call never ran`);
+    if (path === "blocked") assert.match(pre.content.map((c) => c.text).join(""), /was blocked/);
+    if (path === "invalid") assert.match(pre.content.map((c) => c.text).join(""), /Invalid arguments/);
+    if (path === "broken-hook") assert.match(pre.content.map((c) => c.text).join(""), /hook failed/);
+  }
+  const r3 = await executor(tool, seed("s3", 3), sig);
+  // H2 (identical args+text on seeds 1,2,s3): with the sandwich counted,
+  // the seeds are >8 outcomes old → no stall. Without the index advance
+  // (the mutation) the seeds sat at indices 1,2 → repeatFailure stall.
+  assert.equal(r3.details?.stall, undefined, `${kind}/${path}: no stall after the pre-execution sandwich`);
+  assert.equal(r3.details?.repeatFailure, undefined, `${kind}/${path}: H2 window expired the seeds`);
+  // Family (seeds share one family key, distinct texts): the same
+  // expiry must hold — without the index advance the sandwich left the
+  // family window a call behind and the third failure warned 3-in-8.
+  assert.equal(r3.details?.sameFamilyWarn, undefined, `${kind}/${path}: family window expired the seeds`);
+  assert.equal(r3.isError, true, `${kind}/${path}: the real error still rides through`);
+}
+
+test("windowed guards: pre-execution outcomes expire H2 identical-repeat windows (matrix, 2026-11-28 review finding 1)", async () => {
+  for (const path of ["blocked", "invalid", "broken-hook"] as const) await preExecExpiryMatrix("h2", path);
+});
+
+test("windowed guards: pre-execution outcomes expire family-window failures (matrix, 2026-11-28 review finding 1)", async () => {
+  for (const path of ["blocked", "invalid", "broken-hook"] as const) await preExecExpiryMatrix("family", path);
 });
 //
 // Two rungs (the hard stop at 3 false-positived legitimate per-target
