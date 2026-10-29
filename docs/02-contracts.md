@@ -320,6 +320,18 @@ Invariants:
 | `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
+**Start/end pairing (audit R1, 2026-10-29):** every EXECUTED call emits
+exactly one `tool_execution_start` … one `tool_execution_end` (in call
+order). The batch-shape skips (trimmed/duplicate padding, §4.1 length guard,
+the synthetic in-band fills) emit the synthetic `tool_execution_end` for the
+never-executed calls WITHOUT a start — the ID still gets exactly one end,
+but a consumer may see an end whose ID never started. Consumers must key on
+the ID and never guess: the TUI's end handler matches items by ID
+exclusively (the old running-item fallback mislabeled a still-running
+sibling with a ghost's notice — fixed R1) and appends a finished ghost line
+for an ID it never saw start, so the skip notice stays visible without
+touching live items.
+
 #### D33 — guard-stop evidence (`GuardEvidence`)
 
 A guard stop names its trigger instead of discarding it. One discriminated

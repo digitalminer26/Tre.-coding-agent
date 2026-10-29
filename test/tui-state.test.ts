@@ -189,6 +189,46 @@ test("tool: start shows args; end matches by id (order-independent) with isError
   assert.equal(t1.resultText, "oops boom");
 });
 
+// Audit R1 (2026-10-29): a batch-shape skip's tool_execution_end arrives
+// with NO matching start (the trimmed/duplicate calls get synthetic results
+// in call order, never a start). The old running-item fallback stamped the
+// notice onto a still-running sibling; withRunningTool is now exact-match
+// and the end handler appends a finished ghost item instead.
+test("R1: end without a start appends a ghost item — never stamps a running sibling", () => {
+  let s = fold([
+    toolStart("a", "bash", { command: "a" }),
+    toolStart("b", "bash", { command: "b" }),
+    toolStart("c", "bash", { command: "c" }),
+    toolEnd("a", "res-a", true, "bash"),
+  ]);
+  // The ghost end (id "b" was never started in this fold — mimic the
+  // audit probe by NOT folding its start) while c is still running.
+  s = applyEvent(s, toolEnd("ghost-b", "Duplicate call skipped…", true, "bash"));
+  const itemOf = (id: string) => asTool(s.items.find((i) => i.kind === "tool" && i.id === id)!);
+  const c = itemOf("c");
+  assert.equal(c.running, true, "the still-running sibling is untouched by the ghost end");
+  assert.equal(c.resultText, undefined, "no skip notice stamped on the live tool");
+  const ghost = itemOf("ghost-b");
+  assert.equal(ghost.running, false);
+  assert.equal(ghost.isError, true);
+  assert.match(ghost.resultText ?? "", /skipped/);
+  // The real end(c) then updates c itself (no double effect from the ghost).
+  s = applyEvent(s, toolEnd("c", "res-c", false, "bash"));
+  const c2 = itemOf("c");
+  assert.equal(c2.running, false);
+  assert.equal(c2.resultText, "res-c");
+});
+
+test("R1: a ghost end for an already-finished id updates it, appends nothing", () => {
+  let s = fold([toolStart("a", "bash", { command: "a" }), toolEnd("a", "res-a", false, "bash")]);
+  const before = s.items;
+  // Non-quiet duplicate end: matches the finished item by id (exact-match),
+  // updates in place — no new item appended.
+  s = applyEvent(s, toolEnd("a", "again", false, "bash"));
+  assert.equal(s.items.length, before.length);
+  assert.equal(asTool(s.items.find((i) => i.kind === "tool" && i.id === "a")!).resultText, "again");
+});
+
 test("unmatched quiet-tool completion preserves selection indices", () => {
   const state: TuiState = { ...makeInitialState("m"), items: [{ kind: "user", text: "hello" }], selection: { from: { itemIndex: 0, line: 0, col: 0 }, to: { itemIndex: 0, line: 0, col: 3 }, anchor: { itemIndex: 0, line: 0, col: 0 } } };
   const result = applyEvent(state, toolEnd("missing-id", "", false, "read"));

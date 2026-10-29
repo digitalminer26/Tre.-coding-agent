@@ -23,6 +23,7 @@ import { TelegramDriver } from "../src/telegram/driver.js";
 import { makeTelegramBridge } from "../src/telegram/bridge.js";
 import type { TelegramBridge, TelegramMessage } from "../src/telegram/bridge.js";
 import { main, finalAssistantText } from "../src/cli/main.js";
+import { readWorkerStatuses } from "../src/cli/workers.js";
 import { fakeStream } from "./fake-stream.js";
 import type { AgentMessage, ModelConfig } from "../src/types.js";
 
@@ -1002,6 +1003,83 @@ test("wiring: REPL — a telegram idle-turn and typed input SERIALIZE (never con
     const out = S.out.join("");
     assert.ok(out.includes("Idle reply via bot"), "the idle reply was printed");
     assert.ok(out.includes("User turn reply"), "the user turn was printed");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── R4-R2: one-shot exit-130 cancellation wiring (main-level) ──────────────
+// F2 changed the ONE-SHOT contract: a lifecycle stop() that races startup
+// cancels the reserved-but-unstarted turn body (driver.withTurn resolves
+// undefined) and main() must map that to exit 130 with an "aborted" worker
+// status — NOTHING ran and NOTHING is replied via the bot. The driver-level
+// cancellation is pinned above (test "F2: stop() cancels a reserved-but-
+// unstarted body…"); this is the main()-level regression for that wiring
+// (audit round-4 recommendation R2): the telegramDriverHook seam holds the
+// driver's turn mutex BEFORE main() reserves its body, so the body is
+// certainly parked (reserved, unstarted) when the test's stop() fires — no
+// timer-order dependency.
+
+test("R4-R2: main() one-shot — stop() racing startup exits 130, body never runs, nothing replied", async () => {
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const sent: string[] = [];
+    const bridge: TelegramBridge = {
+      enabled: true,
+      pollLong: (_timeoutSec: number, signal?: AbortSignal) =>
+        new Promise<null>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(null), { once: true });
+        }),
+      send: async (text: string) => {
+        sent.push(text);
+      },
+    };
+    let blockerRelease!: () => void;
+    const blockerGate = new Promise<void>((r) => (blockerRelease = r));
+    let blockerStarted = false;
+    let streamCalls = 0;
+    const base = fakeStream([{ type: "text", text: "must never run" }]);
+    const streamFn: NonNullable<Parameters<typeof main>[1]>["streamFn"] = (model, ctx, o) => {
+      streamCalls += 1;
+      return base(model, ctx, o);
+    };
+    let driverRef: TelegramDriver | undefined;
+    const codeP = main(
+      ["run", "the prompt", "--tools", "none", "--models", models, "--cwd", dir],
+      {
+        streamFn,
+        sinks: S.sinks,
+        telegramBridge: bridge,
+        workerDir: dir,
+        telegramDriverOpts: { minIntervalMs: 20, failBaseMs: 10, failCapMs: 50 },
+        telegramDriverHook: (driver) => {
+          // Reserve the mutex from INSIDE the driver BEFORE main() calls
+          // its own withTurn — main()'s body parks behind this one.
+          void driver.withTurn(async () => {
+            blockerStarted = true;
+            await blockerGate;
+          });
+          driverRef = driver;
+        },
+      },
+    );
+    await waitUntil(() => blockerStarted, 5000, "blocker holds the mutex (main's turn is parked)");
+    assert.equal(streamCalls, 0, "main's body is still parked — the stream was never called");
+    // Lifecycle stop while main()'s body is reserved-but-unstarted:
+    driverRef!.stop();
+    blockerRelease(); // release the mutex so main's parked body resumes into the stop check
+    const code = await codeP;
+    assert.equal(code, 130, "the cancelled one-shot exits 130 (nothing ran, no outcome)");
+    assert.equal(streamCalls, 0, "the cancelled body never reached the LLM");
+    assert.equal(sent.length, 0, "nothing was replied via the bot");
+    assert.equal(S.out.join(""), "", "nothing was printed to stdout");
+    // The worker registry records the abort (status "failed" / activity
+    // "aborted") — this is the branch F2 added for one-shot visibility.
+    const workers = readWorkerStatuses(dir);
+    assert.equal(workers.length, 1, "exactly the one-shot worker entry");
+    assert.equal(workers[0]!.status, "failed");
+    assert.equal(workers[0]!.activity, "aborted");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

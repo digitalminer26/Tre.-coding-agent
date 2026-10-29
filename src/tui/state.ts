@@ -1030,7 +1030,33 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         (t) => ({ ...t, running: false, resultText: text, isError: ev.result.isError === true }),
         ev.toolCallId,
       );
-      if (subtasks === null) return ended;
+      // Audit R1 (2026-10-29): no item matched the id — a producer emitted
+      // an end without a start (the batch-shape skips: trimmed/duplicate
+      // calls get synthetic results in call order, never a start). The old
+      // running-item fallback stamped this notice onto an unrelated
+      // still-running sibling; withRunningTool is now exact-match, so a
+      // ghost APPENDS a finished line here instead — the skip stays
+      // visible (✗ + reason) and the sibling keeps running untouched.
+      // (withRunningTool returns the SAME state object on a no-match.)
+      const endedGhost: TuiState =
+        ended === state
+          ? {
+              ...state,
+              items: [
+                ...state.items,
+                {
+                  kind: "tool",
+                  id: ev.toolCallId,
+                  name: ev.result.toolName,
+                  argsText: "",
+                  running: false,
+                  resultText: text,
+                  isError: ev.result.isError === true,
+                },
+              ],
+            }
+          : ended;
+      if (subtasks === null) return endedGhost;
       // Audit cycle-1 finding 3: an OBSERVATIONAL snapshot (a `list`
       // result) is another ingress path for a snapshot into the mirrored
       // view — exactly like the poller's tick — so it must go through the
@@ -1174,8 +1200,16 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
 }
 
 /**
- * Apply `fn` to the tool item whose id matches; defensive fallback: the
- * most recent still-running tool item.
+ * Apply `fn` to the tool item whose id matches. EXACT-MATCH ONLY (audit
+ * R1, 2026-10-29): the old defensive fallback stamped `fn` onto the most
+ * recent still-running tool item when the id matched nothing — but the
+ * loop has producers whose end events have NO matching start (the
+ * batch-shape skips: a trimmed/duplicate call gets its synthetic
+ * tool_execution_end in call order, never a start), so the fallback
+ * transiently stamped a skip notice onto an unrelated running sibling
+ * (wrong ✗/✓, wrong resultText on a live tool line). An unknown id is a
+ * no-op here; the end handler decides what a ghost deserves (see the
+ * `tool_execution_end` case: it appends a finished item instead).
  */
 function withRunningTool(
   state: TuiState,
@@ -1186,13 +1220,6 @@ function withRunningTool(
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]!;
     if (it.kind === "tool" && it.id === id) {
-      items[i] = fn(it);
-      return { ...state, items };
-    }
-  }
-  for (let i = items.length - 1; i >= 0; i--) {
-    const it = items[i]!;
-    if (it.kind === "tool" && it.running) {
       items[i] = fn(it);
       return { ...state, items };
     }

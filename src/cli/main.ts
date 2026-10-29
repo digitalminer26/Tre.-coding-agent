@@ -1333,6 +1333,12 @@ export interface MainDeps {
    *  after main() returns must reject). No production caller. undefined =
    *  no hook. */
   sessionHook?: (session: SessionType) => void;
+  /** Lifecycle seam (tests): called with the one-shot's TelegramDriver
+   *  after construction, BEFORE `start()` and before the turn body is
+   *  reserved — so a test can hold the turn mutex and race a lifecycle
+   *  stop() against startup (the F2 `turnOut === undefined` → exit 130
+   *  contract, audit R1-round4 recommendation R2). No production caller. */
+  telegramDriverHook?: (driver: TelegramDriver) => void;
 }
 
 /**
@@ -2243,6 +2249,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
         },
         { ...telegramDriverOpts, allowIdleTurns: false },
       );
+      // Audit R4-R2 (2026-10-29): lifecycle seam for the exit-130 test —
+      // the ONLY caller is test/telegram-driver.test.ts.
+      deps.telegramDriverHook?.(driver);
       void driver.start();
       const workerIdValue = workerId();
       const worker = buildWorkerStatus(workerIdValue, model, root, args.prompt!);
