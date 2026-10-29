@@ -19,7 +19,9 @@ Mixed-batch terminate semantics unchanged (executed members only); an
 all-skip batch never terminates. 4 regression tests (padding 0/1/3, cycle
 exemption, interleaved order, notice neutrality incl. the over-cap planBatch
 case); docs/02 C6 contract updated to match. Suite **1443 pass / 14 skip /
-0 fail**. Cycle-2 audit follows.
+0 fail**. Cycle-2 audit (auditor-c3, gpt-6.1-sol): **CLEAN** — all three
+cycle-1 repros independently re-run against the fixed build, no regressions
+(loop stopped early on CLEAN, 2 of 3 budgeted cycles).
 
 **Telegram round-4 (src/telegram/driver.ts, src/cli/main.ts, src/telegram/README.md, docs/02-contracts.md C37).** Fixes the two Medium findings from the round-3 audit (coordination dir: `.tre/implement-audit/telegram-round4/`, gitignored): **F1** — the idle-turn success path keeps `activeSteer` attached through `telegramBridge.send()` (typed guidance during the bot reply no longer falls into a detached queue) and detaches in `finally`, draining undrained steer into the driver's deferred buffer for the follow-up turn. **F2** — `withTurn<T>` returns `Promise<T | undefined>`: a reserved-but-unstarted body checks `stopped` after awaiting its predecessor, decrements pendingTurns, releases the mutex, and returns `undefined` without running (one-shot worker path treats it as cancelled, exit 130); `stop()` is now a lifecycle-level cancellation reserved bodies cannot bypass. Tests: explicit F2 barrier test + an end-to-end F1 gated typed-guidance integration test (replacing the former basic idle-reply test); mutation probes pinned both fixes (old code fails exactly at the new assertions). Orchestrator-implemented c0 deviation logged in plan.md (worker-c0 hit its wall-clock cap with a clean tree).
 
