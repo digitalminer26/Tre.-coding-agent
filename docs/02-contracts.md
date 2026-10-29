@@ -414,10 +414,15 @@ interface Tool {
   bash reset. Intra-batch EXACT duplicates (same tool + stable-JSON args
   after the first occurrence) are likewise skipped with an in-band
   `DUPLICATE_CALL_TEXT` result (`details.notExecuted`, `details.batchSkipped`);
-  only the first occurrence executes. Every call ID still yields exactly
-  one `tool_execution_end`; end events fire for executed calls first (model
-  call order), then skips in response order. The cross-turn loop/cycle
-  guards sign the EXECUTED subset only — a trimmed tail never stamps a
+  only the first occurrence executes, and the notice is EXECUTION-NEUTRAL —
+  it never claims the original ran (the earlier occurrence may itself have
+  been trimmed or stall-skipped; audit cycle 1). Every call ID yields exactly
+  one `tool_execution_end` and ALL end events — executed results and skip
+  notices interleaved — fire in model call order. The cross-turn loop/cycle
+  guards sign and digest the EXECUTED subset only: skip records ride the
+  transcript but never pad the result digest and never mark a batch failed
+  (audit cycle 1: padding must not rescue a stable loop, and synthetic
+  failures must not exempt a real cycle); a trimmed tail never stamps a
   megabatch signature into `batchHistory`. The duplicate-vs-distinct
   distinction is contractual: sequential-stall tests use distinct arguments
   to pin the stall path, and the parallel in-flight limitation is pinned

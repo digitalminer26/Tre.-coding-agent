@@ -351,11 +351,15 @@ export const BATCH_TRIMMED_TEXT =
   "still-needed calls in smaller batches (at most a handful of independent " +
   "calls per response).";
 
-/** In-band answer for a duplicate call skipped within the same batch. */
+/** In-band answer for a duplicate call skipped within the same batch.
+ * Execution-neutral (2026-10-29 audit): the earlier occurrence may itself
+ * have been trimmed, stall-skipped, or failed — it always has a result in
+ * this batch's transcript, but claiming it "ran" would be a fabrication
+ * the model can disprove. */
 export const DUPLICATE_CALL_TEXT =
   "Duplicate call skipped: an identical call (same tool, same arguments) " +
-  "already ran in this batch, so this repeat was NOT executed. Read its " +
-  "result below instead of re-issuing it.";
+  "appears earlier in this response, so this repeat was NOT executed. " +
+  "Consult that call's result below instead of re-issuing it.";
 
 /**
  * Split one assistant response's tool calls into the executable set and
@@ -1362,16 +1366,18 @@ export async function* runLoop(
       }
     }
 
-    // Results (and their end events) always land in call order.
+    // Results (and their end events) always land in model call order.
     let allTerminate = true;
     let stalled = false;
     const digestParts: { digest: string; failure: boolean }[] = [];
-    // Record the batch-shape skips FIRST (in response order) so the digest
-    // mirrors what the model reads: its duplicates/trims come back as
-    // explicit errors. The digest below then covers ALL response calls;
-    // the signature/history use the executed subset (see below).
+    // Batch-shape skips get synthetic in-band results FIRST (never
+    // dispatched), but everything downstream — context, end events, and the
+    // guard history — iterates the ORIGINAL `calls` array, so results land
+    // in model call order and the digest covers exactly the EXECUTED
+    // subset (2026-10-29 audit fixes: skip records neither pad the digest
+    // nor force batch failure; padding must not weaken loop guards).
     for (const skipped of planned.skipped) {
-      const entry = {
+      results.set(skipped.call.id, {
         result: {
           content: [
             {
@@ -1382,20 +1388,24 @@ export async function* runLoop(
           details: { notExecuted: true, batchSkipped: true },
         },
         isError: true,
-      };
-      results.set(skipped.call.id, entry);
-      digestParts.push({
-        digest: SYNTHETIC_FILL_DIGEST,
-        failure: true,
       });
     }
-    for (const call of execCalls) {
+    for (const call of calls) {
       const entry = results.get(call.id);
       const msg = resultMessage(
         call,
         entry?.result ?? { content: [{ type: "text", text: "(no result)" }] },
         entry?.isError ?? true,
       );
+      // A batch-shape skip is synthetic: its in-band notice rides the
+      // transcript and gets its end event IN CALL ORDER, but it is excluded
+      // from the guard history (signature and digest cover the executed
+      // subset only) and never informs terminate/stall.
+      if (entry?.result.details?.batchSkipped === true) {
+        context.push(msg);
+        yield { type: "tool_execution_end", toolCallId: call.id, result: msg };
+        continue;
+      }
       digestParts.push({
         // A stall-skipped call is a synthetic in-band fill (never ran):
         // record it with the SYNTHETIC_FILL_DIGEST so a re-issued batch
@@ -1440,26 +1450,12 @@ export async function* runLoop(
           guardEvidence = raw as GuardEvidence;
         }
       }
-      if (!entry?.result.terminate) allTerminate = false;
     }
-    // Batch-shape skips are synthetic errors: they never terminate a batch.
-    if (planned.skipped.length > 0) allTerminate = false;
-    // Batch-shape skips: emit their (already-recorded) in-band results so
-    // the model READS the duplicate/trim notice — otherwise the batch
-    // signature would promise "this repeat was not executed" while the
-    // transcript hid the fact. Order: executed calls first (model call
-    // order), then skips in response order; every call ID still yields
-    // exactly one `tool_execution_end`.
-    for (const skipped of planned.skipped) {
-      const entry = results.get(skipped.call.id);
-      const msg = resultMessage(
-        skipped.call,
-        entry?.result ?? { content: [{ type: "text", text: "(no result)" }] },
-        entry?.isError ?? true,
-      );
-      context.push(msg);
-      yield { type: "tool_execution_end", toolCallId: skipped.call.id, result: msg };
-    }
+    // A batch of ONLY synthetic skips never terminates (2026-10-29 audit:
+    // with every member skipped there are no executed results to set the
+    // flag, and silently breaking out would end the run without a stop
+    // reason). Mixed batches are decided by their executed members alone.
+    if (digestParts.length === 0) allTerminate = false;
     // 2026-10-28 audit fix: when the sequential stall-skip prevented calls
     // in this batch, say so on the evidence — the stall banner then states
     // the honest execution fact ("N further call(s) were skipped"). Only

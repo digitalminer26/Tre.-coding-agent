@@ -27,6 +27,7 @@ import {
   MAX_PROGRESS_NUDGES,
   NO_SUCCESS_NUDGE_TEXT,
   NO_SUCCESS_TURNS,
+  DUPLICATE_CALL_TEXT,
   MAX_BATCH_CALLS,
   MAX_PARALLEL_CALLS,
   POLL_CAP,
@@ -3385,4 +3386,118 @@ test("planBatch: pure unit — duplicates collapse before the cap", () => {
   assert.equal(planned.skipped.length, 1);
   assert.equal(planned.skipped[0]!.call.id, "b");
   assert.equal(planned.skipped[0]!.duplicate, true);
+});
+
+// ── 2026-10-29 implement-audit cycle 1 regressions (audit-c2 findings) ──────
+
+test("batch shape: duplicate padding does NOT weaken the identical-batch guard", async () => {
+  // Audit finding 1: synthetic skip records used to pad the result digest,
+  // so adding exact duplicates to an otherwise-identical repeated batch
+  // changed the digest and hid the loop from the identical-batch guard.
+  // Repro: five identical single-call responses with maxGuardRetries: 0
+  // must stop with "loop" BEFORE executing the 3rd occurrence — whether
+  // the responses carry 0, 1, or 3 duplicate members.
+  for (const padding of [0, 1, 3]) {
+    const { tool, calls } = makeTool("probe");
+    const mk = (id: string) => ({ id, name: "probe", args: { q: "same" } });
+    const turns: FakeTurn[] = Array.from({ length: 5 }, (_, i) => ({
+      type: "toolcall" as const,
+      calls: [mk(`t${i}a`), ...Array.from({ length: padding }, (_, j) => mk(`t${i}d${j}`))],
+    }));
+    const events = await drainLoop(turns, [tool], { maxTurns: 50, maxGuardRetries: 0 });
+    const end = agentEnd(events);
+    assert.equal(
+      end.stopReason,
+      "loop",
+      `padding=${padding}: padding must not rescue a stable identical loop (executed ${calls.length})`,
+    );
+    assert.equal(calls.length, 2, `padding=${padding}: stops before the 3rd occurrence executes`);
+  }
+});
+
+test("batch shape: duplicates do NOT exempt a stable cycle from the cycle guard", async () => {
+  // Audit finding 1b: skip records forced history failed=true, exempting a
+  // successful X,Y,X,Y alternation from the cycle rule. Repro: alternating
+  // successful args, each response carrying one exact duplicate. Without
+  // the fix all seven executed and the run ended "stop".
+  const { tool, calls } = makeTool("probe");
+  const seq = [0, 1, 0, 1, 0, 1, 0];
+  const turns: FakeTurn[] = seq.map((q, i) => ({
+    type: "toolcall" as const,
+    calls: [
+      { id: `c${i}a`, name: "probe", args: { q } },
+      { id: `c${i}b`, name: "probe", args: { q } },
+    ],
+  }));
+  const events = await drainLoop(turns, [tool], { maxTurns: 50, maxGuardRetries: 0 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "loop", "the alternating cycle still stops the run");
+  assert.equal(end.evidence?.guard, "cycle-batch");
+  assert.ok(calls.length < seq.length, "the cycle stops BEFORE all seven responses execute");
+});
+
+test("batch shape: interleaved duplicates keep results/end events in model call order", async () => {
+  // Audit finding 2: [a:dup, b:dup-of-a, c:distinct] used to emit ends as
+  // a,c,b (executed first, then skips). Contract: results land in CALL
+  // order — a,b,c — with b answered by the in-band duplicate notice.
+  const executed: string[] = [];
+  const tool = makeTool("probe", {
+    execute: (async (id: string) => {
+      executed.push(id);
+      return { content: [{ type: "text", text: "ran" }] };
+    }) as Tool["execute"],
+  });
+  const turns: FakeTurn[] = [
+    {
+      type: "toolcall",
+      calls: [
+        { id: "a", name: "probe", args: { q: 1 } },
+        { id: "b", name: "probe", args: { q: 1 } },
+        { id: "c", name: "probe", args: { q: 2 } },
+      ],
+    },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [tool.tool], { maxTurns: 50 });
+  const endIds = events
+    .filter((e) => e.type === "tool_execution_end")
+    .map((e) => (e as Extract<AgentEvent, { type: "tool_execution_end" }>).toolCallId);
+  assert.deepEqual(endIds, ["a", "b", "c"], "end events in model call order");
+  assert.deepEqual(executed, ["a", "c"], "the duplicate b was never dispatched");
+  const bEnd = events.find(
+    (e) => e.type === "tool_execution_end" && (e as { toolCallId?: string }).toolCallId === "b",
+  ) as Extract<AgentEvent, { type: "tool_execution_end" }>;
+  assert.equal(bEnd.result.details?.notExecuted, true);
+  const text = bEnd.result.content.map((c) => ("text" in c ? c.text : "")).join(" ");
+  assert.match(text, /Duplicate call skipped/);
+});
+
+test("duplicate notice is execution-neutral (over-cap and stall-skipped originals)", async () => {
+  // Audit finding 3: the notice claimed the original "already ran" even
+  // when the earlier occurrence was itself trimmed (over-cap) or
+  // stall-skipped. The notice text must not assert execution.
+  assert.doesNotMatch(
+    DUPLICATE_CALL_TEXT,
+    /already ran|ran in this batch/i,
+    "no execution claim that a trimmed/stall-skipped original would falsify",
+  );
+  // planBatch classification stays sound: 33 distinct + a repeat of #33 →
+  // #33 is trimmed (never executed) and its repeat is a duplicate.
+  const mk = (id: string, args: Record<string, unknown>) => ({
+    type: "toolCall" as const,
+    id,
+    name: "bash",
+    arguments: args,
+  });
+  const distinct = Array.from({ length: MAX_BATCH_CALLS + 1 }, (_, i) =>
+    mk(`x${i}`, { command: `echo ${i}` }),
+  );
+  const planned = planBatch([...distinct, mk("dup", { command: `echo ${MAX_BATCH_CALLS}` })]);
+  assert.equal(planned.executable.length, MAX_BATCH_CALLS);
+  const trimmed = planned.skipped.filter((s) => !s.duplicate);
+  const dups = planned.skipped.filter((s) => s.duplicate);
+  assert.equal(trimmed.length, 1, "the over-cap first occurrence is trimmed");
+  assert.equal(trimmed[0]!.call.id, `x${MAX_BATCH_CALLS}`);
+  assert.equal(dups.length, 1, "the repeat of a TRIMMED call is still a duplicate");
+  assert.equal(dups[0]!.call.id, "dup");
 });

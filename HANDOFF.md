@@ -1,4 +1,25 @@
-## 2026-10-29 — Telegram round-4 (F1+F2) + batch-shape guards
+## 2026-10-29 — Telegram round-4 (F1+F2) + batch-shape guards (audited; cycle 1 fixed)
+
+**Audit cycle 1 (auditor gpt-6.1-sol, `audit-c2.md`): FINDINGS — 3 reproduced
+bugs, all in the batch-shape guards (Telegram F1/F2 PASSED stress probes;
+date-only edits verified behavior-neutral).** Fixed in this follow-up:
+1. Synthetic skip records no longer pad the guard history — digest and
+   failure flag are built from the EXECUTED subset only (padding with exact
+   duplicates previously changed the stable digest and rescued loops; skip
+   `failed=true` previously exempted real cycles). Skips still ride the
+   transcript as in-band errors.
+2. Results/end events are emitted in strict model CALL ORDER — one loop over
+   the original `calls` array (executed results and skip notices interleaved
+   correctly: `[a, dup-b, c]` → ends `a,b,c`, executed `a,c`).
+3. `DUPLICATE_CALL_TEXT` is execution-neutral ("appears earlier in this
+   response … consult that call's result") — it no longer claims the
+   original "already ran" when that occurrence was itself trimmed
+   (over-cap) or stall-skipped.
+Mixed-batch terminate semantics unchanged (executed members only); an
+all-skip batch never terminates. 4 regression tests (padding 0/1/3, cycle
+exemption, interleaved order, notice neutrality incl. the over-cap planBatch
+case); docs/02 C6 contract updated to match. Suite **1443 pass / 14 skip /
+0 fail**. Cycle-2 audit follows.
 
 **Telegram round-4 (src/telegram/driver.ts, src/cli/main.ts, src/telegram/README.md, docs/02-contracts.md C37).** Fixes the two Medium findings from the round-3 audit (coordination dir: `.tre/implement-audit/telegram-round4/`, gitignored): **F1** — the idle-turn success path keeps `activeSteer` attached through `telegramBridge.send()` (typed guidance during the bot reply no longer falls into a detached queue) and detaches in `finally`, draining undrained steer into the driver's deferred buffer for the follow-up turn. **F2** — `withTurn<T>` returns `Promise<T | undefined>`: a reserved-but-unstarted body checks `stopped` after awaiting its predecessor, decrements pendingTurns, releases the mutex, and returns `undefined` without running (one-shot worker path treats it as cancelled, exit 130); `stop()` is now a lifecycle-level cancellation reserved bodies cannot bypass. Tests: explicit F2 barrier test + an end-to-end F1 gated typed-guidance integration test (replacing the former basic idle-reply test); mutation probes pinned both fixes (old code fails exactly at the new assertions). Orchestrator-implemented c0 deviation logged in plan.md (worker-c0 hit its wall-clock cap with a clean tree).
 
