@@ -651,7 +651,7 @@ strings, unchanged.
 5. Gate green; suite grows by the above only.
 
 
-## 10. Audit F-6: the sed loop none of the guards caught (2026-11-28 — WARN RUNG LANDED; windowed STALL still deferred)
+## 10. Audit F-6: the sed loop none of the guards caught (2026-10-28 — WARN RUNG LANDED; windowed STALL still deferred)
 
 > Status: the measurement below stands as written. Its last paragraph
 > ("Landed with this audit") records the shipped warn rung; the windowed

@@ -605,7 +605,7 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
       // The loop guard fired (a repeated batch — identical or an alternating
       // cycle, at the fired guard's own repeat count); the run auto-retries
       // with an approach-changing nudge instead of stopping. Informational.
-      // Re-audit fix (2026-11-02): shared guardRetryNote — the old
+      // Re-audit fix (2026-10-27): shared guardRetryNote — the old
       // hard-coded "same tool call 3× in a row" lied on cycle/cap fires.
       sinks.err.write(
         `\n↻ ${guardRetryNote(ev.reason, ev.repeats)} (retry ${ev.retry}/${ev.maxRetries})\n`,
@@ -644,7 +644,7 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         sinks.err.write(`\n${note}${resume}\n`);
       } else if (ev.stopReason === "loop") {
-        // loop-v2 (audit re-fix 2026-11-02): the headline is evidence-driven
+        // loop-v2 (audit re-fix 2026-10-27): the headline is evidence-driven
         // — the old hard-coded "3 times in a row" lied for cycle stops and
         // 12-batch cap stops.
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
@@ -667,7 +667,7 @@ export function printEvent(ev: AgentEvent, sinks: PrintSinks, sessionPath?: stri
         const resume = sessionPath !== undefined ? ` (resume: --resume ${sessionPath})` : "";
         const h2 = ev.evidence?.guard === "repeat-failure";
         const h3 = ev.evidence?.guard === "same-error-stall";
-        // 2026-11-27 audit fix: every stall guard fires AFTER its
+        // 2026-10-28 audit fix: every stall guard fires AFTER its
         // triggering call executed (the result is replaced, not
         // prevented) — the old "the repeat was not re-executed" wording
         // was false. Only the sequential skip prevents queued calls; when
@@ -2249,7 +2249,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       const dir = deps.workerDir ?? workerDir();
       try {
         try { writeWorkerStatus(dir, worker); } catch { /* Visibility is best-effort. */ }
-        const { outcome } = await driver.withTurn(async () => {
+        // F2: withTurn resolves undefined when a lifecycle stop cancels a
+        // reserved-but-unstarted body (a stop racing startup) — nothing ran.
+        const turnOut = await driver.withTurn(async () => {
           // Attach AFTER acquiring the mutex: a steer that raced the
           // pre-attach window sits in the buffer and is claimed here.
           for (const t of driver.attachSteerTarget(steerQueue, "run")) steerQueue.push(t);
@@ -2266,6 +2268,14 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
             driver.detachSteerTarget();
           }
         });
+        if (turnOut === undefined) {
+          // stop() fired before the body started: nothing ran, no outcome.
+          driver.stop();
+          try { writeWorkerStatus(dir, { ...worker, status: "failed", activity: "aborted", updatedAt: Date.now() }); } catch { /* Visibility is best-effort. */ }
+          await flushSinks(sinks);
+          return 130;
+        }
+        const { outcome } = turnOut;
         driver.stop();
         worker.status = workerOutcomeStatus(outcome.stopReason);
         worker.activity = worker.status === "done" ? "done" : outcome.stopReason;
@@ -2397,7 +2407,14 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
               charsPerToken: cpt,
               steeringQueue: steerQueue,
             });
-            td.detachSteerTarget();
+            // F1: the steer queue stays attached across the bot reply send
+            // below — guidance typed during the send lands in the queue and
+            // the finally detach drains it into the driver's buffer (where
+            // it reaches a follow-up turn), instead of vanishing into a
+            // detached queue while still claiming "steered into the
+            // running turn". `active` stays true across the send for the
+            // same reason (SIGINT during the send aborts the turn's
+            // controller rather than killing the process).
             context = result.context;
             cpt = result.charsPerToken;
             const reply = finalAssistantText(result.context);

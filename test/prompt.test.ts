@@ -224,7 +224,7 @@ test("prompt: guidelines are derived from the enabled tool set", () => {
   assert.ok(extra.includes("Custom rule Z"));
 });
 
-test("prompt: error-handling section carries the repeated-failure discipline (2026-11-05, honest wording 2026-11-27)", async () => {
+test("prompt: error-handling section carries the repeated-failure discipline (2026-10-28, honest wording 2026-10-28)", async () => {
   const p = buildSystemPrompt({ cwd: dir, tools: [READ] });
   assert.match(p, /Repeated-failure discipline/);
   assert.match(
@@ -235,7 +235,7 @@ test("prompt: error-handling section carries the repeated-failure discipline (20
   assert.match(
     p,
     /three times in a row WITH\s+VARYING ARGUMENTS earns an in-band guard warning/,
-    "the warning is scoped to the varying-argument streak — exact repeats\n     stall via H2 at 3 with NO warning (2026-11-27 audit finding 2)",
+    "the warning is scoped to the varying-argument streak — exact repeats\n     stall via H2 at 3 with NO warning (2026-10-28 audit finding 2)",
   );
   assert.match(
     p,

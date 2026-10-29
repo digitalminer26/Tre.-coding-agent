@@ -65,7 +65,7 @@ Rules:
   `CYCLE_GUARD_TEXT` (evidence variant `cycle-batch`); and failed repeats
   stay exempt from the cycle rule (the stall guards' domain) — the stable
   cycle check exempts ALL FOUR history records, not just the pattern's
-  first pair (audit 2026-11-02: a synthetically-answered second pair can
+  first pair (audit 2026-10-27: a synthetically-answered second pair can
   digest like a real result and must not complete a "stable" alternation).
   Two identical
   batches remain allowed (legit retries exist). Before stopping, the loop AUTO-RETRIES
@@ -211,9 +211,16 @@ Rules:
   failure** — a fast-failing poll backs off `min(base·2ⁿ, cap)` (default
   1s→60s), so a persistent failure settles to one poll per 60s, never a spin;
   a success (even "no message") resets the counter. The driver is also
-  **interruptible** (`stop()` kills the in-flight poll child and wakes any
-  sleep) and **single-flight** (a turn mutex serializes user + telegram turns
-  so two turns never run concurrently on the shared context). The driver is
+  **interruptible** (`stop()` kills the in-flight poll child, wakes any sleep,
+  and cancels reserved turn bodies that have not started); the caller aborts
+  the active run's controller, and `stopAndDrain()` waits for queued/running
+  bodies to settle. A turn mutex serializes user + Telegram turns so two turns
+  never run concurrently on shared context. In a REPL Telegram idle turn, its
+  steer queue stays attached across the bot reply-send await; typed guidance
+  arriving there is preserved through the handoff buffer for the next queued
+  turn. REPL typed-input semantics are distinct: a line resolves a pending
+  user prompt (queuing a serialized user turn); only when no prompt consumer
+  is pending does a non-command line steer the active turn. The driver is
   **inert** when the bridge is not enabled (no `~/.tre/telegram.json` +
   helper)
   — the no-telegram path is byte-for-byte the old behavior. The LLM endpoint
@@ -309,7 +316,7 @@ Invariants:
 | `context_compacted`       | between LLM turns — CLI auto-compaction (D10, WS9) | `tokensBefore`, `messagesKept`, `summaryChars`; `contextTokens?`, `degraded?` (fallback shrink, docs/06 D), `overBudget?` (strict reduction still over budget — kept anyway) |
 | `compaction_skipped`      | the compaction trigger fired (or was forced) but nothing could be compacted — context UNCHANGED | `reason` |
 | `turn_budget`             | C26: a cycle's budget was exhausted, the loop auto-continues (informational, NOT an error) | `turn`, `cycle`, `maxCycles`, `maxTurns` |
-| `guard_retry`             | the loop guard fired (a repeated batch — identical or an alternating cycle); the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries`, `reason?` (`"identical"` \| `"cycle"` — loop-v2), `repeats?` (the fired guard's own count: issued batches incl. the refused one — re-audit 2026-11-02; absent on older producers; displays then make no count claim) |
+| `guard_retry`             | the loop guard fired (a repeated batch — identical or an alternating cycle); the loop auto-retries with an approach-changing nudge instead of stopping (informational, NOT an error; bounded by `maxGuardRetries`) | `turn`, `retry`, `maxRetries`, `reason?` (`"identical"` \| `"cycle"` — loop-v2), `repeats?` (the fired guard's own count: issued batches incl. the refused one — re-audit 2026-10-27; absent on older producers; displays then make no count claim) |
 | `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
@@ -328,7 +335,7 @@ union (exported from `types.ts`), three homes:
   the additive `details.stallEvidence` on the in-band result —
   `details.stall` keeps its exact meaning; the loop copies the evidence off
   it.
-  - **Loop-v2 fields (audit re-fix 2026-11-02).** `repeats` is ONE counting
+  - **Loop-v2 fields (audit re-fix 2026-10-27).** `repeats` is ONE counting
     unit for both loop variants: batches ISSUED in the pattern including the
     refused one (identical-stable 3; alternating-stable 5; the caps at
     `POLL_CAP`/`CYCLE_CAP`). `stable` distinguishes a stuck stop (the
@@ -352,7 +359,7 @@ union (exported from `types.ts`), three homes:
   results", and a stable stop says "no change in results"; without
   evidence (older producers) the headline makes no count or results claim.
   The `guard_retry` transcript line is the shared `guardRetryNote(reason,
-  repeats)` (re-audit 2026-11-02) — pattern-honest with the fired guard's
+  repeats)` (re-audit 2026-10-27) — pattern-honest with the fired guard's
   own count, no per-surface ternary.
 
 Privacy: signatures and excerpts are tool arguments/errors already persisted
@@ -392,6 +399,29 @@ interface Tool {
   error-handling system.
 - **`executionMode: "sequential"`** (e.g. file mutators) forces the whole
   batch to run in call order; the default is parallel.
+- **Batch-shape guard (2026-10-29, Qwen Flash Next audit).** A response may
+  carry dozens or hundreds of calls (observed: 163 calls in one response,
+  one `bash` command repeated 66× plus a near-identical variant 55×). Such
+  megabatches can launch large concurrent side effects before any per-call
+  guard fires, so the loop trims oversized batches BEFORE dispatch:
+  `MAX_BATCH_CALLS` (32) caps executed calls per response, and
+  `MAX_PARALLEL_CALLS` (8) bounds concurrent `parallel`-tool dispatch
+  (oversized parallel groups run in follow-up chunks, in call order;
+  results still land in call order). Both constants are exported for
+  tests/tuning. Extra members are NOT executed — each gets an in-band
+  error result (`BATCH_TRIMMED_TEXT`) plus `details.notExecuted` (and
+  `details.batchSkipped`), so they never feed progress counters or the A3
+  bash reset. Intra-batch EXACT duplicates (same tool + stable-JSON args
+  after the first occurrence) are likewise skipped with an in-band
+  `DUPLICATE_CALL_TEXT` result (`details.notExecuted`, `details.batchSkipped`);
+  only the first occurrence executes. Every call ID still yields exactly
+  one `tool_execution_end`; end events fire for executed calls first (model
+  call order), then skips in response order. The cross-turn loop/cycle
+  guards sign the EXECUTED subset only — a trimmed tail never stamps a
+  megabatch signature into `batchHistory`. The duplicate-vs-distinct
+  distinction is contractual: sequential-stall tests use distinct arguments
+  to pin the stall path, and the parallel in-flight limitation is pinned
+  for DISTINCT calls (duplicates collapse before dispatch instead).
 - **`terminate: true`** on a result: if *every* result in a batch terminates,
   the loop stops after the batch.
 - Must honor `signal` (abort mid-flight).

@@ -101,13 +101,31 @@ export class TelegramDriver {
   }
 
   /** Reserve a turn synchronously, then execute its body under the mutex.
-   * Polls can steer into the handoff buffer even before the body starts. */
-  async withTurn<T>(fn: () => Promise<T>): Promise<T> {
+   * Polls can steer into the handoff buffer even before the body starts.
+   *
+   * F2 — `stop()` is a LIFECYCLE cancellation, not just a poll stop: a body
+   * that was reserved but had not started when stop() fired (it was parked
+   * on `await prev`) is CANCELLED — its `fn` never runs and the promise
+   * resolves `undefined`. Without this check the body would start after the
+   * previous holder released, and (for the idle path) build a fresh,
+   * unaborted controller the caller's abort can no longer reach — violating
+   * stopAndDrain()'s contract that no turn may run to completion during a
+   * drain. A body already RUNNING is settled by the caller aborting the
+   * turn's OWN controller (the shared `controller` in main.ts is reassigned
+   * to it when the body starts); the drain then waits for its finallys. */
+  async withTurn<T>(fn: () => Promise<T>): Promise<T | undefined> {
     this.pendingTurns += 1;
     const prev = this.turnChain;
     let release!: () => void;
     this.turnChain = new Promise<void>((r) => (release = r));
     await prev;
+    if (this.stopped) {
+      // Reserved-but-unstarted at stop time: release the mutex without
+      // running the body (F2 lifecycle cancellation).
+      this.pendingTurns -= 1;
+      release();
+      return undefined;
+    }
     try {
       return await fn();
     } finally {

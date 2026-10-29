@@ -63,18 +63,25 @@ telegram.py   (machine skill: ~/.tre/agent/skills/telegram/ — python3 stdlib)
                  in flight is DROPPED — one-shot is a single turn and never
                  replies via the bot.
                • REPL wiring (src/cli/main.ts, also used by --plain):
-                 busy → onSteer pushes into the active turn's steering
-                 queue (the same sink a line typed at the prompt uses);
-                 idle → onIdle runs a full turn and replies via the bot
-                 (the reply IS the ack; fallback text when the turn
-                 produced none). The driver's turn mutex (`withTurn`)
-                 serializes user turns and telegram idle-turns on the
-                 shared context — two turns never run concurrently.
-                 `/restart` stops dispatch and drains the mutex
-                 (`stopAndDrain()`) before tearing down MCP.
+                 busy → onSteer pushes Telegram messages into the driver's
+                 attached turn queue (or handoff buffer); idle → onIdle runs a
+                 full turn and replies via the bot (the reply IS the ack;
+                 fallback text when the turn produced none). The idle queue
+                 remains attached through the asynchronous reply send; typed
+                 guidance during that window is drained to the handoff buffer
+                 at detach and claimed by the next turn, not lost in a stale
+                 queue. Typed REPL lines have their own contract: with no
+                 pending prompt consumer they steer the active turn; when the
+                 user prompt is pending, a line resolves that prompt and queues
+                 a user turn behind the mutex. The mutex (`withTurn`) serializes
+                 user and Telegram idle turns on shared context — two turns
+                 never run concurrently. `stop()` prevents reserved-but-not-yet-
+                 started turn bodies from running; `stopAndDrain()` waits for
+                 queued/running turns to settle. `/restart` stops dispatch and
+                 drains the mutex before tearing down MCP.
 ```
 
-**Loop prevention** (the driver's core requirement): a naive
+**Loop prevention and lifecycle** (the driver's core requirement): a naive
 `while (true) { poll(); }` hot-spins whenever a poll fails fast (network
 down, bad token → 401). The driver makes that impossible with three
 independent mechanisms: long-poll self-pacing (each poll blocks up to 15 s,
@@ -83,7 +90,12 @@ poll STARTS even if a poll returns instantly), and capped exponential backoff
 on failure (a persistent fast-failure settles to one poll per `failCapMs`,
 default 60 s; any success resets it). The loop boundary contains all errors
 — `start()`'s promise never rejects unhandled. `stop()` aborts the in-flight
-long-poll and wakes any sleep, so closing a driver returns promptly.
+long-poll and wakes any sleep. It is also lifecycle cancellation: any turn
+reserved on the mutex but not yet started resolves `undefined` without
+running its body. Already-running turns still need their own controller
+aborted by the caller; `stopAndDrain()` then waits for all queued/running
+turns to settle. Closing/restarting a driver must abort the active run before
+draining when the run may be blocked on model/tool work.
 
 Per-message routing inside the loop: steer when a turn is in flight; run an
 idle turn when `allowIdleTurns` is not false and `onIdle` exists; drop
@@ -115,7 +127,7 @@ ever talked to it. Both bridges filter at parse time
    | mode | idle | busy (turn in flight) |
    | --- | --- | --- |
    | TUI | a message starts a real run; the run's final text is sent back (fallback text when the turn produced none) | steered into the running turn; the batch is echoed as `telegram: N message(s) steered into the running turn` |
-   | REPL | same as TUI (idle turns + reply) | steered on the same path as a line typed at the prompt; the turn mutex serializes user turns and telegram idle-turns |
+   | REPL | idle message runs a turn and replies via bot; typed guidance during the reply-send await is preserved for the next turn | Telegram messages steer the attached turn queue; typed lines steer only when no REPL prompt consumer is pending, otherwise they resolve that prompt and its turn waits behind the mutex |
    | one-shot | **no reply path** — dropped (single-turn contract) | steered into the run as guidance (startup backlog included) |
    | `--plain` | forces the REPL path above — same idle+busy behavior | — |
 

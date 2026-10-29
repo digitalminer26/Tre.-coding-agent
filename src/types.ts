@@ -246,7 +246,7 @@ export type GuardEvidence =
       window: number;
       /** Raw denial text (one line, capped). */
       errorExcerpt: string;
-      /** 2026-11-27 audit fix: calls queued AFTER the stalling call in
+      /** 2026-10-28 audit fix: calls queued AFTER the stalling call in
        *  the same SEQUENTIAL batch, skipped without executing (the only
        *  path that prevents a call from running). Absent/0 = none. */
       skipped?: number;
@@ -264,7 +264,7 @@ export type GuardEvidence =
       skipped?: number;
     }
   | {
-      /** Same-error guard (added 2026-11-05, streak redesigned 2026-11-27
+      /** Same-error guard (added 2026-10-28, streak redesigned 2026-10-28
        *  per audit) → stopReason "stall": the same tool returned the same
        *  normalized error text SAME_ERROR_STALL_THRESHOLD times CONSECUTIVELY
        *  under varying arguments (the rephrase-while-stuck pattern; a warn
@@ -358,12 +358,12 @@ export type AgentEvent =
       retry: number;
       /** Total autonomous retries allowed before the run stops. */
       maxRetries: number;
-      /** loop-v2 (audit re-fix 2026-11-02): WHICH pattern fired, so the
+      /** loop-v2 (audit re-fix 2026-10-27): WHICH pattern fired, so the
        *  transcript line never claims "3× in a row" for an alternating
        *  cycle fire. Optional: producers from before loop-v2 omit it and
        *  the display falls back to the generic "repeated batch". */
       reason?: "identical" | "cycle";
-      /** Re-audit fix (2026-11-02): the fired guard's own repeat count —
+      /** Re-audit fix (2026-10-27): the fired guard's own repeat count —
        *  batches ISSUED including the refused one (the evidence's unit: 3
        *  identical-stable, 5 alternating-stable, the caps otherwise) — so
        *  the transcript states the true size instead of a hard-coded "3×".
@@ -517,7 +517,7 @@ export function guardEvidenceNote(evidence: GuardEvidence): string {
   }`;
 }
 
-/** C26 loop-v2 (audit re-fix 2026-11-02) — the evidence-driven loop-stop
+/** C26 loop-v2 (audit re-fix 2026-10-27) — the evidence-driven loop-stop
  *  headline, shared by the CLI banner and the TUI notice. The old
  *  hard-coded "repeated the same tool call(s) 3 times in a row" lied for
  *  cycle stops (an ALTERNATING pattern) and cap stops (12 issued batches,
@@ -561,7 +561,7 @@ export function loopStopNote(evidence?: GuardEvidence): string {
   return `loop: ${pattern} — stopped to avoid a runaway loop (the repeat was not executed)`;
 }
 
-/** Re-audit fix (2026-11-02) — the shared `guard_retry` transcript line for
+/** Re-audit fix (2026-10-27) — the shared `guard_retry` transcript line for
  *  the CLI and the TUI. The old hard-coded "same tool call 3× in a row"
  *  lied on every non-identical-3 fire: an alternating cycle fire (5
  *  batches issued), any cap fire (12), and a legacy producer that gives no

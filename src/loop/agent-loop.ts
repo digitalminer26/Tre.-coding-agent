@@ -37,7 +37,7 @@
  *  - Tool batches run in parallel by default; if ANY tool in the batch is
  *    `executionMode: "sequential"`, the whole batch runs in call order.
  *    Results are appended to context in call order, always.
- *    2026-11-27 audit fix — stall-aware sequential dispatch: once a call
+ *    2026-10-28 audit fix — stall-aware sequential dispatch: once a call
  *    returns `details.stall`, later calls in a SEQUENTIAL batch are
  *    skipped with synthetic `notExecuted` in-band results (the only path
  *    that prevents a call from running; `evidence.skipped` counts them).
@@ -215,7 +215,7 @@ const LENGTH_GUARD_TEXT =
   "limit, so they may be incomplete. Do not rely on them — re-issue the " +
   "tool call with complete arguments.";
 
-// 2026-11-27 audit fix — the sequential stall-skip notice. When one call
+// 2026-10-28 audit fix — the sequential stall-skip notice. When one call
 // in a sequential batch returns `details.stall`, the run is decided; every
 // LATER call in the same batch is skipped with this in-band result
 // (`notExecuted` + `stallSkipped`). Wording is honest: these calls were
@@ -267,7 +267,7 @@ export const LOOP_GUARD_TEXT =
 // run stops with stopReason "loop" as before, so a genuinely stuck model
 // still terminates in bounded time.
 //
-// Re-audit finding 2 (2026-11-02): the nudge is PATTERN-HONEST. The old
+// Re-audit finding 2 (2026-10-27): the nudge is PATTERN-HONEST. The old
 // constant claimed "the same tool call(s) 3 times in a row" for EVERY fire,
 // which lied to the model on alternating-cycle fires and 12-batch cap fires
 // (the model that trusts the text searches for the wrong pattern). The
@@ -321,6 +321,79 @@ export const ERROR_CALL_TEXT =
   "The run ended in an error before this tool call could run. It was NOT " +
   "executed. If you resume, re-issue it (or a corrected version) as your next " +
   "action.";
+
+/**
+ * Batch shape limits (Qwen Flash Next audit, 2026-10-29): a response may
+ * carry dozens or hundreds of calls — in one observed incident, 163 calls
+ * in a single response with the exact same `bash` command repeated 66x
+ * plus a near-identical variant 55x. Such megabatches are a runaway
+ * signature even when nothing repeats across turns: they can launch large
+ * concurrent side effects (notably parallel `bash`) before any per-call
+ * guard sees a result. The loop therefore trims oversized batches before
+ * dispatch:
+ *   - MAX_BATCH_CALLS: hard cap on executed calls per response (a hard
+ *     safeguard, always on, never disabled).
+ *   - MAX_PARALLEL_CALLS: bound on CONCURRENT dispatch of `parallel`
+ *     tools. Parallel dispatch currently means Promise.all (see the
+ *     dispatch section below); the remainder of an oversized parallel
+ *     group runs in follow-up chunks, preserving completion order.
+ * Extra members are NOT executed: each gets an in-band error result and
+ * `details.notExecuted` so skips are never mistaken for ground contact.
+ * Both constants are exported for tests/tuning like the POLL_CAP family.
+ */
+export const MAX_BATCH_CALLS = 32;
+export const MAX_PARALLEL_CALLS = 8;
+
+/** In-band answer for calls trimmed by the batch-shape guard above. */
+export const BATCH_TRIMMED_TEXT =
+  "Batch limit reached: this response carried more tool calls than the " +
+  "runaway-batch cap allows, so this call was NOT executed. Re-issue the " +
+  "still-needed calls in smaller batches (at most a handful of independent " +
+  "calls per response).";
+
+/** In-band answer for a duplicate call skipped within the same batch. */
+export const DUPLICATE_CALL_TEXT =
+  "Duplicate call skipped: an identical call (same tool, same arguments) " +
+  "already ran in this batch, so this repeat was NOT executed. Read its " +
+  "result below instead of re-issuing it.";
+
+/**
+ * Split one assistant response's tool calls into the executable set and
+ * the trimmed set. Pure (no execution) so tests can exercise it directly:
+ *  - intra-batch exact duplicates (same tool + stable-JSON args) after the
+ *    first occurrence are marked duplicate-skipped. The FIRST occurrence
+ *    keeps its position and executes normally; every later repeat is
+ *    reported with its own result so call-ID cardinality is preserved.
+ *  - beyond MAX_BATCH_CALLS executable calls, the remainder is
+ *    batch-trimmed. Trimming applies AFTER duplicate collapsing, so a
+ *    163-call all-duplicate batch executes once rather than 32 times.
+ * Returned `executable` preserves the model's call order. Exported for
+ * tests.
+ */
+export function planBatch(
+  calls: ToolCallBlock[],
+): {
+  executable: ToolCallBlock[];
+  skipped: { call: ToolCallBlock; duplicate: boolean }[];
+} {
+  const executable: ToolCallBlock[] = [];
+  const skipped: { call: ToolCallBlock; duplicate: boolean }[] = [];
+  const seen = new Set<string>();
+  for (const call of calls) {
+    const key = `${call.name}:${stableJson(call.arguments)}`;
+    if (seen.has(key)) {
+      skipped.push({ call, duplicate: true });
+      continue;
+    }
+    seen.add(key);
+    if (executable.length < MAX_BATCH_CALLS) {
+      executable.push(call);
+    } else {
+      skipped.push({ call, duplicate: false });
+    }
+  }
+  return { executable, skipped };
+};
 
 /**
  * C26 — the identity of one tool-call batch: tool names + stable-JSON
@@ -412,7 +485,7 @@ export const LOOP_CAP_GUARD_TEXT =
  *  its OWN JSON element ([type, text] / [type]) and the whole structure
  *  (isError flag + block array) is JSON-encoded in one step — no raw
  *  joins anywhere, so block boundaries survive even when block text
- *  contains separators, NULs, or JSON syntax (audit re-fix 2026-11-02:
+ *  contains separators, NULs, or JSON syntax (audit re-fix 2026-10-27:
  *  the previous version joined texts with \u0000 BEFORE encoding, so
  *  ["a","b"] and ["a\u0000b"] still digested identically). */
 function resultEntryDigest(entry: {
@@ -936,7 +1009,18 @@ export async function* runLoop(
     // the 3rd failure in place and stop with "stall", carrying richer
     // evidence); a plain-identical failing batch still trips the identical
     // rule below, exactly as before v2.
-    const signature = batchSignature(calls);
+    // The cross-turn loop/cycle guards see the EXECUTED subset: a trimmed
+    // megabatch must not poison the identical-batch signature with its
+    // unexecuted tail (the 163-call Qwen response would otherwise stamp a
+    // 163-call signature into history). Skips are still in-context errors,
+    // so a re-issued identical response trims/duplicates again the same way.
+    const plannedForSignature = planBatch(calls);
+    // The cross-turn loop/cycle guards see the EXECUTED subset: a trimmed
+    // megabatch must not poison the identical-batch signature with its
+    // unexecuted tail (the 163-call Qwen response would otherwise stamp a
+    // 163-call signature into history). Skips are still in-context errors,
+    // so a re-issued identical response trims/duplicates again the same way.
+    const signature = batchSignature(plannedForSignature.executable);
     {
       const n = batchHistory.length;
       // Stable-result identical repeat: the last two executed batches ARE
@@ -961,7 +1045,7 @@ export async function* runLoop(
       // Stable-result alternation: [X, Y, X, Y] executed (X ≠ Y) and the
       // current batch is the third X — and each position's results repeat
       // across cycles (dX1 === dX2, dY1 === dY2).
-      // Re-audit (2026-11-02): the failure exemption must cover ALL FOUR
+      // Re-audit (2026-10-27): the failure exemption must cover ALL FOUR
       // history records, not just the first pair (X, Y). A second-pair
       // record (X₂/Y₂) answered SYNTHETICALLY (a guard fill, an unknown
       // tool, an I3 throw — a constant or reused text) can digest the same
@@ -1071,7 +1155,7 @@ export async function* runLoop(
         if (guardRetries < maxGuardRetries) {
           guardRetries += 1;
           batchHistory = [];
-          // Re-audit finding 2 (2026-11-02): the nudge names the pattern
+          // Re-audit finding 2 (2026-10-27): the nudge names the pattern
           // that actually fired with its own repeat count — the old
           // constant told the model "3 times in a row" on cycle and cap
           // fires, sending it hunting for the wrong pattern.
@@ -1085,9 +1169,9 @@ export async function* runLoop(
             turn,
             retry: guardRetries,
             maxRetries: maxGuardRetries,
-            // Which pattern fired (audit re-fix 2026-11-02): the transcript
+            // Which pattern fired (audit re-fix 2026-10-27): the transcript
             // must not claim "3× in a row" when an alternating cycle fired;
-            // the fired guard's own count rides along (re-audit 2026-11-02)
+            // the fired guard's own count rides along (re-audit 2026-10-27)
             // so the line states the true size, not a hard-coded 3.
             reason: cycleFired ? "cycle" : "identical",
             repeats,
@@ -1154,7 +1238,7 @@ export async function* runLoop(
       // Audit v2: a length-guarded batch never ran and its fill text is a
       // constant — record the synthetic digest so the SAME truncated batch
       // repeating still trips the guard (3rd stable repeat). Recorded as a
-      // FAILED batch (re-audit finding 1, 2026-11-02): this is the same
+      // FAILED batch (re-audit finding 1, 2026-10-27): this is the same
       // synthetic in-band answer the unknown-tool/throw paths record as
       // failed, and the cycle guard's stable rule exempts failed records —
       // with failed:false here, alternating truncated batches [A,B,A,B] fed
@@ -1166,17 +1250,26 @@ export async function* runLoop(
       continue; // the model re-issues on the next turn
     }
 
-    const sequential = calls.some(
+    // Batch-shape guard (see planBatch above): trim oversized batches and
+    // collapse intra-batch exact duplicates BEFORE dispatch. Skipped calls
+    // get synthetic in-band error results below (I3: every call gets a
+    // result; F1: `notExecuted` so a skip is never mistaken for ground
+    // contact). The trimmed batch — never the raw response — feeds the
+    // signature, dispatch, results, digest, and history.
+    const planned = planBatch(calls);
+    const execCalls = planned.executable;
+
+    const sequential = execCalls.some(
       (c) => byName.get(c.name)?.executionMode === "sequential",
     );
 
-    for (const call of calls) {
+    for (const call of execCalls) {
       yield { type: "tool_execution_start", toolCall: call };
     }
 
     const results = new Map<string, { result: ToolResult; isError: boolean }>();
     const updates = new Map<string, string[]>();
-    // 2026-11-27 audit fix: how many calls this batch skipped because an
+    // 2026-10-28 audit fix: how many calls this batch skipped because an
     // earlier sequential call stalled (the honest "was prevented from
     // running" count; the stall banner names it when > 0).
     let skippedByStall = 0;
@@ -1226,7 +1319,7 @@ export async function* runLoop(
     };
 
     if (sequential) {
-      // 2026-11-27 audit fix — stall-aware sequential dispatch: once a
+      // 2026-10-28 audit fix — stall-aware sequential dispatch: once a
       // call in the batch returns `details.stall`, the run is already
       // decided, so every LATER call in this batch is skipped with a
       // synthetic in-band result (I3: every call gets a result; F1:
@@ -1236,7 +1329,7 @@ export async function* runLoop(
       // module header); sequential mode ("any sequential tool opts the
       // whole batch in") is the deterministic lane.
       let stallSeen = false;
-      for (const call of calls) {
+      for (const call of execCalls) {
         // The stall can come from a guard the LOOP itself synthesizes
         // (unknown tool / I3 throw inside runOne carry details too when a
         // custom executor sets them); check the stored result before
@@ -1259,14 +1352,44 @@ export async function* runLoop(
         }
       }
     } else {
-      await Promise.all(calls.map((call) => runOne(call)));
+      // Qwen batch-shape fix: bound CONCURRENT parallel dispatch to
+      // MAX_PARALLEL_CALLS. Oversized parallel groups run in follow-up
+      // chunks of at most MAX_PARALLEL_CALLS, in call order; results still
+      // land in call order below. Sequential batches are unaffected (they
+      // already run strictly in order).
+      for (let i = 0; i < execCalls.length; i += MAX_PARALLEL_CALLS) {
+        await Promise.all(execCalls.slice(i, i + MAX_PARALLEL_CALLS).map((call) => runOne(call)));
+      }
     }
 
     // Results (and their end events) always land in call order.
     let allTerminate = true;
     let stalled = false;
     const digestParts: { digest: string; failure: boolean }[] = [];
-    for (const call of calls) {
+    // Record the batch-shape skips FIRST (in response order) so the digest
+    // mirrors what the model reads: its duplicates/trims come back as
+    // explicit errors. The digest below then covers ALL response calls;
+    // the signature/history use the executed subset (see below).
+    for (const skipped of planned.skipped) {
+      const entry = {
+        result: {
+          content: [
+            {
+              type: "text" as const,
+              text: skipped.duplicate ? DUPLICATE_CALL_TEXT : BATCH_TRIMMED_TEXT,
+            },
+          ],
+          details: { notExecuted: true, batchSkipped: true },
+        },
+        isError: true,
+      };
+      results.set(skipped.call.id, entry);
+      digestParts.push({
+        digest: SYNTHETIC_FILL_DIGEST,
+        failure: true,
+      });
+    }
+    for (const call of execCalls) {
       const entry = results.get(call.id);
       const msg = resultMessage(
         call,
@@ -1317,8 +1440,27 @@ export async function* runLoop(
           guardEvidence = raw as GuardEvidence;
         }
       }
+      if (!entry?.result.terminate) allTerminate = false;
     }
-    // 2026-11-27 audit fix: when the sequential stall-skip prevented calls
+    // Batch-shape skips are synthetic errors: they never terminate a batch.
+    if (planned.skipped.length > 0) allTerminate = false;
+    // Batch-shape skips: emit their (already-recorded) in-band results so
+    // the model READS the duplicate/trim notice — otherwise the batch
+    // signature would promise "this repeat was not executed" while the
+    // transcript hid the fact. Order: executed calls first (model call
+    // order), then skips in response order; every call ID still yields
+    // exactly one `tool_execution_end`.
+    for (const skipped of planned.skipped) {
+      const entry = results.get(skipped.call.id);
+      const msg = resultMessage(
+        skipped.call,
+        entry?.result ?? { content: [{ type: "text", text: "(no result)" }] },
+        entry?.isError ?? true,
+      );
+      context.push(msg);
+      yield { type: "tool_execution_end", toolCallId: skipped.call.id, result: msg };
+    }
+    // 2026-10-28 audit fix: when the sequential stall-skip prevented calls
     // in this batch, say so on the evidence — the stall banner then states
     // the honest execution fact ("N further call(s) were skipped"). Only
     // the stall guards reach this point with evidence (the loop guards

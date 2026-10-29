@@ -555,7 +555,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
             : "turns";
         items = [...items, { kind: "error", text: `budget: ${cap} reached — send another prompt to continue` }];
       } else if (ev.stopReason === "loop") {
-        // C26 loop-v2 (audit re-fix 2026-11-02): evidence-driven headline —
+        // C26 loop-v2 (audit re-fix 2026-10-27): evidence-driven headline —
         // the old hard-coded "3 times in a row" lied for cycle stops
         // (alternating pattern) and the 12-batch caps. The refused repeat
         // was NOT executed; a new prompt breaks the pattern.
@@ -589,7 +589,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
         // The same tool failed 3× with a permission denial within its
         // recent calls (the deterministic sandbox wall — docs/08 H1: the
         // count is windowed, so interleaved successes don't hide it).
-        // 2026-11-27 audit fix: the guard fires AFTER the triggering
+        // 2026-10-28 audit fix: the guard fires AFTER the triggering
         // call executed (its result is replaced in-band); only the
         // sequential stall-skip prevents queued calls, and only then
         // does `evidence.skipped` appear. D33: evidence names the tool,
@@ -667,7 +667,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
       // alternating cycle pattern); the run auto-retries once with an
       // approach-changing nudge instead of stopping. Informational — the
       // run keeps going (the model must pick a different action).
-      // loop-v2 (audit re-fix 2026-11-02): the text names the pattern that
+      // loop-v2 (audit re-fix 2026-10-27): the text names the pattern that
       // fired — the old "3× in a row" lied for cycle fires (and legacy
       // producers without `reason` get the neutral phrasing).
       // F2: count the fire (session total) and mark the current run as
@@ -682,7 +682,7 @@ export function applyEvent(state: TuiState, ev: AgentEvent): TuiState {
           ...state.items,
           {
             kind: "info",
-            // Re-audit fix (2026-11-02): shared guardRetryNote — the old
+            // Re-audit fix (2026-10-27): shared guardRetryNote — the old
             // per-surface ternary miscounted (cycle fires said "3×" for a
             // 5-batch pattern; cap fires said "3×" for 12) and described
             // the pattern as "two tool calls" (a batch may hold many).

@@ -1,12 +1,32 @@
-**Same-error streak guard — final form + sequential stall-skip (2026-11-27,
-third round).** The first `same-error-stall` cut (3 windowed hits, hard stop)
+## 2026-10-29 — Telegram round-4 (F1+F2) + batch-shape guards
+
+**Telegram round-4 (src/telegram/driver.ts, src/cli/main.ts, src/telegram/README.md, docs/02-contracts.md C37).** Fixes the two Medium findings from the round-3 audit (coordination dir: `.tre/implement-audit/telegram-round4/`, gitignored): **F1** — the idle-turn success path keeps `activeSteer` attached through `telegramBridge.send()` (typed guidance during the bot reply no longer falls into a detached queue) and detaches in `finally`, draining undrained steer into the driver's deferred buffer for the follow-up turn. **F2** — `withTurn<T>` returns `Promise<T | undefined>`: a reserved-but-unstarted body checks `stopped` after awaiting its predecessor, decrements pendingTurns, releases the mutex, and returns `undefined` without running (one-shot worker path treats it as cancelled, exit 130); `stop()` is now a lifecycle-level cancellation reserved bodies cannot bypass. Tests: explicit F2 barrier test + an end-to-end F1 gated typed-guidance integration test (replacing the former basic idle-reply test); mutation probes pinned both fixes (old code fails exactly at the new assertions). Orchestrator-implemented c0 deviation logged in plan.md (worker-c0 hit its wall-clock cap with a clean tree).
+
+**Batch-shape guards (src/loop/agent-loop.ts, docs/02-contracts.md C6).** From the Qwen runaway-tool-call audit (`qwen-duplicate-audit.md`, same coord dir): one response carried 163 tool calls (66 copies of one git command) and the loop executed every member concurrently with no ceiling. Added `MAX_BATCH_CALLS = 32` (cap on executed calls per response — extras get in-band error results with `details.notExecuted`, never run), `MAX_PARALLEL_CALLS = 8` (concurrency cap — oversized parallel groups run in ordered chunks), and `planBatch()` — a pure planner collapsing intra-batch EXACT duplicates (same tool + stable-JSON args; first occurrence runs, repeats get `DUPLICATE_CALL_TEXT`; trimming applies AFTER dedup). Every call ID still yields exactly one `tool_execution_end`; cross-turn loop/cycle guards sign the EXECUTED subset only. 4 new tests; 2 existing stall tests updated to distinct args. Suite: 1439 pass / 14 skip / 0 fail.
+
+**Machine config (NOT in repo):** `~/.tre/tre/models.json` — moved `reasoning_effort`/`repeat_penalty` out of the nested `options` (llama.cpp reads them top-level) and set `parallel_tool_calls: false` for both Qwen entries; backup `~/.tre/tre/models.json.bak-qwen-params-20261029-155127`.
+
+**Audit:** the round-4 implement-audit cycles were never completed against the implementation (c1 audited the baseline). An independent auditor cycle (gpt-6.1-sol) is run against this committed diff; verdict in `.tre/implement-audit/telegram-round4/audit-c1.md`.
+
+**Date hygiene (this commit):** all mislabelled future dates ("2026-11-02/05/27/28/29" → true dates `10-27`/`10-28`/`10-29`) corrected across `src/`, `test/`, and `docs/` comments — see the note in the 2026-10-28 streak-guard entry.
+
+---
+
+**Same-error streak guard — final form + sequential stall-skip (2026-10-28,
+third round).** *(Date-correction note, 2026-10-29: this entry and the
+guard/audit comments across `src/` and `test/` were originally misdated
+"2026-11-27 / 2026-11-05 / 2026-11-28" — the sessions drifted into future
+dates. True dates derived from git: the loop-v2 audit chain (`a2fd742`/
+`9d5b061`/`8d4f3ab`) 2026-10-27; the streak-guard rounds (`d35241e` →
+`11a5d68`) 2026-10-28. `d35241e`'s commit MESSAGE still carries the bad
+"2026-11-27" — history left unwritten; this note is the correction.)* The first `same-error-stall` cut (3 windowed hits, hard stop)
 failed its own audit on four counts: the reset branch was unreachable dead
 code inside the error-only `if` (successes never reset the streak); a
 generic error across independent targets hard-stalled legitimate probing;
 the CLI/TUI/prompt claimed "the repeat was not re-executed" when every
 guard fires AFTER its triggering call executed; and parallel batches
 dispatched everything before any guard spoke. Fixed in three parts,
-superseding the 2026-11-05 entry it replaces: **(1)** `tools/pipeline.ts` —
+superseding the 2026-10-28 entry it replaces: **(1)** `tools/pipeline.ts` —
 the guard is now a CONSECUTIVE streak: one `{errorText, streak}` record per
 tool, deleted by ANY other outcome (success, permission denial, different
 error — no per-errorText map, no stale state), and a LADDER: warn in-band

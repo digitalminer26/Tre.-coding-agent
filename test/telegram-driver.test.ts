@@ -298,6 +298,39 @@ test("mutex: two turns run SERIALLY, never concurrently", async () => {
   assert.equal(overlap, false, "two turns must not run concurrently on the shared context");
 });
 
+// ── LIFECYCLE CANCELLATION (F2) ────────────────────────────────────────────
+
+test("F2: stop() cancels a reserved-but-unstarted body — its fn never runs and the promise resolves undefined", async () => {
+  const bridge: TelegramBridge = {
+    enabled: false,
+    pollLong: async () => null,
+    send: async () => {},
+  };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  let bodyRan = false;
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  // Hold the mutex with an explicit barrier, so the second body is certainly
+  // reserved-but-unstarted when stop() fires (no timer-order dependency).
+  const a = driver.withTurn(async () => {
+    firstStarted();
+    await firstGate;
+  });
+  await started;
+  const b = driver.withTurn(async () => {
+    bodyRan = true;
+  });
+  driver.stop();
+  const draining = driver.stopAndDrain();
+  releaseFirst();
+  await Promise.all([a, draining]);
+  assert.equal(await b, undefined, "a reserved-but-unstarted body at stop time resolves undefined");
+  assert.equal(bodyRan, false, "the cancelled body must never run");
+  assert.equal(driver.turnInFlight, false, "drain leaves no reserved turns");
+});
+
 // ── STEER HANDOFF BUFFER (attach/detach/steer) ──────────────────────────────
 
 function mkQueue(): { push(t: string): void; drain(): string[]; seen: string[] } {
@@ -841,26 +874,62 @@ test("wiring: REPL — a mid-run message STEERS the user turn (no bot reply); a 
   }
 });
 
-test("wiring: REPL idle — a message with NO turn in flight runs a turn and replies via the bot", async () => {
+test("wiring: REPL idle — typed guidance during reply send reaches the queued user turn", async () => {
   const { dir, models } = await workspace();
   try {
     const S = mkSinks();
     const bridge = new GateBridge();
+    let releaseSend!: () => void;
+    let sendStarted!: () => void;
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+    const sendEntered = new Promise<void>((resolve) => { sendStarted = resolve; });
+    let firstSend = true;
+    const actualSend = bridge.send.bind(bridge);
+    bridge.send = async (text: string): Promise<void> => {
+      if (firstSend) {
+        firstSend = false;
+        sendStarted();
+        await sendGate;
+      }
+      await actualSend(text);
+    };
+    const st = snapshotStream(fakeStream([
+      { type: "text", text: "first idle reply" },
+      { type: "text", text: "user turn reply" },
+    ]));
     const stdin = new Readable({ read: () => {} });
     const code = main(["--tools", "none", "--models", models, "--cwd", dir], {
-      streamFn: fakeStream([{ type: "text", text: "Idle reply via bot" }]),
+      streamFn: st.fn,
       sinks: S.sinks,
       telegramBridge: bridge,
       stdin,
       telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
     });
-    // Wait until the driver is polling, then deliver while the REPL IDLES —
-    // onIdle runs the turn and sends the reply through the bridge.
     await waitUntil(() => bridge.pollCount >= 1, 5000, "driver polling started");
-    bridge.pushMessage(TG_MSG("hello from the phone"));
+    bridge.pushMessage(TG_MSG("initial idle message"));
+    // snapshotStream holds the first stream call until the harness releases it.
+    await waitUntil(() => st.calls.length >= 1, 5000, "first idle stream call");
+    st.releaseGate();
+    // Type guidance when the REPL's user-prompt consumer is waiting. It is
+    // queued as the user turn behind the idle turn (the serialization
+    // contract); then release the turn so the gated reply send is entered.
+    stdin.push("USERMARK consume prompt and reserve user turn\n");
+    await sendEntered;
+    // The second reply-window line must steer into the idle turn, not become
+    // the next user prompt.
+    stdin.push("STEERMARK replied-window typed guidance during the send\n");
+    await waitUntil(() => S.err.join("").includes("steered into the running turn: STEERMARK replied-window typed guidance during the send"), 5000, "reply-window line is steered, not queued as a prompt");
+    releaseSend();
     await waitUntil(() => bridge.sent.length >= 1, 8000, "idle turn replied via the bot");
-    assert.equal(bridge.sent[0], "Idle reply via bot");
-    assert.ok(S.err.join("").includes("replied via the bot"));
+    assert.equal(bridge.sent[0], "first idle reply");
+    // Only the reply-window guidance must steer; the reservation line becomes
+    // the queued user prompt itself.
+    assert.ok(S.err.join("").split("steered into the running turn: ").length - 1 === 1, "exactly one typed line is steered as guidance");
+    // The steered guidance must survive detach: the queued user turn claims
+    // it from the handoff buffer before its first LLM call.
+    await waitUntil(() => st.calls.length >= 2, 8000, "queued user turn consumed the reply-window steer");
+    assert.ok(hasSteer(st.calls[1]!, "USERMARK"), "reserved user prompt runs in the follow-up turn");
+    assert.ok(hasSteer(st.calls[1]!, "STEERMARK replied-window typed guidance"), "reply-window typed guidance reaches the follow-up user turn context");
     stdin.push("/quit\n");
     stdin.push(null);
     assert.equal(await code, 0);

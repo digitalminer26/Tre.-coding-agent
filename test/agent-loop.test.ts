@@ -27,9 +27,12 @@ import {
   MAX_PROGRESS_NUDGES,
   NO_SUCCESS_NUDGE_TEXT,
   NO_SUCCESS_TURNS,
+  MAX_BATCH_CALLS,
+  MAX_PARALLEL_CALLS,
   POLL_CAP,
   UNVERIFIED_EDITS,
   batchSignature,
+  planBatch,
   deriveMaxTurns,
   progressTargetOf,
   runLoop,
@@ -792,8 +795,8 @@ test("C26: loop detection — same batch 3× → guarded, auto-retry once, then 
     retry: 1,
     maxRetries: 1,
     // loop-v2: the event names the pattern that fired (audit re-fix
-    // 2026-11-02) so the transcript never claims "3× in a row" for cycles;
-    // the fired guard's own repeat count rides along (re-audit 2026-11-02).
+    // 2026-10-27) so the transcript never claims "3× in a row" for cycles;
+    // the fired guard's own repeat count rides along (re-audit 2026-10-27).
     reason: "identical",
     repeats: 3,
   });
@@ -903,12 +906,14 @@ test("stall: a result with details.stall → run stops with stopReason stall", a
   assert.match(guarded[0]!.result.content[0]!.text, /STALL_TEXT/);
 });
 
-test("stall-skip (2026-11-27 audit): a sequential batch stops dispatching AFTER a stall result", async () => {
+test("stall-skip (2026-10-28 audit): a sequential batch stops dispatching AFTER a stall result", async () => {
   // A sequential tool (edit) in the batch opts the WHOLE batch into call
   // order; when the first call comes back details.stall, every LATER call
   // is skipped with a synthetic notExecuted result — the only path where
   // a queued call is prevented from running, and evidence.skipped says
-  // how many.
+  // how many. The two queued calls use DISTINCT arguments so the
+  // batch-shape duplicate guard (2026-10-29) does not collapse them first:
+  // this test pins the stall path, not the duplicate path.
   const executed: string[] = [];
   const staller = makeTool("staller", {
     executionMode: "sequential",
@@ -938,8 +943,8 @@ test("stall-skip (2026-11-27 audit): a sequential batch stops dispatching AFTER 
       type: "toolcall",
       calls: [
         { id: "s1", name: "staller", args: {} },
-        { id: "l1", name: "later", args: {} },
-        { id: "l2", name: "later", args: {} },
+        { id: "l1", name: "later", args: { q: 1 } },
+        { id: "l2", name: "later", args: { q: 2 } },
       ],
     },
     { type: "text", text: "should not be reached" },
@@ -960,11 +965,14 @@ test("stall-skip (2026-11-27 audit): a sequential batch stops dispatching AFTER 
   );
 });
 
-test("stall-skip: a PARALLEL batch runs all calls (documented limit)", async () => {
+test("stall-skip: a PARALLEL batch with DISTINCT calls runs all calls (documented limit)", async () => {
   // Parallel dispatch is in flight before any result exists — the guards
   // cannot un-run it. The stall still stops the run AFTER the batch, but
-  // every call executed. Pinned so the limitation stays explicit and any
-  // future change to it is a deliberate contract change.
+  // every DISTINCT call executed. Pinned so the limitation stays explicit
+  // and any future change to it is a deliberate contract change. The
+  // batch-shape duplicate guard (2026-10-29) collapses exact duplicates
+  // BEFORE dispatch, so this test uses distinct arguments: identical
+  // repeats are covered by the "batch shape" duplicate tests.
   let executed = 0;
   const failing = makeTool("par", {
     execute: async () => {
@@ -980,8 +988,8 @@ test("stall-skip: a PARALLEL batch runs all calls (documented limit)", async () 
     {
       type: "toolcall",
       calls: [
-        { id: "p1", name: "par", args: {} },
-        { id: "p2", name: "par", args: {} },
+        { id: "p1", name: "par", args: { q: 1 } },
+        { id: "p2", name: "par", args: { q: 2 } },
       ],
     },
   ];
@@ -1094,7 +1102,7 @@ test("C26: batchSignature — stable across key order, sensitive to tool/args", 
 
 // ────────────────── loop detection v2 (2026-10-31 audit) ──────────────────
 // Result-aware identical guard, period-2 cycle guard, hard poll caps, and
-// the digest/evidence hardening from the 2026-11-02 re-audit.
+// the digest/evidence hardening from the 2026-10-27 re-audit.
 
 test("loop v2: stable identical repeat still stops at 3 (notExecuted, retry, evidence)", async () => {
   const { tool, calls } = makeTool("read");
@@ -3109,7 +3117,7 @@ test("loopStopNote header: evidence-driven for every stop kind, never '3 times' 
   assert.doesNotMatch(legacy, /no change in results|without progress/);
 });
 
-// ── Re-audit 2026-11-02: synthetic-history exemption + honest retry texts ──
+// ── Re-audit 2026-10-27: synthetic-history exemption + honest retry texts ──
 
 test("loop v2: alternating length-guarded batches never trip the stable cycle guard", async () => {
   // Re-audit finding 1: length-guarded fills are SYNTHETIC (nothing ran).
@@ -3212,7 +3220,7 @@ test("guardRetryNote: honest per-pattern transcript line (shared CLI/TUI)", () =
   assert.doesNotMatch(legacy, /3×|3 times|alternating|incl\./);
 });
 
-// Parameterized audit coverage (2026-11-02): ONE synthetic record among the
+// Parameterized audit coverage (2026-10-27): ONE synthetic record among the
 // four stable-cycle history entries [X, Y, X₂, Y₂] must veto the guard. The
 // original single case (synthetic SECOND pair) caught the shipped bug but
 // could miss a regression dropping just ONE of the four failed-flag checks;
@@ -3278,4 +3286,103 @@ test("loop v2: EVERY synthetic stable-cycle position vetoes the guard (all 16 su
       }
     });
   }
+});
+
+test("batch shape: intra-batch exact duplicates execute once, skipped repeats are in-band", async () => {
+  let executions = 0;
+  const tool = makeTool("probe", {
+    execute: (async () => {
+      executions++;
+      return { content: [{ type: "text", text: "ran" }] };
+    }) as Tool["execute"],
+  });
+  const turns: FakeTurn[] = [
+    {
+      type: "toolcall",
+      calls: [
+        { id: "c1", name: "probe", args: { q: 1 } },
+        { id: "c2", name: "probe", args: { q: 1 } },
+        { id: "c3", name: "probe", args: { q: 1 } },
+      ],
+    },
+    { type: "text", text: "done" },
+  ];
+  const events = await drainLoop(turns, [tool.tool]);
+  assert.equal(executions, 1, "only the first duplicate occurrence executes");
+  const ends = events.filter((e) => e.type === "tool_execution_end");
+  assert.equal(ends.length, 3, "every call ID still gets exactly one result");
+  const skipped = ends.filter(
+    (e) =>
+      e.type === "tool_execution_end" &&
+      e.result.details?.notExecuted === true &&
+      /Duplicate call skipped/.test(e.result.content.map((b) => b.type === "text" ? b.text : "").join(" ")),
+  );
+  assert.equal(skipped.length, 2, "both repeats are marked not-executed duplicates");
+});
+
+test("batch shape: oversized batches trim beyond MAX_BATCH_CALLS", async () => {
+  let executions = 0;
+  const tool = makeTool("probe", {
+    execute: (async () => {
+      executions++;
+      return { content: [{ type: "text", text: "ran" }] };
+    }) as Tool["execute"],
+  });
+  const calls = Array.from({ length: MAX_BATCH_CALLS + 3 }, (_, i) => ({
+    id: `c${i}`,
+    name: "probe",
+    args: { q: i },
+  }));
+  const turns: FakeTurn[] = [{ type: "toolcall", calls }, { type: "text", text: "done" }];
+  const events = await drainLoop(turns, [tool.tool]);
+  assert.equal(executions, MAX_BATCH_CALLS, "only the cap executes");
+  const ends = events.filter((e) => e.type === "tool_execution_end");
+  assert.equal(ends.length, calls.length, "every call ID still gets exactly one result");
+  const trimmed = ends.filter(
+    (e) =>
+      e.type === "tool_execution_end" &&
+      e.result.details?.notExecuted === true &&
+      /Batch limit reached/.test(e.result.content.map((b) => b.type === "text" ? b.text : "").join(" ")),
+  );
+  assert.equal(trimmed.length, 3, "the tail is trimmed with an honest notice");
+});
+
+test("batch shape: parallel dispatch is chunked at MAX_PARALLEL_CALLS", async () => {
+  let inflight = 0;
+  let peak = 0;
+  const tool = makeTool("probe", {
+    execute: (async () => {
+      inflight++;
+      peak = Math.max(peak, inflight);
+      await delay(15);
+      inflight--;
+      return { content: [{ type: "text", text: "ran" }] };
+    }) as Tool["execute"],
+  });
+  const n = MAX_PARALLEL_CALLS * 2 + 2;
+  const calls = Array.from({ length: n }, (_, i) => ({
+    id: `c${i}`,
+    name: "probe",
+    args: { q: i },
+  }));
+  const turns: FakeTurn[] = [{ type: "toolcall", calls }, { type: "text", text: "done" }];
+  await drainLoop(turns, [tool.tool]);
+  assert.ok(peak <= MAX_PARALLEL_CALLS, `peak concurrency ${peak} respects the chunk bound`);
+  assert.ok(peak > 1, "parallel dispatch still overlaps within a chunk");
+});
+
+test("planBatch: pure unit — duplicates collapse before the cap", () => {
+  const mk = (id: string, args: Record<string, unknown>) => ({
+    type: "toolCall" as const,
+    id,
+    name: "bash",
+    arguments: args,
+  });
+  const dup = { command: "git status --short" };
+  const calls = [mk("a", dup), mk("b", dup), mk("c", { command: "ls" })];
+  const planned = planBatch(calls);
+  assert.deepEqual(planned.executable.map((c) => c.id), ["a", "c"]);
+  assert.equal(planned.skipped.length, 1);
+  assert.equal(planned.skipped[0]!.call.id, "b");
+  assert.equal(planned.skipped[0]!.duplicate, true);
 });

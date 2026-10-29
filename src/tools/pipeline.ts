@@ -18,7 +18,7 @@
  *      within its recent window stop the run; 2026-09-27, windowed per
  *      docs/08 H1 2026-09-30; H2 identical non-permission failures are
  *      also stopped by strict tool/args/error matching; same-error
- *      guard 2026-11-27 (redesigned per audit): the SAME non-permission
+ *      guard 2026-10-28 (redesigned per audit): the SAME non-permission
  *      error text CONSECUTIVELY under any args — in-band warning at 3
  *      in a row, hard stall at 5; ANY other outcome resets the streak.
  *      All guards act AFTER the call executed: they replace or annotate
@@ -142,7 +142,7 @@ export const STALL_THRESHOLD = 3;
  * last eight calls, with the same conservative threshold as H1. */
 export const REPEAT_FAILURE_WINDOW = 8;
 export const REPEAT_FAILURE_THRESHOLD = 3;
-/** Same-error guard (added 2026-11-05 as "H3", redesigned 2026-11-27
+/** Same-error guard (added 2026-10-28 as "H3", redesigned 2026-10-28
  * per audit) — the args-insensitive same-error streak: the same tool
  * returning the SAME error text (whitespace-normalized) BACK-TO-BACK.
  * One record per tool ({errorText, streak}): ANY other outcome for the
@@ -168,9 +168,9 @@ export const SAME_ERROR_WARN_THRESHOLD = 3;
 export const SAME_ERROR_STALL_THRESHOLD = 5;
 
 /**
- * Family-window warn rung (docs/08 §10, 2026-11-28 audit — measured on 985
+ * Family-window warn rung (docs/08 §10, 2026-10-28 audit — measured on 985
  * session logs). The consecutive guard above keys on the EXACT error text
- * and requires it IN A ROW; the 2026-11-28 sed loop
+ * and requires it IN A ROW; the 2026-10-28 sed loop
  * (`sed -n ",+Np"`, 15 failures across ~90 bash calls, only the digit and
  * incidental grep output varying) reset it on every call. Neither the key
  * (digit-exact) nor the counter (consecutive) alone fixes that — both axes
@@ -208,7 +208,7 @@ function normalizeFailure(texts: string[]): string {
 }
 
 /**
- * Family key (docs/08 §10, 2026-11-28 audit): the whitespace-normalized
+ * Family key (docs/08 §10, 2026-10-28 audit): the whitespace-normalized
  * error with every digit RUN masked ("#+#"). Digits are masked, not
  * removed — ",+18p" → ",+#p" keeps every character around the variable
  * part, so only errors of the same SHAPE collide. Rationale (measured on
@@ -336,11 +336,11 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
   // occupies a slot in the window. Each tool is counted independently.
   const stallByTool = new Map<string, { window: boolean[]; count: number }>();
   const repeatFailures = new Map<string, { calls: number[] }>();
-  // Same-error streak (2026-11-27 redesign): ONE record per tool — the
+  // Same-error streak (2026-10-28 redesign): ONE record per tool — the
   // error text of the tool's most recent consecutive non-permission
   // failure and how many in a row match it. Deleted by any other
   // outcome, so no unbounded per-errorText map and no stale streaks.
-  // Declared up here (2026-11-27 audit, finding 2) because the
+  // Declared up here (2026-10-28 audit, finding 2) because the
   // pre-execution paths — validation failure, blocked gate, broken hook —
   // are "other outcomes" too and must break the streak, exactly like a
   // success.
@@ -352,18 +352,18 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
   // (call index, error text) pairs inside the window. Pruned to the
   // window on EVERY recorded failure — for all families, not just the
   // current one — so both the pairs AND the distinct-text set expire
-  // together (2026-11-28 audit, finding 2: texts used to live forever,
+  // together (2026-10-28 audit, finding 2: texts used to live forever,
   // letting one stale distinct text satisfy the ≥2-texts rule long after
   // its call left the window). The global prune bounds live families per
   // tool at SAME_FAMILY_WINDOW; FAMILY_MAX_TRACKED below is a defensive
   // cap that only reactivates if the window constant outgrows it
-  // (2026-11-28 review, finding 2).
+  // (2026-10-28 review, finding 2).
   const familyWindows = new Map<
     string,
     Map<string, { call: number; text: string }[]>
   >();
   const FAMILY_MAX_TRACKED = 32;
-  // Per-tool OUTCOME sequence (2026-11-28 auditor cycle 2): the windowed
+  // Per-tool OUTCOME sequence (2026-10-28 auditor cycle 2): the windowed
   // guards record state when a result EXISTS, but the executor is entered
   // in dispatch order and returns in completion order — a parallel batch
   // (or any concurrent caller) used to allocate indices at entry while
@@ -383,7 +383,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     callsByTool.set(toolName, n);
     return n;
   };
-  // 2026-11-28 auditor cycle 1, finding 1: pre-execution outcomes
+  // 2026-10-28 auditor cycle 1, finding 1: pre-execution outcomes
   // (validation failure, blocked call, broken beforeToolCall hook) ARE
   // calls of this tool — the windowed guards promise "within its last N
   // calls", and until now every early return skipped both the per-tool
@@ -406,11 +406,11 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     // 1. validate — malformed args never reach the tool.
     const validationError = validateArgs(tool.parameters, call.arguments);
     if (validationError !== undefined) {
-      // 2026-11-27 audit, finding 2: a rejected call is "another outcome"
+      // 2026-10-28 audit, finding 2: a rejected call is "another outcome"
       // — it breaks the same-error streak, or a malformed call between two
       // identical failures would let the streak climb across unrelated
       // work (a false warn/stall one call early). It also occupies its
-      // window slot (2026-11-28 auditor cycle 1).
+      // window slot (2026-10-28 auditor cycle 1).
       breakSameErrorStreak(tool.name);
       occupyNonPermissionSlot(tool.name);
       return {
@@ -432,10 +432,10 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
         decision = await hooks.beforeToolCall(tool, call);
       } catch (err) {
         // A broken hook must not kill the run (I3) — fail the call. It
-        // also breaks the same-error streak (2026-11-27 audit, finding 2):
+        // also breaks the same-error streak (2026-10-28 audit, finding 2):
         // the failure is the HOOK's, not the tool's, so it must not extend
         // a streak of the tool's own errors — and it occupies its window
-        // slot (2026-11-28 auditor cycle 1).
+        // slot (2026-10-28 auditor cycle 1).
         breakSameErrorStreak(tool.name);
         occupyNonPermissionSlot(tool.name);
         return {
@@ -451,8 +451,8 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
       }
       if (decision && "blocked" in decision) {
         // A blocked call never ran — another outcome, so the streak breaks
-        // (2026-11-27 audit, finding 2) and it occupies its window slot
-        // (2026-11-28 auditor cycle 1: eight blocked calls between two
+        // (2026-10-28 audit, finding 2) and it occupies its window slot
+        // (2026-10-28 auditor cycle 1: eight blocked calls between two
         // denials must slide them out of H1's last-8 window).
         breakSameErrorStreak(tool.name);
         occupyNonPermissionSlot(tool.name);
@@ -539,7 +539,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     // 4b. Expose the effective target AFTER hook rewriting, not the
     //     original model path: safety resolves relative paths against the
     //     workspace, which can differ from process.cwd() (--cwd).
-    //     2026-11-27 audit fix: this used to sit at the very END of the
+    //     2026-10-28 audit fix: this used to sit at the very END of the
     //     executor, so every guard verdict that returns before it (notably
     //     the same-error WARN rung, whose result the loop keeps and feeds
     //     into F1's progress scan) silently dropped `progressTarget` — the
@@ -554,7 +554,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     }
 
     // 5a. H1 window bookkeeping — MUST run before any verdict below can
-    // return (2026-11-27 audit, finding 1). Every call of the tool
+    // return (2026-10-28 audit, finding 1). Every call of the tool
     // occupies a slot in the window (success, permission failure, or
     // non-permission failure) and the count is the number of permission
     // failures inside it; the verdict is evaluated later, but nothing may
@@ -562,7 +562,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     // calls never shifted the window and stale denials stayed counted —
     // H1 then fired on a call whose real last-8 history held one denial.
     //
-    // The per-tool OUTCOME INDEX (2026-11-28 auditor cycle 2) is
+    // The per-tool OUTCOME INDEX (2026-10-28 auditor cycle 2) is
     // allocated here — at the single seam every executed outcome passes —
     // so window deltas are non-negative even when parallel batches
     // complete out of dispatch order. This is the only seam: the three
@@ -583,7 +583,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     // normalized non-permission error text. The bounded call-index history
     // prevents stale repeats from accumulating; changing diagnostics do not
     // match. (repeatCallIndex is the per-tool OUTCOME index allocated at
-    // the 5a seam above - 2026-11-28 auditor cycle 2, completion order;
+    // the 5a seam above - 2026-10-28 auditor cycle 2, completion order;
     // the pre-execution returns consumed theirs in occupyNonPermissionSlot.)
     if (result.isError === true) {
       const errorText = normalizeFailure(result.content.map((c) => c.text));
@@ -593,7 +593,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
         entry.calls = entry.calls.filter((n) => repeatCallIndex - n < REPEAT_FAILURE_WINDOW);
         entry.calls.push(repeatCallIndex);
         repeatFailures.set(signatureKey, entry);
-        // Same-error streak bookkeeping (2026-11-27 redesign): one
+        // Same-error streak bookkeeping (2026-10-28 redesign): one
         // record per tool. The SAME normalized error as the tool's last
         // consecutive non-permission failure continues the streak; a
         // different error starts a fresh one of 1. Recorded BEFORE the
@@ -607,13 +607,13 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
             : 1;
         sameErrorStreaks.set(tool.name, { errorText, streak: sameErrorCount });
         // Family-window bookkeeping (docs/08 §10) — recorded BEFORE any
-        // verdict below may return (the 2026-11-27 audit finding 1
+        // verdict below may return (the 2026-10-28 audit finding 1
         // principle): every failure occupies its slot exactly once, so an
         // H2/stall early-return cannot leave the family window a call
         // behind. The VERDICT stays below, after H2 and the consecutive
         // stall own their signatures.
         //
-        // 2026-11-28 audit (finding 1): the FIRST pass pushed the new
+        // 2026-10-28 audit (finding 1): the FIRST pass pushed the new
         // pair only AFTER eviction — and eviction ranked families by
         // their newest call, so a brand-new family (empty history) ranked
         // oldest and was evicted before its first call landed, silently
@@ -629,13 +629,13 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
           // Prune EVERY family to the current window first (the exported
           // helper is the contract; round-2 cycle 1 pinned it directly),
           // so no family keeps pairs (or the distinct texts derived from
-          // them) past its expiry (2026-11-28 audit, finding 2).
+          // them) past its expiry (2026-10-28 audit, finding 2).
           pruneExpiredFamilyEntries(famByTool, repeatCallIndex);
           const entries = famByTool.get(famKey) ?? [];
           entries.push({ call: repeatCallIndex, text: errorText });
           famByTool.set(famKey, entries);
           if (famByTool.size > FAMILY_MAX_TRACKED) {
-            // Defensive belt, UNREACHABLE under current constants (2026-11-28
+            // Defensive belt, UNREACHABLE under current constants (2026-10-28
             // review, finding 2): the global prune above drops every family
             // with no live pairs, so at most SAME_FAMILY_WINDOW (8) families
             // are alive per tool at once — never more than the 32 cap. The
@@ -689,7 +689,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
             },
           };
         }
-        // Same-error guard (added 2026-11-05, ladder redesigned 2026-11-27
+        // Same-error guard (added 2026-10-28, ladder redesigned 2026-10-28
         // per audit) — the rephrase-while-stuck pattern: the model reads
         // the error, "changes something", but the error is a fixed
         // property of its approach (wrong sed range syntax, wrong
@@ -705,7 +705,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
         // Both rungs act AFTER execution: the triggering call ran (its
         // result is annotated or replaced) — the guard never prevents a
         // call from running. Neither rung can skip H1's window bookkeeping
-        // (5a runs first, 2026-11-27 audit finding 1).
+        // (5a runs first, 2026-10-28 audit finding 1).
         if (
           sameErrorCount >= SAME_ERROR_STALL_THRESHOLD &&
           entry.calls.length < REPEAT_FAILURE_THRESHOLD // H2 already owns exact repeats
@@ -761,7 +761,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
         // ≥2 DISTINCT error texts of the same family within the window:
         // the loop the exact key and the consecutive counter both miss.
         // (The window was already updated above, before the verdicts.)
-        // 2026-11-28 audit, finding 2: distinctness is computed from the
+        // 2026-10-28 audit, finding 2: distinctness is computed from the
         // LIVE window entries only — a text whose calls have all expired
         // no longer counts, so the ≥2-texts rule really means "two
         // distinct texts inside the last SAME_FAMILY_WINDOW calls".
@@ -804,7 +804,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
     }
 
     // 6. stall guard (docs/08 H1) — the VERDICT only: the window and count
-    //    were advanced in 5a, before any guard could return (2026-11-27
+    //    were advanced in 5a, before any guard could return (2026-10-28
     //    audit, finding 1), so every call occupies its slot exactly once
     //    and no early return can leave stale denials counted. Permission
     //    failures of one tool within its last STALL_WINDOW calls are a
@@ -843,7 +843,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
 
     return result;
   };
-  // Test-only observation seam (2026-11-28 round-2 auditor, cycle 2
+  // Test-only observation seam (2026-10-28 round-2 auditor, cycle 2
   // finding 1): the family-retention invariant is INVISIBLE behaviorally
   // — a "prune only the current family" mutant prunes each family just
   // before it would become observable again, so every behavioral test

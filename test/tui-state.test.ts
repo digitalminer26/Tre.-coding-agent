@@ -1271,7 +1271,7 @@ test("agent_end: loop → error item explaining the runaway stop (C26)", () => {
   const last = s.items[s.items.length - 1]!;
   assert.equal(last.kind, "error");
   const text = last.kind === "error" ? last.text : "<not an error item>";
-  // loop-v2 (audit re-fix 2026-11-02): WITHOUT evidence the headline makes
+  // loop-v2 (audit re-fix 2026-10-27): WITHOUT evidence the headline makes
   // no count claim (it cannot know the pattern) — the old hard-coded
   // "3 times in a row" lied whenever the producer was a cycle/cap stop.
   assert.match(text, /loop: the model repeated the same tool call\(s\)/);
@@ -3267,7 +3267,7 @@ test("D33: agent_end stall with repeat-failure evidence → the H2 wording, not 
   const text = last.kind === "error" ? last.text : "<not an error item>";
   assert.match(text, /identical error 3 times/);
   assert.doesNotMatch(text, /--no-sandbox/, "an H2 stall is not the sandbox wall");
-  // 2026-11-27 audit fix: queued calls the sequential skip prevented are
+  // 2026-10-28 audit fix: queued calls the sequential skip prevented are
   // named honestly; a stall without evidence.skipped claims nothing.
   assert.match(text, /2 further queued call\(s\) in the batch were skipped/);
   assert.match(text, /trigger: bash failed 3\/8 calls — test failed: expected 1, got 2/);

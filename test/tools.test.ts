@@ -229,9 +229,9 @@ test("H2: repeat window expires and whitespace-only error differences normalize"
   assert.equal(r.details?.repeatFailure, true);
 });
 
-// ─────────── Family-window warn rung (docs/08 §10, 2026-11-28 audit) ───────────
+// ─────────── Family-window warn rung (docs/08 §10, 2026-10-28 audit) ───────────
 //
-// The 2026-11-28 sed loop: a malformed BSD-sed range, 15 failures, each
+// The 2026-10-28 sed loop: a malformed BSD-sed range, 15 failures, each
 // message differing ONLY in the range digit (+18p … +2p) with successes
 // interleaved. The exact-key consecutive ladder and H2's args key both
 // miss it; the family key (digits masked) + sliding window catches it.
@@ -303,7 +303,7 @@ test("family-window: repeats of ONE identical text stay silent (H2/consecutive o
   const r5 = await executor(tool, call("3", "ident", { a: 3 }), sig);
   // DISTINCT-texts >= 2 requirement: one text repeating never triggers the
   // family rung (the consecutive guard warns at 3 IN A ROW; alternating
-  // identical texts stay fully silent per the 2026-11-27 audit).
+  // identical texts stay fully silent per the 2026-10-28 audit).
   assert.equal(r3.details?.sameFamilyWarn, undefined);
   assert.equal(r4.details?.sameFamilyWarn, undefined);
   assert.equal(r5.details?.sameFamilyWarn, undefined);
@@ -327,7 +327,7 @@ test("family-window: window expiry — same-family failures spaced >8 calls apar
   assert.equal(r10.details?.sameFamilyWarn, undefined, "family window pruned: indices 1-2 are >8 calls old");
 });
 
-test("family-window: a distinct text EXPIRES with its call — stale texts never satisfy the >=2 rule (2026-11-28 audit, finding 2)", async () => {
+test("family-window: a distinct text EXPIRES with its call — stale texts never satisfy the >=2 rule (2026-10-28 audit, finding 2)", async () => {
   // The defect: `texts` lived forever while call indices pruned, so one
   // long-expired distinct text let three SAME-text failures warn — the
   // >=2-distinct-texts rule must hold INSIDE the window, not across
@@ -350,7 +350,7 @@ test("family-window: a distinct text EXPIRES with its call — stale texts never
   fail = true;
   text = "boom 2";
   await executor(tool, call("10", "staleTxt", { n: 10 }), sig);
-  fail = false; // 2026-11-28 auditor cycle 1: the "successes" must REALLY
+  fail = false; // 2026-10-28 auditor cycle 1: the "successes" must REALLY
   await executor(tool, call("11", "staleTxt", { n: 0 }), sig); // succeed — a silent failure would climb the consecutive ladder and mask this verdict
   fail = true;
   await executor(tool, call("12", "staleTxt", { n: 12 }), sig);
@@ -461,13 +461,13 @@ test("family-window: EXECUTOR retains no expired non-current family (integration
   })();
 });
 
-test("family-window: a NEW family is admitted and records its first call (2026-11-28 audit, finding 1)", async () => {
+test("family-window: a NEW family is admitted and records its first call (2026-10-28 audit, finding 1)", async () => {
   // The defect: eviction ranked families by newest call and ran BEFORE
   // the first pair was pushed, so the brand-new family (empty history)
   // ranked oldest and self-evicted — a family admitted after 32 other
   // families never warned.
   //
-  // 2026-11-28 review, finding 2 (wording fixed after round-2 audit
+  // 2026-10-28 review, finding 2 (wording fixed after round-2 audit
   // cycle 1) — honest scope note: the global prune (pruneExpiredFamily-
   // Entries, pinned by its own contract test below) drops families with
   // no live pairs, so only <=SAME_FAMILY_WINDOW (8) families are ever
@@ -506,7 +506,7 @@ test("family-window: a NEW family is admitted and records its first call (2026-1
   );
 });
 
-test("family-window: out-of-order parallel completions cannot fake a window (2026-11-28 auditor cycle 2)", async () => {
+test("family-window: out-of-order parallel completions cannot fake a window (2026-10-28 auditor cycle 2)", async () => {
   // The defect: the executor recorded guard state on completion but the
   // per-tool call index was allocated on ENTRY, so a parallel batch
   // finishing in reverse order produced NEGATIVE window deltas (never
@@ -542,7 +542,7 @@ test("family-window: out-of-order parallel completions cannot fake a window (202
   // H2 sandwich: identical args+text on calls 1,2,9; successes between;
   // call 1 completes LAST. No 8-completion window contains all three
   // failures -> no stall, no repeat warn. Delay/fail/succeed is chosen by
-  // the external pending-set (2026-11-28 auditor cycle 3): ALL failing
+  // the external pending-set (2026-10-28 auditor cycle 3): ALL failing
   // calls share ONE argument shape, or H2's args key would split them and
   // the assertion could never see the regression it pins.
   const failing = new Set(["1", "2", "9"]);
@@ -567,7 +567,7 @@ test("family-window: out-of-order parallel completions cannot fake a window (202
   assert.ok(!restResults.some((r) => r.details?.stall === true), "no stall among the in-order calls either");
 });
 
-test("windowed guards: blocked / invalid / broken-hook calls expire real H1 denials (2026-11-28 auditor cycle 1 follow-up)", async () => {
+test("windowed guards: blocked / invalid / broken-hook calls expire real H1 denials (2026-10-28 auditor cycle 1 follow-up)", async () => {
   // The pre-execution returns must consume their call index AND their H1
   // slot (cycle 1, finding 1) — pinned here for the PERMISSION (H1) guard;
   // the H2/family expiry across all three pre-execution paths is pinned
@@ -592,7 +592,7 @@ test("windowed guards: blocked / invalid / broken-hook calls expire real H1 deni
   assert.equal(r11.details?.stall, undefined, "8 blocked calls slide the old denials out of H1's window");
   // Invalid-args calls occupy their slots too (validation runs before the
   // hook, so a missing required arg is rejected even when unblocked).
-  // 2026-11-28 auditor cycle 3: the SEED denials must really execute -
+  // 2026-10-28 auditor cycle 3: the SEED denials must really execute -
   // they carry the required arg; only the eight intervening calls omit it.
   const strict: typeof tool = {
     ...tool,
@@ -640,7 +640,7 @@ test("windowed guards: blocked / invalid / broken-hook calls expire real H1 deni
 });
 
 // The pre-execution expiry pin for the two NON-permission windowed
-// guards (2026-11-28 code review, finding 1): the H1 test above cannot
+// guards (2026-10-28 code review, finding 1): the H1 test above cannot
 // cover them (permission failures bypass their bookkeeping), and the
 // mutation "H1 slot push kept, shared call-index advance dropped" kept
 // the whole suite green while BOTH guards regressed (reproduced: 2
@@ -720,11 +720,11 @@ async function preExecExpiryMatrix(kind: "h2" | "family", path: PrePath): Promis
   assert.equal(r3.isError, true, `${kind}/${path}: the real error still rides through`);
 }
 
-test("windowed guards: pre-execution outcomes expire H2 identical-repeat windows (matrix, 2026-11-28 review finding 1)", async () => {
+test("windowed guards: pre-execution outcomes expire H2 identical-repeat windows (matrix, 2026-10-28 review finding 1)", async () => {
   for (const path of ["blocked", "invalid", "broken-hook"] as const) await preExecExpiryMatrix("h2", path);
 });
 
-test("windowed guards: pre-execution outcomes expire family-window failures (matrix, 2026-11-28 review finding 1)", async () => {
+test("windowed guards: pre-execution outcomes expire family-window failures (matrix, 2026-10-28 review finding 1)", async () => {
   for (const path of ["blocked", "invalid", "broken-hook"] as const) await preExecExpiryMatrix("family", path);
 });
 //
@@ -989,7 +989,7 @@ test("H1 window advances even when the same-error rung fires (finding 1)", async
   );
 });
 
-test("warn rung keeps progressTarget when a hook rewrote the path (2026-11-27 audit)", async () => {
+test("warn rung keeps progressTarget when a hook rewrote the path (2026-10-28 audit)", async () => {
   // F1's unverified-edit scan keys on details.progressTarget, falling back
   // to the model's original path when it is missing (agent-loop.ts:1403-
   // 1407). The progressTarget attach used to sit at the very END of the

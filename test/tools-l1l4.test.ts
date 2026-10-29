@@ -135,7 +135,7 @@ test("L3: prune removes >7d-old .log files, keeps fresh ones and foreign files",
     // epoch-seconds form, so the digits were sometimes consumed as a
     // TIME operand (mtime ~1962/1969) and sometimes as a FILE NAME
     // (leaving `stale` fresh) — a real ~1-in-6 suite flake on macOS
-    // (2026-11-28: L3 failed "stale .log pruned: true !== false").
+    // (2026-10-28: L3 failed "stale .log pruned: true !== false").
     fs.utimesSync(stale, old, old);
     pruneFullOutputDir(dir);
     assert.equal(fs.existsSync(stale), false, "stale .log pruned");
