@@ -344,6 +344,59 @@ test("handoff buffer: a steer racing the turn END is detached to the buffer and 
     "the claim records WHICH body rescued the steer");
 });
 
+test("handoff buffer: a steer WHILE A LABELED BODY RUNS goes straight to its queue, claimed tagged", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  const q = mkQueue();
+  driver.attachSteerTarget(q, "user");
+  driver.steer("mid-turn"); // body is in flight: direct, never buffered
+  assert.deepEqual(q.seen, ["mid-turn"], "live queue receives the steer directly");
+  assert.deepEqual(driver.steerClaims, [{ text: "mid-turn", claimedBy: "user" }],
+    "the claim log names the body that owned the steer");
+  assert.equal(driver.pendingSteers(), 0, "nothing sits in the buffer");
+});
+
+test("follow-up: a steer stranded in the buffer at a labeled body's END manufactures ONE idle follow-up with it", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const idles: { msgs: number; pending: string[] }[] = [];
+  const driver = new TelegramDriver(
+    bridge,
+    { onSteer: () => {}, onIdle: async (msgs, pendingSteers = []) => { idles.push({ msgs: msgs.length, pending: [...pendingSteers] }); } },
+  );
+  // A user-typed body (label "user") attaches a queue; a steer arrives, the
+  // body DRAINS nothing, and the body settles → the queue's undrained steer
+  // must trigger exactly one follow-up onIdle([], pending).
+  await driver.withTurn(async () => {
+    const q = mkQueue();
+    driver.attachSteerTarget(q, "user");
+    driver.steer("left-behind"); // goes to q, but the body never drains it
+    driver.detachSteerTarget(); // detach pushes q's undrained items to the buffer
+  });
+  await waitUntil(() => idles.length >= 1, 500, "follow-up scheduled");
+  await sleep(50); // let any (buggy) second follow-up fire
+  assert.deepEqual(idles, [{ msgs: 0, pending: ["left-behind"] }],
+    "exactly ONE follow-up carrying the stranded steer, no duplicates");
+});
+
+test("follow-up: allowIdleTurns=false never manufactures a follow-up (buffer waits for the next typed turn)", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  let idleCount = 0;
+  const driver = new TelegramDriver(
+    bridge,
+    { onSteer: () => {}, onIdle: async () => { idleCount++; } },
+    { allowIdleTurns: false },
+  );
+  await driver.withTurn(async () => {
+    const q = mkQueue();
+    driver.attachSteerTarget(q, "run");
+    driver.steer("stranded");
+    driver.detachSteerTarget();
+  });
+  await sleep(60);
+  assert.equal(idleCount, 0, "one-shot must never manufacture an idle turn");
+  assert.equal(driver.pendingSteers(), 1, "the steer stays buffered for the next body to claim");
+});
+
 // ── STOP-AND-DRAIN (restart safety) ─────────────────────────────────────────
 
 test("stopAndDrain: stops polling AND waits for the in-flight turn to settle", async () => {

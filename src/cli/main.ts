@@ -2375,8 +2375,8 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
           // and reaches the next turn body (see driver.ts steer()).
           td.steer(`[telegram from ${m.sender}] ${m.text}`);
         },
-        onIdle: async (msgs) => {
-          const prompt = msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`).join("\n");
+        onIdle: async (msgs, pendingSteers = []) => {
+          const prompt = [...pendingSteers, ...msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`)].join("\n");
           // Mirror the user-turn bookkeeping so SIGINT aborts the idle turn
           // (active=true → onSigint aborts `controller`, not exits).
           active = true;
@@ -2397,6 +2397,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
               charsPerToken: cpt,
               steeringQueue: steerQueue,
             });
+            td.detachSteerTarget();
             context = result.context;
             cpt = result.charsPerToken;
             const reply = finalAssistantText(result.context);
@@ -2563,7 +2564,6 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
         sinks.err.write(`unknown command: ${prompt}\n`);
         continue;
       }
-      controller = new AbortController();
       try {
         // Run under the driver's turn mutex so a telegram idle-turn and a user
         // turn never run concurrently on the shared context. The in-flight
@@ -2575,7 +2575,8 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
         // (activeSteer = null) — a silently lost steer. Inside the mutex, the
         // previous holder's finally has run, so the steer can only land in the
         // queue of the turn that actually runs.
-        const result = await td.withTurn(async () => {
+        await td.withTurn(async () => {
+          controller = new AbortController();
           active = true;
           const steerQueue = makeSteerQueue();
           activeSteer = steerQueue;
@@ -2584,7 +2585,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
           // reaches THIS queue, before the loop's first drain.
           for (const t of td.attachSteerTarget(steerQueue, "user")) steerQueue.push(t);
           try {
-            return await runTurn({
+            const result = await runTurn({
               model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
               prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
               executeToolCall: executor,
@@ -2592,18 +2593,19 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
               charsPerToken: cpt,
               steeringQueue: steerQueue,
             });
+            context = result.context;
+            cpt = result.charsPerToken;
           } finally {
+            active = false;
+            lastInt = 0;
+            activeSteer = null;
             // Detach before the mutex releases: a steer racing the turn's
             // end lands in the driver's buffer, not this dead queue.
             td.detachSteerTarget();
           }
         });
-        context = result.context;
-        cpt = result.charsPerToken;
       } finally {
-        active = false;
-        lastInt = 0;
-        activeSteer = null;
+        // Turn-owned state is cleared inside the mutex, before the next body.
       }
     }
     await flushSinks(sinks);
@@ -2616,7 +2618,12 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
     pricesAbort.abort();
     // Stop the background Telegram driver (kills the in-flight poll child and
     // wakes any backoff sleep) so the process can exit cleanly.
-    if (telegramBridge.enabled) telegramDriver?.stop();
+    telegramDriver?.stop();
+    // Abort FIRST (the driver's documented drain contract): an in-flight
+    // turn's body must not run to completion just because we drain before
+    // closing — abort settles it, then the drain waits for the finallys.
+    controller.abort();
+    await telegramDriver?.stopAndDrain();
     // WS12: graceful MCP teardown (idempotent) — every clean exit path. The
     // synchronous killAll backstop in onSigint covers the immediate-exit path.
     if (mcpRef.current) await teardownAll(mcpRef.current);
