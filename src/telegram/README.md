@@ -1,87 +1,171 @@
-# Telegram integration
+# Telegram bridge — architecture
 
-Two bridges share one helper (`telegram.py` in the skill dir) and one
-machine-level config (`~/.tre/telegram.json`). They differ ONLY in how the
-user talks to Telegram while tre. is running:
+The bridge lets the user talk to a running `tre.` session from Telegram. It is
+**one bridge per session, no daemon**: each session creates its own bridge
+and driver at startup, polls the bot on the user's chat, and stops with the
+session. There is no relay and no inbox file; a message is consumed by
+whichever poller reads it first, which is why running `telegram.py poll` by
+hand races the drivers (see "How to run"). The helper's offset
+(`~/.tre/telegram/last_update_id`) is **machine-level, not per-session**:
+concurrent sessions on one bot config share it and race each other's
+updates (see "Single-consumer contract").
 
-| mode | bridge | who polls |
-|---|---|---|
-| interactive TUI (`tre. -c`) | `src/tui/telegram.ts` | the TUI itself (`telegramTick`) |
-| plain/one-shot (`tre. run "…"`) | `src/telegram/driver.ts` | the driver, while a task is in flight |
+## Architecture (as shipped)
 
-## The one rule that makes both correct
+Two bridges + one driver class, one shared path/state module:
 
-The helper's `poll` CONSUMES the Telegram updates (long-poll offset). So
-whoever polls owns the messages — and if a poll happens outside a turn, the
-messages vanish. Corollaries:
-
-- **The TUI must NOT poll from an external loop** (a `watch`/cron/script
-  calling `telegram.py poll`). It only competes with the TUI's own tick for
-  the offset. Use the in-TUI bridge; if it's not working, diagnose it, do NOT
-  add an external poller.
-- plain/one-shot mode (`tre. run "…"`) runs the SAME in-process driver
-  (`createTelegramDriver` — it is shared, not TUI-only), so it polls while a
-  task is in flight and steers replies into the run; you do NOT need to poll.
-  **Poll manually ONLY before the first turn starts** — the startup race below.
-
-## The startup race (both modes)
-
-The TUI tick starts only after the first LLM turn begins (`run.tsx` starts the
-timer at the initial `setState`; plain-mode `installDriver` starts it after
-`input()`). A message sent while tre. is still booting is therefore NOT seen
-by the driver — it sits in Telegram's queue until either the next idle tick
-(TUI) or never (plain, if nothing drains it).
-
-Fix for plain mode: a single manual poll BEFORE the turn, then the turn. The
-one-time poll consumes the backlog; the driver (started once the turn begins)
-answers the result to the bot.
-
-```bash
-python3 ~/.tre/agent/skills/telegram/telegram.py poll
-tre. run "telegram: answer the message(s) above"
+```
+Telegram cloud
+   │  getUpdates / sendMessage
+   ▼
+telegram.py   (machine skill: ~/.tre/agent/skills/telegram/ — python3 stdlib)
+   ▲  spawned as `python3 <helper> poll [--timeout N]` / `send <file>`
+   │  helper resolved across the skill roots by src/telegram/paths.ts
+   │  (project <cwd>/.tre/skills first, then user ~/.tre/agent/skills);
+   │  config ~/.tre/telegram.json + state ~/.tre/telegram/ are machine-level
+   │
+   ├── TUI: TelegramBridge (src/tui/telegram.ts)
+   │     Non-blocking poll (`poll` with no --timeout → getUpdates timeout 0),
+   │     driven by the TUI itself: a self-rescheduling setTimeout tick every
+   │     TELEGRAM_POLL_MS (15 s) in src/tui/run.tsx — never holds the TUI
+   │     open. The tick skips while a previous poll is in flight (overlapping
+   │     polls could double-consume the offset). Hard cap per helper call is
+   │     TELEGRAM_TIMEOUT_MS (135 s) — a backstop above the helper's own
+   │     worst case (60 s HTTP read + a 429 retry_after sleep), not the
+   │     pacing. Routing (src/tui/run.tsx `telegramTick`): idle → fold the
+   │     whole batch into ONE prompt, run it, send the run's final text back
+   │     (fallback text when the turn produced none); busy → steer every
+   │     message into the active run's steering queue (pure helpers
+   │     `steerTelegramBatch` / `steerTelegramBusy` in run.tsx) and echo
+   │     "telegram: N message(s) steered into the running turn". Messages
+   │     polled during a quit (/restart window are dropped — the poll is
+   │     in flight when stopTelegram() runs).
+   │
+   └── Plain CLI (one-shot + REPL): TelegramBridge (src/telegram/bridge.ts)
+         Same helper, with a LONG-POLL seam: `pollLong(timeoutSec, signal)`
+         runs `poll --timeout N` and honors `signal` (node kills the child,
+         so stop() ends an in-flight poll promptly). Enabled only when
+         ~/.tre/telegram.json AND the helper exist; either missing →
+         `enabled: false` and the driver never starts.
+              ▲
+              │  injected as a seam (MainDeps.telegramBridge; tests use a
+              │  fake — no network)
+         TelegramDriver (src/telegram/driver.ts — ONE class, TWO wirings)
+               Handlers: { onSteer(msg), onIdle?(msgs) }. Options:
+               { allowIdleTurns (default true), failBaseMs, failCapMs,
+                 minIntervalMs, onPollError, onHandlerError }.
+               • one-shot wiring (src/cli/main.ts): allowIdleTurns=false,
+                 onSteer pushes into the run's steering queue; the run
+                 executes inside driver.withTurn(...). A message that
+                 arrives while the run is in flight (including the backlog
+                 already queued at startup, which the first poll round
+                 returns) is STEERED in as guidance; a message with no run
+                 in flight is DROPPED — one-shot is a single turn and never
+                 replies via the bot.
+               • REPL wiring (src/cli/main.ts, also used by --plain):
+                 busy → onSteer pushes into the active turn's steering
+                 queue (the same sink a line typed at the prompt uses);
+                 idle → onIdle runs a full turn and replies via the bot
+                 (the reply IS the ack; fallback text when the turn
+                 produced none). The driver's turn mutex (`withTurn`)
+                 serializes user turns and telegram idle-turns on the
+                 shared context — two turns never run concurrently.
+                 `/restart` stops dispatch and drains the mutex
+                 (`stopAndDrain()`) before tearing down MCP.
 ```
 
-In the TUI there is nothing to do: once the first turn ends, the tick drains
-the backlog on its next 15s cycle.
+**Loop prevention** (the driver's core requirement): a naive
+`while (true) { poll(); }` hot-spins whenever a poll fails fast (network
+down, bad token → 401). The driver makes that impossible with three
+independent mechanisms: long-poll self-pacing (each poll blocks up to 15 s,
+so a no-message cycle takes ~15 s), a min-interval guard (hard cap between
+poll STARTS even if a poll returns instantly), and capped exponential backoff
+on failure (a persistent fast-failure settles to one poll per `failCapMs`,
+default 60 s; any success resets it). The loop boundary contains all errors
+— `start()`'s promise never rejects unhandled. `stop()` aborts the in-flight
+long-poll and wakes any sleep, so closing a driver returns promptly.
 
-## Driver contract (plain mode) — what we intend, and what we test
+Per-message routing inside the loop: steer when a turn is in flight; run an
+idle turn when `allowIdleTurns` is not false and `onIdle` exists; drop
+otherwise. A throwing handler is guarded per message (one bad message never
+loses the batch or kills the loop).
 
-`createTelegramDriver(deps)` (pure, deps-injected — see
-`test/telegram-driver.test.ts`) must, per poll:
+**Chat allowlist (M2)**: a bot's `getUpdates` queue carries every chat that
+ever talked to it. Both bridges filter at parse time
+(`parseTelegramPollOutput` + `telegramAllowedChatIds` in
+`src/telegram/paths.ts`) — messages from any chat other than the configured
+`chatId` never reach the model.
 
-1. **Busy** (a task is in flight) → STEER every new message into the running
-   loop (as `[telegram from <sender>] <text>`) and return. The running loop's
-   final text is the user's answer; do NOT send a reply here.
-2. **Idle** → start ONE turn with the whole batch folded into a single prompt,
-   then send the turn's final text to the bot (with failure retry).
+## How to run
 
-Anti-contract to keep out: "drain one message + send + drain next" loops
-(sequential runs), or sending a per-message acknowledgement. The whole-batch
-fold is what stops a multi-message burst from producing N runs or a stale
-steering queue.
+1. **Setup once**: create a bot with @BotFather, write the token and chat id
+   into `~/.tre/telegram.json` (never committed — machine-level state). The
+   skill (`~/.tre/agent/skills/telegram/SKILL.md`) walks through it; the
+   chat id comes from `telegram.py chatids` after the user messages the bot.
+2. **Start a session** — the TUI (`tui`), the plain REPL (bare `tre.`, or
+   `--plain` on a TTY), or one-shot (`run "…"`). When the config and the
+   helper exist, the poller starts
+   automatically and announces itself:
+   - TUI: `telegram: polling every 15s (reply via bot)` (a chat item)
+   - REPL: `telegram: polling every 15s (long-poll; reply via bot)` (stderr)
+   - one-shot: silent — the driver starts with the run and steers only.
 
-`runPrompt` must NOT `setBusy(true)` itself — it asserts
-`opts.assumeBusy === true` and trusts the CALLER to have flipped busy
-synchronously before any await. The only two call sites that follow that
-contract are the interactive TUI's `submitInput` (and, for a Telegram batch,
-`src/tui/run.tsx` — see `submitInput` for the exact pattern). `promptOnce`
-does NOT flip busy: a non-interactive single prompt has no Telegram driver,
-and claiming busy there is a side effect without a purpose.
+   Per-mode routing of incoming messages:
 
-## Failure modes seen in the wild
+   | mode | idle | busy (turn in flight) |
+   | --- | --- | --- |
+   | TUI | a message starts a real run; the run's final text is sent back (fallback text when the turn produced none) | steered into the running turn; the batch is echoed as `telegram: N message(s) steered into the running turn` |
+   | REPL | same as TUI (idle turns + reply) | steered on the same path as a line typed at the prompt; the turn mutex serializes user turns and telegram idle-turns |
+   | one-shot | **no reply path** — dropped (single-turn contract) | steered into the run as guidance (startup backlog included) |
+   | `--plain` | forces the REPL path above — same idle+busy behavior | — |
 
-- `HTTP 409 Conflict … webhook is set` → delete the webhook in @BotFather.
-- `401` → token rotated in `~/.tre/telegram.json`; update it, don't retry.
-- A backgrounded `tre. run … | tee` with no stdin can sit forever in
-  `input()` — it never starts the driver (the driver starts AFTER input) and
-  never produces a result. Always pipe the prompt in.
-- A `tre. run` whose turn finishes WHILE a Telegram poll is in flight leaves
-  the poll's messages undelivered (the driver is torn down at turn end) —
-  drain them at the NEXT run with the pre-turn poll above.
+3. **Do NOT run `telegram.py poll` manually while a session is open** — the
+   poll consumes the pending updates from Telegram's queue (`getUpdates`
+   advances the offset), so the driver's next poll can never see the
+   message. No manual subcommand is a proven-safe peek while a session
+   runs: `chatids` uses `getUpdates offset=-20`, and a negative-offset
+   request FORGETS older updates in Telegram's buffer — it can drop the
+   backlog a session poller has not read yet. Chat discovery is a
+   setup-time step: do it before starting a session, or inside one started
+   with `--no-telegram` (any mode — it disables this process's poller, so no
+   consumer races you).
+4. **Send a notification without a live session** (the drivers only exist
+   while their session runs): write the text to the machine state dir and
+   invoke the helper directly —
 
-## Testing under the sandbox
+   ```bash
+   printf '%s\n' "<message text>" > ~/.tre/telegram/out.txt
+   python3 ~/.tre/agent/skills/telegram/telegram.py send ~/.tre/telegram/out.txt
+   ```
 
-The helper is `/usr/bin/python3` stdlib. `curl`/`git` TLS is broken inside
-the tre. sandbox and `node` is not on the sandboxed PATH; network calls only
-work with `sandboxx -c 'allow network*'` (see `~/.tre/sandboxx.json`). The
-driver's tests are hermetic (fake deps, no network, no real helper).
+5. **Single-consumer contract — one bot, one machine, one consumer.** The
+   offset file (`~/.tre/telegram/last_update_id`) is shared by every helper
+   invocation on the machine, and Telegram allows only one
+   `getUpdates` consumer per bot at a time (a second one gets 409). So:
+   never run a second tre. session (or any poller) against the same bot
+   while one is open, and never put the same bot config on two machines.
+   Concurrent pollers race on the shared offset and can consume, skip, or
+   duplicate each other's updates. One bot config = one session at a time.
+6. **Disable**: delete or rename `~/.tre/telegram.json` — every startup
+   falls back to plain stdin/TUI behavior (the bridges are `enabled: false`
+   and never spawn).
+
+## Testing
+
+- `test/telegram-paths.test.ts` — helper-path resolution across the two
+  skill roots (the 2026-10-02 "message sat undelivered" fix).
+- `test/telegram-chat-filter.test.ts` — M2 cross-chat leak: pure parse +
+  both bridges end-to-end with fake python3 helpers emitting multi-chat
+  batches.
+- `test/tui-telegram.test.ts` — the TUI bridge's error surfacing (helper
+  stderr in the thrown error, the 135 s backstop cap naming a timeout-kill)
+  and the pure TUI steer helpers (`steerTelegramBatch` / `steerTelegramBusy`).
+- `test/telegram-driver.test.ts` — the plain-CLI driver + bridge + main.ts
+  wiring: loop prevention (backoff growth/cap, success reset, min-interval
+  guard against an instantly-returning poll), steer-vs-idle routing,
+  `allowIdleTurns=false` never starting an idle turn, handler/loop error
+  containment, stop/stopAndDrain lifecycle, disabled-bridge no-ops, the
+  turn mutex, and the real `main()` paths (one-shot mid-run steer with no
+  bot reply, REPL mid-run steer, REPL idle turn + reply, and the disabled
+  regressions) driven through the injectable `telegramBridge` /
+  `telegramDriverOpts` seams in `MainDeps`.

@@ -225,6 +225,10 @@ export interface CliOptions {
    *  Bubblewrap on linux; elsewhere there is no backend, so bash runs
    *  unsandboxed with or without the flag). */
   noSandbox: boolean;
+  /** --no-telegram: never start the Telegram poller (this process only).
+   *  Lets `telegram.py chatids`/`poll` run on the same bot config without a
+   *  competing session consumer. */
+  noTelegram: boolean;
   /** C35: --extra-root <dir> (repeatable): explicitly assigned additional
    *  read/write regions (non-sensitive dirs under the user's home), in
    *  addition to the workspace. ONE-SHOT — applies to this launch only, never
@@ -262,6 +266,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     noCompact: false,
     compactKeepTokens: 8192,
     noSandbox: false,
+    noTelegram: false,
     extraRoots: [],
     errors: [],
   };
@@ -326,7 +331,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       i += 2;
     } else if (a === "--yes" || a === "--no-approve" || a === "--ask" ||
-               a === "--no-compact" || a === "--no-sandbox" || a === "--session-auto" ||
+               a === "--no-compact" || a === "--no-sandbox" || a === "--no-telegram" ||
+               a === "--session-auto" ||
                a === "--plain") {
       if (a === "--yes") opts.yes = true;
       else if (a === "--no-approve") opts.noApprove = true;
@@ -334,6 +340,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (a === "--no-compact") opts.noCompact = true;
       else if (a === "--session-auto") opts.sessionAuto = true;
       else if (a === "--plain") plainFlag = true;
+      else if (a === "--no-telegram") opts.noTelegram = true;
       else opts.noSandbox = true;
       i++;
     } else if (a === "--help" || a === "-h") {
@@ -1298,6 +1305,13 @@ export interface MainDeps {
    *  spawn-based bridge (enabled only when ~/.tre/telegram.json + the helper
    *  exist). */
   telegramBridge?: TelegramBridge;
+  /** Telegram driver overrides (tests injecting a fake bridge). Production
+   *  uses the long-poll cadence (TELEGRAM_LONG_POLL_SEC, 15s). A fake-bridge
+   *  test lowers `minIntervalMs`/`failBaseMs`: the driver's min-interval guard
+   *  (driver.ts loop-prevention #2) paces the poll loop and a fake poll returns
+   *  instantly — at the 15s default a steer/idle round-trip would take longer
+   *  than any test may wait. No production caller sets these. */
+  telegramDriverOpts?: { minIntervalMs?: number; failBaseMs?: number; failCapMs?: number };
   /** Worker registry dir override (tests); undefined uses the shared home registry. */
   workerDir?: string;
   /** Injectable home dir (tests); default: os.homedir(). */
@@ -2047,6 +2061,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       buildExecutor,
       noCompact: args.noCompact,
       compactKeepTokens: args.compactKeepTokens,
+      noTelegram: args.noTelegram,
       // C34: the full catalog + a prompt rebuild for /models switches (the
       // system prompt embeds the model name, so a switch must rebuild it).
       modelsFile,
@@ -2144,8 +2159,15 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // src/telegram/driver.ts. Inert when the bridge is not enabled (no
   // ~/.tre/telegram.json + helper). The driver is created per branch below
   // (one-shot vs REPL) because the executor + turn bookkeeping differ.
-  const telegramBridge =
-    deps.telegramBridge ?? makeTelegramBridge(root, deps.home ?? homedir());
+  const telegramBridge = (() => {
+    const b = deps.telegramBridge ?? makeTelegramBridge(root, deps.home ?? homedir());
+    // --no-telegram: force the bridge OFF for THIS process (the flag wins over
+    // an existing config, and over an injected test bridge), so no poller
+    // competes for the bot's update queue while e.g. `telegram.py chatids`
+    // runs against the same config. The driver's start() checks
+    // bridge.enabled, so a disabled bridge never polls.
+    return args.noTelegram && b.enabled ? { ...b, enabled: false } : b;
+  })();
   // The in-flight run's steer sink (the driver's onSteer pushes into it).
   let activeSteer: SteeringQueue | null = null;
   // One steering queue per run — a closure over a plain array (the contract
@@ -2168,6 +2190,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
     onPollError: (err: unknown, delayMs: number) =>
       telegramInfo(`poll error — backing off ${Math.round(delayMs / 1000)}s: ${String(err)}`),
     onHandlerError: (err: unknown) => telegramInfo(`idle-turn error: ${String(err)}`),
+    // Test seam (see MainDeps.telegramDriverOpts): production leaves these at
+    // the driver defaults (15s min-interval / 1s fail base / 60s fail cap).
+    ...(deps.telegramDriverOpts ?? {}),
   };
 
   // SIGINT: first aborts the active run, second exits (plain CLI only).
@@ -2209,7 +2234,13 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       // NOT start a new run. The driver is loop-prevented (see driver.ts).
       const driver = new TelegramDriver(
         telegramBridge,
-        { onSteer: (m) => steerQueue.push(`[telegram from ${m.sender}] ${m.text}`) },
+        {
+          onSteer: (m) => {
+            // Route through the driver: pre-attach (or a steer racing the
+            // handoff) lands in the buffer and is claimed by attach below.
+            driver.steer(`[telegram from ${m.sender}] ${m.text}`);
+          },
+        },
         { ...telegramDriverOpts, allowIdleTurns: false },
       );
       void driver.start();
@@ -2218,16 +2249,23 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       const dir = deps.workerDir ?? workerDir();
       try {
         try { writeWorkerStatus(dir, worker); } catch { /* Visibility is best-effort. */ }
-        const { outcome } = await driver.withTurn(() =>
-          runTurn({
-            model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-            prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
-            executeToolCall: executor,
-            entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
-            steeringQueue: steerQueue,
-            tap: makeWorkerTap(worker, dir),
-          }),
-        );
+        const { outcome } = await driver.withTurn(async () => {
+          // Attach AFTER acquiring the mutex: a steer that raced the
+          // pre-attach window sits in the buffer and is claimed here.
+          for (const t of driver.attachSteerTarget(steerQueue, "run")) steerQueue.push(t);
+          try {
+            return await runTurn({
+              model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+              prompt: args.prompt!, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+              executeToolCall: executor,
+              entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+              steeringQueue: steerQueue,
+              tap: makeWorkerTap(worker, dir),
+            });
+          } finally {
+            driver.detachSteerTarget();
+          }
+        });
         driver.stop();
         worker.status = workerOutcomeStatus(outcome.stopReason);
         worker.activity = worker.status === "done" ? "done" : outcome.stopReason;
@@ -2332,7 +2370,10 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       telegramBridge,
       {
         onSteer: (m) => {
-          activeSteer?.push(`[telegram from ${m.sender}] ${m.text}`);
+          // Route through the driver: an attached queue gets it directly;
+          // a steer racing the mutex handoff lands in the driver's buffer
+          // and reaches the next turn body (see driver.ts steer()).
+          td.steer(`[telegram from ${m.sender}] ${m.text}`);
         },
         onIdle: async (msgs) => {
           const prompt = msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`).join("\n");
@@ -2342,6 +2383,11 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
           controller = new AbortController();
           const steerQueue = makeSteerQueue();
           activeSteer = steerQueue;
+          // Claim the handoff buffer: steers that raced into this turn
+          // (driver saw "idle" while the mutex was already ours) or out of
+          // the previous turn are injected via the queue before the loop's
+          // first drain. After attach, steers route here directly.
+          for (const t of td.attachSteerTarget(steerQueue, "telegram-idle")) steerQueue.push(t);
           try {
             const result = await runTurn({
               model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
@@ -2359,6 +2405,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
             );
             telegramInfo("replied via the bot");
           } finally {
+            td.detachSteerTarget();
             active = false;
             lastInt = 0;
             activeSteer = null;
@@ -2517,22 +2564,40 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
         continue;
       }
       controller = new AbortController();
-      active = true;
-      const steerQueue = makeSteerQueue();
-      activeSteer = steerQueue;
       try {
         // Run under the driver's turn mutex so a telegram idle-turn and a user
-        // turn never run concurrently on the shared context.
-        const result = await td.withTurn(() =>
-          runTurn({
-            model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
-            prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
-            executeToolCall: executor,
-            entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
-            charsPerToken: cpt,
-            steeringQueue: steerQueue,
-          }),
-        );
+        // turn never run concurrently on the shared context. The in-flight
+        // bookkeeping (active/activeSteer) happens INSIDE the mutex: between
+        // the user pressing Enter and the mutex being granted, an idle-turn
+        // may still be finishing its reply — marking this turn active BEFORE
+        // the handoff would route a telegram steer into the waiting turn's
+        // queue, and the idle turn's finally would then clear it away
+        // (activeSteer = null) — a silently lost steer. Inside the mutex, the
+        // previous holder's finally has run, so the steer can only land in the
+        // queue of the turn that actually runs.
+        const result = await td.withTurn(async () => {
+          active = true;
+          const steerQueue = makeSteerQueue();
+          activeSteer = steerQueue;
+          // Attach AFTER acquiring the mutex (and claim the handoff buffer):
+          // a steer that raced the previous turn's end or this turn's start
+          // reaches THIS queue, before the loop's first drain.
+          for (const t of td.attachSteerTarget(steerQueue, "user")) steerQueue.push(t);
+          try {
+            return await runTurn({
+              model, systemPrompt, tools: wiredTools, streamFn, controller, context, session,
+              prompt, sinks, maxTurns: args.maxTurns, maxContinuations: args.maxContinuations,
+              executeToolCall: executor,
+              entryIds, noCompact: args.noCompact, compactKeepTokens: args.compactKeepTokens,
+              charsPerToken: cpt,
+              steeringQueue: steerQueue,
+            });
+          } finally {
+            // Detach before the mutex releases: a steer racing the turn's
+            // end lands in the driver's buffer, not this dead queue.
+            td.detachSteerTarget();
+          }
+        });
         context = result.context;
         cpt = result.charsPerToken;
       } finally {

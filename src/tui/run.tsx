@@ -348,7 +348,9 @@ export interface TuiRunOptions {
   buildExecutor: (ask: AskApproval) => ExecuteToolCall;
   noCompact?: boolean;
   compactKeepTokens?: number;
-  /** D15: static labels for the `/display-bottom` fields. */
+  /** `--no-telegram`: never start the Telegram poller (chat discovery /
+   *  bring-your-own-python runs on the same bot config). */
+  noTelegram?: boolean;
   cwd?: string;
   sessionPath?: string;
   /** Historical model totals loaded from all local session logs. */
@@ -1335,7 +1337,7 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
       telegramTimer = undefined;
     }
   };
-  if (telegram.enabled) {
+  if (telegram.enabled && !opts.noTelegram) {
     telegramInfo(`telegram: polling every ${TELEGRAM_POLL_MS / 1000}s (reply via bot)`);
     // Self-rescheduling setTimeout (not setInterval): the next tick is only
     // armed after the previous one settles, so a slow poll (a 429 sleep, a

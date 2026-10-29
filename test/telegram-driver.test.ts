@@ -1,5 +1,6 @@
 /**
- * Background Telegram driver (plain CLI) — loop prevention + routing.
+ * Background Telegram driver (plain CLI) — loop prevention + routing +
+ * main.ts wiring.
  *
  * The CORE of this feature is that the background poll loop CANNOT hot-spin:
  * a naive `while (true) { poll(); }` spins hundreds of times/second when a
@@ -7,8 +8,10 @@
  * loop-prevention mechanisms (long-poll self-pacing, the min-interval hard
  * cap, and capped exponential backoff on failure) with a FAKE bridge (no
  * network, controlled timing) plus the steer-vs-idle routing and the turn
- * mutex. The main.ts wiring is covered by the regression tests at the bottom
- * (the no-telegram path must be unchanged).
+ * mutex. The bottom section covers the main.ts wiring itself (the D31 tests):
+ * one-shot steer + no idle turn + no reply, REPL idle-turn start + reply +
+ * pre-prompt poll start + user/telegram serialization, and the disabled
+ * no-telegram path (must be unchanged).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -295,6 +298,52 @@ test("mutex: two turns run SERIALLY, never concurrently", async () => {
   assert.equal(overlap, false, "two turns must not run concurrently on the shared context");
 });
 
+// ── STEER HANDOFF BUFFER (attach/detach/steer) ──────────────────────────────
+
+function mkQueue(): { push(t: string): void; drain(): string[]; seen: string[] } {
+  const seen: string[] = [];
+  return {
+    push(t: string) { seen.push(t); },
+    drain() { const d = [...seen]; seen.length = 0; return d; },
+    seen,
+  };
+}
+
+test("handoff buffer: a steer with NO attached queue is buffered, claimed in order by the next labeled attach", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  // Pre-attach (the one-shot window between driver.start() and the turn body):
+  driver.steer("first");
+  driver.steer("second");
+  assert.deepEqual(driver.steerClaims, [], "nothing claimed yet");
+  const q = mkQueue();
+  const claimed = driver.attachSteerTarget(q, "run");
+  assert.deepEqual(claimed, ["first", "second"], "the buffer drains in ARRIVAL order");
+  assert.deepEqual(driver.steerClaims, [
+    { text: "first", claimedBy: "run" },
+    { text: "second", claimedBy: "run" },
+  ], "the claim log tags each message with the claiming body");
+  // After attach: steers route DIRECTLY to the queue, not the buffer.
+  driver.steer("live");
+  assert.deepEqual(claimed, ["first", "second"], "the buffer was not refilled");
+  assert.deepEqual(q.seen, ["live"], "attached → direct routing");
+});
+
+test("handoff buffer: a steer racing the turn END is detached to the buffer and reaches the NEXT body", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  const q1 = mkQueue();
+  driver.attachSteerTarget(q1, "user");
+  driver.detachSteerTarget(); // the turn body finished; the mutex may not have released yet
+  driver.steer("raced-the-end"); // lands in the buffer, NOT q1
+  assert.deepEqual(q1.seen, [], "a detached steer must not enter the dead queue");
+  const q2 = mkQueue();
+  assert.deepEqual(driver.attachSteerTarget(q2, "telegram-idle"), ["raced-the-end"],
+    "the next body claims it before its first drain");
+  assert.deepEqual(driver.steerClaims, [{ text: "raced-the-end", claimedBy: "telegram-idle" }],
+    "the claim records WHICH body rescued the steer");
+});
+
 // ── STOP-AND-DRAIN (restart safety) ─────────────────────────────────────────
 
 test("stopAndDrain: stops polling AND waits for the in-flight turn to settle", async () => {
@@ -482,4 +531,356 @@ test("regression: the REPL runs a turn and /quit exits 0 when the bridge is DISA
   assert.equal(code, 0);
   assert.ok(S.out.join("").includes("hi there"));
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ── main.ts WIRING (D31) ─────────────────────────────────────────────────────
+// The tests above cover the driver in isolation; these drive main() itself
+// with an injected fake bridge (no network, no machine-level telegram config
+// needed). THE GATE: the loop drains the steering queue BEFORE each LLM call,
+// so a steer pushed while a turn is open must be IN THE CONTEXT at the next
+// stream call — the assertion reads the captured context, not the rendered
+// output. Every wait is bounded (waitUntil) so a broken wiring fails loudly
+// instead of hanging. The fake poll returns instantly, so the driver's
+// min-interval guard paces the loop; deps.telegramDriverOpts lowers it to
+// test speed (production keeps the 15s long-poll defaults).
+
+/** A bridge with a wake-able long-poll: pushMessage() either answers the
+ *  poll currently blocking (exactly like the real helper returning a message
+ *  mid-window) or queues it for the next poll. `pendingDelayMs` adds a real
+ *  (macrotask) delay before a QUEUED message is delivered — modeling the
+ *  real helper's process spawn, which always lands after the synchronous
+ *  driver/turn wiring has settled. `events` records send order (shared with
+ *  the stream wrapper to assert turn serialization). */
+class GateBridge implements TelegramBridge {
+  enabled = true;
+  sent: string[] = [];
+  pollCount = 0;
+  /** Polls that RETURNED a batch (the delivery-observable). */
+  delivered = 0;
+  private pending: TelegramMessage[][] = [];
+  private waiting: ((m: TelegramMessage[] | null) => void) | null = null;
+  constructor(
+    private readonly pendingDelayMs = 0,
+    private readonly events?: string[],
+  ) {}
+  pushMessage(msg: TelegramMessage): void {
+    if (this.waiting) {
+      const w = this.waiting;
+      this.waiting = null;
+      this.delivered += 1;
+      w([msg]);
+      return;
+    }
+    this.pending.push([msg]);
+  }
+  async pollLong(timeoutSec: number, signal?: AbortSignal): Promise<TelegramMessage[] | null> {
+    this.pollCount += 1;
+    if (this.pending.length > 0) {
+      const batch = this.pending.shift()!;
+      if (this.pendingDelayMs > 0) {
+        // A real poll is a process spawn — it never resolves in the same
+        // microtask batch as driver.start()/withTurn. The delay models that.
+        await sleep(this.pendingDelayMs);
+      }
+      this.delivered += 1;
+      return batch;
+    }
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (m: TelegramMessage[] | null): void => {
+        if (done) return;
+        done = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.waiting = null;
+        resolve(m);
+      };
+      const onAbort = (): void => finish(null);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiting = finish;
+      // Safety: a bridge that never wakes must not hang the test forever.
+      setTimeout(() => finish(null), Math.max(timeoutSec * 1000, 5_000)).unref?.();
+    });
+  }
+  async send(text: string): Promise<void> {
+    this.sent.push(text);
+    this.events?.push("sent");
+  }
+}
+
+const TG_MSG = (text: string): TelegramMessage => ({ chatId: "1", sender: "tester", text });
+
+/** Per-stream-call context snapshots (the observable: what the LLM was ABOUT
+ *  to see). A drain that works lands the steer in call #2's messages.
+ *  `opts.classify` + `opts.order`: also record a labeled ORDER of stream
+ *  calls / bridge sends (serialization evidence — e.g. an idle reply must
+ *  complete before a user turn's first call). */
+function snapshotStream(
+  base: ReturnType<typeof fakeStream>,
+  opts?: { classify?: (msgs: AgentMessage[]) => string; order?: string[] },
+): {
+  fn: NonNullable<Parameters<typeof main>[1]>["streamFn"];
+  calls: AgentMessage[][];
+  releaseGate: () => void;
+} {
+  const calls: AgentMessage[][] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let released = false;
+  const fn: NonNullable<NonNullable<Parameters<typeof main>[1]>["streamFn"]> = (model, ctx, o) => {
+    const msgs = ctx.messages ?? [];
+    calls.push([...msgs]);
+    if (opts?.classify && opts.order) opts.order.push(opts.classify(msgs));
+    const inner = base(model, ctx, o)[Symbol.asyncIterator]();
+    if (calls.length === 1 && !released) {
+      // Turn 1: emit its first event, then HOLD the turn open (mid-run)
+      // until the harness has handed the steer to the driver's poll.
+      return (async function* () {
+        const first = await inner.next();
+        if (!first.done) yield first.value;
+        await gate;
+        for (;;) {
+          const r = await inner.next();
+          if (r.done) return;
+          yield r.value;
+        }
+      })();
+    }
+    return (async function* () {
+      for (;;) {
+        const r = await inner.next();
+        if (r.done) return;
+        yield r.value;
+      }
+    })();
+  };
+  return {
+    fn,
+    calls,
+    releaseGate: () => {
+      released = true;
+      release();
+    },
+  };
+}
+
+const hasSteer = (msgs: AgentMessage[], needle: string): boolean =>
+  msgs.some((m) => m.role === "user" && typeof m.content === "string" && m.content.includes(needle));
+
+test("wiring: one-shot — a message arriving MID-RUN steers the loop; nothing is replied via the bot", async () => {
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const bridge = new GateBridge();
+    const st = snapshotStream(
+      fakeStream([
+        { type: "text", text: "first answer" },
+        { type: "text", text: "final answer after steer" },
+      ]),
+    );
+    const code = main(
+      ["run", "do the thing", "--tools", "none", "--models", models, "--cwd", dir],
+      {
+        streamFn: st.fn,
+        sinks: S.sinks,
+        telegramBridge: bridge,
+        workerDir: dir,
+        telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
+      },
+    );
+    // 1. The turn must be RUNNING before the message arrives (else one-shot
+    //    would correctly drop it) — wait for the first stream call.
+    await waitUntil(() => st.calls.length >= 1, 5000, "turn 1 started (stream called)");
+    // 2. Push + release in ONE synchronous block: pushMessage resolves the
+    //    driver's blocked poll first (its continuation — the onSteer push —
+    //    queues before the generator's release continuation), so the steer is
+    //    in the queue before the loop drains for call #2.
+    bridge.pushMessage(TG_MSG("STEERMARK fold that in"));
+    st.releaseGate();
+    // 3. GATE: the steer reached the LOOP — it is a user message in the
+    //    context of the next LLM call (not merely polled).
+    await waitUntil(() => st.calls.length >= 2, 5000, "turn 2 stream call");
+    assert.ok(hasSteer(st.calls[1]!, "STEERMARK"), `steer injected into the context (calls: ${st.calls.length})`);
+    assert.equal(await code, 0);
+    const out = S.out.join("");
+    assert.ok(out.includes("final answer after steer"));
+    assert.deepEqual(bridge.sent, [], "one-shot never replies via the bot (steer only)");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wiring: one-shot — a message already queued at STARTUP (the boot backlog) steers the run", async () => {
+  // The user texted while tre. was still booting: the message sits in
+  // Telegram's queue BEFORE the driver starts. The first poll round must
+  // return it (a real helper answers instantly when updates await —
+  // pendingDelayMs models the process spawn so delivery lands AFTER the
+  // synchronous start()/withTurn wiring, exactly like the real thing) and
+  // steer it into the in-flight run — NOT drop it, NOT start a second run.
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const bridge = new GateBridge(25); // queued messages deliver after ~25ms
+    bridge.pushMessage(TG_MSG("STEERMARK queued during boot")); // BEFORE main()
+    const st = snapshotStream(
+      fakeStream([
+        { type: "text", text: "first answer" },
+        { type: "text", text: "final answer after backlog steer" },
+      ]),
+    );
+    const code = main(
+      ["run", "do the thing", "--tools", "none", "--models", models, "--cwd", dir],
+      {
+        streamFn: st.fn,
+        sinks: S.sinks,
+        telegramBridge: bridge,
+        workerDir: dir,
+        telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
+      },
+    );
+    await waitUntil(() => st.calls.length >= 1, 5000, "run started (stream called)");
+    // Wait for the poll to have DELIVERED the backlog batch (the steer is
+    // pushed by the loop in the same continuation), THEN let turn 1 finish.
+    await waitUntil(() => bridge.delivered >= 1, 5000, "startup backlog delivered by the first poll");
+    st.releaseGate();
+    await waitUntil(() => st.calls.length >= 2, 5000, "turn 2 stream call");
+    assert.ok(hasSteer(st.calls[1]!, "STEERMARK"), "the boot-time backlog was steered into the run (not dropped)");
+    assert.equal(await code, 0);
+    assert.ok(S.out.join("").includes("final answer after backlog steer"));
+    assert.deepEqual(bridge.sent, [], "one-shot never replies via the bot (steer only)");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wiring: REPL — a mid-run message STEERS the user turn (no bot reply); a later /quit exits 0", async () => {
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const bridge = new GateBridge();
+    const st = snapshotStream(
+      fakeStream([
+        { type: "text", text: "first answer" },
+        { type: "text", text: "final answer after steer" },
+      ]),
+    );
+    const stdin = new Readable({ read: () => {} });
+    stdin.push("do the thing\n");
+    const code = main(["--tools", "none", "--models", models, "--cwd", dir], {
+      streamFn: st.fn,
+      sinks: S.sinks,
+      telegramBridge: bridge,
+      stdin,
+      telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
+    });
+    await waitUntil(() => st.calls.length >= 1, 5000, "user turn started");
+    bridge.pushMessage(TG_MSG("STEERMARK fold that in"));
+    st.releaseGate();
+    await waitUntil(() => st.calls.length >= 2, 5000, "turn 2 stream call");
+    assert.ok(hasSteer(st.calls[1]!, "STEERMARK"), "telegram steer reached the REPL user turn's context");
+    // Close stdin only AFTER the steer round-trip: the REPL then reads /quit.
+    stdin.push("/quit\n");
+    stdin.push(null);
+    assert.equal(await code, 0);
+    assert.ok(S.out.join("").includes("final answer after steer"));
+    assert.deepEqual(bridge.sent, [], "a steered REPL turn is not replied via the bot");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wiring: REPL idle — a message with NO turn in flight runs a turn and replies via the bot", async () => {
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const bridge = new GateBridge();
+    const stdin = new Readable({ read: () => {} });
+    const code = main(["--tools", "none", "--models", models, "--cwd", dir], {
+      streamFn: fakeStream([{ type: "text", text: "Idle reply via bot" }]),
+      sinks: S.sinks,
+      telegramBridge: bridge,
+      stdin,
+      telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
+    });
+    // Wait until the driver is polling, then deliver while the REPL IDLES —
+    // onIdle runs the turn and sends the reply through the bridge.
+    await waitUntil(() => bridge.pollCount >= 1, 5000, "driver polling started");
+    bridge.pushMessage(TG_MSG("hello from the phone"));
+    await waitUntil(() => bridge.sent.length >= 1, 8000, "idle turn replied via the bot");
+    assert.equal(bridge.sent[0], "Idle reply via bot");
+    assert.ok(S.err.join("").includes("replied via the bot"));
+    stdin.push("/quit\n");
+    stdin.push(null);
+    assert.equal(await code, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("wiring: REPL — a telegram idle-turn and typed input SERIALIZE (never concurrent turns)", async () => {
+  // THE SERIALIZATION GATE: a telegram message arrives while the REPL is
+  // idle (its onIdle turn starts, holding the driver's turn mutex); a line
+  // TYPED at the prompt during that window must WAIT for the idle turn to
+  // fully settle — reply sent — before its own first LLM call. The order
+  // observable: ["idle" call, "sent", "user" call]. An unserialized wiring
+  // would run the user turn against the shared context WHILE the idle turn
+  // is still writing to it (its call lands before "sent").
+  const { dir, models } = await workspace();
+  try {
+    const S = mkSinks();
+    const order: string[] = [];
+    const bridge = new GateBridge(25, order);
+    const classify = (msgs: AgentMessage[]): string => {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]!;
+        if (m.role !== "user" || typeof m.content !== "string") continue;
+        if (m.content.includes("USERMARK")) return "user";
+        if (m.content.includes("TGIDLEMARK")) return "idle";
+      }
+      return "other";
+    };
+    const st = snapshotStream(
+      fakeStream([
+        { type: "text", text: "Idle reply via bot" },
+        { type: "text", text: "User turn reply" },
+      ]),
+      { classify, order },
+    );
+    const stdin = new Readable({ read: () => {} });
+    const code = main(["--tools", "none", "--models", models, "--cwd", dir], {
+      streamFn: st.fn,
+      sinks: S.sinks,
+      telegramBridge: bridge,
+      stdin,
+      telegramDriverOpts: { minIntervalMs: 40, failBaseMs: 10, failCapMs: 50 },
+    });
+    // The telegram message is queued before main(); the FIRST poll delivers
+    // it (~25ms) and the idle turn starts — its stream call is held open by
+    // the snapshot gate, so the idle turn is verifiably IN FLIGHT below.
+    bridge.pushMessage(TG_MSG("TGIDLEMARK hello while idle"));
+    await waitUntil(() => st.calls.length >= 1, 5000, "idle turn started (stream called)");
+    assert.equal(st.calls[0] && classify(st.calls[0]!), "idle", "the held-open turn is the TELEGRAM idle turn");
+    // Type at the prompt WHILE the idle turn holds the mutex.
+    stdin.push("USERMARK typed during the idle turn\n");
+    // Bounded wait: the user turn must NOT reach the LLM while the idle turn
+    // is still open (no second stream call, and no "user" in the order).
+    await sleep(80);
+    assert.equal(st.calls.length, 1, "the typed line must NOT start a turn while the idle turn is in flight");
+    assert.ok(!order.includes("user"), "user turn started before the idle turn settled — turns are NOT serialized");
+    // Settle the idle turn: it replies, releases the mutex, THEN the user
+    // turn runs.
+    st.releaseGate();
+    await waitUntil(() => order.includes("sent"), 5000, "idle reply sent");
+    await waitUntil(() => order.includes("user"), 5000, "user turn ran after the idle turn settled");
+    assert.deepEqual(order, ["idle", "sent", "user"], "idle turn fully settled (reply sent) before the typed line's turn began");
+    const userCall = st.calls[1]!;
+    assert.ok(hasSteer(userCall, "USERMARK"), "the typed line ran as its own turn");
+    stdin.push("/quit\n");
+    stdin.push(null);
+    assert.equal(await code, 0);
+    const out = S.out.join("");
+    assert.ok(out.includes("Idle reply via bot"), "the idle reply was printed");
+    assert.ok(out.includes("User turn reply"), "the user turn was printed");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

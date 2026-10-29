@@ -32,6 +32,7 @@
  * turns, so two turns never run concurrently on the shared context).
  */
 import { TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "./bridge.js";
+import type { SteeringQueue } from "../loop/agent-loop.js";
 
 /** Sleep for `ms`, resolving early if `signal` aborts. */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -60,6 +61,18 @@ export interface TelegramDriverHandlers {
 }
 
 export interface TelegramDriverOptions {
+  /** Grace window (ms) for a steer whose dispatch raced a turn handoff. The
+   *  dispatch decision (`turnInFlight` at poll time) and the REPL's
+   *  bookkeeping (activeSteer inside withTurn, see main.ts) cannot be atomic:
+   *  a poll landing between a user turn acquiring the mutex and its
+   *  bookkeeping sees "idle", and the idle path takes over. When the window
+   *  elapses and no idle turn claimed the message, the driver STEERS it into
+   *  whatever holds the mutex by then. The window is well under one human
+   *  second, so a real idle message costs at most `minIntervalMs +
+   *  steerGraceMs` (~25s at the 15s cadence, steer-only + a few ms) — and a
+   *  steer is never silently dropped at a turn boundary. 0 disables the
+   *  window (the message falls to the idle path immediately). Default 200. */
+  steerGraceMs?: number;
   /** Base delay for the failure backoff (ms). Default 1000. */
   failBaseMs?: number;
   /** Cap on the failure backoff (ms). Default 60000 (a persistent failure
@@ -100,7 +113,13 @@ export class TelegramDriver {
 
   /** Run `fn` with the turn mutex held — serializes user + telegram turns so
    *  two turns never run concurrently on the shared context. `turnInFlight`
-   *  is true for the duration of the body. */
+   *  is true for the duration of the body. The acquisition (awaiting the
+   *  previous holder) happens SYNCHRONOUSLY at call time — before any `await`
+   *  in the caller — so a poll that lands between the caller's withTurn() and
+   *  its body starting observes `turnInFlight === true` and steers. The
+   *  caller's in-flight bookkeeping must happen INSIDE the body: until the
+   *  body runs, a steer routes to the driver's handoff buffer (see
+   *  deferredSteers). */
   async withTurn<T>(fn: () => Promise<T>): Promise<T> {
     const prev = this.turnChain;
     let release!: () => void;
@@ -113,6 +132,56 @@ export class TelegramDriver {
       this.holding = false;
       release();
     }
+  }
+
+  /** Steers whose dispatch raced a turn handoff (see steerGraceMs): claimed
+   *  while no turn body had attached its steer queue yet. Cleared by the next
+   *  attachSteerTarget — a steer that raced a turn START or a turn END
+   *  reaches the next body's context drain instead of being lost. */
+  private deferredSteers: string[] = [];
+
+  /** The steer target of the turn currently holding the mutex (set by
+   *  attachSteerTarget, cleared by detachSteerTarget). */
+  private steerTarget: SteeringQueue | null = null;
+
+  /** Attach the running turn's steer queue — call at the START of the turn
+   *  body, inside withTurn; pass the SAME queue the loop drains. First
+   *  drains the handoff buffer and returns the messages claimed while no
+   *  queue was attached (in arrival order) — the body injects them like any
+   *  steer. After this call, steers route directly into `queue`. `label`
+   *  (when given) tags each claimed message with the body that claimed it —
+   *  for tests and operator visibility into the buffer drain (e.g. a typed
+   *  line's body claiming telegram text polled before the handoff). */
+  attachSteerTarget(queue: SteeringQueue, label?: string): string[] {
+    const claimed = this.deferredSteers;
+    this.deferredSteers = [];
+    this.steerTarget = queue;
+    if (label !== undefined) {
+      for (const t of claimed) this.steerClaims.push({ text: t, claimedBy: label });
+    }
+    return claimed;
+  }
+
+  /** Every steer that was claimed out of the handoff buffer, in claim order,
+   *  tagged with the claiming body (only claims made through a labeled
+   *  attachSteerTarget are recorded). */
+  readonly steerClaims: { text: string; claimedBy: string }[] = [];
+
+  /** Detach at the END of the turn body (finally, inside the mutex). Any
+   *  steer that races between the detach and the mutex release lands in the
+   *  buffer instead of the finished turn's queue — and reaches the next
+   *  turn via attachSteerTarget. */
+  detachSteerTarget(): void {
+    this.steerTarget = null;
+  }
+
+  /** Route one message: direct to the attached queue, else into the
+   *  handoff buffer (claimed by the next turn body). Use this from the
+   *  onSteer handlers — pushing to a captured queue directly loses messages
+   *  that race the mutex handoff. */
+  steer(msg: string): void {
+    if (this.steerTarget) this.steerTarget.push(msg);
+    else this.deferredSteers.push(msg);
   }
 
   /** Start the background poll loop (no-op if the bridge is not enabled or
@@ -177,14 +246,32 @@ export class TelegramDriver {
                 this.opts.onHandlerError?.(err);
               }
             }
-          } else if (this.opts.allowIdleTurns !== false && this.handlers.onIdle) {
-            void this.withTurn(async () => {
-              try {
-                await this.handlers.onIdle!(msgs);
-              } catch (err) {
-                this.opts.onHandlerError?.(err);
+          } else {
+            // Idle. The caller may have acquired the turn mutex WITHOUT its
+            // bookkeeping having run yet (a user turn between withTurn() and
+            // its body), or be waiting behind an idle turn whose finally has
+            // not run (activeSteer still null). Wait out the (tiny) handoff
+            // window instead of claiming the message for an idle turn at
+            // once — then steer wherever the mutex settled.
+            const grace = this.opts.steerGraceMs ?? 200;
+            if (grace > 0) await sleep(grace, this.abort.signal);
+            if (this.stopped) break;
+            if (this.turnInFlight) {
+              for (const m of msgs) {
+                try {
+                  this.handlers.onSteer(m);
+                } catch (err) {
+                  this.opts.onHandlerError?.(err);
+                }
               }
-            });
+            } else if (this.opts.allowIdleTurns !== false && this.handlers.onIdle) {              void this.withTurn(async () => {
+                try {
+                  await this.handlers.onIdle!(msgs);
+                } catch (err) {
+                  this.opts.onHandlerError?.(err);
+                }
+              });
+            }
           }
         }
         // Loop-prevention #2 — the hard cap: enforce a minimum interval between

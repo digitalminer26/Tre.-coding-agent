@@ -139,6 +139,58 @@ model you want (the `id` is OpenRouter's `vendor/model` slug, e.g.
 - `contextWindow`/`maxTokens` are per model — check the model's page on
   openrouter.ai.
 
+### Telegram bridge (optional)
+
+While a `tre.` session is open you can talk to it from your phone: the
+session polls a Telegram bot and routes your messages per mode. It is
+**inert by default** — nothing runs until you complete the one-time setup:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and write the token
+   to `~/.tre/telegram.json` (machine-level, never in the repo):
+   `{"token": "<token>", "chatId": ""}`.
+2. Message your bot once (e.g. `/start`), then fill `chatId` with the chat id
+   from that message — **with no other tre. session running** (the pollers
+   own the update queue; see the caution below):
+   `python3 ~/.tre/agent/skills/telegram/telegram.py chatids`.
+
+Behavior once the config exists (the poller starts automatically and says so
+— the TUI shows `telegram: polling every 15s (reply via bot)` as a chat item,
+the REPL prints `telegram: polling every 15s (long-poll; reply via bot)` on
+stderr; one-shot stays silent and steers only):
+
+| Mode | Idle | Busy (turn in flight) |
+| --- | --- | --- |
+| **TUI** (`tre. tui`) | a Telegram message starts a real turn; the turn's final text is sent back (fallback text when the turn produced none) | the message is steered into the running turn |
+| **REPL** (plain: piped stdin or `--plain`) | same as TUI — the reply is the ack | steered on the same path as a line typed at the prompt (the driver's turn mutex serializes user turns and Telegram idle-turns) |
+| **one-shot** (`tre. run "…"`) | **no reply path** — a message with no run in flight is dropped (single-turn contract) | steered into the run as guidance (the startup backlog included); one-shot never replies via the bot |
+| `--plain` | forces the REPL path above — same idle+busy behavior | — |
+
+Everything else is automatic: the bridges resolve the `telegram.py` helper
+from the skill roots (project `.tre/skills/` then user
+`~/.tre/agent/skills/`), poll every 15 s (the TUI non-blocking, the plain
+CLI long-poll), forward mid-run messages as steering input prefixed
+`[telegram from <name>]`, and back off on failures with a cap that makes a
+hot loop impossible. Poll errors and turn failures are reported as
+`telegram: …` lines (a TUI info item, or stderr on the plain CLI). If either
+the config or the helper is missing, the bridge simply never starts.
+
+**Never run `telegram.py poll` yourself while a session is open** — any poll
+consumes the pending updates from Telegram's queue before the driver's
+long-poll sees them, so the driver can never see the message. The driver
+owns the queue while the session is alive. `chatids` is **not** a safe peek
+either: it uses `getUpdates offset=-20`, and a negative-offset request
+forgets older updates in Telegram's buffer — it can drop messages the
+session poller has not read yet. Run chat discovery only at setup, with no
+session running — or start the session with `--no-telegram` (any mode, TUI
+included; it disables that process's poller). Keep **one consumer per bot**:
+the offset (`~/.tre/telegram/last_update_id`) is machine-level, shared by
+every helper invocation, and Telegram allows only one `getUpdates` consumer
+per bot — never open two sessions on the same bot config, and never put the
+same bot on two machines. To **send** without a live session (the driver
+only exists while its session runs), use the skill's send flow: write
+`~/.tre/telegram/out.txt`, then `python3
+~/.tre/agent/skills/telegram/telegram.py send <file>`.
+
 ## Releasing
 
 `tre.` ships as a self-contained **offline tarball** (pre-built `dist/` + the
