@@ -52,6 +52,28 @@ dispatch cannot be guarded pre-execution (inherent to Promise.all); F1
 `progressMode` still defaults to `"watch"` — promotion to `nudge` is a
 one-line flip backed by `/stats_progress`.
 
+**Slot affinity (`bb19f48`): inert on current servers — annotated, do not
+re-arm the flag expecting a pin (2026-10-29).** The commit claimed
+llama-server pins a session to a slot by hash of the OpenAI `user` field.
+Verified against the live lab box (fork @ upstream `34517d5`, 2026-10-28,
+`--parallel 2`): `get_available_slot()` routes `id_slot` → LCP similarity
+(`-sps`) → LRU and there is NO top-level `user` parsing anywhere in
+tools/server, src, or include (hash-of-`user` routing existed only in old
+llama.cpp and was replaced upstream). The wire/dispatcher/main plumbing is
+sound (tsc clean, dist built, tests pin the injection) and harmless, but a
+no-op on any server that doesn't parse `user`; the flag is intentionally
+UNSET on both lab `models.json` entries. What actually keeps the lab cache
+warm: server-side `-sps 0.8` + LCP routing (pod logs: `f_sim_best 0.94–0.99`
+into one slot; ledgers 94–95% hit). Known residual miss (LCP math, not
+eviction): a turn that nearly doubles the prompt scores < 0.80 and routes to
+the other slot — a hash pin wouldn't prevent that either. **ACTION, only if
+a real pin is ever wanted (multi-writer against one endpoint becomes
+routine): fork-patch llama.cpp** — parse the request's top-level `user` in
+`server_task`, hash to `id_slot` (the `selected slot by id` path already
+works in this build, live-verified), rebuild via the llama-fork-build flow,
+then set `slotAffinity: true` on the lab entries. Cost note: a pinned busy
+slot DEFERS (head-of-line blocks) rather than evicting.
+
 # Current project status (2026-10-25)
 
 **D34 — D26 compaction CLOSED (2026-10-25).** The carried

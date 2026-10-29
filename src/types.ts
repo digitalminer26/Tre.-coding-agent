@@ -699,15 +699,20 @@ export interface ModelCompat {
   /**
    * true → send a top-level `user: <session affinity key>` in every
    * chat/completions request when the caller supplied `ctx.affinityKey`.
-   * llama-server's multi-slot mode (`--parallel N`) assigns each request a
-   * slot by hash of `user` (server/README, "HTTP Multiple slots"): without
-   * it requests round-robin across slots, so concurrent tre. sessions
-   * (TUI + auditor one-shots + delegation) evict each other's prompt-cache
-   * prefix on every call — the `cached_tokens=0` cliff-lines in the ledger.
-   * With it, each session pins to ONE slot and its prefix stays warm.
-   * `user` is an official OpenAI chat/completions field, so OpenAI-compatible
-   * servers accept (and typically ignore) it; set this on llama.cpp endpoints
-   * running with --parallel.
+   * INTERT ON CURRENT SERVERS — verified 2026-10-29 against the lab llama box
+   * (fork of upstream 2026-10-28 `34517d5`, `--parallel 2`): its
+   * `get_available_slot()` routes by `id_slot` → LCP similarity (`-sps`) →
+   * LRU and never parses a top-level `user` field (no `user_field` anywhere
+   * in tools/server, src, include; hash-of-`user` routing existed only in
+   * OLD llama.cpp and was replaced upstream). The wire change is harmless
+   * but does nothing until a server actually consumes `user` — hence the
+   * flag is deliberately UNSET on the lab entries (and re-arming it there
+   * is a no-op, not a pin). What keeps the lab cache warm instead is
+   * server-side `-sps 0.8` + LCP routing (ledger: 94–95% hit). See
+   * HANDOFF.md "slot affinity: inert" for the activation action (fork patch:
+   * parse `user` → hash to `id_slot`; the by-id path is live-verified).
+   * The mechanism IS real on old-hash-routing llama.cpp servers, so the
+   * flag + key plumbing stays for endpoints that parse `user`.
    */
   slotAffinity?: boolean;
   /** Merged verbatim into every request body (e.g. enable_thinking). */

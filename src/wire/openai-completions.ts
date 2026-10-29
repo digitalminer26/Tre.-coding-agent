@@ -130,11 +130,12 @@ export function buildParams(model: ModelConfig, ctx: LlmContext): Record<string,
   if (compat.promptCaching) {
     params.cache_control = { type: "ephemeral" };
   }
-  // Slot affinity (prompt-cache): llama-server --parallel assigns slots by
-  // hash of the official OpenAI `user` field. When the model opts in and the
-  // session dispatcher injected an affinityKey, send it — this pins the
-  // session's requests to one slot so concurrent sessions stop evicting each
-  // other's prefix cache. Only sent when both are set: absent = old behavior.
+  // Slot affinity (prompt-cache): sends the official OpenAI `user` field.
+  // Only servers that hash `user` to a slot (OLD llama.cpp) honor it —
+  // current llama.cpp (incl. the lab fork @ upstream 2026-10-28) ignores
+  // the field; the flag is documented in types.ts (ModelCompat.slotAffinity)
+  // and deliberately unset on lab entries. Only sent when both are set:
+  // absent = old behavior.
   if (compat.slotAffinity && ctx.affinityKey !== undefined) {
     params.user = ctx.affinityKey;
   }

@@ -30,6 +30,8 @@ export function makeStreamDispatcher(
           ? responsesFn(model, ctx, opts)
           : // Session-lifetime affinity: every chat/completions call from this
             // process carries the same key (models opt in via
-            // compat.slotAffinity), so llama-server pins them to one slot.
+            // compat.slotAffinity). NOTE: inert on current llama.cpp — the
+            // wire sends it as `user`, which modern servers don't parse; see
+            // ModelCompat.slotAffinity for the verified server behavior.
             completionsFn(model, { ...ctx, affinityKey }, opts);
 }
