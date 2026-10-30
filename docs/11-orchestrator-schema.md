@@ -561,16 +561,17 @@ marketplace, desktop/mobile clients (`herdr-app`, `herdrm`, `herdr-gpui`),
 Added by stress tests R2–R4. This section is normative: the ledged steps
 may not claim "resumable" or "durable" except as defined here.
 
-### 13.1 The torn-tail bug (repro-verified 2026-10-30, shipped code)
+### 13.1 The torn-tail bug (repro-verified 2026-10-30; pre-fix behavior, now repaired)
 
-`loadSession` tolerates a partial final line (drops it, `droppedTornTail`
-= true), **but nothing repairs the file**: `Session.open` after such a
-crash appends *behind* the partial line, and the session then fails to
-reload (`corrupt line N`) — a survivable crash becomes a permanently
+PRE-FIX behavior (what the requirement below prevents): `loadSession`
+tolerated a partial final line (dropped it, `droppedTornTail` = true),
+**but nothing repaired the file**: `Session.open` after such a crash
+appended *behind* the partial line, and the session then failed to
+reload (`corrupt line N`) — a survivable crash became a permanently
 unreadable session. Reproduced against the built dist: append a truncated
 JSON line to a closed session → load (tolerated) → `Session.open` + one
-append → reload fails. No caller truncates or repairs (grep: no
-truncate/repair path exists in session handling).
+append → reload fails. At audit time no caller truncated or repaired
+(grep: no truncate/repair path existed in session handling).
 
 **Requirement (L1 precondition, landed in `src/session/session.ts`;
 audit 2026-10-30 widened it):** before an appender writes, it must, under

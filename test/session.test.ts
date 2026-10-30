@@ -321,7 +321,7 @@ test("torn trailing line is dropped and reported; earlier lines survive", async 
   assert.deepEqual(replayContext(loaded.entries), [userMsg("ok", 1)]);
 });
 
-// docs/11 §13.1 regression (repro 2026-10-30; audit 2026-10-30 widened it):
+// docs/11 §13.1 regression (repro 2026-10-30; audits 2026-10-30 widened it):
 // before the fix, Session.open after a torn tail appended BEHIND the partial
 // line, so the session became permanently unloadable ("corrupt line 3").
 // A crash can interrupt the last append at ANY byte after the previous "\n",
@@ -330,54 +330,102 @@ test("torn trailing line is dropped and reported; earlier lines survive", async 
 //   - a COMPLETE record minus its "\n"      → it parses, loadSession counts
 //     it as an entry, so a naive "repair only when droppedTornTail" fix
 //     misses it and the next append welds two records onto one line.
-// The matrix below cuts a real appended record at EVERY byte position and
-// asserts open+append+reload stays clean at each cut.
+// The matrix cuts a real appended record at EVERY byte position (0 == killed
+// before any byte landed; record.length == the fully-written control, which
+// must be left byte-for-byte alone) and asserts, at each cut, that open
+// REPAIRS TO THE EXACT EXPECTED BYTES before any further append, that
+// repeated opens are idempotent, and that the session stays loadable. The
+// cut record carries multibyte UTF-8 and JSON escapes, so cuts inside
+// characters and inside escape sequences are exercised (audit P2).
 test("Session.open repairs every crash cut of the final append; the session stays loadable", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "om-sess-repair-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
 
   const path = join(dir, "s.jsonl");
   const s0 = await Session.create(path, { cwd: dir });
-  await s0.appendMessage(userMsg("hello 🦊 漢字", 1));
+  await s0.appendMessage(userMsg("hello", 1));
   await s0.close();
   const prefix = await readFile(path); // header + "hello" record, newline-terminated
 
-  const resumeMsg = { role: "user" as const, content: "after resume", timestamp: 2 };
+  // The record the crash interrupts: multibyte content + JSON escapes.
+  const resumeMsg = userMsg('after resume 🦊 漢字 "quote" \\ back\\nslash', 2);
   const record = Buffer.from(
     JSON.stringify({ type: "message", id: "cut", message: resumeMsg }) + "\n",
   );
 
-  for (let cut = 0; cut < record.length; cut++) {
-    // Crash mid-append: the record's first `cut` bytes arrived, no terminator
-    // (cut 0 == killed before any byte of the record landed).
+  for (let cut = 0; cut <= record.length; cut++) {
+    // Crash mid-append: the record's first `cut` bytes arrived. Only cuts
+    // 1..length-1 leave the file unterminated; cut 0 is "no byte landed"
+    // and cut record.length is the fully-written control.
     await writeFile(path, Buffer.concat([prefix, record.subarray(0, cut)]));
 
+    // Independent survival predicate (mirrors loadSession's rule, not
+    // open's implementation): an unterminated tail survives iff it
+    // parses. JSON.stringify is minified, so a truncated OBJECT prefix
+    // never parses — the only surviving cuts are the full record and,
+    // for a numeric tail like "10", its one-byte prefix "1".
+    const tailBytes = record.subarray(0, cut);
+    let tailParses = false;
+    if (tailBytes.length > 0) {
+      try {
+        JSON.parse(tailBytes.toString("utf8"));
+        tailParses = true;
+      } catch {
+        tailParses = false;
+      }
+    }
+    const survives = cut === record.length || (cut === record.length - 1 && tailParses);
+
     const s1 = await Session.open(path); // must repair, not append past the tear
-    await s1.appendMessage(resumeMsg);
     await s1.close();
+
+    // Repair asserted on the EXACT bytes, independent of any new append:
+    // surviving tail → terminated in place; non-parsing partial →
+    // truncated away; fully-written control → untouched.
+    const expected = survives
+      ? Buffer.concat([prefix, record])
+      : prefix;
+    assert.deepEqual(
+      await readFile(path),
+      expected,
+      `cut ${cut}: open must repair to the exact boundary bytes`,
+    );
+
+    // Repair is idempotent: reopening a repaired file changes nothing.
+    const s2 = await Session.open(path);
+    await s2.close();
+    assert.deepEqual(
+      await readFile(path),
+      expected,
+      `cut ${cut}: repeated open is idempotent`,
+    );
+
+    const s3 = await Session.open(path);
+    await s3.appendMessage(resumeMsg);
+    await s3.close();
 
     const again = await loadSession(path); // threw (or welded) before the fix
     assert.equal(again.droppedTornTail, false, `cut ${cut}: tail must be clean`);
     const bytes = await readFile(path);
     assert.ok(
-      bytes.subarray(0, prefix.length).equals(prefix),
-      `cut ${cut}: prior bytes must be untouched`,
+      bytes.subarray(0, expected.length).equals(expected),
+      `cut ${cut}: repaired bytes must be untouched by the resume append`,
     );
-    if (cut === record.length - 1) {
-      // The complete record survived (only its "\n" was missing): open must
-      // KEEP it (loadSession counted it) and terminate the line — so the
-      // transcript is prefix + survived record + the resume append.
+    if (survives) {
+      // The complete record survived: open must KEEP it (loadSession
+      // counted it) and terminate the line — so the transcript is
+      // prefix + survived record + the resume append.
       assert.equal(again.entries.length, 4, `cut ${cut}: survived record + resume append`);
       assert.deepEqual(replayContext(again.entries), [
-        userMsg("hello 🦊 漢字", 1),
-        userMsg("after resume", 2), // the survived record
-        userMsg("after resume", 2), // the resume append
+        userMsg("hello", 1),
+        resumeMsg, // the survived record
+        resumeMsg, // the resume append
       ]);
     } else {
       assert.equal(again.entries.length, 3, `cut ${cut}: header + hello + resume append`);
       assert.deepEqual(replayContext(again.entries), [
-        userMsg("hello 🦊 漢字", 1),
-        userMsg("after resume", 2),
+        userMsg("hello", 1),
+        resumeMsg,
       ]);
     }
   }
