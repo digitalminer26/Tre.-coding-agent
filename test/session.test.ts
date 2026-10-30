@@ -359,22 +359,15 @@ test("Session.open repairs every crash cut of the final append; the session stay
     // and cut record.length is the fully-written control.
     await writeFile(path, Buffer.concat([prefix, record.subarray(0, cut)]));
 
-    // Independent survival predicate (mirrors loadSession's rule, not
-    // open's implementation): an unterminated tail survives iff it
-    // parses. JSON.stringify is minified, so a truncated OBJECT prefix
-    // never parses — the only surviving cuts are the full record and,
-    // for a numeric tail like "10", its one-byte prefix "1".
-    const tailBytes = record.subarray(0, cut);
-    let tailParses = false;
-    if (tailBytes.length > 0) {
-      try {
-        JSON.parse(tailBytes.toString("utf8"));
-        tailParses = true;
-      } catch {
-        tailParses = false;
-      }
-    }
-    const survives = cut === record.length || (cut === record.length - 1 && tailParses);
+    // Which cuts leave a record that survives repair? The fixture record is
+    // a minified JSON OBJECT, so every truncated prefix of it (cut <
+    // record.length - 1) fails to parse and is dropped; the only surviving
+    // tails are the complete record minus its "\n" (cut length-1, which
+    // loadSession counts as an entry) and the fully-written control (cut
+    // length). This mirrors loadSession's parse-based rule, not open's
+    // implementation — a truncated scalar tail (e.g. "1" from "10") COULD
+    // also parse, but the object fixture guarantees it cannot.
+    const survives = cut >= record.length - 1;
 
     const s1 = await Session.open(path); // must repair, not append past the tear
     await s1.close();
