@@ -1,7 +1,8 @@
 # Spec — Orchestrated multi-agent flow: schemas & contracts
 
-**Status: DRAFT — schema-first document. No implementation has started.**
-This document is the *ground truth* for the orchestrator workstream: every
+**Status: P0 CLOSED (§14) — schema ground truth; implementation is
+starting (P1).** This document is the *ground truth* for the orchestrator
+workstream: every
 artifact the system reads or writes is defined here as a schema, and the
 development ledgers (below) reference schema sections by id. The rule of
 development: **code follows a documented schema; a schema change is made
@@ -72,6 +73,7 @@ Schema ids used by implementation ledgers:
 | S5 | Supervisor decision-log entries | §6 |
 | S6 | Episode state file | §7 |
 | S7 | Fleet projection inputs (observation envelope) | §8 |
+| P0 | Pinned wire contracts (identity, envelope, records, policy) | §14 |
 
 **Change Ledger** (append one row per schema edit; implementation commits
 cite the row):
@@ -84,6 +86,7 @@ cite the row):
 | 2026-10-30 | §13 | NEW normative recovery/durability section: append-torn-tail bug (repro: resumed append after a torn tail makes the session permanently unloadable) → tail repair is an L1 precondition; recovery invariants I1–I7; recovery test matrix as L1/L2 acceptance | round-4 stress test + repro on built code |
 | 2026-10-30 | §11 | rewritten as the **compartment build plan (P0–P13)** after the plan sanity check; corrections folded in: missing terminal evidence is `unknown` never `crashed` + run/attempt identity precedes classification (P2); file steering split plumbing vs durable delivery (P3a/P3b); tailer is observation-only, never repairs (§13.1 repair stays with the exclusive writer); ownership fence + lost-supervisor reconcile is its own compartment (P7) before auto-scheduling; budget accounting is a standalone ledger consumed by classifiers, not owned by them (P8, I7); graph.json desired-vs-derived authority pinned at P0; milestone M1 = P0–P9 observe-only, autonomy enabled only in reviewed increments A1–A6. Old linear L0–L9 sequence retained below as a mapping | plan sanity check |
 | 2026-10-30 | §0 §3 §9 §11 §13 | Accepted self-healing-first rescope supersedes observe-only M1 and old A1–A6 ordering: M0 foundations → M1 autonomous single-worker recovery → M2 shared multi-worker supervision → M3 broader autonomy/polish. Added explicit acceptance (P14), investigation/recovery (P15), upfront authority, aggregate recovery budgets, exception-based escalation, and productivity evaluation. Full S3/S5 wire shapes remain P0 work; unscoped supervised steering must not pass trivially. | user-approved design discussion |
+| 2026-10-30 | §2 §3 §4 §6 §14 | **P0 contract closure:** new §14 pins runId/attemptId identity (§14.1), steer-file line schema + validation + envelope `steering:{requestId,source}` (§14.2, replacing the P0-pending scope placeholder), the four `decisions.jsonl` record kinds `decision-intent`/`decision-outcome`/`acceptance`/`diagnosis` (§14.3, S5 action enum extended to `backoff-retry`/`investigate`/`repair`/`accept-finish`), task revision (§14.4), derived ownership (§14.5), `progressNudge` entry shape closing Q2b (§14.6), `runEnd` reason set (§2), episode/task policy + recovery-budget shapes (§14.7), and the `workerState` closed set (§14.8). S3 gains structured `acceptance` + `policy` + derived-vs-desired authority rule; S1 pins toolResult detail fields and adds the two new entry types as contracts (implementation at P1/P2) | P0 (implementation kickoff) |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -98,10 +101,12 @@ earlier draft's assumptions:
 | entry | signals | supervisor use |
 |-------|---------|----------------|
 | `message` (assistant w/ `toolCall`) | tool name, args digest | command-family classification, pace |
-| `message` (toolResult) | `isError`, `details.sameErrorWarn` / `details.sameFamilyWarn` (persisted today — pipeline.ts ~753/786) | error-family window (mirrors pipeline family key), verify-gap |
+| `message` (toolResult) | `isError`, `details.sameErrorWarn` / `details.sameFamilyWarn` / `details.sameErrorCount` / `details.sameFamilyCount` (persisted today — pipeline.ts ~753/786; exact warn-entry shapes closed at P0 → §14.1) | error-family window (mirrors pipeline family key), verify-gap |
 | `message` (user) | injected text | **a steer arrives as a plain user message** — the loop emits a `steer` *event*, and the driver persists `ev.message` only (main.ts ~1119–1128). There is **no `steer` session-entry type**; provenance is absent unless S2's envelope metadata lands |
 | `guardStop` | D33 `GuardEvidence` union (identical-batch / permission-stall / repeat-failure) | stop classification → ladder (→ S5 action) |
-| `progress_nudge` | kind (`no-success` \| `no-verification`), mode | early warning before a stop — **NOT persisted today** (live event only, consumed at main.ts ~614); persisting it is contract work (Q2a, decided: persist) |
+| `progress_nudge` | kind (`no-success` \| `no-verification`), mode | early warning before a stop — **NOT persisted today** (live event only, consumed at main.ts ~614); persisting it is contract work (Q2a, decided: persist). Shape **closed at P0** → standalone `progressNudge` entry (§14.6), implemented at P1 |
+| `progressNudge` *(new, §14.6 — P1)* | `kind`, `mode`, `runId?` | persisted warn evidence (harness metadata, replay-ignored, format version stays 1 — mirrors `guardStop`); the supervisor acts on these + toolResult warn details |
+| `runEnd` *(new, §13.4 — P2)* | `runId`, `reason` | terminal record per run: "the run ended and why", never "the task passed"; absence classifies `unknown`, never `crashed`. `reason` ∈ driver `StopReason` (`stop`\|`length`\|`error`\|`aborted`\|`budget`\|`loop`\|`stall`\|`progress` — `toolUse` never terminates a run, so it never appears) plus `crashed` **written only by a reconciling supervisor** (never by the driver — a crashed driver cannot write its own terminal record); absence still classifies `unknown` (§11.1 P2) |
 | `compaction` | fold boundary | context-size pressure signal |
 | usage-carrying assistant entries | input/output tokens | cost burn, budget % |
 | `modelChange` | model id | swap accounting |
@@ -153,7 +158,7 @@ write: one JSON line appended per steer request
 Steer request line:
 
 ```json
-{"id":"steer-7f3a","ts":1730230000,"text":"…","source":"orchestrator","priority":"steer"}
+{"id":"steer-7f3a","ts":1730230000,"text":"…","source":"orchestrator","priority":"steer","attemptId":"t2-a1","taskId":"t2"}
 ```
 
 | field | type | notes |
@@ -161,9 +166,10 @@ Steer request line:
 | `id` | string | client-assigned, unique per file; used for ack correlation |
 | `ts` | number | unix seconds, informational |
 | `text` | string | injected exactly as given (no harness templating) |
-| `source` | string | free-form label (`orchestrator`, `human-tty`, …) — persisted into the steer entry provenance if/when added |
+| `source` | string | free-form label (`orchestrator`, `human-tty`, …) — persisted into the steer envelope provenance (→ §14.2) |
 | `priority` | `"steer"` | v1 only `"steer"`; follow-up/queue semantics deliberately excluded (matches current runLoop: no follow-up queue) |
-| scope *(P0-pending, §11.1)* | to be specified | Task revision + session identity are required by the contract below but absent from this draft example. P0 must pin their fields and validation before file delivery is enabled; missing/mismatched scope must not pass trivially in supervised execution. |
+| `attemptId` *(required in managed mode, §14.2)* | string | session this steer targets (→ §14.1). A line whose `attemptId` ≠ the run's current session identity is **skipped with a counted warning — never injected, never dropped silently as success** |
+| `taskId` *(optional, provenance)* | string | scheduling label only (scope reporting, scoping on rewrite); the harness does not interpret it |
 
 Acknowledgement (R2-corrected): **ordering correlation is not a usable
 ack.** A steer persists as a plain user message with no echoed id; human
@@ -193,6 +199,16 @@ undistinguishable. The ack model is instead:
 Contract points:
 - File is created by the harness at startup if absent (empty).
 - Malformed lines: skipped, never fatal; skipped count logged to stderr.
+- **Validation (P0, §14.2):** a line missing `id`/`text`, or with unknown
+  `priority`, is malformed (skip + count). `attemptId` is optional when
+  `--steer-file` is used standalone (unmanaged: mismatch check off); in
+  managed mode the supervisor always writes it and the harness enforces
+  the mismatch rule above.
+- **P3a is mandatory once any file steer carries a nonempty `source`**
+  (or a managed-mode file exists): the harness must persist
+  `steering:{requestId,source}` (§14.2), or the supervisor's ack can never
+  close. The flag alone without provenance support is rejected with a
+  startup error, not a silent degradation.
 - No new CLI surface beyond `--steer-file <path>`; absent flag = exactly
   today's behavior.
 - **Queue file is append-only for its lifetime** — the supervisor never
@@ -231,18 +247,27 @@ path: <episodesDir>/<episodeId>/graph.json
       "model": "local/qwen3-…",
       "approval": "yes",
       "scope": { "files": ["src/x.ts"], "notFiles": ["src/y.ts"] },
-      "acceptance": "gate green + <criteria>",
+      "acceptance": { "criteria": ["gate green", "…"], "requiredChecks": ["npm run check"], "artifacts": [] },
       "budget": { "maxTurns": 40, "maxUsd": 2.0 },
       "status": "done",
-      "result": { "verdict": "ALL VERIFIED - NO FINDINGS", "artifacts": [] }
+      "result": { "verdict": "ALL VERIFIED - NO FINDINGS", "acceptance": "complete", "artifacts": [] }
     }
-  ]
+  ],
+  "policy": { "$ref": "§14.7 episode policy", "baseCommit": "…", "recoveryBudget": { "maxAttemptsPerTask": 4, "maxEpisodeRecoveryUsd": 6.0, "maxWallclockPerAttemptS": 1800 } }
 }
 ```
 
 Rules:
 - `status` ∈ `queued | ready | running | paused | done | failed | parked`.
   The **supervisor** is the only writer; workers never see this file.
+- **Derived vs desired authority (P0):** `status`, `result`, and usage
+  totals are **derived projections** the supervisor rewrites from
+  reconcile (§7 trichotomy); they are never inputs to recovery decisions.
+  Desired inputs — `dependsOn`, `scope`, `acceptance`, `budget` caps,
+  `approval`, `model`, `persona`, `promptRef` — are edited only by an
+  explicit task-rewrite (rung 4), which bumps `revision` (→ §14.4).
+  A recovery action may change derived fields; it may never edit desired
+  fields.
 - Wave scheduling = topological order as in parallel-delegation; wave width
   ≤ slots (2); ≤1 subtask per endpoint per wave.
 - `promptRef` keeps the graph small and diffable; prompts are files, same
@@ -319,7 +344,7 @@ action cycle that did something (no-op observations are not logged):
 | field group | contract |
 |-------------|----------|
 | `observation.signals[].kind` | closed set, extensible only via this doc: `guard-stop`, `warn-rung`, `semantic-loop`, `verify-gap`, `no-advance`, `endpoint-error`, `budget-threshold`, `worker-exit`, `worker-blocked-on-approval` |
-| `decision.rung` | integer 1–5 (see §9 ladder); `action` ∈ `nudge` \| `evidence-nudge-resume` \| `model-swap` \| `task-rewrite` \| `escalate` \| `kill` \| `park` \| `merge` |
+| `decision.rung` | integer 1–5 (see §9 ladder); `action` ∈ `nudge` \| `evidence-nudge-resume` \| `model-swap` \| `task-rewrite` \| `escalate` \| `kill` \| `park` \| `merge` \| `backoff-retry` \| `investigate` \| `repair` \| `accept-finish` (added at P0 for the self-healing scope: bounded retry, bounded diagnosis dispatch, authorized task-local repair, and completing a task on verified acceptance; rung for the new actions: `backoff-retry` = 2, `investigate` = 1.5 recorded as rung 2 with `sideEffect: "none"`, `repair` = 2–3 by authority, `accept-finish` = 0 (not an intervention — recorded when P14 says complete)). **No action executes whose type is not in this enum**; new action types require a Change Ledger row first |
 | `outcome.acked` | steer-file path: correlated user-message envelope with `steering.requestId` seen (not a `steer` entry); resume path: run accepted; swap: new worker spawned. Delivery/start acknowledgement only, never proof of progress or acceptance |
 | `outcome.closedById` | a later decision entry closing this one with measured effect (`progressed` / `recurred` / `stopped-clean`) — this is the meta-telemetry that teaches thresholds later |
 
@@ -338,6 +363,18 @@ outcome must be recorded would let recovery re-spawn blindly. Therefore:
 - Intent and observed outcome are recorded **separately**; recovery
   reconciles intent-vs-reality (§13.2 I2) before retrying anything, and
   an ambiguous effect is *never blindly retried* (§13.2 I5).
+
+**Wire contract (P0-closed, → §14.3):** one `decisions.jsonl` file per
+episode carrying four discriminated record types by `kind` —
+`decision-intent` (before acting; carries `actionId`, `rung`, `action`,
+`strategyId`, `expectedEvidence`), `decision-outcome` (after; same
+`actionId`, plus `acked`, `progress`, `evidenceRefs`, `closedById`),
+`acceptance` (P14 assessment: verdict ∈ `complete|incomplete|blocked|
+uncertain`, per-criterion results, evidence refs, invalidated-by), and
+`diagnosis` (P15 record: cause class, confidence, proposed actions —
+**advice only**, never an authority grant, I-cortex §0.7). Full field
+shapes in §14.3; the JSON example above shows the merged view of an
+intent+outcome pair.
 
 ## 7. S6 — Episode state file
 
@@ -532,7 +569,7 @@ expanded scope and must be amended before any new action type executes.
 | id | question | status |
 |----|----------|--------|
 | Q1 | Does the steer persist gain provenance for direct ack, or stay correlation-by-ordering? | **decided (R2): envelope metadata.** The premise was fiction — no `steer` entry type exists; steering persists as a plain user message (main.ts ~1119). Ordering can't ack interleaved/multi-source steers. Resolution: optional `steering:{requestId,source}` on the message envelope (not model-visible content); promise deduplicated transcript insertion only. L1 ships the `--steer-file` seam; envelope metadata rides the same seam (S2). |
-| Q2 | Should warn-rungs be persisted entries (supervisor semantics depend on them)? | **half-decided (R2):** pipeline family warns are *already* persisted (toolResult.details — contract pinned in §2); `progress_nudge` (F1) is *not* persisted and must become a persisted entry. Remaining open: exact entry shape vs toolResult-style piggyback. → **planned at P1 (§11.1)**: proposed shape is a standalone `progressNudge` entry mirroring the `guardStop` driver-append pattern; the shape is finalized as a §2 Change-Ledged amendment in P0. |
+| Q2 | Should warn-rungs be persisted entries (supervisor semantics depend on them)? | **decided (P0):** pipeline family warns are persisted (toolResult.details — §2 pins `sameErrorWarn`/`sameFamilyWarn`/counts); `progress_nudge` becomes the standalone `progressNudge` entry — shape closed in §14.6, implemented at P1 |
 | Q3 | `<episodesRoot>` location | **decided (R2): `~/.tre/episodes`** — organizational only; grants no isolation and no automatic collection (§5 caveats). |
 | Q4 | Fleet envelope → tokenomics ingest vs file-only first? | open — lean file-only; cross-host needs explicit transport (§8). |
 | Q5 | Worktree integration: auto-merge or stage for human? | **decided (R2, narrowed):** episode-branch integration is **automatic for identified, tested artifacts under approved policy** — per the S5 merge-action contract above (pin base, tested SHA+parents, CAS advance, trusted gate, episode-scoped auto-resolution). *Promotion episode→main stays human by default but is delegable under explicit policy* — "always human" is governance default, not technical necessity. |
@@ -564,7 +601,7 @@ Detailed wire shapes below remain proposals until P0 closes the schemas.
 
 | id | compartment | schemas consumed | status |
 |----|-------------|------------------|--------|
-| P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | not started |
+| P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | **done — closed in §14 (2026-10-30)** |
 | P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | not started |
 | P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | not started |
 | P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | not started |
@@ -871,3 +908,215 @@ implementation), worker outcome =
 process exit code + last entries + torn-tail status, classified only as
 `clean | stopped-by-guard | crashed | unknown`. Anything finer is a
 Q6 implementation decision informed by this matrix.
+
+## 14. P0 — Pinned wire contracts (contract closure)
+
+This section **is** P0: the exact wire shapes §2–§9 left open. Nothing
+here changes replayed context. Each contract names its implementing
+compartment; the schemas in §2–§8 are the normative references and §14
+closes their open fields. Field naming is binding (camelCase, `ts`/
+`timestamp` per host convention: new supervisor artifacts use `ts` unix
+ms; session entries keep `timestamp`).
+
+### 14.1 Identity: runId & attemptId (P0 → consumed by P1/P2/P7)
+
+- **`runId`** — UUID per *run* (one driver invocation against a session,
+  i.e. between `agent_start` and `agent_end`). Generated by the driver at
+  run start, **not** persisted by the worker session format (it is
+  process-lifetime identity, §2 "not recorded"); it is attached to every
+  observation envelope event and to the terminal `runEnd` entry (P2).
+- **`attemptId`** — `"<taskId>-a<N>"` string (e.g. `t2-a3`). Identity of
+  one supervisor-managed worker attempt across spawn/resume: **stable
+  across `--resume`** (same attempt, fresh runId), incremented on
+  model-swap (rung 3) and task-rewrite (rung 4). The supervisor
+  allocates and increments it (persisted in S6 + the attempt record
+  below); the worker never sees the string except through the steer-file
+  `attemptId` field (S2).
+- **Attempt record** — one `kind:"attempt"` record in
+  `events/decisions.jsonl` (§14.3) per attempt, carrying `attemptId`,
+  `taskId`, `taskRevision`, `sessionPath`, `model`, spawn intent/outcome
+  (I2: spawn-before-outcome ⇒ discover-or-park), and worktree path.
+  This is the durable answer to "which attempt owns which session file."
+- **Unmanaged runs** (a bare `tre. run`, no supervisor): no attemptId;
+  runId still exists for envelope/telemetry purposes. S2 `attemptId`
+  check is disabled (managed mode requires the flag, §3).
+
+### 14.2 Steering envelope & scoped requests (P0 → P3a/P3b)
+
+- **Envelope metadata (S1 amendment, ships with P3a):** a persisted
+  steering user message gains
+  `steering: { requestId: string, source: string }` on the **message
+  entry**, not inside `.content` (model-invisible; replay constructs it
+  as an ordinary user message). Legacy entries without the field remain
+  valid; `steering` is optional on `MessageEntry`.
+- **`FileSteeringQueue` input line (S2)** — full validation table:
+
+| field | required | validation on violation |
+|---|---|---|
+| `id` | yes | malformed → skip + stderr count |
+| `ts` | no | informational |
+| `text` | yes | malformed → skip + count |
+| `source` | no (default `"file"`) | — |
+| `priority` | no (default `"steer"`) | anything but `"steer"` → skip + count |
+| `attemptId` | managed mode only | mismatch with the run's session identity → **skip + count as `scope_mismatch`** (steer stays pending-unrecorded for the *old* attempt; supervisor reconciles per S2 scoping) |
+| `taskId` | no | provenance only |
+
+- **Dedup (transcript scan, I4):** at startup and before each drain
+  window the harness scans the session file for `steering.requestId`.
+  Same id + same text → no-op (already recorded; counts as acked). Same
+  id + different text → reject with stderr warning, skip, **do not
+  consume** (the supervisor must decide: retire the id or escalate).
+  Scan cost is bounded by chunked reading; offsets are an optimization.
+- **Ack definition restated (I6):** supervisor marks a steer *recorded*
+  when the correlated envelope appears in the session file it tails —
+  nothing more.
+
+### 14.3 Decision-log wire records (P0 → P4/P8/P10/P11)
+
+`decisions.jsonl` line = one JSON object, discriminated by `kind`. All
+records carry `{schema:"tre-supervisor/1", id, ts, episodeId, taskId?}`.
+
+```jsonc
+// kind:"decision-intent" — appended BEFORE acting (log-then-act)
+{ "kind":"decision-intent", "id":"d-0042", "ts":1730231234000,
+  "episodeId":"…", "taskId":"t2",
+  "actionId":"a-0042-nudge-1",           // stable; outcome & reconcile key on it
+  "attemptId":"t2-a1", "taskRevision":1,
+  "rung":1, "action":"nudge",
+  "strategyId":"nudge:evidence:v1",      // fingerprint for repeated-strategy limits (P8)
+  "expectedEvidence":"next tool call of a different family",
+  "observation": { "signals":[ … §6 shapes … ], "context":{ … } },
+  "authority": { "grantedBy":"episode-policy:§…", "sideEffect":"none|worktree-local|external" },
+  "rationale":"…" }
+
+// kind:"decision-outcome" — appended AFTER the action resolves (or on reconcile)
+{ "kind":"decision-outcome", "id":"d-0042-o", "ts":1730231290000,
+  "episodeId":"…", "taskId":"t2", "actionId":"a-0042-nudge-1",
+  "acked":true,                          // §3 ack definition (delivery only, I6)
+  "progress":"none|uptake|task-relevant", // uptake ≠ progress (§9)
+  "evidenceRefs":["sessions/t2.jsonl#<entryId>"],
+  "closedById":null,                     // a later outcome closing this action
+  "notes":"…" }
+
+// kind:"acceptance" — P14 assessment record
+{ "kind":"acceptance", "id":"d-0050", "ts":…, "episodeId":"…", "taskId":"t2",
+  "taskRevision":1, "verdict":"complete|incomplete|blocked|uncertain",
+  "criteria":[ { "id":"gate","pass":true,"evidenceRef":"gate-run-17",
+                 "checkedAtSha":"<git sha>" } ],
+  "remainingWork":["…"],
+  "invalidatedBy":null,                  // later record id that invalidates this one
+  "modelAdvisory": null }                // optional {judge, quote, confidence} — never waives a gate
+
+// kind:"diagnosis" — P15 record (ADVICE ONLY — §0.7: no authority transfer)
+{ "kind":"diagnosis", "id":"d-0051", "ts":…, "episodeId":"…", "taskId":"t2",
+  "attemptId":"t2-a1",
+  "causeClass":"transient-endpoint|premature-stop|task-defect|environment-blocker|approval-boundary|unknown",
+  "confidence":0.7,
+  "evidenceRefs":[ … ],
+  "proposedActions":[ { "rung":2,"action":"evidence-nudge-resume","strategyId":"…","authorityNeeded":"none" } ],
+  "limitsRespected": { "toolsUsed":3, "spendUsd":0.02 } }
+```
+
+Reconcile rule (I2): an intent with no outcome for its `actionId` is
+**open**; recovery may close it only with observed reality (attempt
+record, process discovery, transcript scan) — never by re-issuing the
+action (I5 for `sideEffect:"external"`).
+
+### 14.4 Task revision & scoping (P0 → P3b/P10)
+
+- `task.revision` — integer starting at 1, bumped **only** by rung-4
+  task-rewrite (desired-field edit, §4). A steering request carries
+  `(taskId, attemptId)`; on rewrite the attemptId changes (new attempt)
+  and pending requests for the old attempt are skipped by the harness
+  (§14.2) — satisfying S2's "not auto-replayed" rule mechanically.
+
+### 14.5 Ownership record (P0 → P6/P7)
+
+No new file: ownership is *derived*, per I1/I2 — the pair (session file,
+worktree) is owned by the attempt whose `kind:"attempt"` record is
+latest-unresolved for the task **and** whose process is either confirmed
+alive (child of current supervisor) or not disproven. Loss of the
+supervisor ⇒ the record does not transfer; the restart reconcile is
+discover-or-park. A second harness must refuse to open a session+worktree
+pair with an unresolved attempt record **when the episode dir is
+supervised** — enforced at P7 (it requires the episode context; the bare
+harness stays flag-driven).
+
+### 14.6 `progressNudge` entry (P0 closes Q2b; P1 implements)
+
+Standalone session entry, mirroring `GuardStopEntry` exactly (harness
+metadata, replay-ignored, additive, format version stays 1):
+
+```ts
+{ type: "progressNudge"; id: string; timestamp: number;
+  kind: "no-success" | "no-verification"; mode: "warn" | "stop"; runId?: string }
+```
+
+Driver-appended (main.ts, same seam as `appendGuardStop` ~1112) when the
+loop emits `progress_nudge`. Replay ignores unknown/non-context types by
+fall-through → replayed context byte-identical; `runId` is optional so
+the entry stays valid for unmanaged runs.
+
+### 14.7 Episode & task policy shapes (P0 → P8/P9/P12)
+
+Desired-input only; the supervisor reads these, workers never do.
+
+```jsonc
+// episode policy (graph.json "policy" object; defaults in [] )
+{ "baseCommit": "<sha>",
+  "gate": { "cmd": "npm run check", "timeoutS": 1200 },
+  "approval": "auto|ask",                    // worker approval mode for tasks (S3 "approval")
+  "maxParallel": 2,
+  "recoveryBudget": {                        // I7 aggregate limits (defaults)
+    "maxAttemptsPerTask": 4,                 // [4]
+    "maxNudgesPerTask": 2,                   // [2] (§9 rung-1 rule, machine-checked)
+    "maxStrategyRepeats": 2,                 // [2] same strategyId per task before strategy must change
+    "maxEpisodeRecoveryUsd": 6.0,            // [episode-dependent, required in managed episodes]
+    "maxEpisodeRecoveryTurns": 60,           // [60]
+    "maxWallclockPerAttemptS": 1800          // [1800]
+  },
+  "authority": {                             // upfront grants; ABSENCE = NOT permitted (§9.1)
+    "paths": ["src/**", "test/**"],
+    "notPaths": [".git/**", "~/.tre/**"],
+    "allowInstalls": false,                  // [false]
+    "allowNetwork": true,                    // [true] within worker's existing sandbox
+    "allowExternalEffects": false,           // [false] push/deploy/msg ⇒ escalate (I5)
+    "models": ["local/qwen3-…"],             // approved endpoints for swaps (rung 3)
+    "diagnostics": { "maxToolCalls": 20, "maxUsd": 0.5 }   // [20 / $0.50 per diagnosis]
+  },
+  "integration": { "autoMergeTested": false, "promoteToMain": "ask" }  // Q5, M3-gated
+}
+```
+
+Task `budget` (S3) caps are **per task across attempts** (I7): the P8
+ledger accumulates usage from every attempt's session entries against
+the task's lifetime totals; a swap or resume never resets them.
+
+### 14.8 Observation envelope `workerState` (P0 → P5)
+
+Closed set (S7), rules-only classification, `unknown`/`stale` mandatory
+where evidence ends (I3):
+`thinking | tool | await-approval | warned | stopped | dead | unknown`.
+Mapping (deterministic, from persisted + ephemeral evidence only):
+`tool` ← tool_execution_start without end (ephemeral); `warned` ← last
+persisted warn entry (toolResult details / progressNudge warn-mode) with
+no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
+`dead` ← process confirmed gone without terminal record; otherwise
+`unknown`. `stale` is an envelope-level flag (no new byte for
+> `staleAfterMs` [default 300000]), not a workerState value.
+
+### 14.9 P0 closure checklist
+
+| contract | closed by | status |
+|---|---|---|
+| runId/attemptId (§14.1) | this section | done |
+| steer envelope + validation (§14.2) | this section | done |
+| decision record kinds (§14.3) | this section | done |
+| task revision (§14.4) | this section | done |
+| ownership derivation (§14.5) | this section | done |
+| progressNudge shape (§14.6) | this section | done → P1 implements |
+| policy shapes (§14.7) | this section | done |
+| workerState set (§14.8) | this section | done |
+
+P0 is **closed** by this section; P0-dependent compartments may start.
+Wire-shape changes after closure require a Change Ledger row before code.
