@@ -118,6 +118,7 @@ import {
 import {
   Session,
   defaultSessionPath,
+  driverRunEndReason,
   replaySession,
   type Session as SessionType,
 } from "../session/session.js";
@@ -1043,6 +1044,10 @@ export async function runTurn(opts: {
   steeringQueue?: SteeringQueue;
 }): Promise<{ outcome: RunOutcome; context: AgentMessage[]; charsPerToken: number }> {
   const { controller, context, session } = opts;
+  // P2 (docs/11 §14.1): driver-allocated run identity for this invocation
+  // against the session; carried to the terminal runEnd entry (envelope
+  // attachment on observation events lands with the supervisor, P7).
+  const runId = randomUUID();
   const user: UserMessage = { role: "user", content: opts.prompt, timestamp: Date.now() };
   const seeded: AgentMessage[] = [...context, user];
   const ids = opts.entryIds ?? new Map<AgentMessage, string>();
@@ -1111,11 +1116,19 @@ export async function runTurn(opts: {
       // order).
       if (ev.type === "done") await persist(ev.message);
       else if (ev.type === "tool_execution_end") await persist(ev.result);
-      else if (ev.type === "agent_end" && ev.evidence !== undefined)
-        // D33 (docs/08 §10): the guard-stop evidence entry — written AFTER
-        // the run's messages (same file order as the stop), skipped when no
-        // session is open. Replay ignores it; the transcript names itself.
-        await session.appendGuardStop(ev.evidence);
+      else if (ev.type === "agent_end") {
+        if (ev.evidence !== undefined)
+          // D33 (docs/08 §10): the guard-stop evidence entry — written AFTER
+          // the run's messages (same file order as the stop), skipped when no
+          // session is open. Replay ignores it; the transcript names itself.
+          await session.appendGuardStop(ev.evidence);
+        // P2 (docs/11 §2/§13.4): the terminal record — "the run ended and
+        // why", never "the task passed". Last entry of the run in the file.
+        // "toolUse" can't terminate a run; if one ever leaks, write nothing
+        // (absence → `unknown`, the honest classification).
+        const endReason = driverRunEndReason(ev.stopReason);
+        if (endReason !== undefined) await session.appendRunEnd(runId, endReason);
+      }
       else if (ev.type === "progress_nudge")
         // P1 (docs/11 §14.6): persisted warn evidence — every fire, every
         // mode (the live event died with the process; the supervisor tails

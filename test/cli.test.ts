@@ -2665,8 +2665,12 @@ test("D33: a loop stop with a session writes a guardStop entry after the run's m
     );
     assert.match(guard.evidence.signature, /echo:/);
   }
-  // The entry lands AFTER the run's messages (the stop is the last thing).
-  assert.equal(replayed.entries[replayed.entries.length - 1], guard);
+  // The entry lands AFTER the run's messages; the runEnd terminal record is
+  // the very last thing (P2), the guard evidence just before it.
+  const tail = replayed.entries.slice(-2);
+  assert.equal(tail[0], guard);
+  assert.ok(tail[1] && tail[1].type === "runEnd", "the terminal runEnd record closes the run");
+  if (tail[1] && tail[1].type === "runEnd") assert.equal(tail[1].reason, "loop");
   // Replay: the entry carries no LLM context.
   const messages = replayed.entries.filter((e) => e.type === "message");
   assert.equal(replayed.context.length, messages.length);
@@ -2729,4 +2733,47 @@ test("P1: a no-progress fire with a session writes a progressNudge entry (watch 
   // Replay: the entry carries no LLM context.
   const messages = replayed.entries.filter((e) => e.type === "message");
   assert.equal(replayed.context.length, messages.length);
+
+  // P2: the run closes with its terminal record (same session, one run).
+  const tail = replayed.entries[replayed.entries.length - 1];
+  assert.ok(tail && tail.type === "runEnd", "the run ends with a runEnd terminal record");
+  if (tail && tail.type === "runEnd") {
+    assert.equal(tail.reason, "stop");
+    assert.match(tail.runId, /^[0-9a-f-]{36}$/, "runId is the §14.1 UUID");
+  }
+});
+
+test("P2: two runTurns on one session write two runEnd records (run identity per invocation)", async (t) => {
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "s.jsonl");
+  const session = await Session.create(sessionPath, {
+    cwd: dir,
+    model: { id: MODEL.id, provider: "fake" },
+  });
+  t.after(() => session.close());
+  const silent: PrintSinks = { out: { write: () => true }, err: { write: () => true } };
+  const base = {
+    model: MODEL,
+    systemPrompt: "sys",
+    tools: [],
+    controller: new AbortController(),
+    session,
+    sinks: silent,
+    maxTurns: 5,
+  };
+  const r1 = await runTurn({ ...base, context: [], prompt: "one", streamFn: fakeStream([{ type: "text", text: "first" }]) });
+  const r2 = await runTurn({ ...base, context: r1.context, prompt: "two", streamFn: fakeStream([{ type: "text", text: "second" }]) });
+  assert.equal(r1.outcome.stopReason, "stop");
+  assert.equal(r2.outcome.stopReason, "stop");
+
+  const replayed = await replaySession(sessionPath);
+  const ends = replayed.entries.filter((e) => e.type === "runEnd");
+  assert.equal(ends.length, 2, "one terminal record per run");
+  const ids = new Set(ends.map((e) => e.type === "runEnd" ? e.runId : ""));
+  assert.equal(ids.size, 2, "each run has its own runId (§14.1)");
+  // The file ends with the SECOND run's record — the classifier's answer to
+  // "is this session's last run over?" is a tail lookup.
+  const last = replayed.entries[replayed.entries.length - 1];
+  assert.ok(last && last.type === "runEnd");
+  assert.equal(replayed.entries.filter((e) => e.type === "message" && e.message.role === "user").length, 2);
 });

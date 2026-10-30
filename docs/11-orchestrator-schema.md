@@ -88,6 +88,7 @@ cite the row):
 | 2026-10-30 | §0 §3 §9 §11 §13 | Accepted self-healing-first rescope supersedes observe-only M1 and old A1–A6 ordering: M0 foundations → M1 autonomous single-worker recovery → M2 shared multi-worker supervision → M3 broader autonomy/polish. Added explicit acceptance (P14), investigation/recovery (P15), upfront authority, aggregate recovery budgets, exception-based escalation, and productivity evaluation. Full S3/S5 wire shapes remain P0 work; unscoped supervised steering must not pass trivially. | user-approved design discussion |
 | 2026-10-30 | §2 §3 §4 §6 §14 | **P0 contract closure:** new §14 pins runId/attemptId identity (§14.1), steer-file line schema + validation + envelope `steering:{requestId,source}` (§14.2, replacing the P0-pending scope placeholder), the four `decisions.jsonl` record kinds `decision-intent`/`decision-outcome`/`acceptance`/`diagnosis` (§14.3, S5 action enum extended to `backoff-retry`/`investigate`/`repair`/`accept-finish`), task revision (§14.4), derived ownership (§14.5), `progressNudge` entry shape closing Q2b (§14.6), `runEnd` reason set (§2), episode/task policy + recovery-budget shapes (§14.7), and the `workerState` closed set (§14.8). S3 gains structured `acceptance` + `policy` + derived-vs-desired authority rule; S1 pins toolResult detail fields and adds the two new entry types as contracts (implementation at P1/P2) | P0 (implementation kickoff) |
 | 2026-10-30 | §14.6 | **Amend at P1 start:** `progressNudge.mode` corrected to the real `ProgressMode` (`watch\|nudge\|stop` — the first pin's `warn\|stop` never existed), and `turn`/`count`/`target` added for event parity (stats attribution). Driver persists every fire, every mode | P1 implementation |
+| 2026-10-30 | §2 §13.4 §11 | **P2 implemented:** `runEnd {runId, reason}` terminal entry is driver-appended at agent_end (`RunEndEntry`, `appendRunEnd`, `driverRunEndReason`; `runTurn` allocates the per-invocation runId). Q6 closed; P2 row flipped to done | P2 implementation |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -574,7 +575,7 @@ expanded scope and must be amended before any new action type executes.
 | Q3 | `<episodesRoot>` location | **decided (R2): `~/.tre/episodes`** — organizational only; grants no isolation and no automatic collection (§5 caveats). |
 | Q4 | Fleet envelope → tokenomics ingest vs file-only first? | open — lean file-only; cross-host needs explicit transport (§8). |
 | Q5 | Worktree integration: auto-merge or stage for human? | **decided (R2, narrowed):** episode-branch integration is **automatic for identified, tested artifacts under approved policy** — per the S5 merge-action contract above (pin base, tested SHA+parents, CAS advance, trusted gate, episode-scoped auto-resolution). *Promotion episode→main stays human by default but is delegable under explicit policy* — "always human" is governance default, not technical necessity. |
-| Q6 | Is exit code + session tail sufficient for completion classification, or does one-shot need `--emit-events`? | **reopened (R2):** the old rationale was wrong — `agent_end` is *not* a persisted general completion record (only guard evidence is). Crash/exit classification is underspecified; decide after §13.4 recovery states are implemented. Stdout mirror remains one option, not the only one. → **planned at P2 (§11.1)**: terminal `runEnd {runId, reason}` with run/attempt identity pinned at P0; absent evidence classifies `unknown`, never `crashed`. |
+| Q6 | Is exit code + session tail sufficient for completion classification, or does one-shot need `--emit-events`? | **reopened (R2):** the old rationale was wrong — `agent_end` is *not* a persisted general completion record (only guard evidence is). Crash/exit classification is underspecified; decide after §13.4 recovery states are implemented. Stdout mirror remains one option, not the only one. → **CLOSED (P2, 2026-10-30)**: terminal `runEnd {runId, reason}` entry is implemented (driver-appended, per-run identity); absent evidence classifies `unknown`, never `crashed`. No `--emit-events` needed — the session file itself is the durable record. |
 | Q7 | Adopt herdr as S7 second transport / supervisor as socket client? | **narrowed (R2):** optional adapter only; herdr is not S7 authority, not remote-JSONL transport, and PTY `agent prompt` is not a trusted steer fallback. |
 | Q8 | Implement the herdr agent contract in tre. harness as cheap reversible work? | **reframed (R2):** bounded *spike*, not "~a day": state reporting is small, but restart/approval/release/resume correctness (incl. `--resume` = file path) needs tests before any estimate. Not a supervisor prerequisite. |
 
@@ -604,7 +605,7 @@ Detailed wire shapes below remain proposals until P0 closes the schemas.
 |----|-------------|------------------|--------|
 | P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | **done — closed in §14 (2026-10-30)** |
 | P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | **done (2026-10-30)** — `ProgressNudgeEntry` + `Session.appendProgressNudge` (session.ts), driver persists every fire in `runTurn.onEvent` (main.ts); shape amended at implementation (turn/count/target, real `ProgressMode`); 4 tests: round-trip, legacy-reader skip (version stays 1), compaction-chain safe, runTurn end-to-end |
-| P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | not started |
+| P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | **done (2026-10-30)** — `RunEndEntry` + `Session.appendRunEnd` + `driverRunEndReason` (session.ts); `runTurn` allocates the §14.1 runId and appends the terminal record at agent_end after guard evidence; toolUse leak writes NOTHING (absence → `unknown`); 5 tests: round-trip, reason mapping, legacy-reader skip, runTurn tail record, two-runs-per-session |
 | P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | not started |
 | P3b | **File-backed steering delivery**: `--steer-file <path>` + `FileSteeringQueue` (offset-tolerant incremental drain, malformed lines skipped+counted, scoped-request validation, transcript-scan dedup by request id with scope/provenance conflict rejection, sync-before-ack per §13.1). **Claims deduplicated transcript insertion only — never exactly-once execution** (I6). Tests: §13.3 rows 1/2/4 | S1, S2 | not started |
 | P4 | **Episode journal & projections**: typed graph.json / state.json / decisions.jsonl readers-writers, schema validation, atomic-rename, dir scaffold (S4), intent/outcome append records (§6 lifecycle), state trichotomy applied (S6). No process ever writes these yet | S3, S5, S6 | not started |
@@ -901,14 +902,17 @@ class says otherwise.
 
 ### 13.4 Exit classification (Q6 parking spot)
 
-Until a durable completion record is specified (candidate: a terminal
-`runEnd {runId, reason}` entry appended by the driver at agent_end —
-`runId` required because a session file holds multiple runs; **planned at
-P2, §11.1** — *must* be added to §2 via Change Ledger before
-implementation), worker outcome =
-process exit code + last entries + torn-tail status, classified only as
-`clean | stopped-by-guard | crashed | unknown`. Anything finer is a
-Q6 implementation decision informed by this matrix.
+**Implemented at P2 (2026-10-30):** the durable completion record is the
+terminal `runEnd {runId, reason}` entry the driver appends at agent_end
+(`runId` required because a session file holds multiple runs; §2 ledger
+row + session.ts `RunEndEntry`). Absence of a runEnd at the tail is
+`unknown`, NEVER `crashed` (a crashed driver cannot write its own
+terminal record; exit code corroborates but never replaces the entry;
+only a reconciling supervisor records `crashed`, and only in its own
+journal, never in the worker session file). How the reason maps to the
+coarse `clean | stopped-by-guard` classes remains a supervisor-side
+classification decision (P7/P13) informed by the runEnd reason + the
+optional guardStop evidence entry preceding it.
 
 ## 14. P0 — Pinned wire contracts (contract closure)
 

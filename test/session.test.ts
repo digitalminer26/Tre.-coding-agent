@@ -730,6 +730,58 @@ test("P1: a reader that predates progressNudge skips it (additive entry, format 
   }
 });
 
+// ─────────────── P2: the runEnd entry (docs/11 §2/§13.4) ───────────────
+
+test("P2: appendRunEnd round-trips through loadSession; replay ignores the entry", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-runend-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "runend.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  await s.appendMessage(userMsg("do the thing", 1));
+  const entryId = await s.appendRunEnd("run_01JX_ABC", "stop");
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const end = loaded.entries.find((e) => e.type === "runEnd");
+  assert.ok(end && end.type === "runEnd", "the runEnd entry is in the file");
+  assert.equal(end.id, entryId);
+  assert.ok(end.timestamp > 0);
+  assert.equal(end.runId, "run_01JX_ABC");
+  assert.equal(end.reason, "stop");
+  // Replay: harness metadata, NOT LLM context.
+  assert.deepEqual(
+    replayContext(loaded.entries),
+    replayContext(loaded.entries.filter((e) => e.type !== "runEnd")),
+  );
+});
+
+test("P2: driverRunEndReason maps the loop reasons and rejects toolUse (absence = unknown)", async () => {
+  const { driverRunEndReason } = await import("../src/session/session.js");
+  for (const r of ["stop", "length", "error", "aborted", "budget", "loop", "stall", "progress"] as const)
+    assert.equal(driverRunEndReason(r), r);
+  assert.equal(driverRunEndReason("toolUse"), undefined, "toolUse never terminates a run → no record");
+});
+
+test("P2: a reader that predates runEnd skips it (additive entry, format version stays 1)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-runend-old-"));
+  const path = join(dir, "old.jsonl");
+  try {
+    const s = await Session.create(path, { model: MODEL });
+    await s.appendMessage(userMsg("keep", 1));
+    await s.appendRunEnd("r1", "aborted");
+    await s.close();
+    const loaded = await loadSession(path);
+    assert.equal(SESSION_FORMAT_VERSION, 1, "the format version was NOT bumped");
+    const legacy = loaded.entries
+      .filter((e) => e.type === "message")
+      .map((e) => (e as { message: AgentMessage }).message);
+    assert.deepEqual(replayContext(loaded.entries), legacy);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("P1: a progressNudge before a compaction boundary does not break the kept-entry chain", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "om-sess-nudge-cx-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -32,6 +32,7 @@ import type {
   GuardEvidence,
   ProgressKind,
   ProgressMode,
+  StopReason,
   UserMessage,
   Usage,
 } from "../types.js";
@@ -241,13 +242,46 @@ export interface ProgressNudgeEntry {
   runId?: string;
 }
 
+/** §14.1: driver-allocated run identity (UUID), attached to the terminal entry. */
+export interface RunEndEntry {
+  type: "runEnd";
+  id: string;
+  timestamp: number;
+  /** §14.1 runId — one per driver invocation against this session. */
+  runId: string;
+  /**
+   * Why the RUN ended (docs/11 §2): "the run ended and why", NEVER "the
+   * task passed" — acceptance stays supervisor-side. Driver-writable
+   * reasons only ("crashed" is reserved for a reconciling supervisor and
+   * is never written by the driver — a crashed driver cannot write its
+   * own terminal record). Absence classifies `unknown`, never `crashed`.
+   */
+  reason: DriverRunEndReason;
+}
+
+/**
+ * Driver-writable `runEnd` reasons: the StopReason set minus "toolUse"
+ * (a tool-use stop never terminates a run, so it never appears).
+ */
+export type DriverRunEndReason = Exclude<StopReason, "toolUse">;
+
+/**
+ * Narrow a loop StopReason to a driver-writable runEnd reason. "toolUse"
+ * must never terminate a run (§2); if one ever leaks through, the honest
+ * answer is NO terminal record (absence → `unknown`), not a wrong reason.
+ */
+export function driverRunEndReason(reason: StopReason): DriverRunEndReason | undefined {
+  return reason === "toolUse" ? undefined : reason;
+}
+
 export type SessionEntry =
   | SessionHeaderEntry
   | MessageEntry
   | ModelChangeEntry
   | CompactionEntry
   | GuardStopEntry
-  | ProgressNudgeEntry;
+  | ProgressNudgeEntry
+  | RunEndEntry;
 
 /** Model identity as recorded by a modelChange entry (resolved from
  *  models.json by the CLI on resume — apiKeys never land in the session file). */
@@ -446,6 +480,26 @@ export class Session {
       id: randomUUID(),
       timestamp: Date.now(),
       ...nudge,
+    });
+  }
+
+  /**
+   * Append the terminal record for one run (P2, docs/11 §2/§13.4):
+   * "the run ended and why" — never "the task passed". Written by the
+   * driver at agent_end (every exit path that reaches agent_end); the
+   * supervisor's classifier treats a file whose tail has no runEnd as
+   * `unknown` — never `crashed` (a crashed driver cannot write its own
+   * terminal record; only a reconciling supervisor may record `crashed`,
+   * and it does so in ITS journal, never in the worker session file).
+   * Replay ignores the entry like guardStop/progressNudge.
+   */
+  appendRunEnd(runId: string, reason: DriverRunEndReason): Promise<string> {
+    return this.write({
+      type: "runEnd",
+      id: randomUUID(),
+      timestamp: Date.now(),
+      runId,
+      reason,
     });
   }
 
