@@ -321,37 +321,66 @@ test("torn trailing line is dropped and reported; earlier lines survive", async 
   assert.deepEqual(replayContext(loaded.entries), [userMsg("ok", 1)]);
 });
 
-// docs/11 §13.1 regression (repro 2026-10-30): before the fix, Session.open
-// after a torn tail appended BEHIND the partial line, so the session
-// became permanently unloadable ("corrupt line 3"). Repair-then-append:
-// open truncates the torn tail, the resume append lands on a valid
-// boundary, and the file reloads clean.
-test("Session.open repairs a torn tail before appending; the session stays loadable", async (t) => {
+// docs/11 §13.1 regression (repro 2026-10-30; audit 2026-10-30 widened it):
+// before the fix, Session.open after a torn tail appended BEHIND the partial
+// line, so the session became permanently unloadable ("corrupt line 3").
+// A crash can interrupt the last append at ANY byte after the previous "\n",
+// leaving the file unterminated in two ways:
+//   - a PARTIAL tail line (unparseable)     → truncate it away;
+//   - a COMPLETE record minus its "\n"      → it parses, loadSession counts
+//     it as an entry, so a naive "repair only when droppedTornTail" fix
+//     misses it and the next append welds two records onto one line.
+// The matrix below cuts a real appended record at EVERY byte position and
+// asserts open+append+reload stays clean at each cut.
+test("Session.open repairs every crash cut of the final append; the session stays loadable", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "om-sess-repair-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
 
   const path = join(dir, "s.jsonl");
   const s0 = await Session.create(path, { cwd: dir });
-  await s0.appendMessage(userMsg("hello", 1));
+  await s0.appendMessage(userMsg("hello 🦊 漢字", 1));
   await s0.close();
+  const prefix = await readFile(path); // header + "hello" record, newline-terminated
 
-  // Simulate a kill mid-append: truncated JSON, no trailing newline.
-  await writeFile(path, (await readFile(path, "utf8")) + '{"type":"message","id":"x","mess');
+  const resumeMsg = { role: "user" as const, content: "after resume", timestamp: 2 };
+  const record = Buffer.from(
+    JSON.stringify({ type: "message", id: "cut", message: resumeMsg }) + "\n",
+  );
 
-  const loaded = await loadSession(path);
-  assert.equal(loaded.droppedTornTail, true, "the torn tail is tolerated on load");
+  for (let cut = 0; cut < record.length; cut++) {
+    // Crash mid-append: the record's first `cut` bytes arrived, no terminator
+    // (cut 0 == killed before any byte of the record landed).
+    await writeFile(path, Buffer.concat([prefix, record.subarray(0, cut)]));
 
-  const s1 = await Session.open(path); // must repair, not append past the tear
-  await s1.appendMessage(userMsg("after resume", 2));
-  await s1.close();
+    const s1 = await Session.open(path); // must repair, not append past the tear
+    await s1.appendMessage(resumeMsg);
+    await s1.close();
 
-  const again = await loadSession(path); // threw before the fix
-  assert.equal(again.droppedTornTail, false);
-  assert.equal(again.entries.length, 3); // header + 2 messages, no weld
-  assert.deepEqual(replayContext(again.entries), [
-    userMsg("hello", 1),
-    userMsg("after resume", 2),
-  ]);
+    const again = await loadSession(path); // threw (or welded) before the fix
+    assert.equal(again.droppedTornTail, false, `cut ${cut}: tail must be clean`);
+    const bytes = await readFile(path);
+    assert.ok(
+      bytes.subarray(0, prefix.length).equals(prefix),
+      `cut ${cut}: prior bytes must be untouched`,
+    );
+    if (cut === record.length - 1) {
+      // The complete record survived (only its "\n" was missing): open must
+      // KEEP it (loadSession counted it) and terminate the line — so the
+      // transcript is prefix + survived record + the resume append.
+      assert.equal(again.entries.length, 4, `cut ${cut}: survived record + resume append`);
+      assert.deepEqual(replayContext(again.entries), [
+        userMsg("hello 🦊 漢字", 1),
+        userMsg("after resume", 2), // the survived record
+        userMsg("after resume", 2), // the resume append
+      ]);
+    } else {
+      assert.equal(again.entries.length, 3, `cut ${cut}: header + hello + resume append`);
+      assert.deepEqual(replayContext(again.entries), [
+        userMsg("hello 🦊 漢字", 1),
+        userMsg("after resume", 2),
+      ]);
+    }
+  }
 });
 
 test("mid-file corruption throws (not a torn tail)", async (t) => {

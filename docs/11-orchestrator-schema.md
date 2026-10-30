@@ -572,11 +572,29 @@ JSON line to a closed session → load (tolerated) → `Session.open` + one
 append → reload fails. No caller truncates or repairs (grep: no
 truncate/repair path exists in session handling).
 
-**Requirement (L1 precondition, landing as its own commit in
-`src/session/session.ts`):** before an appender writes, it must, under
-exclusive ownership, truncate the file to the last valid `\n` boundary
-when the tail is torn — then append. Repair-then-append, never
-append-past-torn-tail.
+**Requirement (L1 precondition, landed in `src/session/session.ts`;
+audit 2026-10-30 widened it):** before an appender writes, it must, under
+exclusive ownership, repair the tail to a valid newline boundary — then
+append. Repair-then-append, never append-past-torn-tail. Two tail classes,
+two repairs (a crash can interrupt the last append at any byte after the
+previous `\n`):
+
+- **Partial tail line** (unparseable) → truncate it away. This is the
+  class the first fix shipped with.
+- **Complete record that lost only its terminating `\n`** (parses fine,
+  so `droppedTornTail` is false and a naive "repair only on
+  `droppedTornTail`" misses it — audit found exactly one such cut out of
+  a 99-cut byte matrix) → **keep** the record (`loadSession`/replay
+  already count it as an entry; truncating it would desync the replayed
+  context from the file) and terminate the line before any further
+  appends.
+
+Shipped: `Session.open` checks the last byte; unterminated tail → parse
+it → `appendFile("\n")` (valid) or `truncate(lastNL + 1)` (partial). A
+load error (mid-file corruption, bad header) throws *before* the file is
+touched — repair never runs on a file `loadSession` rejects. Regression
+= every-byte crash-cut matrix over the final append, asserting prior
+bytes untouched and reload clean at each cut.
 
 **Durability scoping (R3):** repairing the boundary recovers from
 *process* death. It is not a power-failure guarantee: fsync policy per

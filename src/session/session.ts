@@ -22,7 +22,7 @@
  *    not an exception; structural corruption is.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, truncate } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, truncate } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -302,20 +302,38 @@ export class Session {
 
   /** Open an existing session for appending (resume). Validates header + version.
    *
-   *  Repair-then-append (docs/11 §13.1): a prior crash can leave a torn
-   *  trailing line (an interrupted append without its "\n"). `loadSession`
-   *  tolerates it, but appending BEHIND it welds the partial line to the new
-   *  entry and makes the session permanently unloadable (repro: load →
-   *  open → one append → reload fails "corrupt line N"). So when the tail
-   *  is torn we truncate to the last valid newline boundary before
-   *  handing the file back for appends. Process-death durability only —
-   *  see docs/11 §13.1 for the fsync scoping. */
+   *  Repair-then-append (docs/11 §13.1): a prior crash can interrupt the
+   *  last append anywhere after the previous "\n", leaving the file without
+   *  a terminating newline. Two tail classes, two repairs — appended
+   *  anything must land on a valid boundary or the next append welds lines
+   *  and the session becomes permanently unloadable ("corrupt line N"):
+   *   - the tail is a PARTIAL line (unparseable) → truncate it away;
+   *   - the tail is a COMPLETE record that lost only its "\n" (parses) →
+   *     KEEP it (loadSession/replaySession already count it as an entry)
+   *     and terminate the line before any further appends.
+   *  Repair only ever runs when the file is otherwise loadable: a load
+   *  error (mid-file corruption, bad header) throws before the file is
+   *  touched. Process-death durability only — see docs/11 §13.1. */
   static async open(path: string): Promise<Session> {
-    const { header, droppedTornTail } = await loadSession(path);
-    if (droppedTornTail) {
-      const raw = await readFile(path);
-      const boundary = raw.lastIndexOf(0x0a) + 1; // byte after the last complete line
-      await truncate(path, boundary);
+    const { header } = await loadSession(path);
+    const raw = await readFile(path);
+    if (raw.length > 0 && raw[raw.length - 1] !== 0x0a) {
+      const lastNL = raw.lastIndexOf(0x0a);
+      const tail = raw.subarray(lastNL + 1);
+      let tailParses = false;
+      try {
+        JSON.parse(tail.toString("utf8"));
+        tailParses = true;
+      } catch {
+        tailParses = false;
+      }
+      if (tailParses) {
+        // Complete record, missing only its terminator: terminate it.
+        await appendFile(path, "\n");
+      } else {
+        // Partial record: drop it, back to the last valid boundary.
+        await truncate(path, lastNL + 1);
+      }
     }
     const handle = await open(path, "a");
     return new Session(path, header, handle);
