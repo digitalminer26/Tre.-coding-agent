@@ -378,6 +378,88 @@ test("length guard (C22): no room for the retry on the last turn → stops with 
   assert.equal(end.messages.length, 2, "user + partial — no nudge pushed");
 });
 
+// ────────────────────── C43: premature intent stop ──────────────────────
+
+test("intent nudge (C43): colon-ending announcement with no tool call → nudge, model then calls", async () => {
+  const { tool: t1 } = makeTool("t1", {
+    execute: async () => ({ content: [{ type: "text" as const, text: "built" }] }),
+  });
+  const turns: FakeTurn[] = [
+    { type: "text", text: "Now building the server target to verify it compiles:" },
+    { type: "toolcall", calls: [{ id: "a", name: "t1", args: {} }] },
+    { type: "text", text: "build verified" },
+  ];
+  const events = await drainLoop(turns, [t1]);
+  const end = agentEnd(events);
+
+  assert.equal(end.stopReason, "stop", "the run continued: tool, then a clean final answer");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 3);
+  const msgs = end.messages;
+  assert.equal(msgs.length, 6, "user, assistant(announcement), user(nudge), assistant(toolcall), toolResult, assistant(final)");
+  const nudge = msgs[2]!;
+  assert.equal(nudge.role, "user");
+  assert.match(nudge.role === "user" ? nudge.content : "", /announced a next step/i);
+});
+
+test("intent nudge (C43): second consecutive intent stop ends the run as 'stop' (one nudge only)", async () => {
+  const turns: FakeTurn[] = [
+    { type: "text", text: "Now building:" },
+    { type: "text", text: "Still building:" },
+  ];
+  const events = await drainLoop(turns, []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 2);
+  assert.equal(end.messages.filter((m) => m.role === "user").length, 2, "exactly one nudge");
+});
+
+test("intent nudge (C43): long text-only final answer (no colon) is NOT nudged", async () => {
+  const long = "The heartbeat measures time since the last bytes handed to HTTP. ".repeat(12);
+  assert.ok(!long.trimEnd().endsWith(":"));
+  const events = await drainLoop([{ type: "text", text: long }], []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 1, "no extra turn");
+});
+
+test("intent nudge (C43): long colon-ending prose (a real enumerated answer) is NOT nudged", async () => {
+  const long = "Here is the full breakdown of every change and why it is safe: ".repeat(12);
+  const events = await drainLoop([{ type: "text", text: long }], []);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop", ">600 chars is treated as a real answer");
+  assert.equal(events.filter((e) => e.type === "turn_start").length, 1);
+});
+
+test("intent nudge (C43): no room on the last turn → stops without a nudge", async () => {
+  const events = await drainLoop([{ type: "text", text: "Now building it:" }], [], { maxTurns: 1 });
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(end.messages.length, 2, "user + announcement — no nudge pushed");
+});
+
+test("intent nudge (C43): a pending steer supersedes the nudge", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "text", text: "Now building the target:" },
+    { type: "text", text: "done" },
+  ];
+  const { events, seen, queue } = await drainSteered(turns, [tool], 1, ["use ninja, not make"]);
+  const end = agentEnd(events);
+  assert.equal(end.stopReason, "stop");
+  assert.equal(seen.length, 2, "the steer kept the run alive (keep-alive path, not the nudge)");
+  const ctx2 = seen[1]!.messages;
+  assert.ok(
+    ctx2.some((m) => m.role === "user" && m.content === "use ninja, not make"),
+    "the steer was delivered",
+  );
+  assert.ok(
+    !ctx2.some((m) => m.role === "user" && /announced a next step/.test(m.content)),
+    "the steer replaced the nudge (no nudge pushed)",
+  );
+  assert.equal(queue.length, 0);
+  assert.equal(events.filter((e) => e.type === "steer").length, 1);
+});
+
 // ─────────────────────────── batch terminate ───────────────────────────
 
 test("terminate: true on EVERY result → loop stops (scripted 2nd turn not consumed)", async () => {

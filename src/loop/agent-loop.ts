@@ -87,6 +87,7 @@ import type {
   StreamFn,
   Tool,
   ToolCallBlock,
+  TextBlock,
   ToolResult,
   ToolResultMessage,
 } from "../types.js";
@@ -247,6 +248,32 @@ export const BUDGET_CONTINUE_TEXT =
   "If the task is complete, reply with a final summary and do NOT call any " +
   "more tools. Otherwise keep working: briefly state what remains, then make " +
   "your next tool call.";
+
+// C43 — premature-completion nudge. A model turn that announces the next
+// action and then ends with NO tool call (stopReason "stop", zero calls)
+// cuts the run short mid-task: observed live (session tre-20261029-155638,
+// six occurrences) as "Now building the server target to verify it compiles:"
+// and "Remote differs — check whether it's behind or diverged before
+// pushing:" — every occurrence was a SHORT reply whose text ended with a
+// colon: the model treated the colon as a handoff, then the stop token
+// ended the turn before the call materialized. A legitimate final summary
+// essentially never ends with ":" (it dangles syntactically), so the colon
+// ending on a SHORT reply is a high-precision marker; long text-only
+// answers (real summaries, explanations) are never nudged. One nudge per
+// cycle, like the C22 length nudge; a second consecutive intent stop ends
+// the run normally ("stop") — the model is allowed to end with prose.
+const INTENT_NUDGE_TEXT =
+  "Your previous message announced a next step and ended without a tool call. " +
+  "If work remains, make that tool call now instead of describing it. If the " +
+  "task is actually complete, reply with the final summary (no colon-ending " +
+  "announcement) and stop.";
+
+/** C43: true when a text-only stop looks like an announcement that lost its
+ *  tool call: short reply (<=600 chars) whose text ends with ':'. */
+export function isPrematureIntentStop(text: string): boolean {
+  const t = text.trimEnd();
+  return t.length > 0 && t.length <= 600 && t.endsWith(":");
+}
 
 // C26 — loop detection: the same tool-call batch (same tools, same
 // arguments, same order) issued 3 times in a row. The third repeat is a
@@ -635,6 +662,7 @@ export async function* runLoop(
   // sites, attached to agent_end (present exactly for "loop"/"stall").
   let guardEvidence: GuardEvidence | undefined;
   let lengthNudged = false; // C22: the one retry for a no-call `length` stop
+  let intentNudged = false; // C43: the one retry for a colon-ending intent stop
   // C26 — cycle bookkeeping: the budget is per-cycle, not per-run.
   const maxContinuations =
     options.maxContinuations !== undefined
@@ -789,6 +817,7 @@ export async function* runLoop(
       continuations += 1;
       cycleStart = turn;
       lengthNudged = false; // the no-call length retry is per-cycle
+      intentNudged = false; // C43: likewise the intent-completion retry
       context.push({ role: "user", content: BUDGET_CONTINUE_TEXT, timestamp: Date.now() });
       yield {
         type: "turn_budget",
@@ -990,8 +1019,33 @@ export async function* runLoop(
         const keepAlive = await drainSteers(turn);
         if (keepAlive.length > 0) {
           for (const ev of keepAlive) yield ev;
+          // Real user guidance supersedes the C43 nudge (and resets it: the
+          // model's next turn is steered, not a lost-announcement retry).
+          intentNudged = false;
           continue;
         }
+      }
+      if (
+        message.stopReason === "stop" &&
+        !intentNudged &&
+        turn - cycleStart < maxTurns &&
+        isPrematureIntentStop(
+          message.content
+            .filter((b): b is TextBlock => b.type === "text")
+            .map((b) => b.text)
+            .join(""),
+        )
+      ) {
+        // C43: an announcement ended the turn with no tool call. One nudge
+        // lets the model issue the call it was about to make. The assistant
+        // text is already in context (I2), so it sees its own announcement.
+        intentNudged = true;
+        context.push({
+          role: "user",
+          content: INTENT_NUDGE_TEXT,
+          timestamp: Date.now(),
+        });
+        continue; // consumes no turn (not an LLM call); bounded per cycle by intentNudged
       }
       break; // normal stop — or length with the nudge already spent
     }
