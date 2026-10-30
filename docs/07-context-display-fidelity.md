@@ -35,26 +35,46 @@ fidelity that costs nothing: display what the events already carry.
 **State.** On each assistant `done` with `usage`:
 
 - `lastUsage: { input: number; output: number; cacheRead?: number;
-  cacheWrite?: number } | null` — the LAST call's usage (replaces nothing;
-  `contextTokens` keeps its own semantics).
+  cacheWrite?: number } | null` — the last USAGE-REPORTED usage (a call
+  whose `done` carries no usage keeps the previous value: `usage ??
+  state.lastUsage`; replaces nothing — `contextTokens` keeps its own
+  semantics).
 - `cacheReadTotal`, `cacheWriteTotal: number` — session cumulative (0 when the
   endpoint never reports them).
 
 **Display.**
 
 - New bottom field `cache` (added to `BOTTOM_FIELDS`, user-pinnable via
-  `/display-bottom`): the last call's cache ratio —
-  `cached 11.0k/12.1k (91%)` — or `—` when the endpoint reports no
-  `cached_tokens` (never show `0%`: absence of the field is not a zero hit
-  rate).
-- `/context` report gains two lines (only when data exists):
-  `last call: in 12.1k (cached 11.0k) / out 340`
-  `session cache: read 45.2k · write 2.1k` (write line only when > 0).
+  `/display-bottom`): the cache ratio of the last **usage-reporting**
+  call — `lastUsage` is the most recent non-empty usage (`usage ??
+  state.lastUsage`), so a later call that reports no usage KEEPS the
+  previous numbers rather than showing `—` —
+  `cached 11k/12.1k (91%)` — or `—` when no call has EVER reported
+  usage, the stored usage carries no `cacheRead` (the endpoint never
+  sent the cached-tokens field — absence is not a zero hit rate), or its
+  input is non-positive. A reported `cacheRead` of 0 with positive input
+  IS shown as `0%` — a genuine miss is information.
+- `/context` report gains two lines (same retained-`lastUsage` source as
+  the field above — the numbers are the most recent USAGE-REPORTING
+  call's, not necessarily the final call's):
+  `last call: in 12.1k (cached 11k) / out 0.3k` — shown whenever any
+  call has reported usage; the `(cached …)` slice appears only when that
+  retained usage has `cacheRead` > 0, so an endpoint without cache data
+  (or a cold first call) shows `last call: in 0.5k / out 0.1k`.
+  `session cache: read 11k · write 0.2k` (the write slice only when > 0;
+  the whole line when either cumulative total is > 0 — a write-only
+  session renders `session cache: read 0 · write 0.1k`).
 
-**Edge cases.** Endpoints that never report `prompt_tokens_details` → the
-field stays `—` and the report lines are omitted (no misleading zeros). A
-`cacheWrite` of 0 with `cacheRead` > 0 is normal (warm cache) — show only
-what is non-zero.
+**Edge cases.** The display is driven by the normalized `Usage.cacheRead`
+field, whatever the wire format supplies it from (Chat Completions
+`prompt_tokens_details.cached_tokens`, Responses
+`input_tokens_details.cached_tokens` — the adapters differ; see
+`src/wire/`). An endpoint that never supplies it → the field stays `—`,
+the last-call line still shows (without the cached slice), and the
+session line is omitted until any cache total is non-zero (no misleading
+zeros — except the genuine `0%` case above, which is reported data). A
+`cacheWrite` of 0 with `cacheRead` > 0 is normal (warm cache) — the write
+slice is what gets omitted.
 
 ### 2 — Growth per turn + turns-until-compaction (derived)
 

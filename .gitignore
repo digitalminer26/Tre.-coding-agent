@@ -28,6 +28,9 @@ tre.json
 # local artifacts, never in git. The consolidated human report (.mcp-audit-*.md)
 # IS committed, matching the cycle-1/2 convention.
 .tre/audit-cycle3/
+# Read-only doc/code audit rounds (auditor prompts, verdicts, session
+# transcripts) — same class of local orchestration artifacts.
+.tre/audits/
 # GitHub push token. The machine-level home is ~/.tre/github-token (outside
 # the repo, never in git). This entry is a legacy safety net for the old
 # repo-local location, still honored by the release tooling as a fallback.

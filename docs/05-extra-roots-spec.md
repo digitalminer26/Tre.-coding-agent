@@ -54,7 +54,7 @@ only.
 |---|---|---|
 | **bash** (kernel) | `generateBashSandboxPolicy(root)` re-allows the workspace subpath | re-allow the workspace **and each extra root** subpath (real path), last-match-wins |
 | **write/edit** (WS7) | `checkPathWithinRoot(root, p)` | `checkPathWithinRoots(roots, p)` — allowed if under **any** root |
-| **read** | unrestricted (unchanged) | unchanged |
+| **read** | no root restriction (unchanged) | unchanged (the sensitive-path gate is untouched by extra roots) |
 | **prompt** | "All relative paths resolve against `<root>`" | lists the workspace + each extra root |
 
 > **Why both layers at once:** if bash could write an extra root but the
@@ -64,8 +64,16 @@ only.
 
 **Enumeration, not a hole.** An extra root re-allows **its own subpath only** —
 never its parent or siblings. The confinement property is identical to the
-workspace: a path outside every root (workspace + extra roots) is still denied
-by the kernel and still refused by the file-tool hook.
+workspace: a path outside every root (workspace + extra roots) is refused by
+the write/edit path hook; on the kernel side it is outside everything the
+policy re-allows bash, with the D12 v1 boundary's documented exceptions —
+macOS Seatbelt is a denylist (`(allow default)` + targeted denies) that keeps
+per-user temp (`/private/var/folders`) readable+writable independent of the
+roots; Linux bwrap is an empty-root model where such paths are simply not
+visible (`docs/09-linux-sandbox.md`). (`read` is
+outside the root boundary entirely — gated by the sensitive-path list, and
+under `--no-approve` every `read` is blocked fail-closed,
+`docs/04-skill-authoring.md`.)
 
 ## 3. The sensitive-root guard (what makes it a contract)
 
@@ -268,8 +276,11 @@ in the guardrail zone.
 
 **Enumeration still holds.** As with every extra root (§2), the implicit root
 re-allows **its own subpath only** — a SIBLING of `~/.tre` (e.g. `~/other`) is
-still OUTSIDE the boundary: denied by the kernel and refused by the file-tool
-hook.
+still OUTSIDE the boundary: denied by the kernel (bash) and refused by the
+write/edit path hook. (`read` is exempt from the root boundary entirely — the
+root set confines bash/write/edit, never `read`; `read` is gated by the
+sensitive-path list, and under `--no-approve` every `read` is blocked
+fail-closed, `docs/04-skill-authoring.md`.)
 
 ## 7. Out of scope (v1)
 - Extra roots outside the home dir (external mounts, `/opt`) — §3.
@@ -281,7 +292,7 @@ hook.
   on a malformed file or a refused entry). Entries may use `~` / `~/` (expanded
   against the home dir at startup, shell-style — 2026-09-30, so the config is
   portable across machines). See `docs/02-contracts.md` C36.
-- Changing the `read` tool (it stays unrestricted).
+- Changing the `read` tool (it stays root-unrestricted; unchanged).
 
 ## 8. Definition of done
 1. `tsc` clean; **full suite green** (no new failures).
@@ -293,8 +304,9 @@ hook.
 7. **C38 (the implicit `~/.tre` root, §6):** `~/.tre` is implicit — always on
    the boundary by construction, NOT a user-assigned extra root (never
    validated, never written to `tre.json`); the banner shows it on its own
-   `implicit root:` line; a sibling of `~/.tre` is still refused (kernel +
-   file-tool hook).
+   `implicit root:` line; a sibling of `~/.tre` is still refused (kernel for
+   bash + the write/edit path hook; `read` is exempt from the root set, §2 —
+   gated by the sensitive-path list, blocked under `--no-approve`).
 
 ## 9. Sequencing
 The stall guard (C26) is done and green (commit `f393fb2`). This is the **next**

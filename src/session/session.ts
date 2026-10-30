@@ -36,7 +36,11 @@ export const SESSION_FORMAT_VERSION = 1;
 
 /**
  * D20 boundary: sessions live OUTSIDE any repository — the agent under test
- * must never be able to read or edit its own session history. `--session-auto`
+ * must never find its session history among the project files it operates
+ * on. (Repo-level isolation only: the C38 implicit `~/.tre` root makes the
+ * session dir read+write reachable from the tools — non-sensitive session
+ * files included; the sensitive-filename gate covers the credential files,
+ * not transcripts.) `--session-auto`
  * (WS6 CLI) resolves each run's session file here, in `~/.tre/sessions/`,
  * named `tre-<UTC yyyyMMdd>-<HHmmss>-<pid>.jsonl`. Pure: no I/O — the caller
  * creates the parent directory so the first write cannot fail.

@@ -50,7 +50,7 @@ The TUI's `/display-bottom` opens an interactive field picker (↑/↓ + space
 - `docs/07-context-display-fidelity.md` — context display fidelity changes and remaining items
 - `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups
 - `docs/09-linux-sandbox.md` — Linux bash sandbox (Bubblewrap) boundary and mount order (Darwin stays on Seatbelt)
-- `docs/10-mcp-scope.md` — MCP (tier 1: stdio servers, tools only) design + the one CLI asymmetry (`--tools` filters built-ins only; MCP tools are additive, per-server `tools` allowlist is the MCP-scoped equivalent)
+- `docs/10-mcp-scope.md` — MCP (tier 1 stdio tools, shipped; `mcp_resource` resource reading done 2026-10-15 — the rest of tier 2 deferred) + the one CLI asymmetry (`--tools` filters built-ins only; MCP tools are additive, per-server `tools` allowlist is the MCP-scoped equivalent)
 - `docs/tui-mouse-selection/PLAN.md` — TUI in-app mouse selection + `/copy` (implemented)
 - `docs/workstream-input/plan.md` — responsive input during workstreams: stream-render coalescing + immediate interactive paints (implemented)
 - `HANDOFF.md` — dated implementation history (historical statuses may be superseded)
@@ -93,8 +93,13 @@ tre. auth status      # show the stored login (email, plan, expiry)
 tre. auth logout      # delete the stored tokens
 ```
 
-Then add a model with `"api": "openai-responses"` + `"auth": "chatgpt-oauth"`
-to `models.json` (see `models.json.example`). The access token is refreshed
+Login AUTO-DISCOVERS the ChatGPT catalog (`api: "openai-responses"` +
+`auth: "chatgpt-oauth"`) and writes the model entry to
+`~/.tre/tre/models.json` (the default catalog `tre.` reads — override with
+`--models <file>`); it becomes the default when the catalog was empty. If
+another model is already the default, pick the ChatGPT one explicitly
+(`--model <id>`, or `/models` in the TUI). `models.json.example` matters
+only when you add OTHER models by hand. The access token is refreshed
 automatically from the stored refresh token when it expires.
 
 **Login uses fixed local ports.** The OAuth client is the one Codex ships,
@@ -221,7 +226,8 @@ download and execute the versioned installer script from the release:
 curl -fsSL https://github.com/digitalminer26/Tre.-coding-agent/releases/download/vX.Y.Z/install-tre-X.Y.Z.sh | sh
 ```
 
-Replace `X.Y.Z` with the release version (e.g. `v0.4.3`). The script downloads the matching
+Replace `X.Y.Z` with the release version WITHOUT the leading `v` (e.g.
+`0.4.3` — the `v` is already in the URL). The script downloads the matching
 offline bundle, installs it under `~/.tre/tre`, creates the `tre.` symlink,
 updates the shell PATH configuration if needed, and smoke-tests the install.
 Alternatively, download the `.tgz` asset and run its embedded

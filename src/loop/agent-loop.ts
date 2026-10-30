@@ -435,9 +435,9 @@ export function batchSignature(calls: ToolCallBlock[]): string {
   return calls.map((c) => `${c.name}:${stableJson(c.arguments)}`).join("\u0000");
 }
 
-// ─────────────────────── audit fix 2026-10-31: loop detection v2 ────────────
+// ─────────────────────── audit fix 2026-10-27: loop detection v2 ────────────
 // The v1 detector compared batch SIGNATURES only, which had two failure
-// modes found in the 2026-10-31 audit:
+// modes found in the 2026-10-27 audit:
 //
 //  1. ALTERNATING loops evade it. `A → B → A → B → …` never puts three
 //     IDENTICAL batches in a row, so a model ping-ponging between two
@@ -593,7 +593,7 @@ export function progressTargetOf(call: ToolCallBlock): string | undefined {
 /** Deep JSON.stringify with sorted object keys (argument identity that
  *  does not depend on key order).
  *
- *  Audit fix (2026-10-30): builds the JSON string DIRECTLY instead of
+ *  Audit fix (2026-10-27): builds the JSON string DIRECTLY instead of
  *  rebuilding an object tree. The previous version assigned keys into a
  *  `{}` literal, so an argument object containing a JSON `__proto__` key
  *  (which `JSON.parse` produces as an OWN property) did not create a data
@@ -679,7 +679,7 @@ export async function* runLoop(
       ? options.maxGuardRetries
       : DEFAULT_MAX_GUARD_RETRIES;
   let guardRetries = 0;
-  // Loop detection (audit 2026-10-31 v2): the last up-to-LOOP_HISTORY_DEPTH
+  // Loop detection (audit 2026-10-27 v2): the last up-to-LOOP_HISTORY_DEPTH
   // EXECUTED batches, each as a record with the batch signature, an
   // unambiguous JSON digest of its results, and whether any call failed.
   // The identical guard fires when a repeat stops bringing new information
@@ -1045,12 +1045,15 @@ export async function* runLoop(
           content: INTENT_NUDGE_TEXT,
           timestamp: Date.now(),
         });
-        continue; // consumes no turn (not an LLM call); bounded per cycle by intentNudged
+        continue; // not itself an LLM turn (adds nothing to `turn`); the model's
+        // retry response IS a normal turn and still counts against the cycle
+        // budget (the nudge only fires while turn - cycleStart < maxTurns).
+        // Bounded once per cycle by intentNudged.
       }
       break; // normal stop — or length with the nudge already spent
     }
 
-    // C26 loop detection (audit v2, 2026-10-31): STABLE repeats (results
+    // C26 loop detection (audit v2, 2026-10-27): STABLE repeats (results
     // stopped changing) stop early (3rd identical / 3rd cycle of the
     // current position); FRESH-result repeats are bounded by the hard caps
     // (POLL_CAP / CYCLE_CAP batches of the same pattern). The current

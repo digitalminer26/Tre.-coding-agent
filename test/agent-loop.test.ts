@@ -1183,7 +1183,7 @@ test("C26: batchSignature — stable across key order, sensitive to tool/args", 
   );
 });
 
-// ────────────────── loop detection v2 (2026-10-31 audit) ──────────────────
+// ────────────────── loop detection v2 (2026-10-27 audit) ──────────────────
 // Result-aware identical guard, period-2 cycle guard, hard poll caps, and
 // the digest/evidence hardening from the 2026-10-27 re-audit.
 

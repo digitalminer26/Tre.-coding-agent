@@ -84,38 +84,106 @@ files under the MACHINE config root `~/.tre` (e.g. `~/.tre/<skill>.json`,
 `~/.tre/<skill>/` — C40; pre-C40 these lived in the workspace `.tre/`), never
 in the skill dir itself and never in git.
 
-## The read asymmetry (sandbox)
+## The read/sandbox boundary (current behavior, re-verified 2026-10-30)
 
-- The `read` FILE tool is NOT kernel-sandboxed — it is root-confined +
-  sensitive-path gated. The model CAN read `~/.tre/...` files.
-- `bash` IS kernel-sandboxed — `cat ~/.tre/...` → "Operation not permitted".
+- The `read` FILE tool has **no root restriction** (it may read any file), but
+  it IS sensitive-path gated, on the RESOLVED target (lexical path + realpath,
+  so a symlink to `~/.aws/...` cannot smuggle past the check): a sensitive
+  path resolving OUTSIDE the workspace (system-level: `~/.ssh`, `~/.aws`, …)
+  is BLOCKED in every mode; a sensitive path INSIDE the workspace (e.g. a
+  project `.env`) is allowed in `yes` and prompted in `ask`; under
+  `--no-approve` every `read` is blocked (fail-closed — no human to confirm).
+  So the model CAN read most `~/.tre/...` files — EXCEPT the ones whose
+  FILENAME is itself on the sensitive list (see Secrets below):
+  `telegram.json`, `tokenomics.json`, `~/.bashrc`/`.zshrc`/`.profile`, and
+  the `.tre`-anchored `models.json` (endpoint catalog) are blocked from
+  `read`/`write`/`edit` under `~/.tre` in EVERY mode, even though `~/.tre`
+  is an extra root (an extra root never downgrades a (sys) sensitive path).
+- `bash` IS kernel-sandboxed, to workspace + extra roots + the implicit
+  `~/.tre` root (C38). Ordinary paths under `~/.tre` **work** (verified:
+  a listing of `~/.tre/sessions` succeeds). Before C38 even that failed with
+  "Operation not permitted" — older skill docs saying "bash cannot touch
+  `~/.tre`" are STALE. But the sensitive FILENAME gate also scans bash
+  command tokens: `cat ~/.tre/telegram.json` is BLOCKED in every mode
+  (verified). The scan is lexical/best-effort — it cannot see INSIDE a
+  helper: a script that opens its own config (e.g. `python3 skill.py`,
+  which reads `~/.tre/telegram.json` internally at the kernel level) is
+  not caught by the filename gate. (The invocation is still subject to
+  approval mode itself: a plain `python3 …` is a gated call — allowed in
+  `yes`, prompted in `ask`, blocked under `--no-approve`.)
+  That is the intended contract: the MODEL never sees the secret; the
+  helper consumes it. Never write a skill step that pipes a credential
+  file's contents through a tool (cat/head/jq on it) — those forms are
+  blocked, and even when a quoting form slips past the scan the secret
+  would land in the transcript.
+- Consequence for sessions: sessions live OUTSIDE any repository (D20 — they
+  are never project files), under `~/.tre/sessions`, which the C38 implicit
+  root makes reachable from the tools. D20's isolation is **repo-level** (the
+  agent-under-test cannot edit its history as workspace content), not
+  agent-level unreadability — do not write a skill that assumes the agent
+  cannot see its own session files.
 
-If a skill needs the model to read a file outside the workspace, rely on the
-`read` tool, not bash. (The agent can also NOT read its own session file —
-sessions live outside the repo for a different reason: D20.)
+If a skill needs a file outside the workspace that is NOT under `~/.tre` or
+an extra root, rely on the `read` tool (no root restriction, and no prompt
+in `yes`/`ask` — except for the sensitive-path gate; under `--no-approve`
+every `read` is blocked fail-closed), not bash.
 
-## Network under the sandbox
+## Network under the sandbox (re-verified 2026-10-30)
 
-- `curl` and `git` **FAIL TLS**: LibreSSL cannot read
-  `/private/etc/ssl/openssl.cnf` (sandbox-denied) → "Operation not permitted"
-  → "remote helper aborted session" / abort.
-- `python3` (`/usr/bin/python3`, stdlib `urllib`) **WORKS** for HTTPS.
-- node's `https` module works too, but `node` is **NOT on the sandboxed bash
-  PATH** (nvm dir denied) — a skill's helper must be a system binary
-  (`/usr/bin/python3`), never `node`/`npx`/`curl`/`git`.
+The original 2026-09-27 note said curl AND git fail TLS because LibreSSL
+could not read `/private/etc/ssl/openssl.cnf`. That cause is FIXED: the
+policy now explicitly allows that one file (`src/tools/sandbox.ts`,
+"(verified 2026-09-20: error names this exact path)"). Current empirical
+state on this deployment's sandboxed bash:
+
+- `git` over **https WORKS** (`git ls-remote https://…` succeeds).
+- `curl` still FAILS, but with a different cause: it cannot read its CA
+  bundle — `curl: (77) error setting certificate verify locations: CAfile:
+  /etc/ssl/cert.pem` (that path lives under the denied `/private` subpath;
+  it is not in the policy's allow-list).
+- `python3` (`/usr/bin/python3`, stdlib `urllib`) **WORKS** for HTTPS (200).
+- node's `https` module works when node is REACHABLE, but node availability
+  under the sandbox is DEPLOYMENT-DEPENDENT: on this machine the nvm bin dir
+  is on the (inherited) PATH and node runs fine; on deployments where the
+  nvm dir was denied or node was never on the PATH it is not. Never assume
+  it — a skill's helper should be a system binary (`/usr/bin/python3`),
+  which exists everywhere macOS does. Probe (`command -v node`) if a skill
+  genuinely wants node; do not hardcode it.
 - A skill that needs network therefore: `python3` stdlib (or another system
-  binary with working TLS), invoked by absolute or system PATH.
+  binary with working TLS). curl is not a reliable helper; git-over-https
+  happens to work here but is deployment/policy-dependent — don't build a
+  skill's network path on it.
 
 ## Secrets
 
 - Per-machine credentials belong in a gitignored file under the MACHINE
-  config root `~/.tre` (e.g. `~/.tre/telegram.json`) — the agent can write
-  AND read it (C38 makes `~/.tre` an implicit root), it never enters git,
-  and it works from any launch dir. (Pre-C40 these lived in the workspace
-  `.tre/` — moved to `~/.tre` for the config-consistency cleanup.)
-- Name it plainly (`.json`). Sensitive-path patterns (`~/.ssh`, `*.key`,
-  `*.pem`, `.env*`, …) BLOCK reads in EVERY mode — a secret file whose name
-  matches them would be unreadable by the agent's own `read` tool.
+  config root `~/.tre` — it never enters git and works from any launch dir.
+  (Pre-C40 these lived in the workspace `.tre/` — moved to `~/.tre` for the
+  config-consistency cleanup.) HOW the agent writes it matters: the exact
+  names below are sensitive FILENAMES, so at `~/.tre` level the `write`/
+  `edit` tools AND bash commands naming the file are blocked in every mode
+  — e.g. the agent cannot `write ~/.tre/telegram.json` directly (the live
+  telegram skill's "the agent writes the config (the write tool)" setup
+  step PREDATES the sensitive-filename list and no longer works as
+  written). Spell out a setup route that works: create the file with a
+  command whose tokens don't name the sensitive path (e.g. a `python3`
+  heredoc building the JSON), or have the user create it; verify against
+  the safety list before writing a skill's setup text.
+- Naming (`src/tools/safety.ts` is authoritative — the list grows):
+  patterns like `~/.ssh`, `*.key`, `*.pem`, `*.p12`, `.env*`, plus the
+  explicit credential names `telegram.json`, `tokenomics.json`, the shell
+  rc files, and the `.tre`-anchored `models.json`. A sensitive path
+  OUTSIDE the workspace (system-level — e.g. a machine-config file whose
+  name or path matches one of the patterns above) is BLOCKED from
+  `read`/`write`/`edit`/bash in every mode. Ordinary (non-matching) files
+  under `~/.tre` are NOT system-level — they stay reachable through the
+  C38 implicit root (see the read/sandbox boundary above). A NEW skill secret therefore should NOT reuse one of those names:
+  name it distinctly (e.g. `~/.tre/<skillname>-config.json`), and it is
+  writable/readable through the C38 implicit root in `yes`/`ask` (verified
+  for non-listed names under `~/.tre`; under `--no-approve` every read AND
+  write call is blocked fail-closed). A sensitive path INSIDE the workspace
+  behaves differently (allowed in `yes`, prompted in `ask`) — see the
+  read/sandbox boundary above.
 - The skill must say "never echo the secret" (tool output, chat, session all
   land in the transcript).
 - The user provides the secret; the agent never creates or guesses one.

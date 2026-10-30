@@ -1,3 +1,60 @@
+## 2026-10-30 — wire diagnostics + C43 intent nudge (suite 1453 / 0 / 14)
+
+**describeError cause chain (`f029976`).** A transport-level
+`BodyTimeoutError` wrapped as `TypeError: terminated` lost its cause — the
+session reported an unactionable "terminated". `describeError` now walks the
+finite, cycle-checked `cause` chain and assembles
+`root (cause: A <- B <- ...)`; budget applies to the FINAL assembled string,
+code-bearing nodes first. Plain errors keep their previous output
+byte-for-byte. Suite 1447 pass / 0 fail / 14 skip. (Server half of the same
+workstream: llama.cpp `3375f46`, SSE ping during silent prefill —
+live-verified.)
+
+**C43 — premature intent stop → one nudge (`f7daa18`).** Observed 6× in one
+live session: the model announced the next step ("Now building …:") and the
+turn ended `stop` with ZERO tool calls — the colon was treated as a handoff
+the stop token ate. A text-only stop is legitimate, so the recovery keys on
+the high-precision marker (SHORT reply ≤600 chars ending with ':'): in the
+zero-calls branch, after the steering keep-alive check, one nudge per cycle
+("make that tool call now instead of describing it…") and continue —
+mirroring the C22 length nudge exactly (the nudge itself is not an LLM turn —
+it adds nothing to `turn`, though the model's retry response counts as a
+normal turn against the cycle budget; per-cycle reset,
+a pending steer supersedes and resets). A second consecutive intent stop
+ends the run normally. 6 new tests. Suite **1453 pass / 0 fail / 14 skip**
+(current actual, re-verified 2026-10-30).
+
+**Doc consistency sweep (this commit):** corrected the residual mislabelled
+dates the 2026-10-29 hygiene pass missed — `2026-10-31` (8 sites) and
+`2026-10-30` (1 site) in `src/types.ts`, `src/loop/agent-loop.ts`,
+`test/agent-loop.test.ts`, `docs/02`, and `docs/08` → `2026-10-27` (the true
+date of the loop-v2 audit chain `a2fd742`/`9d5b061`/`8d4f3ab`). The two
+remaining `2027-*` strings are legitimate MCP protocol-version fixtures
+(`docs/10` removal dates; the client's modern revision `2026-07-28` and a
+deliberate newer-than-client probe). `docs/08`'s second "§10" heading
+(Audit F-6) renumbered to §11 — it collided with the H3 §10 every cross-ref
+means. Checked clean: all `docs/*.md` references from src//test//README/PLAN/HANDOFF
+resolve; all D-numbers used in code lie within the PLAN.md log rows or the
+archive-defined range (D15–D22 defined in `HANDOFF-archive.md`); all C-labels
+used in code lie within the archive-defined C21–C42 range plus the C1–C3
+compaction-criteria labels defined in `docs/06` and **C43** (the intent nudge
+above — its prose definition lives in this entry, its code definition in
+`agent-loop.ts` + tests). Scope caveat: these are
+RANGE checks, not full cross-reference checks — the numbers are NOT a
+collision-free namespace, so membership does not prove a reference points at
+the definition its reader expects. Two known topic-collisions (kept, label
+reuse predates this sweep): **C41** — `test/tui-pinned-layout.test.ts` ("item
+layouts are cached") vs the archive's C41 (ChatGPT `client_version` fix,
+`HANDOFF-archive.md`); **D15** — `src/wire/*` + `src/auth/*` (ChatGPT
+Responses/OAuth workstream) vs the archive's D15 (`/display-bottom` + `you`
+prefix). Resolve these by topic, not number. Fixed in this sweep: the
+"docs/02 C6 contract" dangling label in HANDOFF (×2) and PLAN (×1) — the
+batch-shape guard paragraph lives under Contract 4 (Tool) in docs/02 and the
+references now say so. Note: C43 is recorded above (this entry is its prose
+definition; the code definition lives in `agent-loop.ts` + tests).
+
+---
+
 ## 2026-10-29 — Telegram round-4 (F1+F2) + batch-shape guards (audited; cycle 1 fixed)
 
 **Audit cycle 1 (auditor gpt-6.1-sol, `audit-c2.md`): FINDINGS — 3 reproduced
@@ -18,18 +75,19 @@ date-only edits verified behavior-neutral).** Fixed in this follow-up:
 Mixed-batch terminate semantics unchanged (executed members only); an
 all-skip batch never terminates. 4 regression tests (padding 0/1/3, cycle
 exemption, interleaved order, notice neutrality incl. the over-cap planBatch
-case); docs/02 C6 contract updated to match. Suite **1443 pass / 14 skip /
+case); the docs/02 batch-shape guard paragraph (Contract 4 — Tool) updated
+to match. Suite **1443 pass / 14 skip /
 0 fail**. Cycle-2 audit (auditor-c3, gpt-6.1-sol): **CLEAN** — all three
 cycle-1 repros independently re-run against the fixed build, no regressions
 (loop stopped early on CLEAN, 2 of 3 budgeted cycles).
 
 **Telegram round-4 (src/telegram/driver.ts, src/cli/main.ts, src/telegram/README.md, docs/02-contracts.md C37).** Fixes the two Medium findings from the round-3 audit (coordination dir: `.tre/implement-audit/telegram-round4/`, gitignored): **F1** — the idle-turn success path keeps `activeSteer` attached through `telegramBridge.send()` (typed guidance during the bot reply no longer falls into a detached queue) and detaches in `finally`, draining undrained steer into the driver's deferred buffer for the follow-up turn. **F2** — `withTurn<T>` returns `Promise<T | undefined>`: a reserved-but-unstarted body checks `stopped` after awaiting its predecessor, decrements pendingTurns, releases the mutex, and returns `undefined` without running (one-shot worker path treats it as cancelled, exit 130); `stop()` is now a lifecycle-level cancellation reserved bodies cannot bypass. Tests: explicit F2 barrier test + an end-to-end F1 gated typed-guidance integration test (replacing the former basic idle-reply test); mutation probes pinned both fixes (old code fails exactly at the new assertions). Orchestrator-implemented c0 deviation logged in plan.md (worker-c0 hit its wall-clock cap with a clean tree).
 
-**Batch-shape guards (src/loop/agent-loop.ts, docs/02-contracts.md C6).** From the Qwen runaway-tool-call audit (`qwen-duplicate-audit.md`, same coord dir): one response carried 163 tool calls (66 copies of one git command) and the loop executed every member concurrently with no ceiling. Added `MAX_BATCH_CALLS = 32` (cap on executed calls per response — extras get in-band error results with `details.notExecuted`, never run), `MAX_PARALLEL_CALLS = 8` (concurrency cap — oversized parallel groups run in ordered chunks), and `planBatch()` — a pure planner collapsing intra-batch EXACT duplicates (same tool + stable-JSON args; first occurrence runs, repeats get `DUPLICATE_CALL_TEXT`; trimming applies AFTER dedup). Every call ID still yields exactly one `tool_execution_end`; cross-turn loop/cycle guards sign the EXECUTED subset only. 4 new tests; 2 existing stall tests updated to distinct args. Suite: 1439 pass / 14 skip / 0 fail.
+**Batch-shape guards (src/loop/agent-loop.ts, docs/02-contracts.md — the batch-shape guard paragraph under Contract 4 — Tool; cited at the time as "C6", a label docs/02 never carried).** From the Qwen runaway-tool-call audit (`qwen-duplicate-audit.md`, same coord dir): one response carried 163 tool calls (66 copies of one git command) and the loop executed every member concurrently with no ceiling. Added `MAX_BATCH_CALLS = 32` (cap on executed calls per response — extras get in-band error results with `details.notExecuted`, never run), `MAX_PARALLEL_CALLS = 8` (concurrency cap — oversized parallel groups run in ordered chunks), and `planBatch()` — a pure planner collapsing intra-batch EXACT duplicates (same tool + stable-JSON args; first occurrence runs, repeats get `DUPLICATE_CALL_TEXT`; trimming applies AFTER dedup). Every call ID still yields exactly one `tool_execution_end`; cross-turn loop/cycle guards sign the EXECUTED subset only. 4 new tests; 2 existing stall tests updated to distinct args. Suite: 1439 pass / 14 skip / 0 fail.
 
 **Machine config (NOT in repo):** `~/.tre/tre/models.json` — moved `reasoning_effort`/`repeat_penalty` out of the nested `options` (llama.cpp reads them top-level) and set `parallel_tool_calls: false` for both Qwen entries; backup `~/.tre/tre/models.json.bak-qwen-params-20261029-155127`.
 
-**Audit:** the round-4 implement-audit cycles were never completed against the implementation (c1 audited the baseline). An independent auditor cycle (gpt-6.1-sol) is run against this committed diff; verdict in `.tre/implement-audit/telegram-round4/audit-c1.md`.
+**Audit:** the round-4 implement-audit cycles were never completed against the implementation (c1 audited the baseline). An independent auditor cycle (gpt-6.1-sol) was planned against this committed diff with the verdict to be written to `.tre/implement-audit/telegram-round4/audit-c1.md` — it was never written there (no `audit-c1.md` exists; the gitignored coord dir holds `audit-c2.md`…`audit-c5.md`, and the post-implementation audit this paragraph promised actually landed as `audit-c2.md`, titled "cycle 1 (post-implementation)"). **SUPERSEDED:** the audit trail continued as the cycles below (cycle 3 `audit-c4.md` against `3ba24ab`; cycle 5 `audit-c5.md` — CLEAN, workstream closed).
 
 **Audit cycle 3 (auditor gpt-6.1-sol, `audit-c4.md`, against `3ba24ab`): FINDINGS — recommendations only, no bug reproduced anywhere; both implemented in this commit.** **R1** — a batch-shape skip's `tool_execution_end` (a synthetic end whose ID never had a start) fell through the TUI's `withRunningTool` running-item fallback and transiently stamped the skip notice onto a still-running sibling (wrong ✗/✓ and resultText on a live tool line for one render). Fix: `withRunningTool` is now EXACT-MATCH ONLY; the `tool_execution_end` handler appends a finished ghost tool line for an ID it never saw start (notice stays visible, siblings untouched; a duplicate end for a finished ID still updates in place, appends nothing). docs/02's AgentEvent table gained the start/end-pairing contract paragraph (executed calls pair 1:1; the batch-shape skips emit ends without starts; consumers key on the ID and never guess). +2 tests (ghost-end-never-stamps-sibling reproducing the audit probe; duplicate-end-updates-in-place). **R2** — the one-shot F2 exit-130 path (`turnOut === undefined` → worker "failed"/"aborted" → exit 130) had only driver-level coverage; added a main()-level regression test via a new lifecycle seam `deps.telegramDriverHook` (called with the one-shot driver before `start()` and before its body reserves — no production caller, mirroring `sessionHook`): the test holds the turn mutex from the hook, fires a lifecycle stop() while main()'s body is reserved-but-unstarted, and asserts exit 130, zero stream calls, zero bot replies, and the aborted worker entry. Suite **1446 pass / 14 skip / 0 fail**.
 

@@ -56,7 +56,7 @@ Rules:
   the run stop with `budget`. Independently, the same tool-call batch
   (tool names + stable-JSON arguments, in order) issued 3 times in a row
   is a runaway-loop signature: the third repeat is failed in-band with
-  `LOOP_GUARD_TEXT` (never executed). Since the 2026-10-31 audit (loop
+  `LOOP_GUARD_TEXT` (never executed). Since the 2026-10-27 audit (loop
   detection v2, docs/08) the guard is RESULT-AWARE and PATTERN-aware: a
   repeat whose results keep arriving fresh is progress, not a loop — it is
   only capped at `POLL_CAP` (12) identical batches / `CYCLE_CAP` (12)
@@ -152,10 +152,20 @@ Rules:
   subpath (real path, read **and** write, with its ancestor-metadata chain),
   emitted BEFORE the workspace rule so the workspace stays the last matching
   rule; and the write/edit path sandbox (`checkPathWithinRoots(roots, p)`)
-  allows a path under ANY root. `read` stays unrestricted. An extra root
+  allows a path under ANY root. `read` stays unrestricted **as to roots**
+  (docs/04: it may read any file, but the sensitive-path gate still
+  applies — systemic-sensitive reads are blocked in every mode). An extra root
   re-allows **its own subpath only** — never its parent or siblings — so a
-  path outside every root is still denied by the kernel and refused by the
-  hook. **The sensitive-root guard (what makes it a contract):** at startup
+  path outside every root is refused by the write/edit path hook; on the
+  kernel side it is outside everything the policy **re-allows** bash, with
+  the D12 v1 boundary's documented exceptions — macOS Seatbelt is a denylist
+  (`(allow default)` + targeted denies) that keeps per-user temp
+  `/private/var/folders` readable+writable independent of the roots
+  (`src/tools/sandbox.ts`); Linux bwrap is an empty-root model where paths
+  outside the roots+mounts are simply not visible
+  (`docs/09-linux-sandbox.md`).
+  **The sensitive-root guard (what makes it a
+  contract):** at startup
   each extra root is validated and the run REFUSES to start (exit 2, like
   `--cwd` on a missing dir) if its real path is sensitive (`~/.ssh`, `~/.aws`,
   `*.pem`, `.env`-family, …) or outside the user's home dir (v1 rule: a
@@ -245,8 +255,12 @@ Rules:
   code paths in the guardrail zone. The startup banner shows it on its own
   line: `  implicit root: <path>  (tre.'s own state dir — always read+write)`.
   Enumeration still holds: a **sibling** of `~/.tre` (e.g. `~/other`) is still
-  OUTSIDE the boundary — denied by the kernel and refused by the file-tool
-  hook. Full spec: `docs/05-extra-roots-spec.md` §6.
+  OUTSIDE the boundary — denied by the kernel (bash) and refused by the
+  write/edit path hook. (`read` is the one file tool with NO root restriction
+  — see the read/sandbox boundary in `docs/04-skill-authoring.md`; it is
+  gated by the sensitive-path list, and under `--no-approve` every `read`
+  is blocked fail-closed.) Full spec:
+  `docs/05-extra-roots-spec.md` §6.
 - **C39 — ChatGPT 401 recovery: a wire 401 forces a token refresh + one
   retry (stale-but-unexpired token).** The ChatGPT backend resolves its
   Bearer token from the local store (`resolveAccessToken`), which refreshes
@@ -320,17 +334,33 @@ Invariants:
 | `progress_nudge`          | F1 (docs/08 §9, D32): a no-progress condition fired — fires in ALL modes including `watch` (the observation channel; informational, NOT an error) | `turn`, `kind` (`no-success` \| `no-verification`), `mode` (`watch` \| `nudge` \| `stop`), `target?` (normalized path, only `no-verification`), `count` |
 | `agent_end`               | run ends                     | `stopReason`, `messages` (final context); `maxTurns` + `maxCycles` when `stopReason === "budget"`; `evidence` (GuardEvidence) when `stopReason` is `"loop"` or `"stall"` — D33, see below; `progress` (`{ kind, count }`) when `stopReason === "progress"` — F1, docs/08 §9 |
 
-**Start/end pairing (audit R1, 2026-10-29):** every EXECUTED call emits
-exactly one `tool_execution_start` … one `tool_execution_end` (in call
-order). The batch-shape skips (trimmed/duplicate padding, §4.1 length guard,
-the synthetic in-band fills) emit the synthetic `tool_execution_end` for the
-never-executed calls WITHOUT a start — the ID still gets exactly one end,
-but a consumer may see an end whose ID never started. Consumers must key on
-the ID and never guess: the TUI's end handler matches items by ID
-exclusively (the old running-item fallback mislabeled a still-running
-sibling with a ghost's notice — fixed R1) and appends a finished ghost line
-for an ID it never saw start, so the skip notice stays visible without
-touching live items.
+**Start/end pairing (audit R1, 2026-10-29; corrected 2026-10-30):** every
+EXECUTED call emits exactly one `tool_execution_start` … one
+`tool_execution_end` (in call order). Two SHAPEs of synthetic result exist
+for never-executed calls, and they differ on the start event:
+- **Batch-shape skips** (trimmed/duplicate padding — `details.batchSkipped`)
+  emit the synthetic `tool_execution_end` WITHOUT a start: a consumer may
+  see an end whose ID never started.
+- **Guard/in-band fills** (the length guard — docs/01 §4.1 — and the
+  abort/error `failInband` fills) emit BOTH the start and the end: a start
+  event is NOT proof the call executed. The discriminator is
+  `details.notExecuted` on the result — set on every synthetic fill
+  (batch skips, length-guard, failInband, stall skips).
+
+So consumers must key on the ID, never guess from the event shape, and use
+`notExecuted` (not the presence of a start) to decide whether ground was
+touched. The TUI's end handler matches items by ID exclusively (the old
+running-item fallback mislabeled a still-running sibling with a ghost's
+notice — fixed R1) and appends a finished ghost line for an ID it never
+saw start, so the skip notice stays visible without touching live items.
+**Exception (audit cycle-1, 2026-10-30):** quiet tools (`read`/`write`/
+`edit` — `QUIET_ON_SUCCESS_TOOLS`) take an earlier branch in the end
+handler: a quiet-tool ERROR result unhidden-in-place requires a matching
+item, so a batch-skipped quiet tool (error result, no start) finds no
+item and renders NO line at all — the skip notice is not visible for
+those. The contract above is about the EVENT STREAM (every ID gets
+exactly one end); the TUI's quiet-tool branch simply drops that
+synthetic end.
 
 #### D33 — guard-stop evidence (`GuardEvidence`)
 

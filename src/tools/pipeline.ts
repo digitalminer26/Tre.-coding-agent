@@ -168,7 +168,7 @@ export const SAME_ERROR_WARN_THRESHOLD = 3;
 export const SAME_ERROR_STALL_THRESHOLD = 5;
 
 /**
- * Family-window warn rung (docs/08 §10, 2026-10-28 audit — measured on 985
+ * Family-window warn rung (docs/08 §11, 2026-10-28 audit — measured on 985
  * session logs). The consecutive guard above keys on the EXACT error text
  * and requires it IN A ROW; the 2026-10-28 sed loop
  * (`sed -n ",+Np"`, 15 failures across ~90 bash calls, only the digit and
@@ -208,7 +208,7 @@ function normalizeFailure(texts: string[]): string {
 }
 
 /**
- * Family key (docs/08 §10, 2026-10-28 audit): the whitespace-normalized
+ * Family key (docs/08 §11, 2026-10-28 audit): the whitespace-normalized
  * error with every digit RUN masked ("#+#"). Digits are masked, not
  * removed — ",+18p" → ",+#p" keeps every character around the variable
  * part, so only errors of the same SHAPE collide. Rationale (measured on
@@ -348,7 +348,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
   const breakSameErrorStreak = (toolName: string): void => {
     sameErrorStreaks.delete(toolName);
   };
-  // Family-window state (docs/08 §10): per tool, per error FAMILY, the
+  // Family-window state (docs/08 §11): per tool, per error FAMILY, the
   // (call index, error text) pairs inside the window. Pruned to the
   // window on EVERY recorded failure — for all families, not just the
   // current one — so both the pairs AND the distinct-text set expire
@@ -606,7 +606,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
             ? streak.streak + 1
             : 1;
         sameErrorStreaks.set(tool.name, { errorText, streak: sameErrorCount });
-        // Family-window bookkeeping (docs/08 §10) — recorded BEFORE any
+        // Family-window bookkeeping (docs/08 §11) — recorded BEFORE any
         // verdict below may return (the 2026-10-28 audit finding 1
         // principle): every failure occupies its slot exactly once, so an
         // H2/stall early-return cannot leave the family window a call
@@ -753,7 +753,7 @@ export function makeToolExecutor(hooks: ToolPipelineHooks = {}): ToolExecutor {
             details: { ...result.details, sameErrorWarn: sameErrorCount },
           };
         }
-        // Family-window warn rung (docs/08 §10) — ADDITIVE: the exact-text
+        // Family-window warn rung (docs/08 §11) — ADDITIVE: the exact-text
         // consecutive ladder above owns its signatures untouched (byte
         // repeats defer to H2; one text IN A ROW is the consecutive
         // guard's domain — including alternating identical texts, which

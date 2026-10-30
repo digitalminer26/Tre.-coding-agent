@@ -1722,8 +1722,10 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // block (replay, model re-resolve, its side effects) keeps its position
   // below, unchanged.
   // Every interactive TUI run gets a durable session by default. Sessions
-  // stay outside repositories (~/.tre/sessions/) so the agent cannot read or
-  // edit its own history. Explicit --session/--resume always take precedence;
+  // stay outside repositories (~/.tre/sessions/) so the agent never operates
+  // on its own history as project files (D20's isolation is repo-level —
+  // the C38 implicit root makes the session dir tool-reachable; see
+  // docs/04). Explicit --session/--resume always take precedence;
   // --session-auto retains its existing behavior for non-TUI invocations too.
   const ui: "plain" | "tui" =
     args.ui === "tui" ? "tui" : args.ui === "plain" ? "plain" : process.stdin.isTTY ? "tui" : "plain";

@@ -229,7 +229,7 @@ test("H2: repeat window expires and whitespace-only error differences normalize"
   assert.equal(r.details?.repeatFailure, true);
 });
 
-// ─────────── Family-window warn rung (docs/08 §10, 2026-10-28 audit) ───────────
+// ─────────── Family-window warn rung (docs/08 §11, 2026-10-28 audit) ───────────
 //
 // The 2026-10-28 sed loop: a malformed BSD-sed range, 15 failures, each
 // message differing ONLY in the range digit (+18p … +2p) with successes

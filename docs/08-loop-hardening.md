@@ -29,7 +29,7 @@ three guards, and the loop walked through the gaps between them:
 
 | Guard | Where | Catches | Stops on |
 |---|---|---|---|
-| C26 loop guard | `agent-loop.ts` | byte-identical tool-call batch (names + stable-JSON args + order) 3× in a row — AND, since the 2026-10-31 audit (loop detection v2), the same pair ALTERNATING (X,Y,X,Y,X…) with unchanged results, plus fresh-result caps (POLL_CAP/CYCLE_CAP) so bounded churn still dies | `loop` |
+| C26 loop guard | `agent-loop.ts` | byte-identical tool-call batch (names + stable-JSON args + order) 3× in a row — AND, since the 2026-10-27 audit (loop detection v2), the same pair ALTERNATING (X,Y,X,Y,X…) with unchanged results, plus fresh-result caps (POLL_CAP/CYCLE_CAP) so bounded churn still dies | `loop` |
 | Stall guard | `pipeline.ts` | same TOOL failing with a PERMISSION signature 3× within the last 8 calls (windowed, NOT consecutive — H1) | `stall` |
 | Turn budget | `agent-loop.ts` | anything, eventually (per-cycle cap + 3 auto-continuations) | `budget` |
 
@@ -651,7 +651,7 @@ strings, unchanged.
 5. Gate green; suite grows by the above only.
 
 
-## 10. Audit F-6: the sed loop none of the guards caught (2026-10-28 — WARN RUNG LANDED; windowed STALL still deferred)
+## 11. Audit F-6: the sed loop none of the guards caught (2026-10-28 — WARN RUNG LANDED; windowed STALL still deferred)
 
 > Status: the measurement below stands as written. Its last paragraph
 > ("Landed with this audit") records the shipped warn rung; the windowed

@@ -214,7 +214,7 @@ export type GuardEvidence =
       guardRetries: number;
     }
   | {
-      /** C26 cycle guard (audit 2026-10-31) → stopReason "loop": the same
+      /** C26 cycle guard (audit 2026-10-27) → stopReason "loop": the same
        *  ALTERNATING 2-batch pattern issued repeatedly. When `stable`, the
        *  pattern's results repeated too (no new information); otherwise the
        *  run hit the CYCLE_CAP alternation cap. */
