@@ -22,7 +22,7 @@
  *    not an exception; structural corruption is.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, truncate } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -300,9 +300,23 @@ export class Session {
     }
   }
 
-  /** Open an existing session for appending (resume). Validates header + version. */
+  /** Open an existing session for appending (resume). Validates header + version.
+   *
+   *  Repair-then-append (docs/11 §13.1): a prior crash can leave a torn
+   *  trailing line (an interrupted append without its "\n"). `loadSession`
+   *  tolerates it, but appending BEHIND it welds the partial line to the new
+   *  entry and makes the session permanently unloadable (repro: load →
+   *  open → one append → reload fails "corrupt line N"). So when the tail
+   *  is torn we truncate to the last valid newline boundary before
+   *  handing the file back for appends. Process-death durability only —
+   *  see docs/11 §13.1 for the fsync scoping. */
   static async open(path: string): Promise<Session> {
-    const { header } = await loadSession(path);
+    const { header, droppedTornTail } = await loadSession(path);
+    if (droppedTornTail) {
+      const raw = await readFile(path);
+      const boundary = raw.lastIndexOf(0x0a) + 1; // byte after the last complete line
+      await truncate(path, boundary);
+    }
     const handle = await open(path, "a");
     return new Session(path, header, handle);
   }

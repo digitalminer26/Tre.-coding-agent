@@ -15,7 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -319,6 +319,39 @@ test("torn trailing line is dropped and reported; earlier lines survive", async 
   assert.equal(loaded.droppedTornTail, true);
   assert.equal(loaded.entries.length, 2);
   assert.deepEqual(replayContext(loaded.entries), [userMsg("ok", 1)]);
+});
+
+// docs/11 §13.1 regression (repro 2026-10-30): before the fix, Session.open
+// after a torn tail appended BEHIND the partial line, so the session
+// became permanently unloadable ("corrupt line 3"). Repair-then-append:
+// open truncates the torn tail, the resume append lands on a valid
+// boundary, and the file reloads clean.
+test("Session.open repairs a torn tail before appending; the session stays loadable", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-repair-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const path = join(dir, "s.jsonl");
+  const s0 = await Session.create(path, { cwd: dir });
+  await s0.appendMessage(userMsg("hello", 1));
+  await s0.close();
+
+  // Simulate a kill mid-append: truncated JSON, no trailing newline.
+  await writeFile(path, (await readFile(path, "utf8")) + '{"type":"message","id":"x","mess');
+
+  const loaded = await loadSession(path);
+  assert.equal(loaded.droppedTornTail, true, "the torn tail is tolerated on load");
+
+  const s1 = await Session.open(path); // must repair, not append past the tear
+  await s1.appendMessage(userMsg("after resume", 2));
+  await s1.close();
+
+  const again = await loadSession(path); // threw before the fix
+  assert.equal(again.droppedTornTail, false);
+  assert.equal(again.entries.length, 3); // header + 2 messages, no weld
+  assert.deepEqual(replayContext(again.entries), [
+    userMsg("hello", 1),
+    userMsg("after resume", 2),
+  ]);
 });
 
 test("mid-file corruption throws (not a torn tail)", async (t) => {
