@@ -215,6 +215,161 @@ test("stream-error scenario: partial text then done(error)", async () => {
   assert.equal(text?.text, "partial ");
 });
 
+test("transport error preserves bounded, nested, object, and circular causes", async () => {
+  const model = { ...MODEL };
+  const originalFetch = globalThis.fetch;
+  const runFailure = async (failure: unknown): Promise<string> => {
+    globalThis.fetch = (async () => { throw failure; }) as typeof fetch;
+    const events = await collectStream(
+      openAiStream,
+      model,
+      noToolsCtx(),
+      { signal: new AbortController().signal },
+    );
+    const done = events[events.length - 1] as Extract<AssistantStreamEvent, { type: "done" }>;
+    assert.equal(done.message.stopReason, "error");
+    return done.message.errorMessage ?? "";
+  };
+
+  try {
+    const timeout = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT",
+    });
+    const typeError = new TypeError("terminated", { cause: timeout });
+    const nested = new Error("fetch failed", { cause: typeError });
+    const nestedText = await runFailure(nested);
+    assert.match(nestedText, /fetch failed/);
+    assert.match(nestedText, /TypeError: terminated/);
+    assert.match(nestedText, /BodyTimeoutError \[UND_ERR_BODY_TIMEOUT\]: Body Timeout Error/);
+
+    const objectCauseText = await runFailure(Object.assign(new Error("request failed"), {
+      cause: { name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT", message: "Body Timeout Error" },
+    }));
+    assert.match(objectCauseText, /UND_ERR_BODY_TIMEOUT/);
+
+    const cyclic = new Error("outer");
+    (cyclic as unknown as { cause?: unknown }).cause = cyclic;
+    assert.match(await runFailure(cyclic), /\[circular cause\]/);
+
+    // Cyclic chain with a real diagnostic before the marker: both survive.
+    const outer2 = new Error("outer failed");
+    const inner2 = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT", cause: outer2,
+    });
+    (outer2 as { cause?: unknown }).cause = inner2;
+    const cyclicDiag = await runFailure(outer2);
+    assert.match(cyclicDiag, /UND_ERR_BODY_TIMEOUT/);
+    assert.match(cyclicDiag, /\[circular cause\]/);
+
+    const longText = await runFailure(Object.assign(new Error("x".repeat(3000)), {
+      cause: timeout,
+    }));
+    assert.ok(longText.length <= 1000);
+    assert.match(longText, /UND_ERR_BODY_TIMEOUT/);
+    assert.match(longText, /Body Timeout Error/);
+
+    // Depth boundary: a transport cause behind many wrappers still surfaces.
+    let deep: Error = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT",
+    });
+    for (let i = 0; i < 10; i++) deep = new Error(`wrapper ${i}`, { cause: deep });
+    const deepText = await runFailure(deep);
+    assert.ok(deepText.length <= 1000);
+    assert.match(deepText, /UND_ERR_BODY_TIMEOUT/);
+    assert.match(deepText, /Body Timeout Error/);
+
+    // Coded intermediate cause must beat a deeper generic message.
+    const genericDeepest = new Error("generic inner failure");
+    const codedIntermediate = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT", cause: genericDeepest,
+    });
+    const codedText = await runFailure(new Error("outer", { cause: codedIntermediate }));
+    assert.match(codedText, /UND_ERR_BODY_TIMEOUT/);
+
+    // Aggregate pressure: many long nodes must not evict the coded diagnostic.
+    let pressured: Error = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT",
+    });
+    for (let i = 0; i < 6; i++) {
+      pressured = new Error(`${"noise ".repeat(120)}${i}`, { cause: pressured });
+    }
+    const pressureText = await runFailure(pressured);
+    assert.ok(pressureText.length <= 1000);
+    assert.match(pressureText, /UND_ERR_BODY_TIMEOUT/);
+
+    // Beyond the traversal cap: the note must be honest, not misleading.
+    let capped: Error = Object.assign(new Error("Body Timeout Error"), {
+      name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT",
+    });
+    for (let i = 0; i < 80; i++) capped = new Error(`wrapper ${i}`, { cause: capped });
+    const cappedText = await runFailure(capped);
+    assert.ok(cappedText.length <= 1000);
+    assert.match(cappedText, /deeper causes omitted/);
+    assert.doesNotMatch(cappedText, /UND_ERR_BODY_TIMEOUT/);
+
+    // Marker survival under REAL eviction pressure. Each coded cause
+    // formats to ~365 chars (message keeps its TAIL), so four of them plus
+    // the 320-char root exceed 1000 and the loop must evict from the tail.
+    const mk = (tailTag: string, cause?: unknown) => {
+      const e = Object.assign(
+        new Error("prefix " + "z".repeat(600) + " " + tailTag),
+        { name: "BodyTimeoutError", code: "UND_ERR_BODY_TIMEOUT" },
+      );
+      if (cause !== undefined) (e as { cause?: unknown }).cause = cause;
+      return e;
+    };
+    const c1 = mk("AAA-tail");
+    const c2 = mk("BBB-tail", c1);
+    const c3 = mk("CCC-tail", c2);
+    const c4 = mk("DDD-tail", c3);
+    const cycRoot = new Error("cyc-root");
+    (c1 as { cause?: unknown }).cause = cycRoot;
+    (cycRoot as { cause?: unknown }).cause = c4;
+    const cycText = await runFailure(cycRoot);
+    assert.ok(cycText.length <= 1000, `len ${cycText.length}`);
+    // Eviction really happened: the lowest-priority coded node was dropped.
+    assert.ok(!/AAA-tail/.test(cycText), `AAA should be evicted: ${cycText}`);
+    assert.match(cycText, /DDD-tail/);
+    // ...while the marker and the highest-priority coded diagnostic survive.
+    assert.match(cycText, /\[circular cause\]/);
+    assert.match(cycText, /UND_ERR_BODY_TIMEOUT/);
+
+    // Coded intermediate outranks a DEEPER generic node: enough coded
+    // causes to exceed the budget, so eviction (which drops from the tail of
+    // the priority list) must discard the deepest generic node first.
+    const generic = new Error("prefix " + "z".repeat(600) + " GGG-tail");
+    let chain: Error = mk("III-tail", generic);
+    chain = mk("HHH-tail", chain);
+    chain = mk("FFF-tail", chain);
+    chain = mk("EEE-tail", chain);
+    chain = mk("DDD2-tail", chain);
+    chain = mk("CCC2-tail", chain);
+    const priorityText = await runFailure(chain);
+    assert.ok(priorityText.length <= 1000, `len ${priorityText.length}`);
+    assert.match(priorityText, /UND_ERR_BODY_TIMEOUT/);
+    // The deeper generic node loses its slot to the coded causes.
+    assert.ok(!/GGG-tail/.test(priorityText), `GGG should be evicted: ${priorityText}`);
+
+    // Long cause names/messages must not evict the diagnostic code.
+    const longName = Object.assign(new Error("Body Timeout Error"), {
+      name: "N".repeat(1000), code: "UND_ERR_BODY_TIMEOUT",
+      message: `prefix ${"y".repeat(2000)} Body Timeout Error tail`,
+    });
+    const longNameText = await runFailure(new Error("outer", { cause: longName }));
+    assert.match(longNameText, /UND_ERR_BODY_TIMEOUT/);
+    assert.match(longNameText, /Body Timeout Error tail/);
+
+    // Plain errors without causes keep the previous message-only behavior.
+    const plain = `${"explanation ".repeat(200)}actionable detail`;
+    const plainText = await runFailure(new Error(plain));
+    assert.equal(plainText, plain);
+    const shortText = await runFailure(new Error("plain failure"));
+    assert.equal(shortText, "plain failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("abort before request: done(aborted) without throwing", async () => {
   const mock = await startMockSse("text");
   const model = { ...MODEL, baseUrl: mock.baseUrl };

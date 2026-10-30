@@ -526,7 +526,98 @@ function describeError(err: unknown): string {
     }
     return `HTTP ${err.status}: ${detail}`.slice(0, 1000);
   }
-  return err instanceof Error ? err.message : String(err);
+
+  // Non-error throwables keep the old behavior exactly.
+  if (!(err instanceof Error)) return String(err);
+  const noCauseMessage = err.cause === undefined
+    && !("code" in err && typeof (err as { code?: unknown }).code === "string");
+
+  interface DiagnosticNode { name: string; code: string; message: string; marker?: boolean }
+  const nodes: DiagnosticNode[] = [];
+  const seen = new Set<object>();
+  let current: unknown = err;
+  let truncated = false;
+  // Traverse the whole finite chain (cycle-checked). The cap only guards
+  // against pathological depth; when it trips we say so explicitly instead
+  // of implying that the deepest cause was reached.
+  for (;;) {
+    if (current === null || (typeof current !== "object" && typeof current !== "function")) {
+      if (current !== undefined && current !== err) nodes.push({ name: "", code: "", message: String(current) });
+      break;
+    }
+    const obj = current as Record<string, unknown>;
+    if (seen.has(obj)) {
+      nodes.push({ name: "", code: "", message: "", marker: true });
+      break;
+    }
+    seen.add(obj);
+    const name = typeof obj.name === "string" && obj.name ? obj.name : (obj as unknown as Error).constructor?.name ?? "Error";
+    const message = typeof obj.message === "string" ? obj.message : String(current);
+    const code = typeof obj.code === "string" && obj.code ? obj.code : "";
+    nodes.push({ name, code, message });
+    current = obj.cause;
+    if (current === undefined) break;
+    if (nodes.length >= 64) {
+      truncated = true;
+      break;
+    }
+  }
+
+  // Ordinary errors without useful metadata keep the previous behavior.
+  if (noCauseMessage && nodes.length <= 1) return err.message;
+
+  const LIMIT = 1000;
+  const bound = (s: string, max: number, keepTail: boolean): string => {
+    if (s.length <= max) return s;
+    return keepTail ? "…" + s.slice(-(max - 1)) : s.slice(0, max - 1) + "…";
+  };
+  const nodeText = (n: DiagnosticNode): string => {
+    if (n.marker) return "[circular cause]";
+    const name = bound(n.name, 60, false);
+    const code = n.code ? ` [${bound(n.code, 60, false)}]` : "";
+    const msg = bound(n.message, 240, true);
+    return `${name}${code}: ${msg}`;
+  };
+
+  const rootNode = nodes[0]!;
+  const causes = nodes.slice(1);
+  // Priority order for the budget: code-bearing nodes (transport codes like
+  // UND_ERR_BODY_TIMEOUT) first, then the first wrapper (usually the generic
+  // message, e.g. TypeError: terminated), then the deepest node. Everything
+  // is measured on the FINAL assembled string — no reserved-magic arithmetic.
+  const priority: number[] = [];
+  causes.forEach((n, i) => { if (!n.marker && n.code) priority.push(i); });
+  if (causes.length > 0 && !causes[0]!.marker) priority.push(0);
+  const deepestIdx = causes.map((n, i) => ({ n, i })).reverse().find(({ n }) => !n.marker)?.i;
+  if (deepestIdx !== undefined) priority.push(deepestIdx);
+  const hasMarker = causes.some((n) => n.marker);
+  const note = truncated ? `[${nodes.length}+ levels traversed; deeper causes omitted]` : "";
+
+  const rootText = bound(nodeText(rootNode), 320, true);
+  const assemble = (kept: number[], withMarker: boolean, withNote: boolean): string => {
+    const parts = kept.map((i) => nodeText(causes[i]!));
+    if (withMarker) parts.push("[circular cause]");
+    if (withNote) parts.push(note);
+    return parts.length ? `${rootText} (cause: ${parts.join(" <- ")})` : rootText;
+  };
+
+  // Keep only what fits, dropping from the tail of the priority list; the
+  // assembled string is measured exactly, so nothing is clipped afterwards.
+  let kept = [...new Set(priority)];
+  let withMarker = hasMarker;
+  let text = assemble(kept, withMarker, note !== "");
+  while (text.length > LIMIT && kept.length > 0) {
+    kept = kept.slice(0, -1);
+    text = assemble(kept, withMarker, note !== "");
+  }
+  if (text.length > LIMIT && withMarker) {
+    withMarker = false;
+    text = assemble(kept, withMarker, note !== "");
+  }
+  if (text.length > LIMIT && note !== "") {
+    text = assemble(kept, withMarker, false);
+  }
+  return text.length > LIMIT ? text.slice(0, LIMIT) : text;
 }
 
 /**
