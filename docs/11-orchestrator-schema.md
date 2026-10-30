@@ -12,12 +12,20 @@ same discipline the repo already uses for `docs/02` (event contracts) and
 ## 0. Purpose & principles
 
 An **orchestrator** process supervises **N worker** `tre.` sessions
-(N = 2 on the current host: two parallel local-slot semaphores + public LLM
-endpoints as needed). The orchestrator's job is *observation → judgment →
-intervention*: watch worker behavior streams, detect bad behaviors (looping,
-stalling, drifting, distress), steer workers back (nudge, resume, swap,
-rewrite, escalate), and present the fleet to a human through views more
-expressive than a single TUI.
+(target: two workers with on-demand observer/recovery inference; the dual-GPU
+host may support three concurrent inference slots, subject to measurement).
+The orchestrator owns **getting approved tasks to verified acceptance**:
+observe → evaluate → diagnose → recover → verify, escalating only when
+necessary. Premature turn endings and recoverable errors should not require
+the human to supply routine continuation nudges. Single-worker self-healing
+is the first useful milestone; multi-worker scheduling follows.
+
+The deterministic control plane owns lifecycle, permissions, budgets, and
+durable actions. An event-triggered observer/recovery agent judges ambiguous
+failures and conducts authorized investigation through that control plane.
+It need not consume an inference slot continuously. Worker and observer
+capacity, context memory, and aggregate throughput must be measured rather
+than inferred from slot count. Herdr is optional and not a prerequisite.
 
 Standing principles (settled in design discussion, 2026-10-30):
 
@@ -37,8 +45,19 @@ Standing principles (settled in design discussion, 2026-10-30):
    same normalized entries (the `state.ts` reducer semantics); no viewer
    re-implements interpretation.
 5. **One Telegram consumer.** Human ⇄ *orchestrator* rides Telegram;
-   orchestrator ⇄ worker steering rides the steer-file seam (→ S4). The bot
+   orchestrator ⇄ worker steering rides the steer-file seam (→ S2). The bot
    is never wired worker-side in this system.
+6. **Self-healing within authority; exception-based human attention.**
+   Upfront policy authorizes continuation, diagnostics, and bounded repair.
+   An uncertain diagnosis triggers investigation, not immediate escalation.
+   New authority, consequential intent ambiguity, unreconcilable effects,
+   an external blocker requiring human action, or exhausted recovery budgets
+   justify escalation. Never bypass approvals or weaken acceptance checks.
+7. **Acceptance, not activity.** A normal run end is not task completion;
+   a successful resume is not recovery success. Require task-relevant
+   progress and acceptance evidence. Control logic does not parse model
+   prose as protocol; model judgments are validated structured advisory
+   records, never independent grants of execution authority.
 
 ## 1. Schema index & Change Ledger
 
@@ -63,6 +82,8 @@ cite the row):
 | 2026-10-30 | §12 | added build-vs-buy prior-art appendix (herdr evaluation) | internet research |
 | 2026-10-30 | §2 §3 §7 §8 §9 §10 | stress-test rounds 2–4: dropped the `steer`-entry-ack premise (no such entry type exists — steer persists as a plain user message); S1 pins `progress_nudge` as a to-be-persisted contract and the toolResult-detail warn fields; S2 gains request-scoped dedup rules; §7 gains ownership-fence + reconciliation rules; §9 budgets span attempts; Q1/Q3/Q4/Q5 decided, Q2 half-decided, Q6 reopened, Q8 reframed | adversarial stress tests |
 | 2026-10-30 | §13 | NEW normative recovery/durability section: append-torn-tail bug (repro: resumed append after a torn tail makes the session permanently unloadable) → tail repair is an L1 precondition; recovery invariants I1–I7; recovery test matrix as L1/L2 acceptance | round-4 stress test + repro on built code |
+| 2026-10-30 | §11 | rewritten as the **compartment build plan (P0–P13)** after the plan sanity check; corrections folded in: missing terminal evidence is `unknown` never `crashed` + run/attempt identity precedes classification (P2); file steering split plumbing vs durable delivery (P3a/P3b); tailer is observation-only, never repairs (§13.1 repair stays with the exclusive writer); ownership fence + lost-supervisor reconcile is its own compartment (P7) before auto-scheduling; budget accounting is a standalone ledger consumed by classifiers, not owned by them (P8, I7); graph.json desired-vs-derived authority pinned at P0; milestone M1 = P0–P9 observe-only, autonomy enabled only in reviewed increments A1–A6. Old linear L0–L9 sequence retained below as a mapping | plan sanity check |
+| 2026-10-30 | §0 §3 §9 §11 §13 | Accepted self-healing-first rescope supersedes observe-only M1 and old A1–A6 ordering: M0 foundations → M1 autonomous single-worker recovery → M2 shared multi-worker supervision → M3 broader autonomy/polish. Added explicit acceptance (P14), investigation/recovery (P15), upfront authority, aggregate recovery budgets, exception-based escalation, and productivity evaluation. Full S3/S5 wire shapes remain P0 work; unscoped supervised steering must not pass trivially. | user-approved design discussion |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -90,8 +111,9 @@ every consumer):
 
 - **No general completion record.** `agent_end` persists *only* its guard
   evidence (`guardStop` when present, main.ts ~1112–1116). A clean run end
-  leaves no terminal entry; crash classification must come from process
-  exit + tail analysis (Q6, reopened).
+  leaves no terminal entry; classification uses process evidence + tail
+  analysis and remains unknown when those do not establish an outcome
+  (Q6, reopened).
 - **No live in-progress state.** Silence distinguishes neither "thinking"
   from "hung on endpoint" nor "tool running." Views must carry an
   `unknown`/`stale` state; never infer precise liveness from absence.
@@ -141,6 +163,7 @@ Steer request line:
 | `text` | string | injected exactly as given (no harness templating) |
 | `source` | string | free-form label (`orchestrator`, `human-tty`, …) — persisted into the steer entry provenance if/when added |
 | `priority` | `"steer"` | v1 only `"steer"`; follow-up/queue semantics deliberately excluded (matches current runLoop: no follow-up queue) |
+| scope *(P0-pending, §11.1)* | to be specified | Task revision + session identity are required by the contract below but absent from this draft example. P0 must pin their fields and validation before file delivery is enabled; missing/mismatched scope must not pass trivially in supervised execution. |
 
 Acknowledgement (R2-corrected): **ordering correlation is not a usable
 ack.** A steer persists as a plain user message with no echoed id; human
@@ -297,7 +320,7 @@ action cycle that did something (no-op observations are not logged):
 |-------------|----------|
 | `observation.signals[].kind` | closed set, extensible only via this doc: `guard-stop`, `warn-rung`, `semantic-loop`, `verify-gap`, `no-advance`, `endpoint-error`, `budget-threshold`, `worker-exit`, `worker-blocked-on-approval` |
 | `decision.rung` | integer 1–5 (see §9 ladder); `action` ∈ `nudge` \| `evidence-nudge-resume` \| `model-swap` \| `task-rewrite` \| `escalate` \| `kill` \| `park` \| `merge` |
-| `outcome.acked` | steer-file path: correlated `steer` entry seen; resume path: run accepted; swap: new worker spawned |
+| `outcome.acked` | steer-file path: correlated user-message envelope with `steering.requestId` seen (not a `steer` entry); resume path: run accepted; swap: new worker spawned. Delivery/start acknowledgement only, never proof of progress or acceptance |
 | `outcome.closedById` | a later decision entry closing this one with measured effect (`progressed` / `recurred` / `stopped-clean`) — this is the meta-telemetry that teaches thresholds later |
 
 Rule: **every intervention the orchestrator performs gets exactly one
@@ -436,47 +459,243 @@ Hygiene (binding on the rule engine, mirrors guard design):
   intervention creates the behavior it diagnoses).
 - Boundary steering cannot rescue a permanently blocked tool call; that
   is a timeout/cancellation policy question, not a steer (R2).
-- same guard fires ≥2 times across respawns → task jumps to rung 4/5, never
-  retried into a slot indefinitely (poison-job parking).
+- Same guard fires ≥2 times across respawns → prohibit another blind
+  same-strategy retry; require diagnosis and a materially different authorized
+  strategy, or park/escalate. Guard recurrence is evidence, not an automatic
+  request for human attention if useful bounded investigation remains.
 - Warnings do not auto-escalate: local reflexes act first; the cortex
   intervenes on patterns the reflex cannot see (cross-run, cross-worker),
   unless escalation policy explicitly says otherwise.
+
+### 9.1 Self-healing policy (accepted scope; wire schemas closed at P0)
+
+The ladder identifies action classes, not a mandatory escalation sequence.
+Choose the least disruptive action supported by evidence. Ended-run recovery
+uses safe resume; in-flight guidance uses S2; a blocked tool requires runner
+investigation/cancellation, not repeated boundary steers.
+
+```text
+interruption → reconcile execution → evaluate acceptance
+  → finish | continue | investigate | repair | change approach | escalate
+  → verify task-relevant progress → continue or revise recovery
+```
+
+**Authority is granted upfront, not invented during recovery.** Task/episode
+policy must enumerate permitted paths, diagnostic commands, task-local repairs,
+approved models/endpoints, spend/time limits, and permitted external effects.
+Shared-environment changes, dependency installation, credentials, service
+restarts, and publication require explicit policy; absent permission they
+are not automatic repairs. Acceptance criteria and safety guards may not be
+weakened to make a task pass. Model output is untrusted advice at this boundary.
+
+**Investigation before escalation:** an uncertain cause normally triggers
+bounded evidence collection. Transient endpoint failures may back off/retry
+only when tool effects are not ambiguous. Premature normal stops resume with
+specific remaining acceptance work. Repeated failures require diagnosis,
+not generic "continue". Task-local fixes and revised approaches are autonomous
+within authority. An observer has no concurrent write entitlement to a live
+worker's worktree; mutating repair must be serialized through P7 ownership.
+
+**Limits:** the ≤2 rung-1 nudges rule limits repeated live guidance, not the
+whole recovery chain. P8 also enforces aggregate recovery time/spend/attempt
+limits and repeated-strategy limits across sessions/restarts, including
+observer inference and diagnostics. Record strategy, expected evidence,
+resulting progress, and new diagnostic information; activity alone earns no
+unlimited retry allowance. P0 pins exact policy fields and default limits.
+
+**Escalate only when** new authority or a consequential human intent decision
+is needed, external effects remain unsafe to reconcile, an external blocker
+requires human action, or bounded recovery is exhausted without a useful
+safe next step. Wait/retry for temporary dependencies within policy. If
+ownership cannot be proved, park rather than spawn; investigation may proceed
+only without touching ambiguously owned resources. Notify with evidence,
+what was attempted, the blocker, and the exact decision needed. A parked task
+must not stop independent authorized tasks. Parking is not proof that a live
+process stopped; confirmed cancellation remains an explicit controlled action.
+
+**Acceptance:** classify complete/incomplete/blocked/uncertain using approved
+criteria, required checks, and artifact-bound evidence. Successful run exit,
+a steer receipt, or a worker's claim alone is insufficient. Model judgment
+may assess semantic requirements but cannot waive deterministic gates or
+promote stale checks after relevant artifacts change.
+
+**P0 schema work required before implementation:** S3/policy must carry
+acceptance and authority/recovery limits; S5 must represent structured
+acceptance assessments, diagnoses, strategy ids, diagnostic/repair actions,
+and separate intent/outcome/progress records; S6 caches their projections;
+S7 carries evidence references rather than asserting unobserved state. The
+existing S3/S5 examples and action enum are not yet sufficient for this
+expanded scope and must be amended before any new action type executes.
 
 ## 10. Open questions
 
 | id | question | status |
 |----|----------|--------|
 | Q1 | Does the steer persist gain provenance for direct ack, or stay correlation-by-ordering? | **decided (R2): envelope metadata.** The premise was fiction — no `steer` entry type exists; steering persists as a plain user message (main.ts ~1119). Ordering can't ack interleaved/multi-source steers. Resolution: optional `steering:{requestId,source}` on the message envelope (not model-visible content); promise deduplicated transcript insertion only. L1 ships the `--steer-file` seam; envelope metadata rides the same seam (S2). |
-| Q2 | Should warn-rungs be persisted entries (supervisor semantics depend on them)? | **half-decided (R2):** pipeline family warns are *already* persisted (toolResult.details — contract pinned in §2); `progress_nudge` (F1) is *not* persisted and must become a persisted entry. Remaining open: exact entry shape vs toolResult-style piggyback. |
+| Q2 | Should warn-rungs be persisted entries (supervisor semantics depend on them)? | **half-decided (R2):** pipeline family warns are *already* persisted (toolResult.details — contract pinned in §2); `progress_nudge` (F1) is *not* persisted and must become a persisted entry. Remaining open: exact entry shape vs toolResult-style piggyback. → **planned at P1 (§11.1)**: proposed shape is a standalone `progressNudge` entry mirroring the `guardStop` driver-append pattern; the shape is finalized as a §2 Change-Ledged amendment in P0. |
 | Q3 | `<episodesRoot>` location | **decided (R2): `~/.tre/episodes`** — organizational only; grants no isolation and no automatic collection (§5 caveats). |
 | Q4 | Fleet envelope → tokenomics ingest vs file-only first? | open — lean file-only; cross-host needs explicit transport (§8). |
 | Q5 | Worktree integration: auto-merge or stage for human? | **decided (R2, narrowed):** episode-branch integration is **automatic for identified, tested artifacts under approved policy** — per the S5 merge-action contract above (pin base, tested SHA+parents, CAS advance, trusted gate, episode-scoped auto-resolution). *Promotion episode→main stays human by default but is delegable under explicit policy* — "always human" is governance default, not technical necessity. |
-| Q6 | Is exit code + session tail sufficient for completion classification, or does one-shot need `--emit-events`? | **reopened (R2):** the old rationale was wrong — `agent_end` is *not* a persisted general completion record (only guard evidence is). Crash/exit classification is underspecified; decide after §13.4 recovery states are implemented. Stdout mirror remains one option, not the only one. |
+| Q6 | Is exit code + session tail sufficient for completion classification, or does one-shot need `--emit-events`? | **reopened (R2):** the old rationale was wrong — `agent_end` is *not* a persisted general completion record (only guard evidence is). Crash/exit classification is underspecified; decide after §13.4 recovery states are implemented. Stdout mirror remains one option, not the only one. → **planned at P2 (§11.1)**: terminal `runEnd {runId, reason}` with run/attempt identity pinned at P0; absent evidence classifies `unknown`, never `crashed`. |
 | Q7 | Adopt herdr as S7 second transport / supervisor as socket client? | **narrowed (R2):** optional adapter only; herdr is not S7 authority, not remote-JSONL transport, and PTY `agent prompt` is not a trusted steer fallback. |
 | Q8 | Implement the herdr agent contract in tre. harness as cheap reversible work? | **reframed (R2):** bounded *spike*, not "~a day": state reporting is small, but restart/approval/release/resume correctness (incl. `--resume` = file path) needs tests before any estimate. Not a supervisor prerequisite. |
 
-## 11. Development ledgers
+## 11. Development plan — self-healing-first compartments (P0–P15)
 
-The build sequence agreed in design (each step cites the schemas it
-consumes; update status here AND in the Change Ledger when a step lands):
+The accepted scope supersedes the earlier observe-only-first product plan:
+**self-healing single-worker execution first, multi-worker scale second**.
+Observe-only and recommendation-only modes remain development validation
+stages, not the first useful product. Existing compartment ids are retained;
+P14/P15 make acceptance evaluation and diagnosis/recovery explicit rather
+than hiding them in a late optional LLM judge.
 
-| # | step | new surface | schemas consumed | status |
-|---|------|-------------|------------------|--------|
-| L0 | this doc | — | — | **done (draft)** |
-| L1 | `--steer-file` seam in tre. (turn-boundary drain, steer entry ack) | one SteeringQueue impl + flag | S2, S1 | not started |
-| L2 | supervisor v0: graph parse → spawn (worktrees, semaphore=2) → tail → rung-2 evidence-nudge-resume → decisions.jsonl; `watch`-style terminal matrix single-column | one stdlib script | S1, S3–S7 | not started |
-| L3 | semantic-loop + verify-gap classifiers (command-family window, edit-no-verify across episodes) | rules in supervisor | S1, S7 | not started |
-| L4 | steer-file nudges (rung 1) + hygiene ledger enforcement | supervisor | S2, S5, §9 | not started |
-| L5 | fleet envelope emitter + terminal matrix (lanes) | tailer + tmux/grid viewer | S7 | not started |
-| L6 | dashboard extension (web lanes + drill-down links) | tokenomics container page | S7, S1 | not started |
-| L7 | episode-record viewer (interleaved timeline) | viewer over S1+S5 | not started |
-| L8 | LLM judge role (public endpoint, event-triggered, verdict → ladder) | supervisor + judge adapter | S5, S7 | not started |
-| L9 | meta-telemetry: outcome-correlated stats → threshold recommendations | analyst script | S5 | not started |
+Each compartment owns one coherent contract and compiles/tests independently.
+Unwired libraries have no execution effects; P1/P2 add recorded evidence but
+must not change replayed context; file steering remains opt-in. File/git
+modules perform I/O when called, while reducers and policy functions remain
+pure. No compartment implies a one-commit implementation.
 
-Guardrail note: L1 touches `src/loop`/`src/cli` (not the guardrail zone as
-currently defined) but **is an in-run behavior seam** — treat its commit
-with the same human-review gravity; docs/02 gains the steer-file contract
-row with the implementation.
+Tracks: **harness contracts** P1–P3; **episode primitives and control plane**
+P4–P8; **acceptance and recovery judgment** P10/P14/P15; **execution and
+composition** P9/P11; **deferred integration and richer views** P12/P13.
+Detailed wire shapes below remain proposals until P0 closes the schemas.
+
+### 11.1 Compartments
+
+| id | compartment | schemas consumed | status |
+|----|-------------|------------------|--------|
+| P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | not started |
+| P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | not started |
+| P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | not started |
+| P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | not started |
+| P3b | **File-backed steering delivery**: `--steer-file <path>` + `FileSteeringQueue` (offset-tolerant incremental drain, malformed lines skipped+counted, scoped-request validation, transcript-scan dedup by request id with scope/provenance conflict rejection, sync-before-ack per §13.1). **Claims deduplicated transcript insertion only — never exactly-once execution** (I6). Tests: §13.3 rows 1/2/4 | S1, S2 | not started |
+| P4 | **Episode journal & projections**: typed graph.json / state.json / decisions.jsonl readers-writers, schema validation, atomic-rename, dir scaffold (S4), intent/outcome append records (§6 lifecycle), state trichotomy applied (S6). No process ever writes these yet | S3, S5, S6 | not started |
+| P5 | **Read-only ingestion & fleet projection**: persistent-offset JSONL tailer (reporter pattern), §13.1-*aware* (reconcile cursor on truncation/replacement — see §11.2 boundary note), entry-id dedup, deterministic replay, envelope emission (S7) with explicit `unknown`/`stale` (I3) | S1, S7 | not started |
+| P6 | **Worktree provisioning**: `git worktree add/remove`, episode-branch pin at `baseCommit`, isolated task branches/dirs, safe cleanup. **No integration logic here** (that is P12) | S4 | not started |
+| P7 | **Attempt runner & ownership recovery**: controlled spawn/stop with attempt identity tracked in durable records (not PIDs); lost-supervisor reconcile — the old worker is not our child after a supervisor restart and `waitpid` is not generally available, so PID checks are insufficient: **discover-or-park** is the conservative fallback (I1/I2). Independently testable kill/spawn/reconcile unit *before* any scheduler uses it | §13.2 I1/I2, S6 | not started |
+| P8 | **Durable accounting & authority enforcement.** Gate worker, observer, diagnostic, repair, and spawn actions independently of model judgment. Track total time/spend/turns, recovery attempts, strategy fingerprints, progress and new diagnostic evidence across restarts. Reserve/account for outstanding usage and unknown cost. Stable action ids and reconciliation prevent blind duplicate actions. Authority covers paths, commands, environment changes, approved endpoints, spending, and external effects; absence of authority is not permission. | §9, §13.2 I5/I7, S5 | not started |
+| P9 | **Supervisor composition in two stages.** M1: one worker with P14 acceptance, P15 diagnosis, P10 planning, and P11 execution in a closed recovery loop; basic status and escalation included. M2: add DAG scheduling, two or N workers, measured endpoint capacity, shared recovery supervision, and resource/budget isolation. Observe-only mode is a validation switch, not the product milestone. | S1, S3–S7 | not started |
+| P10 | **Evidence classification & recovery planner.** Pure functions combine persisted evidence, P14 assessments, validated P15 diagnoses, authority, and ledger facts into finish/continue/investigate/repair/change-approach/escalate recommendations. No model calls or side effects here; recommendations are checked by P8 and executed by P11. Golden fixtures cover uptake versus progress and repeated-strategy detection. Advanced semantic classifiers can follow M1. | S1, S5, S7, §9 | not started |
+| P11 | **Recovery action executor.** Executes authorized plans through P7/P8 with durable intent/outcome records: backoff/retry, confirmed-stop resume, scoped in-flight steer (P3b), diagnostic/repair dispatch, and later model/session/task transitions. Owns no independent permission grant. Bounded diagnostics and task-local repair are core M1 capabilities, not late ladder additions. P7 remains the process-control primitive; neither observer nor worker may bypass the control plane. | S2, S5, S6, §9 | not started |
+| P12 | **Tested candidate integration** (initially unwired): the §5 merge-action contract as a module — candidate construction, trusted gate bound to the exact candidate SHA, CAS advance on episode-branch head, acceptance record, conflict/head-movement → reconcile-or-park | S4, S5 | not started |
+| P13 | **Human escalation and richer viewers.** M1 includes an actionable escalation channel with evidence, attempts, blocker, and exact decision needed; Telegram has one orchestrator-owned consumer. Independent tasks may continue while one is parked. Rich matrix lanes, dashboard transport, episode replay UI, and meta-telemetry are deferred. Core observer judgment moves to P15, not an optional late LLM judge. | S5, S7, §9 | not started |
+| P14 | **Acceptance evaluator.** Classify complete/incomplete/blocked/uncertain against approved criteria and artifact-bound evidence. Prefer deterministic checks; validated model assessment handles semantic criteria without replacing required gates. Return evidence refs and remaining work, and invalidate stale assessments after relevant artifact changes. Normal stop or model self-report alone never proves completion. | S3, S5, S7, §9 | not started |
+| P15 | **Investigation & recovery agent.** Event-triggered, tool-capable diagnosis over a bounded evidence packet; tools run through P8/P11. Distinguish transient errors, premature stops, task defects, environment blockers, and approval boundaries. Produce structured diagnosis, uncertainty, strategy, expected evidence, and proposed actions. Bounded investigation and task-local repair ship in M1; unrestricted recursive delegation does not. Different strategies may be tried within the aggregate budget; repeated generic nudges are not healing. | S1, S3, S5, §9 | not started |
+
+### 11.2 Rules that bind the compartments (from the sanity check)
+
+- **Repair is a writer act, never a reader act.** §13.1's repair-then-append
+  belongs to the exclusive writer under the ownership fence (I1). P5 (and
+  any tailer/viewer) consumes only complete newline-terminated records,
+  buffers partial trailing bytes, and reconciles its cursor on
+  truncation/replacement — it **must never truncate or terminate another
+  process's file**.
+- **Ingestion ≠ projection.** The tailer reports bytes and observation
+  freshness; classification (worker state, `unknown`/`stale`, signals)
+  happens in the projection layer (P5's projection half / P10), so a
+  misreading never corrupts the record of what was read.
+- **Identity before classification.** No compartment classifies run
+  completion until P0 pins run/attempt identity and P2's terminal record
+  ships; until then everything terminal-ambiguous is `unknown`.
+- **Ownership before autonomy.** P7 (runner + reconcile) ships and is
+  tested before P9 starts or replaces workers. Replay fixtures, observe-only
+  runs, and recommendation-only runs validate P10/P11 before live recovery;
+  none is a requirement for routine human approval in the finished product.
+- **Accounting below judgment.** The budget ledger (P8) gates actions
+  independently of classifier output; budgets are never recomputed inside
+  a classifier from local views.
+- **One contract per compartment**; a schema change is made in §2–§8
+  first (Change Ledger row), then the owning compartment implements it.
+  Note for parallel dispatch: P1 and P3 both touch the session/driver
+  boundary — sequence them or assign one owner.
+
+### 11.3 Dependency shape
+
+```text
+P0: close schemas, authority, acceptance, and recovery contracts
+├── P1 → P2                         worker evidence (sequence shared-file edits)
+├── P3a → P3b                       optional live-steering path
+├── P4 → P8                         journal → accounting/authority
+├── P5                              ingestion/projection
+└── P6 → P7                         isolation → attempt control
+
+P0 + P4 + P5 → P14                  acceptance evaluator
+P0 + P4 + P5 + P8 → P15             diagnosis adapter / evidence packets
+P14 + P15 contracts + P8 → P10      pure recovery planner
+P7 + P8 + P10 contracts → P11       executor, mockable before composition
+P2 + P4–P8 + P10/P11 + P14/P15
+  + basic P13 escalation → P9/M1    single-worker closed recovery loop
+P9/M1 + scheduler/capacity tests → P9/M2   two or N workers
+P3b → P11 live-steering capability  not required for ended-run recovery
+P4 + P6 + P8 → P12                  deferred tested integration
+P5 + P9 → richer P13                deferred viewers/telemetry
+```
+
+This is a build dependency graph, not an unbounded runtime delegation tree.
+P15 requests tools through the executor; P14/P15 are independently testable
+with mock tools/model responses. P4/P5/P6 can be developed independently
+once P0 pins interfaces. P1/P3 share the session/driver boundary: one owner
+or sequential edits. No need to implement every advanced classifier first.
+
+### 11.4 Milestones & validation gates (supersedes old A1–A6 ordering)
+
+| milestone | delivers | exit evidence |
+|---|---|---|
+| **M0 — safe execution foundations** | P0 contracts; P1/P2 evidence; P4–P8 journal, observation, isolation, ownership, authority, and budgets | Recovery matrix foundation tests; replay unchanged; unauthorized actions denied; restart accounting and ambiguous ownership handled conservatively |
+| **M1 — self-healing single worker** | P9 single-worker composition with core P10/P11, P14/P15, basic P13 status/escalation. Automatic premature-stop continuation, safe transient retry, bounded diagnostics and task-local repair, progress/acceptance checks | Interrupted tasks reach verified acceptance without routine human nudges; failed strategies redirect; unsafe or exhausted cases produce actionable escalation |
+| **M2 — shared supervision for two or N workers** | P9 DAG scheduling, measured endpoint limits, on-demand observer, isolated attempts, fair recovery resource allocation | No cross-task mutation or duplicated ownership; aggregate budgets hold; one parked task does not block independent work; concurrency benchmarks include observer contention |
+| **M3 — broader autonomy and operational polish** | Approved model swaps, fresh-session handoffs, broader decomposition, optional P3b in-flight steering, P12 tested integration, richer P13 views | Capability-specific recovery and acceptance tests; promotion policy explicit; improvements supported by operating evidence |
+
+M1 includes changing a failed approach within the approved task, not merely
+repeating continuation prompts. Cross-model swaps and broad task rewrites
+can follow in M3. P3b is not required for recovery of an already ended run;
+it is required before enabling live file steering. Automatic merging, richer
+views, herdr, and meta-telemetry do not gate M1/M2.
+
+Validate each new recovery capability with replay/fault fixtures, then
+observe-only or recommendation-only trials as appropriate, then controlled
+live execution under upfront policy. These are engineering release gates,
+not a product default of asking the user to approve every recovery action.
+No model-proposed action may bypass P8 authority or P7 ownership checks.
+
+**Productivity evaluation:** measure interrupted tasks reaching acceptance
+without human intervention, active human minutes per accepted task,
+end-to-end accepted throughput, recovery spend/time, harmful/unnecessary
+interventions, and regressions/rework. Compare single-worker baseline,
+two-worker deterministic supervision, and event-triggered observer recovery
+on comparable tasks. Slot utilization and generated output are not success
+metrics; additional inference is worthwhile only when accepted results or
+human attention improve.
+
+### 11.5 Recovery-matrix mapping (acceptance ownership)
+
+| §13.3 row | compartment tests |
+|---|---|
+| crash before steer persist | P3b |
+| crash after persist, before observe | P3b (dedup by id, scope-aware) |
+| old worker alive during recovery | P7 (I1 fence — discover-or-park) |
+| task rewritten, steers pending | P3b (S2 scoping) |
+| partial final JSONL line | shipped (Session.open repair, §13.1) |
+| spawn ok, crash before outcome | P7 + P8 (intent/outcome records, I2) |
+| ambiguous external effect | P8 (I5 reconcile-or-escalate) |
+| tested candidate, head moved | P12 (CAS) |
+| repeated nudges + swaps vs episode budget | P8 (I7 ledger), exercised via P11 |
+| self-healing functional scenarios below | P9/P10/P11/P14/P15; authority and accounting via P8 |
+
+### 11.6 Old linear ledger → compartments (superseded)
+
+The pre-check sequence is kept only as a mapping — compartments replace it:
+L0 (this doc) → done; L1 (`--steer-file`) → P3a+P3b; L2 (supervisor v0) →
+P9/P11 (core recovery in M1, concurrency in M2); L3
+(classifiers) → P10; L4 (rung-1 nudges + hygiene) → P11/P3b with P8;
+L5 (envelope + matrix) → P5/P13; L6 (dashboard) → P13 (deferred, Q4);
+L7 (episode record) → P13; L8 (core model judgment) → P14/P15; L9 (meta-telemetry) →
+P13.
+
+Guardrail note (unchanged): P3a/P3b touch `src/loop`/`src/cli` — not the
+guardrail zone as currently defined, but **an in-run behavior seam**:
+treat those commits with human-review gravity; docs/02 gains the steer-file
+contract row with the implementation.
 
 ## 12. Prior art — build vs buy: herdr evaluation (2026-10-30, internet research)
 
@@ -611,12 +830,15 @@ class says otherwise.
 | I1 | **Ownership fence:** one attempt may write a given session+worktree pair. A replacement worker starts only after the prior attempt is confirmed stopped (waitpid-class evidence); if stop cannot be established, **park — do not spawn**. Heartbeat/PID absence alone is not proof of stop (a disconnected worker still runs). | supervisor "helpfully" reviving tasks |
 | I2 | **Reconcile before retry:** recovery cross-checks desired (graph) vs recorded (decisions/sessions) vs observed (processes, branch heads) and repairs the projections; it never blindly executes from one file. Spawn intent without recorded outcome ⇒ discover-or-park, never blind re-spawn. | crash between log and act |
 | I3 | **No inference from silence:** live state not recorded is `unknown`/`stale`, never guessed. | matrix views lying |
-| I4 | **Append-only queues + valid boundary:** queue files are never rewritten under a live reader; consumers repair-then-append (§13.1). Offsets are optimizations, not authority. | lost/duplicated steers |
+| I4 | **Append-only queues + valid boundary:** queue files are never rewritten under a live reader; exclusive writers repair-then-append (§13.1), never read-only consumers. Offsets are optimizations, not authority. | lost/duplicated steers |
 | I5 | **Ambiguous external effects never auto-retry.** A worker action with side effects outside its worktree (push, deploy, message, spend) is only replayed if idempotent/reconcilable; otherwise reconcile-or-escalate. v1 default: workers contain effects in the worktree; publishing paths are separately controlled. | double-push, double-spend |
 | I6 | **Three claims, three proofs:** recorded (transcript entry) ≠ available (context-construction evidence) ≠ followed (task-relevant result). Ack grants only the first. | "steered" ≠ "fixed" |
 | I7 | **Budgets span attempts:** per-task/per-episode intervention + spend budgets survive respawn/swap/restart (§9). | intervention storm |
 
 ### 13.3 Recovery test matrix (acceptance for L1; extended at L2)
+
+(Old step ids: L1 = P3a/P3b, L2 = P9+; per-row compartment ownership in
+§11.5.)
 
 | injected failure | required result |
 |---|---|
@@ -629,12 +851,23 @@ class says otherwise.
 | external effect with ambiguous outcome | reconcile/escalate; no blind retry (I5) |
 | candidate tested, integration head moved | CAS rejects advance; rebuild + retest (§5 merge contract) |
 | repeated nudges + swaps | aggregate episode budget stops automation (I7) |
+| normal run ends before required check | safe resume completes remaining work; no routine human nudge |
+| transient endpoint failure | bounded backoff/retry; no replay of ambiguous tool effects |
+| correctable task-local failure | diagnosis → authorized repair → check evidence; no human approval per action |
+| repeated recovery strategy fails | different evidence-backed strategy or bounded investigation; no generic continuation loop |
+| recovery agent proposes unauthorized repair | control plane denies it; no guard/check weakening; actionable authority request if needed |
+| work changes after a passing check | stale acceptance invalidated; required checks rerun against relevant artifacts |
+| ownership uncertain during diagnosis | no replacement or concurrent mutating repair; reconcile safely or park |
+| recovery budget exhausted | stop automated recovery, preserve evidence, escalate; counters survive restart |
+| blocked task alongside independent task (M2) | affected task parks; unrelated authorized work continues |
 
 ### 13.4 Exit classification (Q6 parking spot)
 
 Until a durable completion record is specified (candidate: a terminal
-`runEnd {reason}` entry appended by the driver at agent_end — *must* be
-added to §2 via Change Ledger before implementation), worker outcome =
+`runEnd {runId, reason}` entry appended by the driver at agent_end —
+`runId` required because a session file holds multiple runs; **planned at
+P2, §11.1** — *must* be added to §2 via Change Ledger before
+implementation), worker outcome =
 process exit code + last entries + torn-tail status, classified only as
 `clean | stopped-by-guard | crashed | unknown`. Anything finer is a
 Q6 implementation decision informed by this matrix.
