@@ -2671,3 +2671,62 @@ test("D33: a loop stop with a session writes a guardStop entry after the run's m
   const messages = replayed.entries.filter((e) => e.type === "message");
   assert.equal(replayed.context.length, messages.length);
 });
+
+// ─────── P1: runTurn persists progressNudge entries (docs/11 §14.6) ───────
+
+test("P1: a no-progress fire with a session writes a progressNudge entry (watch mode)", async (t) => {
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "s.jsonl");
+  const session = await Session.create(sessionPath, {
+    cwd: dir,
+    model: { id: MODEL.id, provider: "fake" },
+  });
+  t.after(() => session.close());
+  const silent: PrintSinks = { out: { write: () => true }, err: { write: () => true } };
+
+  const bad: Tool = {
+    name: "failer",
+    description: "always fails",
+    parameters: { type: "object" },
+    execute: async () => ({
+      content: [{ type: "text", text: "boom" }],
+      isError: true,
+    }),
+  };
+  // 3 fully-failed turns (varying args so the identical-call guard stays
+  // out of it) → the no-success condition fires (watch = default);
+  // then the model stops on its own.
+  const streamFn = fakeStream([
+    { type: "toolcall", calls: [{ name: "failer", args: { n: 1 } }] },
+    { type: "toolcall", calls: [{ name: "failer", args: { n: 2 } }] },
+    { type: "toolcall", calls: [{ name: "failer", args: { n: 3 } }] },
+    { type: "text", text: "giving up" },
+  ]);
+
+  const { outcome } = await runTurn({
+    model: MODEL,
+    systemPrompt: "sys",
+    tools: [bad],
+    streamFn,
+    controller: new AbortController(),
+    context: [],
+    session,
+    prompt: "fail for me",
+    sinks: silent,
+    maxTurns: 50,
+  });
+  assert.equal(outcome.stopReason, "stop");
+
+  const replayed = await replaySession(sessionPath);
+  const nudges = replayed.entries.filter((e) => e.type === "progressNudge");
+  assert.equal(nudges.length, 1, "the fire is persisted (one episode, one entry)");
+  const n = nudges[0];
+  assert.ok(n && n.type === "progressNudge");
+  assert.equal(n.kind, "no-success");
+  assert.equal(n.mode, "watch");
+  assert.equal(n.turn, 3);
+  assert.equal(n.count, 3);
+  // Replay: the entry carries no LLM context.
+  const messages = replayed.entries.filter((e) => e.type === "message");
+  assert.equal(replayed.context.length, messages.length);
+});

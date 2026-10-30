@@ -27,7 +27,14 @@ import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { makeSummaryMessage } from "../context/compact.js";
-import type { AgentMessage, GuardEvidence, UserMessage, Usage } from "../types.js";
+import type {
+  AgentMessage,
+  GuardEvidence,
+  ProgressKind,
+  ProgressMode,
+  UserMessage,
+  Usage,
+} from "../types.js";
 
 /** Bump when the on-disk entry shape changes; replay rejects other versions. */
 export const SESSION_FORMAT_VERSION = 1;
@@ -207,12 +214,40 @@ export interface GuardStopEntry {
   evidence: GuardEvidence;
 }
 
+/**
+ * P1 (docs/11 §14.6) — a persisted no-progress warning (F1). Written by the
+ * driver when the loop emits `progress_nudge`, closing the §2 gap: the
+ * supervisor tails warn evidence from the file, in every mode (the live
+ * event was previously the only channel and died with the process).
+ * Harness metadata, NOT LLM context: replay ignores it like guardStop, and
+ * it is never referenced by a compaction's firstKeptEntryId. Additive entry
+ * type — SESSION_FORMAT_VERSION stays 1 (old readers fall through).
+ */
+export interface ProgressNudgeEntry {
+  type: "progressNudge";
+  id: string;
+  timestamp: number;
+  /** Which no-progress condition fired. */
+  kind: ProgressKind;
+  /** The mode the run was in when it fired (event parity, §14.6). */
+  mode: ProgressMode;
+  /** Loop turn the condition fired on. */
+  turn: number;
+  /** The count that crossed the threshold (turns, or edits of target). */
+  count: number;
+  /** Normalized target path — only for "no-verification". */
+  target?: string;
+  /** §14.1 run identity; absent for unmanaged runs and pre-P2 files. */
+  runId?: string;
+}
+
 export type SessionEntry =
   | SessionHeaderEntry
   | MessageEntry
   | ModelChangeEntry
   | CompactionEntry
-  | GuardStopEntry;
+  | GuardStopEntry
+  | ProgressNudgeEntry;
 
 /** Model identity as recorded by a modelChange entry (resolved from
  *  models.json by the CLI on resume — apiKeys never land in the session file). */
@@ -391,6 +426,29 @@ export class Session {
     });
   }
 
+  /**
+   * Append a no-progress warning entry (P1, docs/11 §14.6). Written by the
+   * driver on EVERY `progress_nudge` event, in every mode — one greppable
+   * line naming the condition, the count, and (for no-verification) the
+   * target, so warn evidence survives the process for supervisor tailing.
+   * Replay ignores the entry (see ProgressNudgeEntry).
+   */
+  appendProgressNudge(nudge: {
+    kind: ProgressKind;
+    mode: ProgressMode;
+    turn: number;
+    count: number;
+    target?: string;
+    runId?: string;
+  }): Promise<string> {
+    return this.write({
+      type: "progressNudge",
+      id: randomUUID(),
+      timestamp: Date.now(),
+      ...nudge,
+    });
+  }
+
   /** Flush + release the file handle. Appends after close() throw. */
   async close(): Promise<void> {
     const handle = this.handle;
@@ -501,7 +559,7 @@ export function replayContextWithIds(entries: SessionEntry[]): ReplayWithIds {
         ...retained.slice(idx),
       ];
     }
-    // header / modelChange / guardStop carry no LLM context
+    // header / modelChange / guardStop / progressNudge carry no LLM context
   }
   return { context: retained.map((r) => r.message), contextEntryIds: retained.map((r) => r.id) };
 }

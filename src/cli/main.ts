@@ -1116,6 +1116,17 @@ export async function runTurn(opts: {
         // the run's messages (same file order as the stop), skipped when no
         // session is open. Replay ignores it; the transcript names itself.
         await session.appendGuardStop(ev.evidence);
+      else if (ev.type === "progress_nudge")
+        // P1 (docs/11 §14.6): persisted warn evidence — every fire, every
+        // mode (the live event died with the process; the supervisor tails
+        // warn evidence from the file). Replay ignores it.
+        await session.appendProgressNudge({
+          kind: ev.kind,
+          mode: ev.mode,
+          turn: ev.turn,
+          count: ev.count,
+          ...(ev.target !== undefined ? { target: ev.target } : {}),
+        });
       else if (ev.type === "steer")
         // The steer's user message is pushed to the context by the loop but
         // travels only as an event — persist the EXACT object the loop

@@ -658,3 +658,92 @@ test("D33: a reader that predates guardStop skips it (additive entry, format ver
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ─────────── P1: the progressNudge entry (docs/11 §14.6) ───────────
+
+test("P1: appendProgressNudge round-trips through loadSession; replay ignores the entry", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-nudge-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "nudge.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  await s.appendMessage(userMsg("do the thing", 1));
+  const entryId = await s.appendProgressNudge({
+    kind: "no-success",
+    mode: "watch",
+    turn: 3,
+    count: 3,
+  });
+  await s.appendProgressNudge({
+    kind: "no-verification",
+    mode: "nudge",
+    turn: 7,
+    count: 5,
+    target: "src/app.ts",
+    runId: "run_01JX_TEST",
+  });
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const nudges = loaded.entries.filter((e) => e.type === "progressNudge");
+  assert.equal(nudges.length, 2, "both nudge entries are in the file");
+  const first = nudges[0];
+  assert.ok(first && first.type === "progressNudge");
+  assert.equal(first.id, entryId);
+  assert.ok(first.timestamp > 0);
+  assert.equal(first.kind, "no-success");
+  assert.equal(first.mode, "watch");
+  assert.equal(first.turn, 3);
+  assert.equal(first.count, 3);
+  assert.equal(first.target, undefined);
+  const second = nudges[1];
+  assert.ok(second && second.type === "progressNudge");
+  assert.equal(second.kind, "no-verification");
+  assert.equal(second.mode, "nudge");
+  assert.equal(second.target, "src/app.ts");
+  assert.equal(second.runId, "run_01JX_TEST");
+
+  // Replay: harness metadata, NOT LLM context (same contract as guardStop).
+  assert.deepEqual(
+    replayContext(loaded.entries),
+    replayContext(loaded.entries.filter((e) => e.type !== "progressNudge")),
+  );
+});
+
+test("P1: a reader that predates progressNudge skips it (additive entry, format version stays 1)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-nudge-old-"));
+  const path = join(dir, "old.jsonl");
+  try {
+    const s = await Session.create(path, { model: MODEL });
+    await s.appendMessage(userMsg("keep", 1));
+    await s.appendProgressNudge({ kind: "no-success", mode: "stop", turn: 6, count: 4 });
+    await s.close();
+
+    const loaded = await loadSession(path);
+    assert.equal(SESSION_FORMAT_VERSION, 1, "the format version was NOT bumped");
+    const legacy = loaded.entries
+      .filter((e) => e.type === "message")
+      .map((e) => (e as { message: AgentMessage }).message);
+    assert.deepEqual(replayContext(loaded.entries), legacy);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("P1: a progressNudge before a compaction boundary does not break the kept-entry chain", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-nudge-cx-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "nudge-cx.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  await s.appendMessage(userMsg("one", 1));
+  await s.appendProgressNudge({ kind: "no-verification", mode: "watch", turn: 2, count: 3, target: "a.ts" });
+  const m2 = await s.appendMessage(userMsg("two", 2));
+  await s.appendCompaction("SUMMARY: earlier work", m2, 1000);
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const ctx = replayContext(loaded.entries);
+  assert.equal(ctx.length, 2);
+  assert.equal(ctx[1]!.content, "two");
+});

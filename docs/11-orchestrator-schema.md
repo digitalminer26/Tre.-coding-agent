@@ -87,6 +87,7 @@ cite the row):
 | 2026-10-30 | §11 | rewritten as the **compartment build plan (P0–P13)** after the plan sanity check; corrections folded in: missing terminal evidence is `unknown` never `crashed` + run/attempt identity precedes classification (P2); file steering split plumbing vs durable delivery (P3a/P3b); tailer is observation-only, never repairs (§13.1 repair stays with the exclusive writer); ownership fence + lost-supervisor reconcile is its own compartment (P7) before auto-scheduling; budget accounting is a standalone ledger consumed by classifiers, not owned by them (P8, I7); graph.json desired-vs-derived authority pinned at P0; milestone M1 = P0–P9 observe-only, autonomy enabled only in reviewed increments A1–A6. Old linear L0–L9 sequence retained below as a mapping | plan sanity check |
 | 2026-10-30 | §0 §3 §9 §11 §13 | Accepted self-healing-first rescope supersedes observe-only M1 and old A1–A6 ordering: M0 foundations → M1 autonomous single-worker recovery → M2 shared multi-worker supervision → M3 broader autonomy/polish. Added explicit acceptance (P14), investigation/recovery (P15), upfront authority, aggregate recovery budgets, exception-based escalation, and productivity evaluation. Full S3/S5 wire shapes remain P0 work; unscoped supervised steering must not pass trivially. | user-approved design discussion |
 | 2026-10-30 | §2 §3 §4 §6 §14 | **P0 contract closure:** new §14 pins runId/attemptId identity (§14.1), steer-file line schema + validation + envelope `steering:{requestId,source}` (§14.2, replacing the P0-pending scope placeholder), the four `decisions.jsonl` record kinds `decision-intent`/`decision-outcome`/`acceptance`/`diagnosis` (§14.3, S5 action enum extended to `backoff-retry`/`investigate`/`repair`/`accept-finish`), task revision (§14.4), derived ownership (§14.5), `progressNudge` entry shape closing Q2b (§14.6), `runEnd` reason set (§2), episode/task policy + recovery-budget shapes (§14.7), and the `workerState` closed set (§14.8). S3 gains structured `acceptance` + `policy` + derived-vs-desired authority rule; S1 pins toolResult detail fields and adds the two new entry types as contracts (implementation at P1/P2) | P0 (implementation kickoff) |
+| 2026-10-30 | §14.6 | **Amend at P1 start:** `progressNudge.mode` corrected to the real `ProgressMode` (`watch\|nudge\|stop` — the first pin's `warn\|stop` never existed), and `turn`/`count`/`target` added for event parity (stats attribution). Driver persists every fire, every mode | P1 implementation |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -602,7 +603,7 @@ Detailed wire shapes below remain proposals until P0 closes the schemas.
 | id | compartment | schemas consumed | status |
 |----|-------------|------------------|--------|
 | P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | **done — closed in §14 (2026-10-30)** |
-| P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | not started |
+| P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | **done (2026-10-30)** — `ProgressNudgeEntry` + `Session.appendProgressNudge` (session.ts), driver persists every fire in `runTurn.onEvent` (main.ts); shape amended at implementation (turn/count/target, real `ProgressMode`); 4 tests: round-trip, legacy-reader skip (version stays 1), compaction-chain safe, runTurn end-to-end |
 | P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | not started |
 | P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | not started |
 | P3b | **File-backed steering delivery**: `--steer-file <path>` + `FileSteeringQueue` (offset-tolerant incremental drain, malformed lines skipped+counted, scoped-request validation, transcript-scan dedup by request id with scope/provenance conflict rejection, sync-before-ack per §13.1). **Claims deduplicated transcript insertion only — never exactly-once execution** (I6). Tests: §13.3 rows 1/2/4 | S1, S2 | not started |
@@ -1049,13 +1050,29 @@ metadata, replay-ignored, additive, format version stays 1):
 
 ```ts
 { type: "progressNudge"; id: string; timestamp: number;
-  kind: "no-success" | "no-verification"; mode: "warn" | "stop"; runId?: string }
+  kind: ProgressKind;              // "no-success" | "no-verification" (types.ts)
+  mode: ProgressMode;              // "watch" | "nudge" | "stop" — the mode the
+                                   // run was in when it fired (types.ts), mirroring
+                                   // the live event's attribution semantics
+  turn: number;                    // loop turn the condition fired on (event parity)
+  count: number;                   // threshold-crossing count (event parity)
+  target?: string;                 // normalized path — "no-verification" only
+  runId?: string }                 // §14.1; optional → valid for unmanaged runs
 ```
 
 Driver-appended (main.ts, same seam as `appendGuardStop` ~1112) when the
-loop emits `progress_nudge`. Replay ignores unknown/non-context types by
-fall-through → replayed context byte-identical; `runId` is optional so
-the entry stays valid for unmanaged runs.
+loop emits `progress_nudge` — **every fire persists, in every mode**
+(§14.8 counts warn evidence from all modes; mode attribution rides the
+entry). The event fires once per episode per kind (loop-side anti-spam,
+docs/08 §9), so entry volume is bounded without a harness-side cap.
+Replay ignores unknown/non-context types by fall-through → replayed
+context byte-identical.
+
+*(Amended 2026-10-30 at P1 implementation: the first pin said
+`mode:"warn"|"stop"` and omitted turn/count/target; the real `ProgressMode`
+is `"watch"|"nudge"|"stop"` and consumers (/stats_progress attribution,
+§14.8 classification) need the event-parity fields. Change Ledger row
+below.)*
 
 ### 14.7 Episode & task policy shapes (P0 → P8/P9/P12)
 
@@ -1099,7 +1116,7 @@ where evidence ends (I3):
 `thinking | tool | await-approval | warned | stopped | dead | unknown`.
 Mapping (deterministic, from persisted + ephemeral evidence only):
 `tool` ← tool_execution_start without end (ephemeral); `warned` ← last
-persisted warn entry (toolResult details / progressNudge warn-mode) with
+persisted warn entry (toolResult details / a `progressNudge` entry) with
 no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 `dead` ← process confirmed gone without terminal record; otherwise
 `unknown`. `stale` is an envelope-level flag (no new byte for
