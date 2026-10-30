@@ -41,6 +41,7 @@ import {
 } from "../src/loop/agent-loop.js";
 import { guardRetryNote, loopStopNote } from "../src/types.js";
 import type {
+  SteerEntry,
   AgentEvent,
   AgentMessage,
   AssistantMessage,
@@ -1617,6 +1618,43 @@ test("steering: two steers are drained in order", async () => {
   assert.equal(ctx2[4]!.role, "user");
   if (ctx2[3]!.role === "user") assert.equal(ctx2[3]!.content, "first steer");
   if (ctx2[4]!.role === "user") assert.equal(ctx2[4]!.content, "second steer");
+});
+
+test("steering P3a (§14.2): envelope pushes carry provenance onto the steer event; plain pushes default to {requestId:\"\", source:\"tty\"}", async () => {
+  const { tool } = makeTool("read");
+  const turns: FakeTurn[] = [
+    { type: "toolcall", calls: [{ id: "c1", name: "read", args: { path: "a" } }] },
+    { type: "text", text: "done" },
+  ];
+  const q: (string | SteerEntry)[] = [];
+  const queue = {
+    push(item: string | SteerEntry) { q.push(item); },
+    drain() { const d = [...q]; q.length = 0; return d; },
+  };
+  const base = fakeStream(turns, { model: MODEL });
+  const streamFn: StreamFn = (m, ctx, o) => {
+    if (ctx.messages.length === 1) {
+      queue.push("plain line");
+      queue.push({ text: "supervisor line", requestId: "req-7", source: "telegram" });
+    }
+    return base(m, ctx, o);
+  };
+  const events = await drain(runLoop({
+    model: MODEL, systemPrompt: "sys", initialMessages: [userMsg("hi")],
+    tools: [tool], streamFn, signal: new AbortController().signal, steeringQueue: queue,
+  }));
+  const steers = events.filter((e) => e.type === "steer") as Extract<AgentEvent, { type: "steer" }>[];
+  assert.equal(steers.length, 2);
+  // Plain push → empty envelope (byte-identical content, legacy default).
+  assert.deepEqual(steers[0]!.steering, { requestId: "", source: "tty" });
+  assert.equal(steers[0]!.text, "plain line");
+  // Envelope push → provenance rides the event (the driver persists it on
+  // the message ENTRY; nothing leaks into .content).
+  assert.deepEqual(steers[1]!.steering, { requestId: "req-7", source: "telegram" });
+  assert.equal(steers[1]!.text, "supervisor line");
+  if (steers[1]!.message.role === "user") {
+    assert.equal(steers[1]!.message.content, "supervisor line", "content is the raw text only");
+  }
 });
 
 test("steering keep-alive: a pending steer keeps a text-only stop alive for one more turn", async () => {

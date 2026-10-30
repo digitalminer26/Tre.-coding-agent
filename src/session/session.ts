@@ -32,6 +32,7 @@ import type {
   GuardEvidence,
   ProgressKind,
   ProgressMode,
+  SteeringMeta,
   StopReason,
   UserMessage,
   Usage,
@@ -168,6 +169,10 @@ export interface MessageEntry {
   type: "message";
   id: string;
   message: AgentMessage;
+  /** P3a (docs/11 §14.2): steering provenance, set when the message was
+   *  injected via steering. Model-invisible: replay rebuilds a plain
+   *  `message` from `.message` and never reads this field. */
+  steering?: SteeringMeta;
 }
 
 export interface ModelChangeEntry {
@@ -409,8 +414,13 @@ export class Session {
   }
 
   /** Append one message to the log. Resolves with the new entry's id. */
-  appendMessage(message: AgentMessage): Promise<string> {
-    return this.write({ type: "message", id: randomUUID(), message });
+  appendMessage(message: AgentMessage, steering?: SteeringMeta): Promise<string> {
+    return this.write({
+      type: "message",
+      id: randomUUID(),
+      message,
+      ...(steering !== undefined ? { steering } : {}),
+    });
   }
 
   /** Record a model switch (the CLI resolves it against models.json on resume). */

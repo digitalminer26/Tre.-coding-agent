@@ -79,6 +79,7 @@ import type {
   GuardEvidence,
   ProgressKind,
   ProgressMode,
+  SteerEntry,
   UserMessage,
   AssistantMessage,
   ExecuteToolCall,
@@ -106,8 +107,10 @@ export type { ExecuteToolCall } from "../types.js";
  * discards the leftovers when the run ends.
  */
 export interface SteeringQueue {
-  push(text: string): void;
-  drain(): string[];
+  push(text: string | SteerEntry): void;
+  /** P3a: drains may yield plain strings (TTY — the loop defaults them to
+   *  `{requestId:"", source:"tty"}`) or tagged `SteerEntry` items. */
+  drain(): (string | SteerEntry)[];
 }
 
 export interface AgentLoopOptions {
@@ -743,10 +746,13 @@ export async function* runLoop(
     if (!queue) return [];
     const pending = queue.drain();
     const events: AgentEvent[] = [];
-    for (const text of pending) {
+    for (const entry of pending) {
+      // P3a (docs/11 §14.2): plain-string items (TTY, legacy callers) keep
+      // byte-identical content with an empty-envelope default.
+      const { text, requestId, source } = typeof entry === "string" ? { text: entry, requestId: "", source: "tty" } : entry;
       const message: UserMessage = { role: "user", content: text, timestamp: Date.now() };
       context.push(message);
-      events.push({ type: "steer", turn, text, message });
+      events.push({ type: "steer", turn, text, steering: { requestId: requestId ?? "", source: source ?? "tty" }, message });
     }
     if (pending.length > 0) {
       // D27 Finding 2 — external guidance makes a repeated batch legitimate

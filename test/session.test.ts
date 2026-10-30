@@ -710,6 +710,35 @@ test("P1: appendProgressNudge round-trips through loadSession; replay ignores th
   );
 });
 
+test("P3a: a steer's envelope persists on the message entry; replay keeps it model-invisible (docs/11 §14.2)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-steerenv-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "steerenv.jsonl");
+
+  const s = await Session.create(path, { model: MODEL });
+  const plain = userMsg("typed line", 1);
+  const steered = userMsg("[telegram from alice] focus", 2);
+  const plainId = await s.appendMessage(plain);
+  const steeredId = await s.appendMessage(steered, { requestId: "req-9", source: "telegram" });
+  await s.close();
+
+  const loaded = await loadSession(path);
+  const msgs = loaded.entries.filter((e) => e.type === "message");
+  assert.equal(msgs.length, 2);
+  const legacy = msgs.find((e) => e.id === plainId);
+  const env = msgs.find((e) => e.id === steeredId);
+  assert.ok(legacy && env);
+  assert.equal(legacy.steering, undefined, "a plain append has no envelope (legacy shape stays valid)");
+  assert.deepEqual(env.steering, { requestId: "req-9", source: "telegram" });
+
+  // Model-invisibility: the replayed CONTEXT is built from .message only —
+  // identical whether or not the envelope field exists on disk.
+  assert.deepEqual(
+    replayContext(loaded.entries),
+    replayContext(loaded.entries.map((e) => (e.type === "message" ? { ...e, steering: undefined } : e))),
+  );
+});
+
 test("P1: a reader that predates progressNudge skips it (additive entry, format version stays 1)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "om-sess-nudge-old-"));
   const path = join(dir, "old.jsonl");

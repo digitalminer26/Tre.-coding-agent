@@ -87,6 +87,7 @@ import { canonicalSessionPath, readSubtasks, subtaskDir, subtaskKey } from "../t
 import { resolveModel, type ModelsFile } from "../config/models.js";
 import { makeTelegramBridge, TELEGRAM_POLL_MS } from "./telegram.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
+import type { SteerEntry } from "../types.js";
 import type { AskApproval } from "../tools/safety.js";
 import type {
   AgentMessage,
@@ -160,11 +161,14 @@ function resolveSwitchedModel(modelsFile: ModelsFile | undefined, modelId: strin
  */
 export function steerTelegramBatch(
   msgs: [string, string, string][],
-  push: (prompt: string) => void,
+  push: (entry: SteerEntry) => void,
 ): string[] {
   return msgs.map(([, sender, text]) => {
     const prompt = `[telegram from ${sender}] ${text}`;
-    push(prompt);
+    // P3a (§14.2): the queue item is an envelope — the persisted message
+    // entry records source "telegram" (the returned prompt stays plain for
+    // display).
+    push({ text: prompt, source: "telegram" });
     return prompt;
   });
 }
@@ -787,7 +791,9 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     controller = new AbortController();
     // One steering queue per run — a closure over a plain array (the
     // contract is push/drain; the loop drains, onSubmit pushes).
-    const steerState: { q: string[] } = { q: [] };
+    // P3a: items may be plain strings (typed lines) or envelopes (telegram
+    // driver); the loop normalizes each at drain time.
+    const steerState: { q: (string | SteerEntry)[] } = { q: [] };
     steerQueue = {
       push: (t) => steerState.q.push(t),
       drain: () => {

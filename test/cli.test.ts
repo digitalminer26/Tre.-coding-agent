@@ -35,7 +35,7 @@ import {
   type PrintSinks,
 } from "../src/cli/main.js";
 import { estimateTokens } from "../src/context/compact.js";
-import { Session, replaySession } from "../src/session/session.js";
+import { Session, loadSession, replaySession } from "../src/session/session.js";
 import { readWorkerStatuses } from "../src/cli/workers.js";
 import { subtaskDir, subtaskKey, canonicalSessionPath } from "../src/tools/subtask.js";
 import { deriveMaxTurns } from "../src/loop/agent-loop.js";
@@ -46,6 +46,7 @@ import type {
   AssistantMessage,
   LlmContext,
   ModelConfig,
+  SteerEntry,
   StreamFn,
   Tool,
   UserMessage,
@@ -1363,6 +1364,60 @@ test("steering: a steer typed during a run is answered (keep-alive) and persiste
   const replayUsers = replayed.context.filter((m) => m.role === "user");
   assert.equal(replayUsers.length, 2, "prompt + steer are both persisted");
   if (replayUsers[1]!.role === "user") assert.equal(replayUsers[1]!.content, "steer me left");
+});
+
+test("steering P3a (§14.2): an envelope steer persists steering:{requestId,source} on the session entry (model-invisible)", async (t) => {
+  const { dir } = await workspace(t);
+  const sessionPath = join(dir, "s.jsonl");
+  const session = await Session.create(sessionPath, {
+    cwd: dir,
+    model: { id: MODEL.id, provider: "fake" },
+  });
+  t.after(() => session.close());
+  const silent: PrintSinks = { out: { write: () => true }, err: { write: () => true } };
+
+  // The loop's contract: drain may yield plain strings OR envelopes.
+  const list: (string | SteerEntry)[] = [];
+  const steeringQueue = {
+    push: (item: string | SteerEntry) => list.push(item),
+    drain: () => { const out = [...list]; list.length = 0; return out; },
+  };
+
+  let turn = 0;
+  const streamFn: StreamFn = (model, _ctx, _opts) =>
+    (async function* () {
+      turn++;
+      const base: AssistantMessage = {
+        role: "assistant", content: [], model: model.id, provider: model.provider,
+        stopReason: "stop", timestamp: Date.now(),
+      };
+      yield { type: "start", partial: base };
+      if (turn === 1) steeringQueue.push({ text: "supervisor steer", requestId: "req-11", source: "telegram" });
+      const text = turn === 1 ? "turn one" : "steering received";
+      const partial: AssistantMessage = { ...base, content: [{ type: "text", text }] };
+      yield { type: "text_delta", delta: text, partial };
+      yield { type: "done", message: partial };
+    })();
+
+  const { outcome } = await runTurn({
+    model: MODEL, systemPrompt: "sys", tools: [], streamFn,
+    controller: new AbortController(), context: [], session,
+    prompt: "start", sinks: silent, maxTurns: 8, steeringQueue,
+  });
+  assert.equal(outcome.stopReason, "stop");
+
+  // The entry on disk carries the envelope; the replayed message does NOT
+  // (replay constructs a plain user message — §14.2 model-invisibility).
+  const loaded = await loadSession(sessionPath);
+  const steered = loaded.entries.filter((e) => e.type === "message").find((e) => e.type === "message" && e.message.role === "user" && e.message.content === "supervisor steer");
+  assert.ok(steered && steered.type === "message", "the steer message entry is persisted");
+  if (steered && steered.type === "message") {
+    assert.deepEqual(steered.steering, { requestId: "req-11", source: "telegram" });
+  }
+  const replayed = await replaySession(sessionPath);
+  const users = replayed.context.filter((m) => m.role === "user");
+  assert.equal(users.length, 2);
+  assert.equal("steering" in users[1]!, false, "the replayed message is a plain user message");
 });
 
 // ─────────────────────────────── WS7: safety ────────────────────────────────

@@ -89,6 +89,7 @@ cite the row):
 | 2026-10-30 | §2 §3 §4 §6 §14 | **P0 contract closure:** new §14 pins runId/attemptId identity (§14.1), steer-file line schema + validation + envelope `steering:{requestId,source}` (§14.2, replacing the P0-pending scope placeholder), the four `decisions.jsonl` record kinds `decision-intent`/`decision-outcome`/`acceptance`/`diagnosis` (§14.3, S5 action enum extended to `backoff-retry`/`investigate`/`repair`/`accept-finish`), task revision (§14.4), derived ownership (§14.5), `progressNudge` entry shape closing Q2b (§14.6), `runEnd` reason set (§2), episode/task policy + recovery-budget shapes (§14.7), and the `workerState` closed set (§14.8). S3 gains structured `acceptance` + `policy` + derived-vs-desired authority rule; S1 pins toolResult detail fields and adds the two new entry types as contracts (implementation at P1/P2) | P0 (implementation kickoff) |
 | 2026-10-30 | §14.6 | **Amend at P1 start:** `progressNudge.mode` corrected to the real `ProgressMode` (`watch\|nudge\|stop` — the first pin's `warn\|stop` never existed), and `turn`/`count`/`target` added for event parity (stats attribution). Driver persists every fire, every mode | P1 implementation |
 | 2026-10-30 | §2 §13.4 §11 | **P2 implemented:** `runEnd {runId, reason}` terminal entry is driver-appended at agent_end (`RunEndEntry`, `appendRunEnd`, `driverRunEndReason`; `runTurn` allocates the per-invocation runId). Q6 closed; P2 row flipped to done | P2 implementation |
+| 2026-11-01 | §14.2 §2 §11 | **P3a implemented:** the steering path carries provenance end-to-end — `SteeringQueue.push(string \| SteerEntry)` / `drain(): (string \| SteerEntry)[]` (agent-loop.ts; the widened drain keeps existing string-returning mocks valid), the `steer` event gains `steering?: SteeringMeta`, `MessageEntry` gains optional `steering`, and the `runTurn` persist tap writes it. Plain-string pushes (TTY and every legacy caller) normalize to `{requestId:"", source:"tty"}` — delivered text and persisted `.content` byte-identical. Telegram driver routes envelopes (`source:"telegram"`, optional `requestId`) through its handoff buffer; the TUI busy-branch telegram steer pushes the same envelopes. P3a row flipped to done | P3a implementation |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -606,7 +607,7 @@ Detailed wire shapes below remain proposals until P0 closes the schemas.
 | P0 | **Contract closure & schema reconciliation.** Pin run/attempt identity, scoped steering and conflict rules, intent/outcome lifecycle, graph authority, ownership, acceptance evidence, structured observer judgments, diagnostic permissions, repair authority, and recovery budgets. Graph `status`/`result` and usage totals are derived projections; approval, dependencies, scope, acceptance, and budget caps are desired inputs. Update S1–S7 before implementation; examples are not yet complete wire contracts. | all | **done — closed in §14 (2026-10-30)** |
 | P1 | **Persisted warning evidence** — `progress_nudge` becomes a session entry (closes the Q2b half: proposed shape = standalone `progressNudge {id,kind,mode,ts}`, mirroring the `guardStop` driver-append pattern at main.ts ~1112 so replay's "ignore non-context entries" path stays unchanged). Exit: recorded; replay/context byte-identical; existing consumers tolerate it | S1, §2 | **done (2026-10-30)** — `ProgressNudgeEntry` + `Session.appendProgressNudge` (session.ts), driver persists every fire in `runTurn.onEvent` (main.ts); shape amended at implementation (turn/count/target, real `ProgressMode`); 4 tests: round-trip, legacy-reader skip (version stays 1), compaction-chain safe, runTurn end-to-end |
 | P2 | **Run lifecycle evidence** — terminal record(s) with run identity: `runEnd {runId, reason}` driver-appended (the §13.4 candidate, amended). **`runEnd` means "the run ended and why", not "the task passed"**; acceptance remains supervisor-side. **Absent terminal evidence = `unknown/incomplete`, never `crashed`** (missing can mean old format, still-running, driver crash, persistence failure, or partial observation — exit code corroborates but doesn't replace it). Q6 closes here | S1, §13.4 | **done (2026-10-30)** — `RunEndEntry` + `Session.appendRunEnd` + `driverRunEndReason` (session.ts); `runTurn` allocates the §14.1 runId and appends the terminal record at agent_end after guard evidence; toolUse leak writes NOTHING (absence → `unknown`); 5 tests: round-trip, reason mapping, legacy-reader skip, runTurn tail record, two-runs-per-session |
-| P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | not started |
+| P3a | **Structured steering plumbing** (harness-internal): extend the steering path so provenance survives queue → `steer` event → persisted envelope (`steering:{requestId,source}`, Q1). The 2-method `SteeringQueue` (`push(text)`, `drain()`, agent-loop.ts ~108) cannot carry identity — this is an interface change, not a file reader. Legacy TTY/Telegram behavior byte-identical | S1, S2 | **done (2026-11-01)** — `SteerEntry`/`SteeringMeta` (types.ts); `SteeringQueue.push(string \| SteerEntry)` + `drain(): (string \| SteerEntry)[]` (drain widened so string-returning mocks stay valid); `steer` event gains `steering?`; `MessageEntry.steering?` written by the runTurn persist tap; plain pushes normalize to `{requestId:"", source:"tty"}` (content byte-identical); Telegram driver routes `source:"telegram"` envelopes through the handoff buffer (detach normalizes stray strings); 4 tests: loop normalization, session entry round-trip + replay invisibility, driver envelope provenance through the buffer, runTurn end-to-end persistence |
 | P3b | **File-backed steering delivery**: `--steer-file <path>` + `FileSteeringQueue` (offset-tolerant incremental drain, malformed lines skipped+counted, scoped-request validation, transcript-scan dedup by request id with scope/provenance conflict rejection, sync-before-ack per §13.1). **Claims deduplicated transcript insertion only — never exactly-once execution** (I6). Tests: §13.3 rows 1/2/4 | S1, S2 | not started |
 | P4 | **Episode journal & projections**: typed graph.json / state.json / decisions.jsonl readers-writers, schema validation, atomic-rename, dir scaffold (S4), intent/outcome append records (§6 lifecycle), state trichotomy applied (S6). No process ever writes these yet | S3, S5, S6 | not started |
 | P5 | **Read-only ingestion & fleet projection**: persistent-offset JSONL tailer (reporter pattern), §13.1-*aware* (reconcile cursor on truncation/replacement — see §11.2 boundary note), entry-id dedup, deterministic replay, envelope emission (S7) with explicit `unknown`/`stale` (I3) | S1, S7 | not started |
@@ -954,6 +955,27 @@ ms; session entries keep `timestamp`).
   entry**, not inside `.content` (model-invisible; replay constructs it
   as an ordinary user message). Legacy entries without the field remain
   valid; `steering` is optional on `MessageEntry`.
+
+  **Implemented (P3a, 2026-11-01):** the plumbing that carries the
+  envelope is `SteerEntry` (`{text, requestId?, source?}`, types.ts) on
+  the queue seam — `SteeringQueue.push(string | SteerEntry)` and
+  `drain(): (string | SteerEntry)[]` (the union return keeps existing
+  string-returning callers/mocks valid). `drainSteers` normalizes each
+  item: plain strings (TTY, legacy) → `{requestId:"", source:"tty"}`
+  with byte-identical delivered `.content`; envelopes pass their
+  provenance onto the `steer` event's `steering?: SteeringMeta`, which
+  the `runTurn` persist tap writes onto the `MessageEntry`
+  (`appendMessage(message, steering?)`). The Telegram driver is the
+  first envelope producer: `steer(msg, requestId?)` pushes
+  `{source:"telegram"}` envelopes through the handoff buffer (buffer
+  items and `attachSteerTarget`'s claimed list are `SteerEntry`; detach
+  normalizes any stray strings left in a dead queue). `idle`-turn
+  claims still become plain prompt text (no envelope — the message
+  starts a run, it is not steered into one). The TUI busy-branch
+  telegram steer (`steerTelegramBatch`) pushes the same
+  `{source:"telegram"}` envelopes. P3b's `FileSteeringQueue`
+  is the next producer: `requestId` = the line's `id`, `source:"file"`
+  (§14.2 table), dedup scan reads the entries persisted by this path.
 - **`FileSteeringQueue` input line (S2)** — full validation table:
 
 | field | required | validation on violation |

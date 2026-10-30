@@ -98,6 +98,30 @@ export type StopReason =
   | "stall"
   | "progress";
 
+/**
+ * P3a (docs/11 §14.2) — steering provenance: rides the steer event and is
+ * persisted on the message ENTRY (not inside .content — model-invisible;
+ * replay constructs a plain user message and never reads this field).
+ * `source` is free-form provenance ("tty", "telegram", "file", …);
+ * `requestId` correlates a supervisor-written steer with its ack (S2).
+ */
+export interface SteeringMeta {
+  requestId: string;
+  source: string;
+}
+
+/**
+ * P3a: a drained steering item — text plus provenance. Plain-string pushes
+ * (TTY, and everything pre-P3a) get `requestId: ""` + `source: "tty"`, so
+ * the delivered text and the persisted content stay byte-identical to the
+ * pre-P3a behavior.
+ */
+export interface SteerEntry {
+  text: string;
+  requestId?: string;
+  source?: string;
+}
+
 /** F1 (docs/08 §9) — which no-progress condition fired. */
 export type ProgressKind = "no-success" | "no-verification";
 
@@ -403,6 +427,10 @@ export type AgentEvent =
       type: "steer";
       turn: number;
       text: string;
+      /** P3a (docs/11 §14.2): provenance of the drained item (absent =
+       *  pre-P3a/legacy caller). Persisted on the message ENTRY as
+       *  `steering`, never inside .content. */
+      steering?: SteeringMeta;
       message: UserMessage;
     }
   | { type: "tool_execution_start"; toolCall: ToolCallBlock }

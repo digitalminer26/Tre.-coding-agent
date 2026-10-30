@@ -334,14 +334,20 @@ test("F2: stop() cancels a reserved-but-unstarted body — its fn never runs and
 
 // ── STEER HANDOFF BUFFER (attach/detach/steer) ──────────────────────────────
 
+// P3a: driver pushes may be plain strings or envelopes — `seen` records
+// the TEXT either way so the pre-P3a assertions read unchanged.
 function mkQueue(): { push(t: string): void; drain(): string[]; seen: string[] } {
   const seen: string[] = [];
+  const q: unknown[] = [];
+  const textOf = (x: unknown): string => (typeof x === "string" ? x : (x as { text: string }).text);
   return {
-    push(t: string) { seen.push(t); },
-    drain() { const d = [...seen]; seen.length = 0; return d; },
+    push(t: string) { q.push(t); seen.push(textOf(t)); },
+    drain() { const d = q.map(textOf); q.length = 0; return d; },
     seen,
   };
 }
+
+
 
 test("handoff buffer: a steer with NO attached queue is buffered, claimed in order by the next labeled attach", async () => {
   const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
@@ -352,15 +358,42 @@ test("handoff buffer: a steer with NO attached queue is buffered, claimed in ord
   assert.deepEqual(driver.steerClaims, [], "nothing claimed yet");
   const q = mkQueue();
   const claimed = driver.attachSteerTarget(q, "run");
-  assert.deepEqual(claimed, ["first", "second"], "the buffer drains in ARRIVAL order");
+  assert.deepEqual(claimed.map((s) => s.text), ["first", "second"], "the buffer drains in ARRIVAL order");
   assert.deepEqual(driver.steerClaims, [
     { text: "first", claimedBy: "run" },
     { text: "second", claimedBy: "run" },
   ], "the claim log tags each message with the claiming body");
   // After attach: steers route DIRECTLY to the queue, not the buffer.
   driver.steer("live");
-  assert.deepEqual(claimed, ["first", "second"], "the buffer was not refilled");
+  assert.deepEqual(claimed.map((s) => s.text), ["first", "second"], "the buffer was not refilled");
   assert.deepEqual(q.seen, ["live"], "attached → direct routing");
+});
+
+test("P3a (§14.2): routed steers are envelopes — source \"telegram\" survives the handoff buffer; requestId rides through", async () => {
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const driver = new TelegramDriver(bridge, noopHandlers);
+  // Buffered pre-attach: provenance must survive the handoff into the claim.
+  driver.steer("buffered");
+  driver.steer("supervised", "req-42");
+  const q = mkQueue();
+  const claimed = driver.attachSteerTarget(q, "run");
+  assert.deepEqual(
+    claimed.map((s) => ({ text: s.text, source: s.source, requestId: s.requestId })),
+    [
+      { text: "buffered", source: "telegram", requestId: "" },
+      { text: "supervised", source: "telegram", requestId: "req-42" },
+    ],
+    "the claim carries the full envelope, in order",
+  );
+  // Direct routing while attached: the queue receives the envelope itself.
+  const items: unknown[] = [];
+  driver.attachSteerTarget(
+    { push: (x: unknown) => items.push(x), drain: () => { const d = items.splice(0); return d as never; } } as never,
+    "user",
+  );
+  driver.steer("live", "req-43");
+  assert.deepEqual(items, [{ text: "live", source: "telegram", requestId: "req-43" }],
+    "a direct push is the envelope, not the bare text");
 });
 
 test("handoff buffer: a steer racing the turn END is detached to the buffer and reaches the NEXT body", async () => {
@@ -372,7 +405,7 @@ test("handoff buffer: a steer racing the turn END is detached to the buffer and 
   driver.steer("raced-the-end"); // lands in the buffer, NOT q1
   assert.deepEqual(q1.seen, [], "a detached steer must not enter the dead queue");
   const q2 = mkQueue();
-  assert.deepEqual(driver.attachSteerTarget(q2, "telegram-idle"), ["raced-the-end"],
+  assert.deepEqual(driver.attachSteerTarget(q2, "telegram-idle").map((s) => s.text), ["raced-the-end"],
     "the next body claims it before its first drain");
   assert.deepEqual(driver.steerClaims, [{ text: "raced-the-end", claimedBy: "telegram-idle" }],
     "the claim records WHICH body rescued the steer");
@@ -395,7 +428,8 @@ test("follow-up: a steer stranded in the buffer at a labeled body's END manufact
   const idles: { msgs: number; pending: string[] }[] = [];
   const driver = new TelegramDriver(
     bridge,
-    { onSteer: () => {}, onIdle: async (msgs, pendingSteers = []) => { idles.push({ msgs: msgs.length, pending: [...pendingSteers] }); } },
+    // P3a: pendingSteers are envelopes — the test keeps asserting on texts.
+    { onSteer: () => {}, onIdle: async (msgs, pendingSteers = []) => { idles.push({ msgs: msgs.length, pending: pendingSteers.map((s) => s.text) }); } },
   );
   // A user-typed body (label "user") attaches a queue; a steer arrives, the
   // body DRAINS nothing, and the body settles → the queue's undrained steer

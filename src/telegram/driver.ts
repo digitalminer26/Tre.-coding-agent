@@ -33,6 +33,7 @@
  */
 import { TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "./bridge.js";
 import type { SteeringQueue } from "../loop/agent-loop.js";
+import type { SteerEntry } from "../types.js";
 
 /** Sleep for `ms`, resolving early if `signal` aborts. */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -57,7 +58,7 @@ export interface TelegramDriverHandlers {
   onSteer(msg: TelegramMessage): void;
   /** A message arrived while idle: run a turn and reply via the bot. Optional
    *  — a one-shot driver (allowIdleTurns: false) never calls it. */
-  onIdle?(msgs: TelegramMessage[], pendingSteers?: string[]): Promise<void>;
+  onIdle?(msgs: TelegramMessage[], pendingSteers?: SteerEntry[]): Promise<void>;
 }
 
 export interface TelegramDriverOptions {
@@ -138,8 +139,11 @@ export class TelegramDriver {
   /** Steers whose dispatch raced a turn handoff (session-local ownership): claimed
    *  while no turn body had attached its steer queue yet. Cleared by the next
    *  attachSteerTarget — a steer that raced a turn START or a turn END
-   *  reaches the next body's context drain instead of being lost. */
-  private deferredSteers: string[] = [];
+   *  reaches the next body's context drain instead of being lost.
+   *  P3a (docs/11 §14.2): items are typed envelopes carrying provenance
+   *  (`source: "telegram"`) so a steer keeps its origin through the
+   *  handoff buffer into the persisted message entry. */
+  private deferredSteers: SteerEntry[] = [];
   /** Number of steers still waiting in the handoff buffer (diagnostics). */
   pendingSteers(): number { return this.deferredSteers.length; }
 
@@ -157,13 +161,13 @@ export class TelegramDriver {
    *  (when given) tags each claimed message with the body that claimed it —
    *  for tests and operator visibility into the buffer drain (e.g. a typed
    *  line's body claiming telegram text polled before the handoff). */
-  attachSteerTarget(queue: SteeringQueue, label?: string): string[] {
+  attachSteerTarget(queue: SteeringQueue, label?: string): SteerEntry[] {
     const claimed = this.deferredSteers;
     this.deferredSteers = [];
     this.steerTarget = queue;
     this.steerTargetLabel = label;
     if (label !== undefined) {
-      for (const t of claimed) this.claim({ text: t, claimedBy: label });
+      for (const t of claimed) this.claim({ text: t.text, claimedBy: label });
     }
     return claimed;
   }
@@ -182,7 +186,13 @@ export class TelegramDriver {
     const queue = this.steerTarget;
     this.steerTarget = null;
     this.steerTargetLabel = undefined;
-    if (queue) this.deferredSteers.push(...queue.drain());
+    // P3a: normalize any plain strings left in the dead queue (a caller
+    // pushing raw text) so the buffer is uniformly envelopes.
+    if (queue) {
+      for (const item of queue.drain()) {
+        this.deferredSteers.push(typeof item === "string" ? { text: item, source: "tty" } : item);
+      }
+    }
     this.scheduleFollowUp();
   }
 
@@ -210,12 +220,15 @@ export class TelegramDriver {
    *  handoff buffer (claimed by the next turn body). Use this from the
    *  onSteer handlers — pushing to a captured queue directly loses messages
    *  that race the mutex handoff. */
-  steer(msg: string): void {
+  steer(msg: string, requestId?: string): void {
+    // P3a (§14.2): every driver steer is a telegram-sourced envelope; the
+    // loop persists the envelope onto the message entry it writes.
+    const entry: SteerEntry = { text: msg, source: "telegram", requestId: requestId ?? "" };
     if (this.steerTarget) {
-      this.steerTarget.push(msg);
+      this.steerTarget.push(entry);
       this.claim({ text: msg, claimedBy: this.steerTargetLabel ?? "<unlabeled>" });
     } else {
-      this.deferredSteers.push(msg);
+      this.deferredSteers.push(entry);
     }
   }
 

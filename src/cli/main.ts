@@ -135,6 +135,8 @@ import type {
   ModelConfig,
   StopReason,
   StreamFn,
+  SteerEntry,
+  SteeringMeta,
   TextBlock,
   Tool,
   UserMessage,
@@ -1053,9 +1055,9 @@ export async function runTurn(opts: {
   const ids = opts.entryIds ?? new Map<AgentMessage, string>();
   if (session) ids.set(user, await session.appendMessage(user));
 
-  const persist = (m: AgentMessage): Promise<void> =>
+  const persist = (m: AgentMessage, steering?: SteeringMeta): Promise<void> =>
     (async () => {
-      const id = await session!.appendMessage(m);
+      const id = await session!.appendMessage(m, steering);
       ids.set(m, id);
     })();
 
@@ -1147,7 +1149,7 @@ export async function runTurn(opts: {
         // the entry-id map stays consistent: compaction keys ids by message
         // identity, so a steer that becomes the first kept message must
         // resolve to the entry persisted here.
-        await persist(ev.message);
+        await persist(ev.message, ev.steering);
     }
     opts.tap?.(ev);
     printEvent(ev, opts.sinks, session?.path);
@@ -2205,7 +2207,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // One steering queue per run — a closure over a plain array (the contract
   // is push/drain; the loop drains before each LLM call).
   const makeSteerQueue = (): SteeringQueue => {
-    const state: { q: string[] } = { q: [] };
+    // P3a: items may be plain strings (typed lines) or envelopes (telegram
+    // driver); the loop normalizes each at drain time.
+    const state: { q: (string | SteerEntry)[] } = { q: [] };
     return {
       push: (t) => state.q.push(t),
       drain: () => {
@@ -2421,7 +2425,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
           td.steer(`[telegram from ${m.sender}] ${m.text}`);
         },
         onIdle: async (msgs, pendingSteers = []) => {
-          const prompt = [...pendingSteers, ...msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`)].join("\n");
+          // Idle claims become the prompt (a plain user turn), so only the
+          // envelope texts are used; their provenance is not persisted.
+          const prompt = [...pendingSteers.map((s) => s.text), ...msgs.map((m) => `[telegram from ${m.sender}] ${m.text}`)].join("\n");
           // Mirror the user-turn bookkeeping so SIGINT aborts the idle turn
           // (active=true → onSigint aborts `controller`, not exits).
           active = true;
