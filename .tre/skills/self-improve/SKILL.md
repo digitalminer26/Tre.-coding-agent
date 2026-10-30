@@ -55,9 +55,12 @@ commits such changes themselves with `GUARDRAIL_BYPASS=1`.
 Capture a real frame (ANSI stays in the file — strip it before asserting):
 
 Paths go under $TMPDIR, not /tmp — when you (the agent under test) run
-this recipe from your bash tool, the tre. child INHERITS the kernel
-sandbox, where /private/tmp is write-denied and ~/.tre is read/write-
-denied. A fresh --session outside the repo keeps the frame clean too:
+this recipe from your bash tool, the tre. child INHERITS your kernel
+sandbox, where /private/tmp is write-denied. (~/.tre is NOT denied —
+the C38 implicit root is re-allowed in the policy the child inherits;
+keep the session file under $TMPDIR anyway so a fresh frame stays out
+of your own session history.) A fresh --session outside the repo keeps
+the frame clean too:
 
 ```bash
 TDIR="${TMPDIR:-/tmp}"
@@ -81,8 +84,13 @@ always exactly 4 lines above the screen bottom.
   (`tre. tui --session <file>` to save / `--resume <file>` to continue).
 - Sessions must live OUTSIDE the repository (D20 boundary): pass
   `--session ~/.tre/sessions/<task>-<utc-timestamp>.jsonl` or use `--session-auto`.
-  The agent under test must never be able to read or edit its own session
-  history — a session file inside the repo would be both readable and editable.
+  The agent under test can reach its own session history
+  (the C38 implicit root makes `~/.tre` read+write reachable) but should never be
+  trusted to keep it intact inside the repo — a session file inside the
+  repo would be editable as project content alongside the code under
+  test; outside the repo it is not part of the workspace, git history,
+  or diff under review (repo-level isolation, not unreadability —
+  `docs/04-skill-authoring.md`).
 - Do not start a second increment after you have used ~80% of your turns.
 
 ## Definition of done
