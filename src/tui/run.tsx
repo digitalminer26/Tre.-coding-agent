@@ -367,6 +367,13 @@ export interface TuiRunOptions {
    */
   startupInfo?: string;
   /**
+   * P3b: steer-queue factory (--steer-file). When supplied, each run gets
+   * the queue from this factory (the file-backed FileSteeringQueue — one
+   * instance per process) instead of the per-run in-memory array queue.
+   * Absent → the existing behavior (in-memory queue).
+   */
+  makeSteerQueue?: () => SteeringQueue;
+  /**
    * C34: the parsed models.json catalog — feeds `/models` (list + switch).
    * The driver keeps the full ModelConfigs; on a switch it re-resolves by id
    * (resolveModel) and rebuilds the stream + system prompt. Absent → the
@@ -794,14 +801,16 @@ export async function runTui(opts: TuiRunOptions): Promise<number> {
     // P3a: items may be plain strings (typed lines) or envelopes (telegram
     // driver); the loop normalizes each at drain time.
     const steerState: { q: (string | SteerEntry)[] } = { q: [] };
-    steerQueue = {
-      push: (t) => steerState.q.push(t),
-      drain: () => {
-        const out = steerState.q;
-        steerState.q = [];
-        return out;
-      },
-    };
+    steerQueue = opts.makeSteerQueue
+      ? opts.makeSteerQueue()
+      : {
+          push: (t) => steerState.q.push(t),
+          drain: () => {
+            const out = steerState.q;
+            steerState.q = [];
+            return out;
+          },
+        };
     try {
       const result = await runTurn({
         model,

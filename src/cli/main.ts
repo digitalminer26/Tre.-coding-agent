@@ -22,6 +22,10 @@
  *   --mcp <file|none>  WS12: MCP servers (stdio). tre.json's "mcpServers" is the
  *                      default; --mcp <file> is an explicit config path (tests);
  *                      --mcp none disables all servers for this launch.
+ *   --steer-file <path> file-backed steering delivery (P3b, docs/11 §3/S2):
+ *                      drain the JSONL a supervisor appends at every turn
+ *                      boundary; request-id dedup over the session transcript.
+ *                      Requires a session file. Absent = today's behavior.
  *   --session <file>   session file: created if absent, resumed if present
  *   --resume <file>    resume an EXISTING session (error if absent)
  *   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -124,6 +128,7 @@ import {
 } from "../session/session.js";
 import { makeTelegramBridge, TELEGRAM_LONG_POLL_SEC, type TelegramBridge, type TelegramMessage } from "../telegram/bridge.js";
 import { TelegramDriver } from "../telegram/driver.js";
+import { FileSteeringQueue } from "../steer/file-queue.js";
 import { workerDir, workerId, writeWorkerStatus } from "./workers.js";
 
 import { QUIET_ON_SUCCESS_TOOLS, guardEvidenceNote, guardRetryNote, lengthEndNote, loopStopNote } from "../types.js";
@@ -241,6 +246,12 @@ export interface CliOptions {
   /** WS12: --mcp <file> (explicit config path) / --mcp none (disable all
    *  servers for a launch). undefined = the tre.json `mcpServers` default. */
   mcp?: string;
+  /** P3b (docs/11 §3/S2): --steer-file <path> — file-backed steering delivery.
+   *  The harness drains the JSONL appended by a supervisor at every turn
+   *  boundary (same seam as typed/Telegram steer). Requires a session file
+   *  (the transcript is the dedup authority, §14.2); absent flag = exactly
+   *  today's behavior. */
+  steerFile?: string;
 }
 
 export interface ParsedArgs extends CliOptions {
@@ -302,7 +313,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (a === "--model" || a === "--models" || a === "--tools" || a === "--cwd" ||
                a === "--session" || a === "--resume" || a === "--skills" || a === "--max-turns" ||
                a === "--max-continuations" || a === "--compact-keep" || a === "--extra-root" ||
-               a === "--mcp") {
+               a === "--steer-file" || a === "--mcp") {
       const v = argv[i + 1];
       if (v === undefined) {
         opts.errors.push(`${a} needs a value`);
@@ -317,6 +328,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       else if (a === "--resume") opts.resumePath = v;
       else if (a === "--skills") opts.skillDirs.push(v);
       else if (a === "--extra-root") opts.extraRoots.push(v);
+      else if (a === "--steer-file") opts.steerFile = v;
       else if (a === "--mcp") opts.mcp = v;
       else if (a === "--max-turns") {
         const n = Number(v);
@@ -1248,6 +1260,15 @@ Options:
                      per-server "tools" allowlist in tre.json is the MCP-scoped
                      equivalent). A server's tools default to ASK (prompt in
                      ask/yes, block in no) unless the server is "trust": true.
+  --steer-file <path>
+                     P3b (docs/11 §3/S2): file-backed steering delivery. The
+                     harness drains the JSONL appended by a supervisor at
+                     every turn boundary (request-id dedup over the session
+                     transcript; malformed lines skipped+counted; torn
+                     trailing lines held, never repaired). Requires a session
+                     file (--session/--resume/--session-auto) — the
+                     transcript is the dedup authority. Absent flag = exactly
+                     today's behavior.
   --session <file>   session file: create if absent, resume if present
   --resume <file>    resume an existing session file
   --session-auto     session file under ~/.tre/sessions/ (never inside the repo)
@@ -1763,6 +1784,30 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   }
   const sessionFile = args.resumePath ?? args.sessionPath ?? autoSessionPath;
 
+  // P3b (docs/11 §3/S2, §14.2): file-backed steering delivery. One queue
+  // instance per process = one consumer per steer file (§3: "One consumer
+  // per file (the run's harness)"). Requires a session file: the transcript
+  // is the dedup authority (request ids are recovered by scanning persisted
+  // steering envelopes), so the flag without a session is a startup refusal
+  // (exit 2), never a silent degradation. Managed mode (attemptId scoping)
+  // is NOT wired here — that arrives with the supervisor (P9); standalone
+  // `--steer-file` runs unmanaged (mismatch check off, §14.2).
+  let fileSteer: FileSteeringQueue | undefined;
+  if (args.steerFile !== undefined) {
+    if (sessionFile === undefined) {
+      sinks.err.write(
+        "error: --steer-file requires a session file — pass --session <file>, --resume <file>, or --session-auto (the session transcript is the steer dedup authority, docs/11 §14.2)\n",
+      );
+      return 2;
+    }
+    fileSteer = new FileSteeringQueue({
+      path: args.steerFile,
+      sessionPath: sessionFile,
+      warn: (m) => sinks.err.write(`${m}\n`),
+    });
+    sinks.err.write(`steer-file: draining ${args.steerFile}\n`);
+  }
+
   // WS12: MCP servers (scope §4.1/§4.4/§6). Config home is tre.json (the same
   // walk-up + ~/.tre/tre.json as extraRoots); `--mcp <file>` overrides with an
   // explicit config path (tests) and `--mcp none` disables all servers for a
@@ -2069,6 +2114,15 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
         // CLI's try/finally — without an explicit close the FileHandle is
         // only released by the GC, which Node >= 26 reports as an error
         // ("A FileHandle object was closed during garbage collection").
+        // P3b: persist the final steer-file cursor before the session closes
+        // (the last drain's safe offset must survive the run — docs/11 §13.3).
+        if (fileSteer !== undefined) {
+          const st = fileSteer.getStats();
+          sinks.err.write(
+            `steer-file: lines=${st.linesRead} injected=${st.injected} malformed=${st.malformed} scope_mismatch=${st.scopeMismatch} dedup_acked=${st.dedupAcked} conflict_rejected=${st.conflictRejected}\n`,
+          );
+          fileSteer.close();
+        }
         if (session) await session.close();
       }
       return 2;
@@ -2140,6 +2194,9 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       // info item so the user sees the current approval/sandbox behavior and
       // the optional flags before the first prompt.
       startupInfo: behavior.join("\n"),
+      // P3b: --steer-file → every TUI run drains the file-backed queue
+      // (the run's queue). Absent flag → undefined → in-memory queues.
+      makeSteerQueue: fileSteer !== undefined ? () => fileSteer as SteeringQueue : undefined,
       deps: { askApproval: deps.askApproval },
       onSigintOwnership: (owned) => (owned ? acquireSigint() : releaseSigint()),
       // /restart: re-exec this exact argv (the child resumes the session
@@ -2155,7 +2212,16 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
       mcpRef.current = null; // the 'exit' backstop must not re-kill post-teardown
       // (killAll is idempotent anyway — this is hygiene, not correctness).
     }
-    if (session) await session.close();
+    // P3b: persist the final steer-file cursor before the session closes
+    // (the last drain's safe offset must survive the run — docs/11 §13.3).
+    if (fileSteer !== undefined) {
+      const st = fileSteer.getStats();
+      sinks.err.write(
+        `steer-file: lines=${st.linesRead} injected=${st.injected} malformed=${st.malformed} scope_mismatch=${st.scopeMismatch} dedup_acked=${st.dedupAcked} conflict_rejected=${st.conflictRejected}\n`,
+      );
+      fileSteer.close();
+    }
+        if (session) await session.close();
     return code;
   }
 
@@ -2207,6 +2273,11 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
   // One steering queue per run — a closure over a plain array (the contract
   // is push/drain; the loop drains before each LLM call).
   const makeSteerQueue = (): SteeringQueue => {
+    // P3b: with --steer-file the file-backed queue IS the run's queue — it
+    // drains pushed items first (TTY/Telegram steer), file lines after,
+    // and keeps the push/drain contract (§3: identical semantics to the
+    // in-memory queue at the turn-boundary seam).
+    if (fileSteer !== undefined) return fileSteer;
     // P3a: items may be plain strings (typed lines) or envelopes (telegram
     // driver); the loop normalizes each at drain time.
     const state: { q: (string | SteerEntry)[] } = { q: [] };
@@ -2691,7 +2762,16 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
     } catch {
       // already closed — fine
     }
-    if (session) await session.close();
+    // P3b: persist the final steer-file cursor before the session closes
+    // (the last drain's safe offset must survive the run — docs/11 §13.3).
+    if (fileSteer !== undefined) {
+      const st = fileSteer.getStats();
+      sinks.err.write(
+        `steer-file: lines=${st.linesRead} injected=${st.injected} malformed=${st.malformed} scope_mismatch=${st.scopeMismatch} dedup_acked=${st.dedupAcked} conflict_rejected=${st.conflictRejected}\n`,
+      );
+      fileSteer.close();
+    }
+        if (session) await session.close();
   }
 }
 
