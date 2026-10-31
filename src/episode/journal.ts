@@ -350,7 +350,11 @@ export interface DiagnosisRecord extends RecordEnvelope {
 /** §14.1 attempt record — the durable answer to "which attempt owns which
  *  session file" (derived ownership, §14.5). spawnOutcome absent/null =
  *  intent without observed outcome ⇒ discover-or-park (I2), never blind
- *  re-spawn. */
+ *  re-spawn. pid/pgid (P7 audit F1/F2/F5/F6): stamped into the "ok"
+ *  resolve record at spawn — the journal, not state.json, is the
+ *  liveness-discovery source (state.json demoted to cache, S6); a
+ *  supervisor restart never loses the process evidence, and a stale
+ *  hint row can neither add nor remove a claim. */
 export interface AttemptRecord extends RecordEnvelope {
   kind: "attempt";
   attemptId: string;
@@ -359,6 +363,18 @@ export interface AttemptRecord extends RecordEnvelope {
   model?: string;
   worktreePath?: string;
   spawnOutcome?: "ok" | "failed" | null;
+  /** Recorded by the runner on the "ok" resolve (the process existed). */
+  pid?: number;
+  /** Process-group id when spawned detached (stop() signals the group). */
+  pgid?: number;
+  /** Causal spawn generation per session path (P7 audit finding 3): the
+   *  runner stamps 1 + the max generation of ANY record on the session
+   *  when it writes the intent, and every later record for that spawn
+   *  (resolve, confirmation) COPIES it — so a confirmation's later `ts`
+   *  can never reorder ownership. Supersession compares generations,
+   *  never wall-clock timestamps, where generations exist; records
+   *  without the field are legacy (generation 0). */
+  spawnGen?: number;
 }
 
 export type SupervisorRecord =
@@ -399,6 +415,8 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
   }, ["causeClass"]),
   attempt: recordShape({ kind: choice("attempt"), attemptId: id, taskRevision: revision, sessionPath: id,
     model: id, worktreePath: id, spawnOutcome: nullable(choice("ok", "failed")),
+    pid: revision, pgid: revision, // P7 audit F1/F6: stamped on the "ok" resolve (see AttemptRecord)
+    spawnGen: revision, // P7 audit finding 3: causal generation per session (see AttemptRecord)
   }, ["attemptId", "sessionPath"]),
 };
 

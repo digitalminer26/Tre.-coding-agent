@@ -1,0 +1,97 @@
+Getting started:
+  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)
+  tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.
+Behavior:
+  approval: auto-approve (default) — workspace-scoped work runs without a prompt
+  sandbox:  on (bash confined to the workspace + extra roots)
+  implicit root: /Users/xilcilus/.tre  (tre.'s own state dir — always read+write)
+  extra roots (durable, from tre.json): /Users/xilcilus/projects, /Users/xilcilus/.nvm, /Users/xilcilus/kubeconfigs  (read+write, in addition to the workspace)
+  turn budget: 30 turns/cycle × 4 cycles (default)  (--max-turns / --max-continuations, or tre.json)
+  skills:   12 available
+    · implement-audit — Run implement→audit cycles on a code change: a worker model …
+    · self-improve — MANDATORY protocol for making ANY code change in this reposi…
+    · git-commit — Commit the current codebase safely. Runs the quality gate on…
+    · llama-fork-build — Build and deploy the user's llama.cpp fork (with the ai-stac…
+    · llm-quality — Evaluate LLM output quality with oracle-graded structured re…
+    · parallel-delegation — Plan a workstream as a dependency graph and run independent …
+    · private-registry — Operate the private OCI image registry (llmsandbox VM, 192.1…
+    · task-delegation — Decompose a multi-part task into subtasks, assign each to a …
+    · telegram — Send and receive messages with the user via a Telegram bot. …
+    · tokenomics-reporter — Push this host's tre. session usage data to the tokenomics c…
+    · tre-deploy — Build and deploy the tre. coding agent to another machine WI…
+    · tre-release — Cut and publish a release of the Tre.-coding-agent repo — ve…
+  blocked:  system-level sensitive reads + destructive commands (across the board)
+  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)
+**Audit of `src/runner/attempt.ts` (P7). Read-only; no files edited.** The source has no line numbers, so locations are given by symbol.
+
+**1. Concurrency / TOCTOU.** Not safe for a P9 that issues calls without a mutex. `run()` reads records and state, then `fenceOrThrow` awaits, and `children.set` happens only after the 'spawn' event, so two calls in that window both see an empty slot. Reachable cases: same-task double `run()` (same attemptId, two workers, two intent records), two tasks on one session, and two concurrent `open()` calls (the `runners.has` check precedes the `await`). Minimal fix: a per-instance async mutex around every mutating method, plus reserving the session slot synchronously before the first `await`.
+
+1. **High** `run()`/`fenceOrThrow`: two concurrent `run(t1)` both get `t1-a1`, both pass the fence, both spawn on one session. Fix: mutex, and reserve `children`/pending before any await.
+2. **High** `run(t1)` and `run(t2)` on the same session race the same way (the foreign check is in-memory only). Fix: as above, plus the durable check in item 3.
+3. **Medium** `open()`: the `runners.has` check precedes `await DecisionJournal.forEpisode`, so two opens both succeed. Fix: insert a placeholder before the await.
+4. **Medium** `writeStateHint` is an unlocked read-modify-write; concurrent writes for t1 and t2 drop one row. Fix: serialize through the mutex.
+5. **Low** Two concurrent `stop()` calls both send SIGTERM and may each send SIGKILL. Harmless but unspecified. Fix: memoize the stop promise per entry.
+6. "Child registered after it exited" is **PASS**: `exit` is a later macrotask than 'spawn', and `entry.exited` lives on the object.
+
+**2. stop() completeness.** No. If the leader exits on SIGTERM, `terminate` sees `entry.exited` and returns `escalated:false`, and `stop` resolves `stopped:true` while a grandchild in the group still runs. This violates the I1 "confirmed stopped" contract and is a contract violation for `escalated:false`. Group evidence is `process.kill(-pgid, 0)` returning ESRCH, polled until a deadline, with SIGKILL to the group if it survives; EPERM counts as "not proven gone".
+
+7. **High** `terminate`/`stop`: leader exits, grandchild survives, `stopped:true`, `escalated:false`. The new worker then opens the session while the grandchild still writes. Fix: after exit, poll the group with `kill(-pgid,0)` until ESRCH; SIGKILL the group on timeout; resolve `stopped:true` only on group-empty, and throw/park otherwise. Caveat: a `setsid` escapee is invisible to any group probe; document that.
+8. **Medium** The test "stubborn" has `sh` as the leader, so it never exercises leader-exits-while-child-survives. Add that test.
+
+**3. Cross-task ownership (§14.5).** `analyze` filters to `r.taskId === task.taskId`, and the hint lookup uses `state.tasks[task.taskId]`. Nothing in the fence scans records or hints by `sessionPath` across tasks. Walk-through:
+- (a) Foreign unresolved intent on the same session: **not caught**.
+- (b) Foreign spawned-ok, no hint row: **not caught**.
+- (c) Foreign spawned-ok with a matching hint row under the foreign task's key: **not caught** (the lookup is keyed by the wrong task).
+
+The live-child check is the only protection, and it does not survive restart.
+
+9. **High** `fenceOrThrow`/`analyze`: foreign tuples on the same `sessionPath` are invisible to the durable and hint checks. Fix: build the claim set from ALL records and ALL `state.tasks` rows where `sessionPath`/`session` matches, and block on any unresolved or unprovable foreign tuple. Also check `worktreePath`, since §14.5 is a pair.
+
+**4. Restart reconcile and historical attempts.** Yes, this deadlocks. Each historical `spawnOutcome:"ok"` tuple has no matching hint (the hint holds only the latest attempt), so its `live` and `probe` are both undefined. `fenceOrThrow` then throws `prior-attempt-unresolved` for each one, so the operator must run one `confirmStopped` per historical attempt per restart. The requirement grows with attempt count. A contract-preserving fix: a prior attempt is disproven when a LATER fenced spawn on the same session path exists in the journal, because that spawn could only pass the fence if the earlier one was already disproven. The fence must be durable-driven for this to hold.
+
+10. **High** `fenceOrThrow` spawned-ok loop: historical ok attempts are never disproven, so restart requires N manual confirms. Fix: journal-ordered transitive disproof as above, or bound the requirement to the latest attempt per session.
+
+**5. confirmStopped and hint integrity.** `writeStateHint(task, attemptId, undefined, "paused")` runs unconditionally. If the hint pointed to a newer attempt N with pid P, it is now rewritten to the older attempt with no pid, so N's pid is lost. (a) `reconcile` for N shows "no matching hint, unproven" rather than "running"; (b) `analyze` no longer probes N; (c) a fresh supervisor cannot discover N's pid. The fence still parks, so this is not unsafe in itself, but it destroys the only discovery evidence. On accepting "ok": §14.1 says "ok" resolves, and `confirmStopped` appends `"failed"` over a process that did run, so the history says the spawn failed when it did not. The code accepts it deliberately, but it contradicts the schema.
+
+11. **High** `confirmStopped`: unconditional hint rewrite can erase a newer live attempt's pid. Fix: only rewrite the hint when `row.attemptId === attemptId`.
+12. **Medium** Confirming an `ok` tuple records `"failed"` for a process that ran. Fix: add a distinct outcome (for example `"stopped-confirmed"`) or document it as an exception to §14.1.
+
+**6. State-hint lifecycle.** Paths that leave a stale row:
+- `stop()`: never updates the row, so `status:"running"` and the pid remain.
+- Child exits on its own: the same.
+- Resolve append throws after tracking: no hint written.
+- `writeStateHint` fails after a durable spawn: the warning is returned but the row is stale.
+- Restart: `supervisorPid` is kept from the dead process forever, because `state.supervisorPid ?? process.pid` is never refreshed.
+
+A stale pid whose number was reused by a same-uid process reads as "running" and parks forever (a false park, not a false spawn). A dead pid reads as disproven. No code path clears a pid hint for a dead child.
+
+13. **Medium** `stop()` and child-exit paths never clear or update the hint row. Fix: on exit, rewrite the row with `status:"paused"` and no pid, under the mutex.
+14. **Medium** `supervisorPid` is never refreshed on restart. Fix: write `process.pid` on every hint write, or remove the field.
+
+**7. Default spawner.** Not a correct wiring. Fresh runs emit `--session X --attempt-id Y`; the CLI rejects `--attempt-id` as unknown, so the worker exits at once. Resume emits `--resume --session X`, which the CLI rejects as mutually exclusive. With `stdio:"ignore"`, the 'spawn' event still fires, so the record is resolved `"ok"` for a worker that never ran. The failure is silent, which I3 forbids.
+
+15. **High** `treWorkerSpawner`: produces unusable argv and the attempt is recorded `ok`. Fix: either make `treWorkerSpawner` throw `RunnerError("bad-input")` until the CLI has a matching flag, or require an explicit spawner (no default). Also replace `stdio:"ignore"` with a log file in the episode dir.
+16. **Medium** `stdio:"ignore"` discards all diagnostics. Fix: capture stderr to a per-attempt log.
+
+**8. Evidence quality.** "No pid hint ⇒ park" is conservative and safe, but it is the wrong place to hold the evidence. S6 says the hint may be absent, so liveness must not depend on it. The pid belongs in the durable resolve record, which is sync-before-ack and authoritative. Then "never started" (no resolve record) is distinct from "started, hint lost" (resolve record with pid, no hint). Session-file mtime or stamped entries are silence, not proof of life or death.
+
+17. **High** Restart liveness depends on a cache (state.json). Fix: write `pid` and `pgid` into the `ok` resolve record, and have `analyze` probe from the journal, with state.json only as a cache.
+
+**9. Instance discipline.** `open()` keys by `episodeDir(root, id)` but `close()` deletes by `join(this.root, this.episodeId)`. Those match only if `episodeDir` is a plain `join` (its source is not in the attachment). A relative root versus an absolute root gives different keys, so two runners can coexist in one process. A failed delete would make later `open()` calls fail forever. `close(true)` unrefs live children and deletes the registry entry, so a second `open()` gets a new runner with an empty `children` map, and the fence passes while the old worker still writes. The single-writer invariant leaks.
+
+18. **High** `close(true)` followed by `open()` in the same process: second writer, empty `children`, fence passes against a live worker. Fix: keep `close(true)` from releasing the slot while children are live (or keep a process-wide registry of live children keyed by session), and store the key computed in `open()` on the instance (`this.key = resolve(root, episodeId)`), using that same key in `close()`.
+19. **Medium** Relative vs absolute root produces two keys. Fix: normalize with `path.resolve` once in `open()`.
+
+**10. Untested behavior** (ranked):
+- **High:** concurrent `run`/`run`, `run`/`confirmStopped`, and `open`/`open`. None are covered.
+- **High:** leader-exits-with-surviving-grandchild, stop resolving `stopped:true` with the group alive.
+- **High:** cross-task session claims through the journal and hints (only the in-memory case is tested).
+- **High:** restart with historical `ok` attempts (the deadlock in item 10).
+- **Medium:** hint staleness after `stop()` and after a self-exit; restart after a pid is reused.
+- **Medium:** `appendRecord` failure after the process exists (resolve append throws after `children.set`). The caller gets `journal-failed` with no handle, but the child stays tracked. Nothing pins this.
+- **Medium:** `close(true)` followed by `open()` leaking a second writer.
+- **Low:** `confirmStopped` on an `ok` tuple; `supervisorPid` on restart; `defaultPidProbe` ps exit-1 handling.
+
+**Verdict: REJECT.** The concurrency gap (items 1–3), the group-escape in `stop()` (item 7), the unscoped cross-task fence (item 9), and the broken default spawner (item 15) each violate a stated contract.
+
+PASS: child registered after exit (no lost exit event); `run()` intent-before-act ordering; `spawn-failed` resolves the intent as `"failed"`; `attemptId` allocation is numeric and includes the caller proposal; the `resume` session binding check.

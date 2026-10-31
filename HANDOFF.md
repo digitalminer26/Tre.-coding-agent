@@ -1,3 +1,28 @@
+## 2026-10-31 — P7 remediation against the working-tree audit (all 9 findings + dead code); suite 1638 / 0 / 14
+
+`src/runner/attempt.ts` (1,215 lines, 27 tests named per finding) now
+addresses every finding of `docs/audits/audit-p7-working-tree.md` (whose
+blocker was that the module did not compile): ESM-safe X_OK executable
+check; `confirmStopped` ownership by SPAWN GENERATION (journal-stamped
+`spawnGen` — a newer tuple's live claim survives confirmation of an older
+one); session paths canonicalized at run/resume entry; group liveness via
+`kill(-pgid,0)` (stop() returns groupStatus; leader death alone never
+releases ownership — reconcile parks, run/confirmStopped refuse, incl.
+EPERM = undeterminable = park per I3); resolved `failed` outcomes are
+negative evidence; single-flight `AttemptRunner.open()`; `validateSpawnSpec`
+refuses `--attempt-id` and `--resume`+`--session` (real CLI exits 2 on both
+— verified), default `treWorkerSpawner` emits XOR argv with identity via
+TRE_ATTEMPT_ID env; S6 hint advances to newer attempts, refuses rewinds;
+dead code removed (newestPerSession stub, reservations tripwire).
+AttemptRecord gains `pid`/`pgid`/`spawnGen` (journal = liveness authority,
+state.json demoted to cache). The F5 test fixture was replaced after a
+probe proved the old `trap '' TERM; sleep &` leader genuinely died to the
+group TERM (flaky escalated). Evidence: `npx tsc` clean; 27/27 x8 stable
+runner runs; full suite 1638/0/14; live probes confirmed group semantics
+(alive with leader dead/child alive; ESRCH after group SIGKILL) and CLI
+argv rejections. P7 stays NOT accepted — independent re-audit (gpt-6.1-sol
+implement-audit loop) decides.
+
 ## 2026-10-31 — P6 REOPENED: independent audit found 3 real defects (suite 1611 / 0 / 14 (1597 + 14 skip))
 
 **The cycle-4 ACCEPT was not independent.** Cycles 1–4 audited P6 with the

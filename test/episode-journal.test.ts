@@ -303,11 +303,14 @@ test("newDecisionId is unique and prefixed", () => {
   for (const id of ids) assert.ok(id.startsWith("d-"));
 });
 
-test("no process in src/ references episode journal files yet (P4: primitives only)", async () => {
-  // The P4 exit criterion: these primitives exist but NOTHING outside
-  // src/episode/ touches graph.json / state.json / decisions.jsonl or
-  // imports the journal module. Guards against a premature writer creeping
-  // in before the supervisor (P6+) exists.
+test("episode journal files have exactly two module owners: src/episode/ + src/runner/ (P7)", async () => {
+  // The P4 exit criterion was "primitives only — NOTHING outside
+  // src/episode/ touches the journal". P7 (§11.1) is the sanctioned
+  // consumer the guard named: the attempt runner is the first module
+  // allowed to append attempt records / write the S6 state hints, and
+  // every later writer (P9 supervisor, P11 recovery) must route through
+  // it. Widening the allowlist beyond these two directories re-arms the
+  // premature-writer alarm the P4 guard existed to ring.
   const { execFileSync } = await import("node:child_process");
   let hits = "";
   try {
@@ -324,8 +327,8 @@ test("no process in src/ references episode journal files yet (P4: primitives on
   const offenders = hits
     .split("\n")
     .filter(Boolean)
-    .filter((line) => !line.startsWith("src/episode/"));
-  assert.deepEqual(offenders, [], `episode journal files must have exactly one module owner (src/episode/) until the supervisor lands`);
+    .filter((line) => !line.startsWith("src/episode/") && !line.startsWith("src/runner/"));
+  assert.deepEqual(offenders, [], `episode journal files must have exactly one module owner (src/episode/) plus the P7 attempt runner (src/runner/) — nothing else writes them`);
 });
 
 // Audit regressions: data read from disk has no TypeScript guarantees.

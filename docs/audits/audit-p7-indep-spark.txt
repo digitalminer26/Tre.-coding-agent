@@ -1,0 +1,48 @@
+Getting started:
+  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)
+  tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.
+Behavior:
+  approval: auto-approve (default) — workspace-scoped work runs without a prompt
+  sandbox:  on (bash confined to the workspace + extra roots)
+  implicit root: /Users/xilcilus/.tre  (tre.'s own state dir — always read+write)
+  extra roots (durable, from tre.json): /Users/xilcilus/projects, /Users/xilcilus/.nvm, /Users/xilcilus/kubeconfigs  (read+write, in addition to the workspace)
+  turn budget: 30 turns/cycle × 4 cycles (default)  (--max-turns / --max-continuations, or tre.json)
+  skills:   12 available
+    · implement-audit — Run implement→audit cycles on a code change: a worker model …
+    · self-improve — MANDATORY protocol for making ANY code change in this reposi…
+    · git-commit — Commit the current codebase safely. Runs the quality gate on…
+    · llama-fork-build — Build and deploy the user's llama.cpp fork (with the ai-stac…
+    · llm-quality — Evaluate LLM output quality with oracle-graded structured re…
+    · parallel-delegation — Plan a workstream as a dependency graph and run independent …
+    · private-registry — Operate the private OCI image registry (llmsandbox VM, 192.1…
+    · task-delegation — Decompose a multi-part task into subtasks, assign each to a …
+    · telegram — Send and receive messages with the user via a Telegram bot. …
+    · tokenomics-reporter — Push this host's tre. session usage data to the tokenomics c…
+    · tre-deploy — Build and deploy the tre. coding agent to another machine WI…
+    · tre-release — Cut and publish a release of the Tre.-coding-agent repo — ve…
+  blocked:  system-level sensitive reads + destructive commands (across the board)
+  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)
+Auditing the attempt runner — checking each failure mode against the contracts.
+Auditing the attempt runner — checking each failure mode against the contracts.
+**Q1 — Concurrency / TOCTOU.** `run`/`resume` snapshot records, state, and probes, then `await` before `children.set`, so two callers can pass the fence on the same snapshot and both spawn. `children` is keyed by session, so a second spawn overwrites the first entry and orphans a live worker. No mutex exists; a realistic P9 issuing parallel per-task retries reaches all of these.
+1. High, `attempt.ts:run/resume/fenceOrThrow/spawnAttempt` — concurrent `run+run` on one task compute the same `nextAttemptId`, both pass the fence, both append intent, two workers share one session and one attemptId. Fix: instance-wide (or per-session) async mutex covering allocation→fence→intent→spawn→register→resolve as one critical section.
+2. High, `attempt.ts:spawnAttempt children.set` — concurrent spawns on the same session overwrite the map entry; the loser is unstoppable via `stop`, invisible to `hasLiveChildren`. Fix: same mutex plus reserve the session synchronously (pending placeholder) before the first `await`; fail-fast on duplicate reservation.
+3. High, `attempt.ts:fenceOrThrow` — fence observes pre-intent records, so an in-flight intent from a concurrent caller is invisible (stale read → duplicate spawn). Fix: covered by the same mutex; re-read records inside the lock.
+4. Medium, `attempt.ts:stop` — double `stop` both see `!exited`, both signal and both await `exitPromise` (double SIGTERM/SIGKILL, inconsistent `escalated`). Fix: same mutex or per-entry stopping flag.
+5. Medium, `attempt.ts:confirmStopped vs run` — confirm's live/probe checks race a concurrent spawn; evidence is checked before the resolving append. Fix: same mutex around confirm's check-and-append.
+
+**Q2 — stop() completeness.** `terminate` returns after the direct child's `exit` event; a detached group whose leader exits while a grandchild survives still counts as `stopped:true, escalated:false`. That is not waitpid-class evidence for a group and directly breaks the I1 claim in the header. A single `kill(-pgid,0)` miss is also insufficient (racy re-check).
+1. High, `attempt.ts:terminate/stop` — leader-exits-grandchild-survives reports `stopped:true, escalated:false` while the group writes the session. Fix: after child exit, loop `kill(-pgid,0)` until ESRCH (bounded); if still present, SIGKILL the group, re-poll, set `escalated:true` when group-KILL was needed; resolve only on group-gone or timeout-failure.
+
+**Q3 — Ownership derivation (§14.5) and cross-task claims.** `analyze` filters records to `task.taskId` and probes only `state.tasks[task.taskId]`, so foreign-task durable claims on the same session file are never examined. The only cross-task gate is the in-memory live-child check, which does not survive restart.
+1. High, `attempt.ts:analyze/fenceOrThrow` — (a) foreign unresolved intent on same session: not caught, fresh spawn proceeds → two writers. Fix: join the fence on session across all taskIds: scan all attempt records and all `state.tasks` rows for matching `sessionPath`/`session`, probe matching foreign hints, refuse unless all disproven.
+2. High, same location — (b) foreign spawned-ok same session with no hint row: not caught. Fix: same as above.
+3. High, same location — (c) foreign spawned-ok same session with hint row under the foreign taskId: not caught (`row` lookup misses it). Fix: same as above.
+4. PASS: same-instance foreign live child is fenced (tested).
+
+**Q4 — Restart reconcile and attempt history.** After restart `live` is always `undefined` and the hint holds one attemptId, so every non-latest `spawnOutcome:"ok"` view gets no probe and hits the `!probe → park` branch. The supervisor must then `confirmStopped` every historical attempt on every restart before any new spawn.
+1. High, `attempt.ts:fenceOrThrow spawned loop + analyze` — N historical `ok` attempts mean N manual confirms per restart (unbounded, growing); each confirm rewrites `ok→failed`, falsifying history. Fix: bound the liveness gate to the latest attempt per (task, session) tuple (or latest per task); treat older `ok` tuples superseded by a later durable tuple as closed, not live-gated.
+
+**Q5 — confirmStopped() and state-hint integrity.** `confirmStopped` unconditionally rewrites the task's hint row to the confirmed (possibly stale) attemptId with `pid` cleared. It also accepts `latest.spawnOutcome==="ok"`, appending a `failed` record over a resolved tuple.
+1. High, `attempt.ts:confirmStopped writeStateHint` — confirming an old attempt while the hint points at a newer (possibly live) attempt repoints the row backwards and deletes the live pid. Fix: only touch the hint when `row.attemptId===attemptId && row.session===task.session`; otherwise leave it.
+2. Medium, same function — effects: (a) next `reconcile` for the newer attempt loses its probe; (b) next `analyze` probe-match misses → unprovable → park (DoS on the live attempt); (c) a
