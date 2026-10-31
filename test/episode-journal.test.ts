@@ -15,8 +15,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
   createEpisodeLayout,
@@ -285,7 +287,7 @@ test("validateSupervisorRecord enforces the envelope (schema/id/episodeId)", () 
   assert.throws(() => validateSupervisorRecord(intent({ id: "" })), EpisodeSchemaError);
   assert.throws(
     () => validateSupervisorRecord({ ...intent(), schema: "tre-supervisor/2" } as never),
-    /expected schema "tre-supervisor\/1"/,
+    /schema invalid/,
   );
   assert.doesNotThrow(() => validateSupervisorRecord(intent()));
 });
@@ -307,7 +309,7 @@ test("no process in src/ references episode journal files yet (P4: primitives on
     hits = execFileSync(
       "grep",
       ["-rn", "--include=*.ts", "-e", "graph.json", "-e", "decisions.jsonl", "-e", "tre-graph", "-e", "tre-episode-state", "-e", "episode/journal", "src/"],
-      { cwd: new URL("..", import.meta.url).pathname.replace(/\/$/, ""), encoding: "utf8" },
+      { cwd: fileURLToPath(new URL("../..", import.meta.url)), encoding: "utf8" },
     );
   } catch (e) {
     // grep exits 1 on no match; anything else is a real error
@@ -319,4 +321,311 @@ test("no process in src/ references episode journal files yet (P4: primitives on
     .filter(Boolean)
     .filter((line) => !line.startsWith("src/episode/"));
   assert.deepEqual(offenders, [], `episode journal files must have exactly one module owner (src/episode/) until the supervisor lands`);
+});
+
+// Audit regressions: data read from disk has no TypeScript guarantees.
+test("complete graph/state validation rejects malformed known fields on read and write", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const invalidGraphs = [
+    { ...minimalGraph, policy: { authority: { paths: [], notPaths: [], allowExternalEffects: "yes" } } },
+    { ...minimalGraph, policy: { recoveryBudget: { maxEpisodeRecoveryUsd: "unlimited" } } },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], budget: { maxTurns: -1 } }] },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], scope: { files: 1, notFiles: [] } }] },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], acceptance: { criteria: [], requiredChecks: "gate", artifacts: [] } }] },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], revision: 0 }] },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], model: 12 }] },
+    { ...minimalGraph, tasks: [{ ...minimalGraph.tasks[0], approval: "anything" }] },
+  ];
+  const invalidStates = [
+    { ...minimalState, tasks: { t1: null } },
+    { ...minimalState, tasks: { t1: { status: "imaginary" } } },
+    { ...minimalState, tasks: { t1: { status: "running", offset: -1 } } },
+    { ...minimalState, tasks: { t1: { status: "running", modelsTried: [4] } } },
+    { ...minimalState, slots: { local: 1 } },
+    { ...minimalState, telegram: {} },
+  ];
+  await mkdir(dir, { recursive: true });
+  for (const bad of invalidGraphs) {
+    const path = join(dir, "graph.json");
+    await assert.rejects(writeEpisodeGraph(path, bad as never), EpisodeSchemaError);
+    await writeFile(path, JSON.stringify(bad));
+    await assert.rejects(readEpisodeGraph(path), EpisodeSchemaError);
+  }
+  for (const bad of invalidStates) {
+    const path = join(dir, "state.json");
+    await assert.rejects(writeEpisodeState(path, bad as never), EpisodeSchemaError);
+    await writeFile(path, JSON.stringify(bad));
+    await assert.rejects(readEpisodeState(path), EpisodeSchemaError);
+  }
+});
+
+test("all record kinds enforce fields, closed enums, and own kind lookup", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const invalid = [
+    null, [], { ...intent(), kind: "toString" }, { ...intent(), kind: "constructor" },
+    { ...outcome(), actionId: 123 }, { ...outcome(), acked: "false" },
+    { ...intent(), episodeId: 12 }, { ...intent(), taskId: false },
+    { ...intent(), rung: 1.5 }, { ...intent(), rung: 6 },
+    { ...intent(), authority: { grantedBy: 1, sideEffect: "none" } },
+    { ...intent(), observation: { signals: [{ kind: "vibes" }] } },
+    { ...intent(), kind: "acceptance", verdict: "complete", criteria: [{ id: 1, pass: true }] },
+    { ...intent(), kind: "diagnosis", causeClass: "unknown", proposedActions: [{ rung: 2, action: "invalid-action" }] },
+    { ...intent(), kind: "attempt", attemptId: 12, sessionPath: "x" },
+  ];
+  for (const bad of invalid) {
+    assert.throws(() => validateSupervisorRecord(bad as never), EpisodeSchemaError);
+    await assert.rejects(journal.append(bad as never), EpisodeSchemaError);
+    await writeFile(journal.path, JSON.stringify(bad) + "\n");
+    await assert.rejects(DecisionJournal.open(journal.path), EpisodeSchemaError);
+  }
+});
+
+test("nullable attempts and acceptance fields round-trip; resolved spawn intent clears", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const attempt: AttemptRecord = { schema: "tre-supervisor/1", id: "spawn", ts: 1, episodeId: "ep-test", taskId: "t1", kind: "attempt", attemptId: "t1-a1", sessionPath: "sessions/t1.jsonl", spawnOutcome: null };
+  await journal.append(attempt);
+  await journal.append({ ...attempt, id: "spawn-outcome", spawnOutcome: "ok" });
+  await journal.append({ schema: "tre-supervisor/1", id: "accept", ts: 2, episodeId: "ep-test", kind: "acceptance", verdict: "complete", criteria: [], invalidatedBy: null, modelAdvisory: null });
+  const records = (await journal.read()).records;
+  assert.equal(records.length, 3);
+  assert.deepEqual(unresolvedSpawns(records), []);
+  assert.deepEqual(unresolvedSpawns([attempt, { ...attempt, id: "failed", spawnOutcome: "failed" }]), []);
+  assert.deepEqual(unresolvedSpawns([attempt, { ...attempt, episodeId: "other", spawnOutcome: "ok" }]), [attempt]);
+});
+
+test("corruption fails closed before repair or append; only unterminated invalid JSON is torn", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const good = JSON.stringify(intent()) + "\n";
+  for (const bytes of [good + "{bad}\n", good + "{bad}\n{torn", good + "null", good + '{"kind":"vibes"}']) {
+    await writeFile(journal.path, bytes);
+    await assert.rejects(DecisionJournal.open(journal.path), EpisodeSchemaError);
+    assert.equal(await readFile(journal.path, "utf8"), bytes);
+  }
+  await writeFile(journal.path, good + "{torn");
+  assert.equal((await journal.read()).tornTail, true);
+  const repaired = await DecisionJournal.open(journal.path);
+  await repaired.append(outcome());
+  assert.deepEqual((await repaired.read()).records, [intent(), outcome()]);
+});
+
+test("episode identity validation happens before any filesystem mutation", async (t) => {
+  const { root } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const bad of ["", ".", "..", "../escape", "a/b", "a\\b", "/absolute", "a\0b"]) {
+    assert.throws(() => episodeDir(root, bad), EpisodeSchemaError);
+    await assert.rejects(createEpisodeLayout(root, bad, minimalGraph), EpisodeSchemaError);
+  }
+  await assert.rejects(createEpisodeLayout(root, "other", minimalGraph), /must match/);
+  await assert.rejects(createEpisodeLayout(root, "ep-test", { ...minimalGraph, tasks: null } as never), EpisodeSchemaError);
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("concurrent large journal appends are serialized into complete records", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const records = Array.from({ length: 6 }, (_, i) => intent({ id: `large-${i}`, rationale: String(i).repeat(1_200_000) }));
+  await Promise.all(records.map((r) => journal.append(r)));
+  assert.deepEqual((await journal.read()).records, records);
+});
+
+test("partial append failure poisons queued and later appends until validated reopening", async (t) => {
+  const { open } = await import("node:fs/promises");
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  await journal.append(intent());
+  const probe = await open(journal.path, "a");
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const original = prototype.appendFile;
+  let calls = 0;
+  const mock = t.mock.method(prototype, "appendFile", async function (this: typeof probe, data: string) {
+    calls++;
+    await original.call(this, data.slice(0, 15), "utf8");
+    throw new Error("injected partial write failure");
+  });
+  try {
+    const results = await Promise.allSettled([journal.append(outcome()), journal.append(intent({ id: "queued" }))]);
+    assert.ok(results.every((r) => r.status === "rejected"));
+    await assert.rejects(journal.append(outcome()), /reopen/);
+    assert.equal(calls, 1);
+  } finally { mock.mock.restore(); }
+  const reopened = await DecisionJournal.open(journal.path);
+  await reopened.append(outcome());
+  assert.deepEqual((await reopened.read()).records, [intent(), outcome()]);
+});
+
+test("atomic writers persist a validated snapshot unaffected by caller mutation", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const graph = structuredClone(minimalGraph);
+  const pending = writeEpisodeGraph(join(dir, "graph.json"), graph);
+  graph.tasks = null as never;
+  await pending;
+  assert.deepEqual(await readEpisodeGraph(join(dir, "graph.json")), minimalGraph);
+  const state = structuredClone(minimalState);
+  const pendingState = writeEpisodeState(join(dir, "state.json"), state);
+  state.tasks = null as never;
+  await pendingState;
+  assert.deepEqual(await readEpisodeState(join(dir, "state.json")), minimalState);
+  const before = await readFile(join(dir, "state.json"), "utf8");
+  await assert.rejects(writeEpisodeState(join(dir, "state.json"), { ...minimalState, telegram: { pendingApproval: undefined } }), EpisodeSchemaError);
+  assert.equal(await readFile(join(dir, "state.json"), "utf8"), before);
+});
+
+test("scaffold snapshots the seeded graph before yielding", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const graph = structuredClone(minimalGraph);
+  const pending = createEpisodeLayout(root, "ep-test", graph);
+  graph.tasks = null as never;
+  await pending;
+  assert.deepEqual(await readEpisodeGraph(join(dir, "graph.json")), minimalGraph);
+});
+
+// ── Spark 1.3 cycle-2 regressions ──────────────────────────────────────────
+
+test("terminated blank lines are corruption, not silently skipped (spark-2 F1)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  await journal.append(intent());
+  await appendFile(journal.path, "   \n");
+  await assert.rejects(DecisionJournal.open(journal.path), EpisodeSchemaError);
+  await writeFile(journal.path, JSON.stringify(intent()) + "\n\n" + JSON.stringify(outcome()) + "\n");
+  await assert.rejects(DecisionJournal.open(journal.path), /blank line/);
+  // A whitespace-only UNTERMINATED tail is torn, not corrupt.
+  await writeFile(journal.path, JSON.stringify(intent()) + "\n   ");
+  const reopened = await DecisionJournal.open(journal.path);
+  assert.equal((await reopened.read()).records.length, 1);
+});
+
+test("openIntents closes only within (episodeId,taskId,actionId) — cross-task reuse cannot close (spark-2 F3)", async () => {
+  const records = [
+    intent({ id: "i1", taskId: "t1", actionId: "X" }),
+    intent({ id: "i2", taskId: "t2", actionId: "X" }),
+    outcome({ id: "o1", taskId: "t1", actionId: "X" }),
+  ];
+  assert.deepEqual(openIntents(records).map((r) => r.id), ["i2"]);
+});
+
+test("latestAttempt optionally scopes to episodeId (spark-2 F2)", () => {
+  const mk = (id: string, episodeId: string, attemptId: string): AttemptRecord =>
+    ({ schema: "tre-supervisor/1", id, ts: 1, episodeId, taskId: "t", kind: "attempt", attemptId, sessionPath: `sessions/${attemptId}.jsonl` });
+  const foreign = mk("a1", "other", "t-a1");
+  const mine = mk("a2", "ep-test", "t-a2");
+  const records = [mine, foreign];
+  assert.equal(latestAttempt(records, "t")!.attemptId, "t-a1");
+  assert.equal(latestAttempt(records, "t", "ep-test")!.attemptId, "t-a2");
+  assert.equal(latestAttempt(records, "t", "nope"), undefined);
+});
+
+test("circular input is rejected as EpisodeSchemaError, never a stack overflow (spark-2 F4)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const circular = intent() as any;
+  circular.observation = { signals: [{ kind: "guard-stop" }], context: {} };
+  circular.observation.context.self = circular;
+  await assert.rejects(journal.append(circular as SupervisorRecord), EpisodeSchemaError);
+  const graph = structuredClone(minimalGraph) as any;
+  graph.tasks[0]!.scope = { files: [graph], notFiles: [] };
+  await assert.rejects(writeEpisodeGraph(join(dir, "graph.json"), graph), /circular/);
+  assert.equal(existsSync(join(dir, "graph.json")), false);
+});
+
+test("unserializable (BigInt) records reject with EpisodeSchemaError and leave the journal usable (spark-2 F5)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const bad = structuredClone(intent()) as any;
+  bad.observation = { signals: [{ kind: "guard-stop" }], context: { x: 1n } };
+  const good = intent();
+  await assert.rejects(journal.append(bad as SupervisorRecord), EpisodeSchemaError);
+  await journal.append(good); // not poisoned: nothing was written for the bad record
+  const { records } = await journal.read();
+  assert.deepEqual(records.map((r) => r.id), [good.id]);
+});
+
+test("stale .tmp-* siblings from a crashed writer are swept; fresh ones survive (spark-2 F6)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const target = join(dir, "graph.json");
+  const stale = join(dir, "graph.json.tmp-999-" + "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
+  await writeFile(stale, "garbage");
+  const old = new Date(Date.now() - 120_000);
+  await utimes(stale, old, old);
+  const fresh = join(dir, "state.json.tmp-999-" + "1".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
+  await writeFile(fresh, "in-flight");
+  await writeEpisodeGraph(target, minimalGraph);
+  assert.equal(existsSync(stale), false);
+  assert.equal(existsSync(fresh), true); // under 60s: could belong to a live writer
+  await rm(fresh, { force: true });
+});
+
+test("createEpisodeLayout failure before graph.json leaves no commit marker; retry completes (spark-2 F7)", async (t) => {
+  const { mkdtemp } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "p4-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const graphPath = join(root, "ep-retry", "graph.json");
+  const retryGraph: EpisodeGraph = { ...structuredClone(minimalGraph), episodeId: "ep-retry" };
+  // Force the seed write to fail AFTER the mkdirs: a DIRECTORY named graph.json
+  // makes the rename EISDIR/ENOTDIR, proving the failure window is marker-less.
+  await mkdir(join(root, "ep-retry"), { recursive: true });
+  await mkdir(graphPath);
+  await assert.rejects(createEpisodeLayout(root, "ep-retry", retryGraph));
+  assert.equal((await stat(graphPath)).isDirectory(), true); // still no graph written
+  await rm(graphPath, { recursive: true, force: true });
+  await createEpisodeLayout(root, "ep-retry", retryGraph); // idempotent retry completes
+  assert.deepEqual(await readEpisodeGraph(graphPath), retryGraph);
+});
+
+// ── Spark 1.3 cycle-3 regressions ──────────────────────────────────────────
+
+test("poisoned-instance rejection is catchable as EpisodeSchemaError (spark-3 F1)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const probe = await (await import("node:fs/promises")).open(journal.path, "a");
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  const original = proto.appendFile;
+  const mock = t.mock.method(proto, "appendFile", async function (this: typeof probe) {
+    await original.call(this, "{\n", "utf8");
+    throw new Error("injected io failure");
+  });
+  try { await assert.rejects(journal.append(intent())); } finally { mock.mock.restore(); }
+  await assert.rejects(journal.append(outcome()), EpisodeSchemaError);
+});
+
+test("diamond-shared (non-cyclic) objects validate cleanly; only ancestor cycles reject (spark-3 F2)", () => {
+  const shared = { kind: "guard-stop" as const };
+  const ok = intent();
+  ok.observation = { signals: [shared, shared], context: {} };
+  validateSupervisorRecord(ok); // must not throw
+  // (Ancestor cycles on schema-traversed paths are pinned by the F4 test above.)
+});
+
+test("tmp sweep ignores names outside our exact writer pattern (spark-3 F3)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const decoys = [
+    join(dir, "graph.json.tmp-1-" + "-".repeat(36)), // 36 dashes: not canonical UUID
+    join(dir, "graph.json.tmp-1-0000000Z-0000-0000-0000-000000000000"), // non-hex
+    join(dir, "notes.tmp-9-00000000-0000-4000-8000-000000000000.extra"), // trailing suffix
+  ];
+  const old = new Date(Date.now() - 120_000);
+  for (const decoy of decoys) { await writeFile(decoy, "keepme"); await utimes(decoy, old, old); }
+  await writeEpisodeGraph(join(dir, "graph.json"), minimalGraph);
+  for (const decoy of decoys) assert.equal(await readFile(decoy, "utf8"), "keepme");
 });

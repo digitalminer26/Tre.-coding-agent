@@ -16,7 +16,7 @@
  * discipline as §13.1/session.ts), and the I2 reconcile helpers over the
  * decision records (open intents, latest attempt).
  */
-import { appendFile, mkdir, open as fsOpen, readFile, rename, rm, stat, truncate } from "node:fs/promises";
+import { appendFile, mkdir, open as fsOpen, readdir, readFile, rename, rm, stat, truncate } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -32,6 +32,9 @@ export function defaultEpisodesRoot(): string {
 
 /** The canonical per-episode directory path. */
 export function episodeDir(root: string, episodeId: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(episodeId) || episodeId === "." || episodeId === "..") {
+    throw new EpisodeSchemaError("episodeId must be a safe, non-empty path component");
+  }
   return join(root, episodeId);
 }
 
@@ -43,13 +46,20 @@ export function episodeDir(root: string, episodeId: string): string {
  * — the supervisor is the only writer (S3 rule).
  */
 export async function createEpisodeLayout(root: string, episodeId: string, graph: EpisodeGraph): Promise<string> {
-  assertSchemaMatch(graph.schema, GRAPH_SCHEMA_ID, "graph.schema");
   const dir = episodeDir(root, episodeId);
+  const snapshot = serializeValidated(graph, GRAPH_JSON_SCHEMA, "graph");
+  const seed = JSON.parse(snapshot) as EpisodeGraph;
+  if (seed.episodeId !== episodeId) throw new EpisodeSchemaError("graph.episodeId must match episodeId");
+  // An I/O failure between mkdirs and the graph write can leave a partial
+  // scaffold (dirs, no graph.json). That is caller-reconciled: this function
+  // is idempotent, so a retry completes in place, and no graph.json means
+  // the episode never existed for any reader (graph presence is the commit
+  // marker, §13.1 crash-scope discipline).
   await mkdir(join(dir, "prompts"), { recursive: true });
   await mkdir(join(dir, "events"), { recursive: true });
   await mkdir(join(dir, "sessions"), { recursive: true });
   await mkdir(join(dir, "wt"), { recursive: true });
-  await writeEpisodeGraph(join(dir, "graph.json"), graph);
+  await writeEpisodeGraph(join(dir, "graph.json"), seed);
   return dir;
 }
 
@@ -136,40 +146,45 @@ export interface EpisodeGraph {
   policy?: EpisodePolicy;
 }
 
-const GRAPH_JSON_SCHEMA: JsonSchema = {
-  type: "object",
-  required: ["schema", "episodeId", "goal", "tasks"],
-  properties: {
-    schema: { type: "string", enum: [GRAPH_SCHEMA_ID] },
-    episodeId: { type: "string" },
-    goal: { type: "string" },
-    maxRounds: { type: "integer" },
-    tasks: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["id", "persona", "promptRef", "dependsOn"],
-        properties: {
-          id: { type: "string" },
-          persona: { type: "string" },
-          promptRef: { type: "string" },
-          dependsOn: { type: "array", items: { type: "string" } },
-          revision: { type: "integer" },
-          status: { type: "string", enum: [...TASK_STATUSES] },
-          result: {
-            type: "object",
-            required: ["verdict", "acceptance"],
-            properties: {
-              verdict: { type: "string" },
-              acceptance: { type: "string", enum: ["complete", "incomplete", "blocked", "uncertain"] },
-              artifacts: { type: "array", items: { type: "string" } },
-            },
-          },
-        },
-      },
-    },
-  },
+// Local persistence shapes: unknown fields remain additive, but every known
+// field is checked. Do not extend the deliberately lenient tool validator.
+type Shape = JsonSchema & {
+  nullable?: boolean;
+  minimum?: number;
+  nonEmpty?: boolean;
+  values?: Shape;
+  properties?: Record<string, Shape>;
+  items?: Shape;
 };
+const str: Shape = { type: "string" };
+const id: Shape = { type: "string", nonEmpty: true };
+const bool: Shape = { type: "boolean" };
+const num: Shape = { type: "number", minimum: 0 };
+const count: Shape = { type: "integer", minimum: 0 };
+const revision: Shape = { type: "integer", minimum: 1 };
+const strings: Shape = { type: "array", items: str };
+const choice = (...values: string[]): Shape => ({ type: "string", enum: values });
+const obj = (properties: Record<string, Shape>, required: string[] = []): Shape => ({ type: "object", properties, required });
+const nullable = (shape: Shape): Shape => ({ ...shape, nullable: true });
+const status = choice(...TASK_STATUSES);
+const GRAPH_JSON_SCHEMA: Shape = obj({
+  schema: choice(GRAPH_SCHEMA_ID), episodeId: id, goal: str, maxRounds: revision,
+  tasks: { type: "array", items: obj({
+    id, persona: id, promptRef: id, dependsOn: { type: "array", items: id },
+    model: id, approval: choice("yes", "auto", "ask"), revision, status,
+    scope: obj({ files: strings, notFiles: strings }, ["files", "notFiles"]),
+    acceptance: obj({ criteria: strings, requiredChecks: strings, artifacts: strings }, ["criteria", "requiredChecks", "artifacts"]),
+    budget: obj({ maxTurns: count, maxUsd: num }, ["maxTurns"]),
+    result: obj({ verdict: str, acceptance: choice("complete", "incomplete", "blocked", "uncertain"), artifacts: strings }, ["verdict", "acceptance", "artifacts"]),
+  }, ["id", "persona", "promptRef", "dependsOn"]) },
+  policy: obj({
+    baseCommit: id, gate: obj({ cmd: id, timeoutS: num }, ["cmd"]), approval: choice("auto", "ask"), maxParallel: revision,
+    recoveryBudget: obj({ maxAttemptsPerTask: count, maxNudgesPerTask: count, maxStrategyRepeats: count, maxEpisodeRecoveryUsd: num, maxEpisodeRecoveryTurns: count, maxWallclockPerAttemptS: num }),
+    authority: obj({ paths: strings, notPaths: strings, allowInstalls: bool, allowNetwork: bool, allowExternalEffects: bool, models: strings,
+      diagnostics: obj({ maxToolCalls: count, maxUsd: num }, ["maxToolCalls", "maxUsd"]) }, ["paths", "notPaths"]),
+    integration: obj({ autoMergeTested: bool, promoteToMain: choice("auto", "ask") }),
+  }),
+}, ["schema", "episodeId", "goal", "tasks"]);
 
 export async function readEpisodeGraph(path: string): Promise<EpisodeGraph> {
   return parseValidated(await readFile(path, "utf8"), GRAPH_JSON_SCHEMA, "graph", path) as EpisodeGraph;
@@ -208,19 +223,12 @@ export interface EpisodeState {
   telegram?: { pendingApproval: unknown | null };
 }
 
-const STATE_JSON_SCHEMA: JsonSchema = {
-  type: "object",
-  required: ["schema", "episodeId", "tasks"],
-  properties: {
-    schema: { type: "string", enum: [STATE_SCHEMA_ID] },
-    episodeId: { type: "string" },
-    supervisorPid: { type: "integer" },
-    tasks: {
-      type: "object",
-      properties: {},
-    },
-  },
-};
+const STATE_JSON_SCHEMA: Shape = obj({
+  schema: choice(STATE_SCHEMA_ID), episodeId: id, supervisorPid: revision,
+  tasks: { type: "object", values: obj({ status, pid: revision, attemptId: id, session: id, offset: count, nudges: count, stops: count, modelsTried: strings }, ["status"]) },
+  slots: { type: "object", values: nullable(id) },
+  telegram: obj({ pendingApproval: { nullable: true } as Shape }, ["pendingApproval"]),
+}, ["schema", "episodeId", "tasks"]);
 
 export async function readEpisodeState(path: string): Promise<EpisodeState> {
   return parseValidated(await readFile(path, "utf8"), STATE_JSON_SCHEMA, "state", path) as EpisodeState;
@@ -362,83 +370,47 @@ export type SupervisorRecord =
 
 export type SupervisorRecordKind = SupervisorRecord["kind"];
 
-const RECORD_KINDS = ["decision-intent", "decision-outcome", "acceptance", "diagnosis", "attempt"] as const;
-
-/** Kind-level required fields (§14.3); deep field checks follow the same
- *  zero-dep validator. Unknown extra keys are tolerated (additive). */
-const RECORD_SCHEMAS: Record<SupervisorRecordKind, JsonSchema> = {
-  "decision-intent": {
-    type: "object",
-    required: ["schema", "id", "ts", "episodeId", "kind", "actionId", "rung", "action"],
-    properties: {
-      kind: { type: "string", enum: ["decision-intent"] },
-      action: { type: "string", enum: [...SUPERVISOR_ACTIONS] },
-      rung: { type: "number" },
-      authority: {
-        type: "object",
-        required: ["grantedBy", "sideEffect"],
-        properties: { sideEffect: { type: "string", enum: ["none", "worktree-local", "external"] } },
-      },
-    },
-  },
-  "decision-outcome": {
-    type: "object",
-    required: ["schema", "id", "ts", "episodeId", "kind", "actionId", "acked", "progress"],
-    properties: {
-      kind: { type: "string", enum: ["decision-outcome"] },
-      progress: { type: "string", enum: ["none", "uptake", "task-relevant"] },
-    },
-  },
-  acceptance: {
-    type: "object",
-    required: ["schema", "id", "ts", "episodeId", "kind", "verdict", "criteria"],
-    properties: {
-      kind: { type: "string", enum: ["acceptance"] },
-      verdict: { type: "string", enum: ["complete", "incomplete", "blocked", "uncertain"] },
-      criteria: {
-        type: "array",
-        items: { type: "object", required: ["id", "pass"], properties: { pass: { type: "boolean" } } },
-      },
-    },
-  },
-  diagnosis: {
-    type: "object",
-    required: ["schema", "id", "ts", "episodeId", "kind", "causeClass"],
-    properties: {
-      kind: { type: "string", enum: ["diagnosis"] },
-      causeClass: {
-        type: "string",
-        enum: ["transient-endpoint", "premature-stop", "task-defect", "environment-blocker", "approval-boundary", "unknown"],
-      },
-    },
-  },
-  attempt: {
-    type: "object",
-    required: ["schema", "id", "ts", "episodeId", "kind", "attemptId", "sessionPath"],
-    properties: {
-      kind: { type: "string", enum: ["attempt"] },
-      spawnOutcome: { type: "string", enum: ["ok", "failed"] },
-    },
-  },
+const sideEffect = choice("none", "worktree-local", "external");
+const rung: Shape = { type: "integer", minimum: 0, enum: [0, 1, 2, 3, 4, 5] };
+const envelope = { schema: choice(DECISION_SCHEMA_ID), id, ts: num, episodeId: id, taskId: id };
+const recordShape = (properties: Record<string, Shape>, required: string[]): Shape =>
+  obj({ ...envelope, ...properties }, ["schema", "id", "ts", "episodeId", "kind", ...required]);
+const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
+  "decision-intent": recordShape({
+    kind: choice("decision-intent"), actionId: id, attemptId: id, taskRevision: revision, rung,
+    action: choice(...SUPERVISOR_ACTIONS), strategyId: id, expectedEvidence: str,
+    observation: obj({ signals: { type: "array", items: obj({ kind: choice(...DECISION_SIGNAL_KINDS) }, ["kind"]) }, context: { type: "object" } }, ["signals"]),
+    authority: obj({ grantedBy: id, sideEffect }, ["grantedBy", "sideEffect"]), rationale: str,
+  }, ["actionId", "rung", "action"]),
+  "decision-outcome": recordShape({ kind: choice("decision-outcome"), actionId: id, acked: bool,
+    progress: choice("none", "uptake", "task-relevant"), evidenceRefs: strings, closedById: nullable(id), notes: str,
+  }, ["actionId", "acked", "progress"]),
+  acceptance: recordShape({ kind: choice("acceptance"), taskRevision: revision,
+    verdict: choice("complete", "incomplete", "blocked", "uncertain"),
+    criteria: { type: "array", items: obj({ id, pass: bool, evidenceRef: id, checkedAtSha: id }, ["id", "pass"]) },
+    remainingWork: strings, invalidatedBy: nullable(id),
+    modelAdvisory: nullable(obj({ judge: id, quote: str, confidence: num }, ["judge", "quote", "confidence"])),
+  }, ["verdict", "criteria"]),
+  diagnosis: recordShape({ kind: choice("diagnosis"), attemptId: id,
+    causeClass: choice("transient-endpoint", "premature-stop", "task-defect", "environment-blocker", "approval-boundary", "unknown"),
+    confidence: num, evidenceRefs: strings,
+    proposedActions: { type: "array", items: obj({ rung, action: choice(...SUPERVISOR_ACTIONS), strategyId: id, authorityNeeded: sideEffect }, ["rung", "action"]) },
+    limitsRespected: obj({ toolsUsed: count, spendUsd: num }, ["toolsUsed", "spendUsd"]),
+  }, ["causeClass"]),
+  attempt: recordShape({ kind: choice("attempt"), attemptId: id, taskRevision: revision, sessionPath: id,
+    model: id, worktreePath: id, spawnOutcome: nullable(choice("ok", "failed")),
+  }, ["attemptId", "sessionPath"]),
 };
 
 /** Validate one record against its kind schema. Throws on violation. */
 export function validateSupervisorRecord(record: SupervisorRecord): void {
-  const envelope = record as unknown as Record<string, unknown>;
-  if (envelope.schema !== DECISION_SCHEMA_ID) {
-    throw new EpisodeSchemaError(`decision record: expected schema "${DECISION_SCHEMA_ID}", got ${JSON.stringify(envelope.schema)}`);
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    throw new EpisodeSchemaError("decision record must be an object");
   }
-  if (typeof envelope.id !== "string" || envelope.id === "") {
-    throw new EpisodeSchemaError("decision record: id must be a non-empty string");
-  }
-  if (typeof envelope.ts !== "number" || !Number.isFinite(envelope.ts)) {
-    throw new EpisodeSchemaError("decision record: ts must be a finite number");
-  }
-  const kind = envelope.kind as SupervisorRecordKind;
-  const schema = RECORD_SCHEMAS[kind];
-  if (!schema) throw new EpisodeSchemaError(`decision record: unknown kind ${JSON.stringify(String(envelope.kind))}`);
-  const err = validateArgs(schema, envelope);
-  if (err) throw new EpisodeSchemaError(`decision record invalid: schema invalid: ${err}`);
+  const kind = record.kind;
+  if (!Object.hasOwn(RECORD_SCHEMAS, kind)) throw new EpisodeSchemaError(`decision record: unknown kind ${JSON.stringify(kind)}`);
+  const err = validateShape(RECORD_SCHEMAS[kind], record);
+  if (err) throw new EpisodeSchemaError(`decision record: schema invalid: ${err}`);
 }
 
 /**
@@ -452,13 +424,16 @@ export function validateSupervisorRecord(record: SupervisorRecord): void {
  * complete-but-unterminated record) before any further appends.
  */
 export class DecisionJournal {
+  private pending: Promise<void> = Promise.resolve();
+  private poisoned = false;
   private constructor(readonly path: string) {}
 
   /** Open the journal, repairing the tail (§13.1) when it exists.
    *  Mid-file corruption throws — repair only ever touches the tail. */
   static async open(path: string): Promise<DecisionJournal> {
     const journal = new DecisionJournal(path);
-    await journal.repairTail();
+    await journal.read(); // fail closed on any corruption except an unterminated JSON tail
+    await journal.#repairTail();
     return journal;
   }
 
@@ -469,18 +444,35 @@ export class DecisionJournal {
     return DecisionJournal.open(join(dir, "decisions.jsonl"));
   }
 
-  /** Append one record: validate → single JSONL line → fsync → resolve.
-   *  The line is written with O_APPEND in one write() call (never
-   *  interleaved partials under a reader). */
+  /** Serialized per instance under the caller's exclusive-writer ownership.
+   * FileHandle.appendFile may use multiple syscalls: queue complete lines,
+   * fsync before resolving, and poison on any I/O failure. Reopen to validate
+   * and repair before retrying; never append behind an ambiguous failed write.
+   * Separate instances/processes require the supervisor ownership fence (P7).
+   */
   async append(record: SupervisorRecord): Promise<void> {
-    validateSupervisorRecord(record); // envelope (id/ts) + kind schema
-    const handle = await fsOpen(this.path, "a", 0o644);
-    try {
-      await handle.appendFile(JSON.stringify(record) + "\n", "utf8");
-      await handle.sync(); // sync-before-ack (§13.1)
-    } finally {
-      await handle.close();
-    }
+    let serialized: string;
+    try { serialized = JSON.stringify(record); }
+    catch (e) { throw new EpisodeSchemaError(`decision record: cannot serialize JSON (${(e as Error).message})`); }
+    validateSupervisorRecord(JSON.parse(serialized) as SupervisorRecord);
+    const line = serialized + "\n"; // validate the exact snapshot before yielding
+    const operation = this.pending.then(async () => {
+      if (this.poisoned) throw new EpisodeSchemaError("journal append failed; reopen before appending");
+      try {
+        const handle = await fsOpen(this.path, "a", 0o644);
+        try {
+          await handle.appendFile(line, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } catch (e) {
+        this.poisoned = true;
+        throw e;
+      }
+    });
+    this.pending = operation.catch(() => {});
+    return operation;
   }
 
   /** Read every record. The LAST line may be torn (a crash mid-append): it
@@ -507,12 +499,16 @@ export class DecisionJournal {
     let malformed = 0;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
-      if (line.trim() === "") continue;
+      if (line.trim() === "") {
+        if (i === lines.length - 1 && !raw.endsWith("\n")) { tornTail = true; continue; } // whitespace-only torn tail
+        malformed++;
+        throw new EpisodeSchemaError(`decisions.jsonl: corrupt line ${i + 1} (blank line — records are exactly one JSON object per line)`);
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
       } catch {
-        if (i === lines.length - 1) {
+        if (i === lines.length - 1 && !raw.endsWith("\n")) {
           tornTail = true; // the crash cut; repair-on-open removes it
           continue;
         }
@@ -534,7 +530,7 @@ export class DecisionJournal {
   /** §13.1 repair, journal edition: an unparseable tail line is truncated
    *  away; a complete record that lost only its terminating newline is
    *  KEPT and terminated. Idempotent; a clean file is untouched. */
-  async repairTail(): Promise<void> {
+  async #repairTail(): Promise<void> {
     let st;
     try {
       st = await stat(this.path);
@@ -547,14 +543,13 @@ export class DecisionJournal {
     if (buf[buf.length - 1] === 0x0a) return; // terminated — clean
     const lastNL = buf.lastIndexOf(0x0a);
     const tail = buf.subarray(lastNL + 1).toString("utf8");
-    try {
-      JSON.parse(tail);
-      // Complete record without its newline: keep it, terminate the line.
-      await appendFile(this.path, "\n");
-    } catch {
-      // Partial tail: truncate everything after the last newline.
+    let parsed: unknown;
+    try { parsed = JSON.parse(tail); } catch {
       await truncate(this.path, lastNL + 1);
+      return;
     }
+    validateSupervisorRecord(parsed as SupervisorRecord);
+    await appendFile(this.path, "\n");
   }
 }
 
@@ -566,17 +561,21 @@ export class DecisionJournal {
  * re-issuing the action (I5 for sideEffect:"external").
  */
 export function openIntents(records: SupervisorRecord[]): DecisionIntentRecord[] {
-  const closedActionIds = new Set(
-    records.filter((r): r is DecisionOutcomeRecord => r.kind === "decision-outcome").map((r) => r.actionId),
+  const closureKey = (r: { episodeId: string; taskId?: string; actionId: string }) =>
+    JSON.stringify([r.episodeId, r.taskId ?? "", r.actionId]);
+  const closed = new Set(
+    records.filter((r): r is DecisionOutcomeRecord => r.kind === "decision-outcome").map(closureKey),
   );
-  return records.filter((r): r is DecisionIntentRecord => r.kind === "decision-intent" && !closedActionIds.has(r.actionId));
+  return records.filter((r): r is DecisionIntentRecord => r.kind === "decision-intent" && !closed.has(closureKey(r)));
 }
 
-/** The latest attempt record for a task (§14.5 derived ownership). */
-export function latestAttempt(records: SupervisorRecord[], taskId: string): AttemptRecord | undefined {
+/** The latest attempt record for a task (§14.5 derived ownership). When an
+ *  episodeId is given the lookup is scoped to it — a journal fragment or a
+ *  merged replay must never surface another episode's attempt. */
+export function latestAttempt(records: SupervisorRecord[], taskId: string, episodeId?: string): AttemptRecord | undefined {
   for (let i = records.length - 1; i >= 0; i--) {
     const r = records[i]!;
-    if (r.kind === "attempt" && r.taskId === taskId) return r;
+    if (r.kind === "attempt" && r.taskId === taskId && (episodeId === undefined || r.episodeId === episodeId)) return r;
   }
   return undefined;
 }
@@ -584,7 +583,11 @@ export function latestAttempt(records: SupervisorRecord[], taskId: string): Atte
 /** Attempt records whose spawn intent never resolved (I2: discover-or-
  *  park — these must NOT be blindly re-spawned). */
 export function unresolvedSpawns(records: SupervisorRecord[]): AttemptRecord[] {
-  return records.filter((r): r is AttemptRecord => r.kind === "attempt" && (r.spawnOutcome === undefined || r.spawnOutcome === null));
+  const latest = new Map<string, AttemptRecord>();
+  for (const record of records) {
+    if (record.kind === "attempt") latest.set(JSON.stringify([record.episodeId, record.taskId, record.attemptId]), record);
+  }
+  return [...latest.values()].filter((r) => r.spawnOutcome === undefined || r.spawnOutcome === null);
 }
 
 /** Fresh id helper matching the S5 convention ("d-<uuid prefix>"). */
@@ -596,35 +599,103 @@ export function newDecisionId(): string {
 
 export class EpisodeSchemaError extends Error {}
 
-function assertSchemaMatch(actual: string, expected: string, where: string): void {
-  if (actual !== expected) {
-    throw new EpisodeSchemaError(`${where}: expected schema "${expected}", got ${JSON.stringify(actual)}`);
+function validateShape(schema: Shape, value: unknown, path = "$", ancestors: Set<unknown> = new Set()): string | undefined {
+  if (schema.nullable && value === null) return undefined;
+  const isObject = typeof value === "object" && value !== null;
+  if (isObject) {
+    // Ancestry-only cycle detection: a node shared between SIBLING branches
+    // (a diamond) is JSON-serializable and valid; only re-entering an
+    // ancestor on the current path is a cycle.
+    if (ancestors.has(value)) return `${path}: circular reference`;
+    ancestors.add(value);
+  }
+  try {
+    return validateShapeInner(schema, value, path, ancestors);
+  } finally {
+    if (isObject) ancestors.delete(value);
   }
 }
 
-function parseValidated(text: string, schema: JsonSchema, what: string, path: string): unknown {
+function validateShapeInner(schema: Shape, value: unknown, path: string, ancestors: Set<unknown>): string | undefined {
+  const err = validateArgs({ type: schema.type, enum: schema.enum }, value);
+  if (err) return `${path}: ${err}`;
+  if (schema.nonEmpty && value === "") return `${path}: must be non-empty`;
+  if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) return `${path}: below minimum ${schema.minimum}`;
+  if (schema.type === "object") {
+    const object = value as Record<string, unknown>;
+    for (const key of schema.required ?? []) {
+      if (!Object.hasOwn(object, key)) return `${path}: missing required property "${key}"`;
+    }
+    for (const [key, entry] of Object.entries(object)) {
+      const shape = Object.hasOwn(schema.properties ?? {}, key) ? schema.properties![key] : schema.values;
+      if (shape) { const error = validateShape(shape, entry, `${path}.${key}`, ancestors); if (error) return error; }
+    }
+  }
+  if (schema.type === "array" && schema.items) {
+    for (let i = 0; i < (value as unknown[]).length; i++) {
+      const error = validateShape(schema.items, (value as unknown[])[i], `${path}[${i}]`, ancestors);
+      if (error) return error;
+    }
+  }
+  return undefined;
+}
+
+function parseValidated(text: string, schema: Shape, what: string, path: string): unknown {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch (e) {
     throw new EpisodeSchemaError(`${what} ${path}: not valid JSON (${(e as Error).message})`);
   }
-  const err = validateArgs(schema, value);
+  const err = validateShape(schema, value);
   if (err) throw new EpisodeSchemaError(`${what} ${path}: schema invalid: ${err}`);
   return value;
+}
+
+/** Snapshot and validate the persisted representation before yielding or I/O. */
+function serializeValidated(value: unknown, schema: Shape, what: string): string {
+  try {
+    const serialized = JSON.stringify(value, null, 2) + "\n";
+    const err = validateShape(schema, JSON.parse(serialized));
+    if (err) throw new EpisodeSchemaError(`${what}: schema invalid: ${err}`);
+    return serialized;
+  } catch (e) {
+    if (e instanceof EpisodeSchemaError) throw e;
+    throw new EpisodeSchemaError(`${what}: cannot serialize JSON (${(e as Error).message})`);
+  }
+}
+
+const STALE_TMP_MS = 60_000;
+
+/** Remove our own tmp-sibling pattern after STALE_TMP_MS — a previous writer
+ *  that crashed between close() and rename() left it behind; nothing else
+ *  ever names these files, so age alone is the safety bound. Best effort. */
+async function sweepStaleTmp(dir: string): Promise<void> {
+  let names: string[];
+  try { names = await readdir(dir); } catch { return; }
+  const now = Date.now();
+  await Promise.all(names
+    .filter((n) => /^.*\.tmp-[0-9]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(n))
+    .map(async (n) => {
+      const full = join(dir, n);
+      try {
+        const st = await stat(full);
+        if (now - st.mtimeMs > STALE_TMP_MS) await rm(full, { force: true });
+      } catch { /* racing writer or vanished */ }
+    }));
 }
 
 /** Atomic replacement: write to a sibling tmp file, fsync, rename over the
  *  target, then unlink a FAILED tmp (best effort). A concurrent reader
  *  sees either the old file or the new one, never a partial write. */
-async function writeJsonAtomic(path: string, value: unknown, schema: JsonSchema, what: string): Promise<void> {
-  const err = validateArgs(schema, value);
-  if (err) throw new EpisodeSchemaError(`${what}: refusing to write — schema invalid: ${err}`);
+async function writeJsonAtomic(path: string, value: unknown, schema: Shape, what: string): Promise<void> {
+  const serialized = serializeValidated(value, schema, what);
   await mkdir(dirname(path), { recursive: true });
+  await sweepStaleTmp(dirname(path)); // crash-leaked .tmp-* siblings are garbage
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   const handle = await fsOpen(tmp, "w", 0o644);
   try {
-    await handle.writeFile(JSON.stringify(value, null, 2) + "\n", "utf8");
+    await handle.writeFile(serialized, "utf8");
     await handle.sync();
     await handle.close();
   } catch (e) {
@@ -632,5 +703,8 @@ async function writeJsonAtomic(path: string, value: unknown, schema: JsonSchema,
     await rm(tmp, { force: true }).catch(() => {});
     throw e;
   }
-  await rename(tmp, path);
+  try { await rename(tmp, path); } catch (e) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw e;
+  }
 }
