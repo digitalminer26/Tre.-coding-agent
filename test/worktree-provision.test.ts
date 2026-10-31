@@ -450,12 +450,63 @@ test("remove: deleteBranch gated on base-commit proof; unmerged refused; force d
 test("remove: unadvanced branch deletes cleanly with baseCommit proof", async () => {
   const { prov, repo, base } = await setup();
   await prov.ensureTaskWorktree({ episodeId: "epE", taskId: "t1", baseCommit: base });
-  const rep = await prov.removeTaskWorktree({ episodeId: "epE", taskId: "t1", baseCommit: `refs/heads/agent/epE/t1`, deleteBranch: true });
-  // base given as the branch itself: base..branch is trivially empty, and
-  // deleting a branch at its own tip is provably loss-free.
+  const rep = await prov.removeTaskWorktree({ episodeId: "epE", taskId: "t1", baseCommit: base, deleteBranch: true });
   assert.equal(rep.worktreeRemoved, true);
   assert.equal(rep.branchDeleted, true);
   assert.equal(await gitMaybe(repo, "rev-parse", "--verify", "--quiet", "refs/heads/agent/epE/t1"), null);
+});
+
+test("remove: a base equal to the branch tip is NOT proof — unmerged work is never deleted (audit C8)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epI", taskId: "t1", baseCommit: base });
+  await writeFile(join(wt.path, "work.txt"), "real task output\n");
+  await git(wt.path, "add", "work.txt");
+  await git(wt.path, "commit", "-m", "task work");
+  const tip = await git(wt.path, "rev-parse", "HEAD");
+  assert.notEqual(tip, base);
+
+  // `base..branch` with base == tip is trivially empty — the naive gate
+  // would "prove" loss-free deletion and actually discard the commit.
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epI", taskId: "t1", baseCommit: tip, deleteBranch: true }),
+    (e: unknown) => { expectCode(e, "no-base-for-branch-delete"); return true; },
+  );
+  // Nothing was mutated, and the work is still there.
+  assert.equal(await git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/agent/epI/t1"), tip);
+  assert.equal(await readFile(join(wt.path, "work.txt"), "utf-8"), "real task output\n");
+});
+
+test("ensure: a registration whose HEAD does not descend from the pin is refused, not adopted (audit C5)", async () => {
+  const { prov, repo, base } = await setup();
+  const first = await prov.ensureTaskWorktree({ episodeId: "epJ", taskId: "t1", baseCommit: base });
+
+  // Move the repo forward: the pin for a retried attempt is now a
+  // descendant of the branch, so the branch is NOT at/past the new base.
+  await writeFile(join(repo, "b.txt"), "later\n");
+  await git(repo, "add", "b.txt");
+  await git(repo, "commit", "-m", "base moved on");
+  const movedBase = await git(repo, "rev-parse", "HEAD");
+
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epJ", taskId: "t1", baseCommit: movedBase }),
+    (e: unknown) => { expectCode(e, "branch-conflict"); return true; },
+  );
+  // Same-pin retry still converges (the normal idempotent path).
+  const again = await prov.ensureTaskWorktree({ episodeId: "epJ", taskId: "t1", baseCommit: base });
+  assert.equal(again.preexisting, true);
+  assert.equal(again.head, first.head);
+});
+
+test("remove: a locked worktree is refused with \`locked\`, not a bare git failure (audit C6)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epK", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epK", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "locked"); return true; },
+  );
+  // The entry survives a locked refusal; force is the explicit override.
+  assert.equal((await listWorktrees(repo)).some((e) => e.path === wt.path), true);
 });
 
 test("remove: refuses a foreign-branch registration (never someone else's worktree)", async () => {
@@ -504,9 +555,13 @@ test("prune: reports its own removals and refuses to touch stale entries outside
   await git(repo, "worktree", "add", "--quiet", foreignWt, "--detach", base);
   await rm(foreignWt, { recursive: true, force: true });
 
-  const refused = await prov.prune();
-  assert.deepEqual(refused.removed, []);
-  assert.deepEqual(refused.refusedForeign, [foreignWt]);
+  // C1: a refusal is an ERROR (I8), never an inspectable return value.
+  await assert.rejects(
+    prov.prune(),
+    (e: unknown) => { expectCode(e, "prune-refused"); assert.match((e as Error).message, /outside/); return true; },
+  );
+  // ... and nothing was pruned while refusing.
+  assert.equal((await listWorktrees(repo)).some((e) => e.path === foreignWt), true);
 
   // With the foreign entry cleared, our prune converges and reports
   // exactly our own vanished worktree.
@@ -515,7 +570,6 @@ test("prune: reports its own removals and refuses to touch stale entries outside
   await rm(wt.path, { recursive: true, force: true });
   const done = await prov.prune();
   assert.deepEqual(done.removed, [wt.path]);
-  assert.deepEqual(done.refusedForeign, []);
   const reg2 = await listWorktrees(repo);
   assert.equal(reg2.some((e) => e.path === wt.path), false);
 });
@@ -524,7 +578,7 @@ test("prune: no-op when nothing is stale (and never disturbs live worktrees)", a
   const { prov, base } = await setup();
   const wt = await prov.ensureTaskWorktree({ episodeId: "epH", taskId: "t1", baseCommit: base });
   const r = await prov.prune();
-  assert.deepEqual(r, { removed: [], refusedForeign: [] });
+  assert.deepEqual(r, { removed: [] });
   assert.equal(await readFile(join(wt.path, "a.txt"), "utf-8"), "base\n");
 });
 

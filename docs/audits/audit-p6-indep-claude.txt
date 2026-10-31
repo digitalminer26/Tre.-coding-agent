@@ -1,0 +1,22 @@
+**Q1 (compartment).** Mostly holds: no merge, rebase, CAS, or branch-advance logic appears, and imports are node-only. The returned `TaskWorktree` is not fully AttemptRecord-complete, though. On the `openTaskWorktree` path `baseCommit` is `""`, and `head` is a registry snapshot, not a verified value. The `ensure` preexisting path also returns a `baseCommit` that was never checked against the branch (see C5).
+
+**Q2 (test gaps).** (1) Re-`ensure` of an existing registration with a different `baseCommit` after the base has moved, or with the branch advanced or rebased. No test covers it, and it is the first thing a P7 retry loop hits. (2) Locked or prunable registrations: `listWorktrees` ignores `locked`, so the `stale-registration` message ("call prune()") can be a dead end, and `remove` on a locked clean worktree is untested. Also untested: `prune()` with a stale entry equal to `wtRoot` itself.
+
+**Q3 (verdict): REJECT.** Must-fix, by severity:
+1. **C5 (sequential wrong result).** `ensureTaskWorktree` (preexisting branch) returns `baseCommit: baseSha` and `head: entry.head` without checking `head` descends from `baseSha`. Repro: `ensure(base="main")`, advance main, `ensure(base="main")` → returns `preexisting:true`, `baseCommit=newSha`, `head=oldSha`. The AttemptRecord provenance is false.
+2. **C1 (I8 violation).** `prune()` returns `refusedForeign` as data instead of throwing. `prune-refused` is declared in `ProvisionErrorCode` but never thrown. Fix: throw it.
+3. **I3 hole (C8).** `removeTaskWorktree` with `baseCommit` set to the branch itself (`refs/heads/agent/…`) makes `base..branch` trivially empty and deletes unmerged work. The test at "unadvanced branch deletes cleanly" codifies this as "provably loss-free", which is wrong. Fix: reject a base equal to the branch tip, and stop asserting it in tests.
+4. **C4 (misleading error).** `gitVerify` maps exit 1 to null for every call, and `--quiet` suppresses stderr. The post-creation `rev-parse HEAD` therefore yields a `git-failed` with "HEAD null does not match". Use a separate classifier for HEAD and surface stderr.
+5. **C6 (misleading recovery).** `locked` is not parsed. A locked, vanished worktree gets "call prune()", which git will not complete. Parse `locked` and report it explicitly.
+6. **C2 (fail-open in principle).** `nearestExisting` swallows every `statSync` error (EACCES included) and walks up. Mkdir fails later, so this is harmless in practice, but only throw ENOENT and fail closed on everything else.
+7. **C3 (RISK, fail-closed).** `pathsEqual` is string equality. On a case-insensitive FS, `T1` and `t1` are the same directory but unequal strings. The result is `path-exists`, not a wrong worktree. No "two different worktrees compare equal" case exists, since distinct `taskId` strings map to distinct registry strings.
+
+**Candidate verdicts**
+- **C1:** CONFIRMED-WRONG (I8). See item 2.
+- **C2:** RISK, harmless. Walk-up on EACCES can pass the gate, but the subsequent `mkdir` fails on the same permission.
+- **C3:** RISK, fail-closed only. See item 7.
+- **C4:** CONFIRMED (misleading message). The `--quiet --verify` exit-1 corrupt-repo question is RISK: git may suppress the diagnostic.
+- **C5:** CONFIRMED-WRONG. See item 1.
+- **C6:** RISK. No partial state, because git refuses before deleting. The error is misclassified, and the dirty gate runs first.
+- **C7:** NOT-A-DEFECT. `forced:false` on a noop is accurate: nothing was discarded.
+- **C8:** CONFIRMED-WRONG (design hole). See item 3.

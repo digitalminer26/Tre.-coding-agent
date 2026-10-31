@@ -1,0 +1,15 @@
+Q1: Yes. No merge/rebase/CAS/branch-advance exists; `branch -D` runs only after `base..branch` empty proof or `force` explicit discard, which is cleanup not integration. `TaskWorktree{episodeId,taskId,path,branch,head,baseCommit,repoRoot,preexisting}` supplies §14.1 identity+path+pin. No caller outside `src/worktree` imports it per guard test.
+
+Q2: 1) Re-`ensure` with a moved `baseCommit` on an existing registration — P7 re-pins every attempt and will silently get a stale `head`. 2) `prune()` foreign-blocked return value — P7 crash-recovery must branch on `{removed,refusedForeign}` not exceptions, untested as a caller contract. Both hit on first real reuse, not first creation.
+
+Q3: REJECT. Must-fix in order: C5 stale-pin acceptance, C1 `prune` refusal not thrown + dead `prune-refused`, C3 `pathsEqual` canonicalization lie, C7 noop `forced` lie. Residuals C2/C4/C6 acceptable as documented fail-closed.
+
+Findings:
+C1 CONFIRMED-WRONG — `prune(): if(foreign.length>0) return {removed:[],refusedForeign}` violates I8; `prune-refused` code dead. Caller ignoring return thinks prune succeeded while stale outside `wtRoot` blocked it.
+C2 NOT-A-DEFECT for I5, RISK for contract — `nearestExisting()` `catch{walk up}` on EACCES skips unreadable ancestor, but `mkdir(recursive)` then fails closed with raw `SystemError` not `ProvisionError`, no placement bypass.
+C3 CONFIRMED-WRONG — `pathsEqual(a===b)` with only `wtRoot` realpath'd; registry is git raw text. macOS `/var->/private/var` or symlinked episode dir: second `ensure` misses entry, sees `dirExists` true → spurious `path-exists`; `prune` misclassifies own stale as foreign. Comment claiming both sides canonical is false.
+C4 RISK — `gitVerify(path,["rev-parse","HEAD"])` null→`git-failed` is correct code, only message `HEAD null` misleading. Blanket `code===1→null` for all probes could mask corrupt-repo exit-1 as negative instead of `git-failed`; no proven corrupt exit-1 on this git, so not WRONG.
+C5 CONFIRMED-WRONG — `ensureTaskWorktree` open path `return {...entry.head,baseCommit:baseSha,preexisting:true}` without `head==base` or `head descends from base` check. Repro: ensure(ep,t,base=B1), advance repo, ensure(ep,t,base=B2) returns head=B1 with baseCommit=B2 as success.
+C6 NOT-A-DEFECT — `listWorktrees` ignoring `locked/bare` leaves locked entry normal; `remove` dirty-gate then `worktree remove` fails with `git-failed`, no mutation before failure, no partial state; `bare/detached` never matches `taskPath`.
+C7 CONFIRMED-WRONG minor — `removeTaskWorktree` noop `return {...forced:false,noop:true}` ignores `force:true`; should echo `forced:force`.
+C8 NOT-A-DEFECT — No sequential I1/I2/I3/I6/I7 violation found: refused `open` mkdirs after gate, `path-exists`/`not-registered`/`foreign-branch` never adopt/delete, `base..branch` empty proof before `-D`, dirty `status` before `remove`, `prune` returns before `git prune` on foreign stale.

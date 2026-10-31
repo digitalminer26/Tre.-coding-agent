@@ -1,3 +1,41 @@
+## 2026-10-31 — P6 REOPENED: independent audit found 3 real defects (suite 1611 / 0 / 14 (1597 + 14 skip))
+
+**The cycle-4 ACCEPT was not independent.** Cycles 1–4 audited P6 with the
+SAME model family that implemented it (deepseek-v4.1-flash-1017), so the
+sign-off inherited the implementer's blind spots. A fresh audit of the
+committed 603611d by two different families (claude-haiku-5.5 and
+muse-spark-1.3) both returned REJECT on the same findings. Three were
+confirmed by a live probe harness against the built module, not by reading:
+
+- **C8 (data loss):** the `deleteBranch` gate `rev-list base..branch` is
+  trivially empty when `baseCommit` is the branch's own tip — the gate
+  "proved" loss-free deletion and then discarded a real unmerged commit.
+  Reproduced end-to-end. The proof now requires base to be an INDEPENDENT
+  pin (reachable from some ref other than the branch being deleted) AND an
+  ancestor; the old test asserting "base == tip is provably loss-free" was
+  itself wrong and is corrected.
+- **C5 (false provenance):** `ensureTaskWorktree`'s preexisting path
+  returned the requested `baseCommit` beside the registry `head` with no
+  relation check, so a retry with a moved base returned success with a
+  false §14.1 AttemptRecord and a wrong P12 merge anchor. Now the head must
+  equal or descend from the base, else `branch-conflict`.
+- **C1 (dead refusal):** `prune()` returned `{refusedForeign}` instead of
+  throwing, so callers that ignore the result believed a blocked cleanup
+  succeeded; `prune-refused` was declared but never thrown.
+
+Also fixed: `locked` is parsed from `worktree list --porcelain` (a locked
+worktree now refuses with a `locked` code instead of a late bare git
+failure, and the stale-entry message names `worktree unlock`); the
+placement probe no longer walks up on EACCES (fail-open in a fail-closed
+gate); the post-creation HEAD check surfaces real stderr instead of
+"HEAD null"; and the `pathsEqual` comment no longer claims a
+canonicalization it does not do (renamed to a documented fail-closed
+residual). Suite **1597 pass / 0 fail / 14 skip**, gate clean.
+
+**Lesson (worth keeping):** an audit run by the implementing model is not
+an audit. Cycles must use a different family, and cycle-4-style ACCEPTs
+should say which model signed off.
+
 ## 2026-10-31 — P6 worktree provisioning + 4-cycle audit (suite 1608 / 0 / 14)
 
 **P6 implemented (docs/11 §11.1, §5, §14.1/§14.5).** `src/worktree/provision.ts`

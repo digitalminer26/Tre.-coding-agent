@@ -83,6 +83,7 @@ export type ProvisionErrorCode =
   | "no-base-for-branch-delete" // deleteBranch without proof base
   | "prune-refused"             // stale entries exist outside our wtRoot
   | "branch-in-use"             // deleteBranch refused: branch checked out in another worktree
+  | "locked"                    // worktree is `git worktree lock`ed — explicit unlock required
   | "git-failed";               // any other git failure (command + stderr attached)
 
 export class WorktreeProvisionError extends Error {
@@ -233,6 +234,21 @@ export async function resolveCommit(repoRoot: string, rev: string): Promise<stri
   return sha;
 }
 
+/**
+ * True when `head` is `base` or a descendant of it (the pin's invariant).
+ * An empty/unknown head is NOT a descendant (fail closed).
+ */
+async function isDescendantOf(repoRoot: string, head: string, base: string): Promise<boolean> {
+  if (head === "") return false;
+  if (head === base) return true;
+  // `--is-ancestor A B` is true when A is an ancestor of B: we ask whether
+  // BASE is an ancestor of HEAD (the pin's invariant), not the reverse.
+  return probeExit0(repoRoot, ["merge-base", "--is-ancestor", base, head]).then(
+    (baseIsAncestorOfHead) => baseIsAncestorOfHead,
+    () => false,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Worktree registry view (`git worktree list --porcelain`)
 // ---------------------------------------------------------------------------
@@ -246,6 +262,8 @@ export interface WorktreeEntry {
   branch: string | null;
   /** git marks entries whose directory (or gitdir link) is gone. */
   prunable: boolean;
+  /** git marks worktrees pinned with `git worktree lock` (removal needs --force). */
+  locked: boolean;
 }
 
 /** All worktrees registered with the repository at repoRoot. */
@@ -254,19 +272,21 @@ export async function listWorktrees(repoRoot: string): Promise<WorktreeEntry[]> 
   const entries: WorktreeEntry[] = [];
   let cur: Partial<WorktreeEntry> | undefined;
   const flush = () => {
-    if (cur?.path !== undefined) entries.push({ path: cur.path, head: cur.head ?? "", branch: cur.branch ?? null, prunable: cur.prunable ?? false });
+    if (cur?.path !== undefined) entries.push({ path: cur.path, head: cur.head ?? "", branch: cur.branch ?? null, prunable: cur.prunable ?? false, locked: cur.locked ?? false });
     cur = undefined;
   };
   for (const line of out.split("\n")) {
     if (line.startsWith("worktree ")) {
       flush();
-      cur = { path: line.slice("worktree ".length), head: "", branch: null, prunable: false };
+      cur = { path: line.slice("worktree ".length), head: "", branch: null, prunable: false, locked: false };
     } else if (cur !== undefined && line.startsWith("HEAD ")) {
       cur.head = line.slice("HEAD ".length);
     } else if (cur !== undefined && line.startsWith("branch refs/heads/")) {
       cur.branch = line.slice("branch refs/heads/".length);
     } else if (cur !== undefined && line.startsWith("prunable")) {
       cur.prunable = true;
+    } else if (cur !== undefined && (line === "locked" || line.startsWith("locked "))) {
+      cur.locked = true;
     }
   }
   flush();
@@ -433,6 +453,17 @@ export class WorktreeProvisioner {
       if (mode === "detached" && entry.branch !== null) {
         throw new WorktreeProvisionError("foreign-branch", `worktree ${path} is on branch ${JSON.stringify(entry.branch)} but detached provisioning was requested — refusing to adopt`);
       }
+      // Audit C5: a registration's EXISTENCE is not proof it descends from
+      // this base. A retried attempt whose base moved (or a repo mutated
+      // between attempts) would otherwise be handed back as provenance
+      // claiming `baseCommit: baseSha` while HEAD is somewhere else — a
+      // false AttemptRecord (§14.1) and a wrong merge anchor for P12.
+      if (!(await isDescendantOf(this.repoRoot, entry.head, baseSha))) {
+        throw new WorktreeProvisionError(
+          "branch-conflict",
+          `worktree ${path} is registered at ${entry.head || "(no head)"}, which does not descend from the requested base ${baseSha} — refusing to adopt (re-provisioning a moved base is P7/P12 territory)`,
+        );
+      }
       return { episodeId, taskId, path: entry.path, branch: entry.branch, head: entry.head, baseCommit: baseSha, repoRoot: this.repoRoot, preexisting: true };
     }
 
@@ -460,8 +491,18 @@ export class WorktreeProvisioner {
       }
     }
 
-    const head = await gitVerify(path, ["rev-parse", "HEAD"]);
-    if (head === null || head !== baseSha) {
+    // Audit C4: `rev-parse HEAD` cannot legitimately answer "not found"
+    // here, so exit 1 must NOT be collapsed into a negative by the generic
+    // gitVerify classifier — that produced "HEAD null does not match".
+    // Use `git()` so the real stderr reaches the caller.
+    let head: string;
+    try {
+      head = (await git(path, ["rev-parse", "HEAD"])).trim();
+    } catch (err) {
+      const e = err as WorktreeProvisionError;
+      throw new WorktreeProvisionError("git-failed", `fresh worktree at ${path} has no readable HEAD: ${e.message}`, e.detail);
+    }
+    if (head !== baseSha) {
       throw new WorktreeProvisionError("git-failed", `fresh worktree HEAD ${head} does not match pinned base ${baseSha} (repo mutated mid-provision?)`);
     }
     return { episodeId, taskId, path, branch, head, baseCommit: baseSha, repoRoot: this.repoRoot, preexisting: false };
@@ -516,7 +557,18 @@ export class WorktreeProvisioner {
       return { episodeId, taskId, path, branch: null, worktreeRemoved: false, branchDeleted: false, forced: false, noop: true };
     }
     if (entry.prunable) {
-      throw new WorktreeProvisionError("stale-registration", `worktree at ${path} is registered but its directory is gone — call prune() instead of remove`);
+      throw new WorktreeProvisionError(
+        "stale-registration",
+        entry.locked
+          ? `worktree at ${path} is registered, LOCKED, and its directory is gone — \`git worktree unlock\` then \`git worktree prune\` (prune() cannot complete a locked entry)`
+          : `worktree at ${path} is registered but its directory is gone — call prune() instead of remove`,
+      );
+    }
+    // Audit C6: git refuses `worktree remove` on a locked entry without
+    // --force; say so up front instead of surfacing a bare git-failed
+    // after the dirty gate has already run.
+    if (entry.locked && !force) {
+      throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force to discard`);
     }
     const expected = taskBranchName(episodeId, taskId);
     if (entry.branch !== null && entry.branch !== expected) {
@@ -543,6 +595,23 @@ export class WorktreeProvisioner {
           throw new WorktreeProvisionError("no-base-for-branch-delete", "deleteBranch needs baseCommit to prove the branch is unadvanced (or force)");
         }
         const baseSha = await resolveCommit(this.repoRoot, base);
+        // Audit C8: `base..branch` is trivially empty when the caller
+        // passes the branch's OWN tip as the base — the gate would then
+        // "prove" loss-free deletion while discarding real commits. The
+        // proof is sound only when the base is an independent pin: a
+        // commit reachable from some ref OTHER than the branch being
+        // deleted (the episode branch, main, a tag). A base reachable
+        // ONLY through this branch is not a pin at all — it is the
+        // branch's own history, and deleting it would lose that history.
+        const tip = (await git(this.repoRoot, ["rev-parse", "--verify", entry.branch])).trim();
+        const containing = (await git(this.repoRoot, ["for-each-ref", "--contains", baseSha, "--format=%(refname)"])).trim().split("\n").filter((r) => r !== "" && r !== `refs/heads/${entry.branch}`);
+        if (containing.length === 0) {
+          throw new WorktreeProvisionError("no-base-for-branch-delete", `baseCommit ${baseSha} is reachable only through ${entry.branch} itself (tip ${tip}) — it is not an independent pin and cannot prove the branch is unadvanced (pass the pin the branch was created at, or force)`);
+        }
+        const isBaseInBranch = await probeExit0(this.repoRoot, ["merge-base", "--is-ancestor", baseSha, tip]);
+        if (!isBaseInBranch) {
+          throw new WorktreeProvisionError("no-base-for-branch-delete", `baseCommit ${baseSha} is not an ancestor of ${entry.branch} (tip ${tip}) — it cannot prove the branch is unadvanced (pass the branch's own pin, or force)`);
+        }
         const ahead = await git(this.repoRoot, ["rev-list", "--max-count=1", `${baseSha}..${entry.branch}`]);
         if (ahead.trim() !== "") {
           throw new WorktreeProvisionError("unmerged", `branch ${entry.branch} has commits past ${baseSha} — integration is P12; refusing to delete (force discards)`);
@@ -568,19 +637,26 @@ export class WorktreeProvisioner {
    * `prune --dry-run` prints nothing on this platform, so before/after
    * comparison is the source of truth).
    */
-  async prune(): Promise<{ removed: string[]; refusedForeign: string[] }> {
+  async prune(): Promise<{ removed: string[] }> {
     const before = await listWorktrees(this.repoRoot);
     const stale = before.filter((e) => e.prunable);
     const foreign = stale.filter((e) => !pathsEqual(e.path, this.wtRoot) && !isWithin(e.path, this.wtRoot));
     if (foreign.length > 0) {
-      return { removed: [], refusedForeign: foreign.map((e) => e.path).sort() };
+      // I8: a refusal is an ERROR, never a return value a caller can ignore
+      // (audit C1: `prune-refused` was declared but never thrown, so an
+      // `await ... ; done` caller silently believed cleanup succeeded).
+      throw new WorktreeProvisionError(
+        "prune-refused",
+        `refusing to prune: ${foreign.length} stale registration(s) lie outside ${this.wtRoot} — another tool's admin metadata is not ours to prune`,
+        { stderr: foreign.map((e) => e.path).sort().join("\n") },
+      );
     }
-    if (stale.length === 0) return { removed: [], refusedForeign: [] };
+    if (stale.length === 0) return { removed: [] };
     await git(this.repoRoot, ["worktree", "prune"]);
     const after = new Set((await listWorktrees(this.repoRoot)).map((e) => e.path));
     const removed = stale.filter((e) => !after.has(e.path)).map((e) => e.path).sort();
     this.warn(`worktree prune: removed ${removed.length} stale registration(s): ${removed.join(", ")}`);
-    return { removed, refusedForeign: [] };
+    return { removed };
   }
 }
 
@@ -594,11 +670,22 @@ function isWithin(child: string, parent: string): boolean {
 }
 
 /**
- * Compare a registry path with our computed path, both derived from
- * realpath'd anchors (repo toplevel / wtRoot) + git-relative components,
- * so plain string equality is correct — registry paths may name deleted
- * directories, which is exactly why NEITHER side is realpath'd again
- * (a realpath call on a stale entry would throw and mask the mismatch).
+ * Compare a registry path with our computed path.
+ *
+ * `this.wtRoot` IS realpath'd (open()), but a registry path is git's own
+ * raw text and may name a directory that no longer exists — so it cannot
+ * be realpath'd here without masking the prunable case. String equality
+ * is therefore only reliable when git registered the path in the same
+ * spelling we compute.
+ *
+ * Residual (audit C3, accepted for P6 — fail-CLOSED direction): on a
+ * case-INSENSITIVE or symlink-aliased filesystem (`/tmp` ->
+ * `/private/tmp`, a symlinked episode dir) the two spellings can differ,
+ * and the lookup misses. The consequence is a refusal, never a wrong
+ * worktree: `ensure` reports `path-exists`, `remove` reports
+ * `not-registered`, and `prune` treats the entry as foreign — all
+ * operator-visible and recoverable. Canonicalization is deliberately NOT
+ * attempted on a path that may be nonexistent.
  */
 function pathsEqual(a: string, b: string): boolean {
   return a === b;
@@ -615,8 +702,16 @@ function nearestExisting(p: string): string {
   for (;;) {
     try {
       if (statSync(cur).isDirectory()) return cur;
-    } catch {
-      // does not exist (or is unreachable) — walk up
+      // exists but is not a directory (e.g. a `.git` gitfile): keep walking
+    } catch (err) {
+      // ONLY a genuine ENOENT/ENOTDIR means "keep walking up". Anything
+      // else (EACCES, ELOOP, EIO) is an inability to PROVE the placement is
+      // outside every repo — fail CLOSED rather than skip the ancestor and
+      // risk provisioning inside a foreign repo (audit C2).
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw new WorktreeProvisionError("git-failed", `cannot inspect ${cur} while validating wtRoot placement (${code}) — refusing to guess`);
+      }
     }
     const parent = resolve(cur, "..");
     if (parent === cur) return cur; // filesystem root (existsSync should stop us)
