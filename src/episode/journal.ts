@@ -426,14 +426,23 @@ export function validateSupervisorRecord(record: SupervisorRecord): void {
 export class DecisionJournal {
   private pending: Promise<void> = Promise.resolve();
   private poisoned = false;
+  private repaired = false;
   private constructor(readonly path: string) {}
+
+  /** True when the last `open` actually repaired a torn tail (§13.1) — a
+   *  truncated unparseable fragment or a record whose newline was lost.
+   *  Without this, an episode whose only record was torn away is
+   *  indistinguishable from one that never wrote anything. */
+  get tornTailRepaired(): boolean {
+    return this.repaired;
+  }
 
   /** Open the journal, repairing the tail (§13.1) when it exists.
    *  Mid-file corruption throws — repair only ever touches the tail. */
   static async open(path: string): Promise<DecisionJournal> {
     const journal = new DecisionJournal(path);
     await journal.read(); // fail closed on any corruption except an unterminated JSON tail
-    await journal.#repairTail();
+    journal.repaired = await journal.#repairTail();
     return journal;
   }
 
@@ -478,14 +487,16 @@ export class DecisionJournal {
   /** Read every record. The LAST line may be torn (a crash mid-append): it
    *  is skipped and reported (same semantics as loadSession's
    *  droppedTornTail). Any OTHER malformed line is mid-file corruption and
-   *  throws. Duplicate ids are reported, not silently dropped. */
-  async read(): Promise<{ records: SupervisorRecord[]; tornTail: boolean; malformed: number; duplicateIds: string[] }> {
+   *  THROWS — corrupt records are never skipped-and-counted, because a
+   *  silently dropped decision would corrupt I2 reconcile. Duplicate ids
+   *  are reported, not silently dropped. */
+  async read(): Promise<{ records: SupervisorRecord[]; tornTail: boolean; duplicateIds: string[] }> {
     let raw: string;
     try {
       raw = await readFile(this.path, "utf8");
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-        return { records: [], tornTail: false, malformed: 0, duplicateIds: [] };
+        return { records: [], tornTail: false, duplicateIds: [] };
       }
       throw e;
     }
@@ -496,13 +507,15 @@ export class DecisionJournal {
     // A trailing "" after the final newline is not a line.
     if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     let tornTail = false;
-    let malformed = 0;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
       if (line.trim() === "") {
         if (i === lines.length - 1 && !raw.endsWith("\n")) { tornTail = true; continue; } // whitespace-only torn tail
-        malformed++;
         throw new EpisodeSchemaError(`decisions.jsonl: corrupt line ${i + 1} (blank line — records are exactly one JSON object per line)`);
+      }
+      const duplicated = duplicateKeyIn(line);
+      if (duplicated !== undefined) {
+        throw new EpisodeSchemaError(`decisions.jsonl: line ${i + 1} repeats the key ${JSON.stringify(duplicated)} (JSON.parse is last-wins — refusing an ambiguous record)`);
       }
       let parsed: unknown;
       try {
@@ -512,7 +525,6 @@ export class DecisionJournal {
           tornTail = true; // the crash cut; repair-on-open removes it
           continue;
         }
-        malformed++;
         throw new EpisodeSchemaError(`decisions.jsonl: corrupt line ${i + 1} (mid-file corruption)`);
       }
       validateSupervisorRecord(parsed as SupervisorRecord);
@@ -524,32 +536,33 @@ export class DecisionJournal {
       }
       out.push(parsed as SupervisorRecord);
     }
-    return { records: out, tornTail, malformed, duplicateIds };
+    return { records: out, tornTail, duplicateIds };
   }
 
   /** §13.1 repair, journal edition: an unparseable tail line is truncated
    *  away; a complete record that lost only its terminating newline is
    *  KEPT and terminated. Idempotent; a clean file is untouched. */
-  async #repairTail(): Promise<void> {
+  async #repairTail(): Promise<boolean> {
     let st;
     try {
       st = await stat(this.path);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // nothing to repair
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; // nothing to repair
       throw e;
     }
-    if (st.size === 0) return;
+    if (st.size === 0) return false;
     const buf = await readFile(this.path);
-    if (buf[buf.length - 1] === 0x0a) return; // terminated — clean
+    if (buf[buf.length - 1] === 0x0a) return false; // terminated — clean
     const lastNL = buf.lastIndexOf(0x0a);
     const tail = buf.subarray(lastNL + 1).toString("utf8");
     let parsed: unknown;
     try { parsed = JSON.parse(tail); } catch {
       await truncate(this.path, lastNL + 1);
-      return;
+      return true;
     }
     validateSupervisorRecord(parsed as SupervisorRecord);
     await appendFile(this.path, "\n");
+    return true;
   }
 }
 
@@ -640,7 +653,50 @@ function validateShapeInner(schema: Shape, value: unknown, path: string, ancesto
   return undefined;
 }
 
+/** Duplicate keys in one raw JSON object. JSON.parse is LAST-WINS, so a
+ *  repeated `kind`/`id`/`actionId` validates as a record the author never
+ *  wrote — and decision records drive I2 reconcile. Check the boundary. */
+function duplicateKeyIn(text: string): string | undefined {
+  const stack: (Set<string> | null)[] = []; // null = array frame
+  let expectKey = false;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === "\\") { j += 2; continue; }
+        if (text[j] === '"') break;
+        j++;
+      }
+      const frame = stack[stack.length - 1];
+      if (frame && expectKey) {
+        let key: string;
+        // Decode the key so `"a"` and `"\u0061"` are the SAME key (JSON.parse
+        // would collapse them; a raw-slice comparison would not).
+        try { key = JSON.parse(text.slice(i, j + 1)) as string; } catch { key = text.slice(i, j + 1); }
+        if (frame.has(key)) return key;
+        frame.add(key);
+        expectKey = false;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === "{") { stack.push(new Set()); expectKey = true; i++; continue; }
+    if (ch === "[") { stack.push(null); i++; continue; }
+    if (ch === "}" || ch === "]") { stack.pop(); i++; continue; }
+    if (ch === ":") { expectKey = false; i++; continue; }
+    if (ch === ",") { if (stack[stack.length - 1]) expectKey = true; i++; continue; }
+    i++;
+  }
+  return undefined;
+}
+
 function parseValidated(text: string, schema: Shape, what: string, path: string): unknown {
+  const duplicated = duplicateKeyIn(text);
+  if (duplicated !== undefined) {
+    throw new EpisodeSchemaError(`${what} ${path}: repeated key ${JSON.stringify(duplicated)} (JSON.parse is last-wins — refusing an ambiguous document)`);
+  }
   let value: unknown;
   try {
     value = JSON.parse(text);

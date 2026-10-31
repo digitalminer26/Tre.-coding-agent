@@ -186,7 +186,7 @@ test("journal append round-trips records in order; missing file reads empty", as
 
   // a nonexistent journal reads empty (ENOENT → empty, not a throw)
   const missing = await DecisionJournal.open(join(dir, "nope", "decisions.jsonl"));
-  assert.deepEqual(await missing.read(), { records: [], tornTail: false, malformed: 0, duplicateIds: [] });
+  assert.deepEqual(await missing.read(), { records: [], tornTail: false, duplicateIds: [] });
 });
 
 test("append validates before writing: bad action/kind never reaches the file", async () => {
@@ -237,15 +237,19 @@ test("torn tail: complete record that lost only its newline is KEPT and terminat
   assert.equal(records.length, 2);
 });
 
-test("mid-file corruption throws (repair only touches the tail)", async () => {
+test("mid-file corruption throws and leaves the file byte-identical (repair only touches the tail)", async () => {
   const { dir } = await tmpEpisode();
   const journalPath = join(dir, "events", "decisions.jsonl");
   await mkdir(join(dir, "events"), { recursive: true });
-  await writeFile(journalPath, JSON.stringify(intent()) + "\n{x corrupt\n" + JSON.stringify(outcome()) + "\n");
+  const corrupt = JSON.stringify(intent()) + "\n{x corrupt\n" + JSON.stringify(outcome()) + "\n";
+  await writeFile(journalPath, corrupt);
   await assert.rejects(async () => {
     const j = await DecisionJournal.open(journalPath);
     await j.read();
   }, /mid-file corruption/);
+  // The parenthetical in the test name is the contract: a failed open must not
+  // have mutated anything. Repair only ever touches an unterminated TAIL.
+  assert.equal(await readFile(journalPath, "utf8"), corrupt);
 });
 
 test("duplicate ids are reported, not silently dropped", async () => {
@@ -628,4 +632,76 @@ test("tmp sweep ignores names outside our exact writer pattern (spark-3 F3)", as
   for (const decoy of decoys) { await writeFile(decoy, "keepme"); await utimes(decoy, old, old); }
   await writeEpisodeGraph(join(dir, "graph.json"), minimalGraph);
   for (const decoy of decoys) assert.equal(await readFile(decoy, "utf8"), "keepme");
+});
+
+// ── Post-commit audit (7a52bb7) regressions ────────────────────────────────
+
+test("open() reports whether it repaired a torn tail (post-commit F2)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journalPath = join(dir, "events", "decisions.jsonl");
+  await mkdir(join(dir, "events"), { recursive: true });
+
+  // Clean file: nothing repaired.
+  await writeFile(journalPath, JSON.stringify(intent()) + "\n");
+  assert.equal((await DecisionJournal.open(journalPath)).tornTailRepaired, false);
+
+  // Record whose newline was lost: repaired (kept + terminated).
+  await writeFile(journalPath, JSON.stringify(intent()));
+  const terminated = await DecisionJournal.open(journalPath);
+  assert.equal(terminated.tornTailRepaired, true);
+  assert.equal((await terminated.read()).records.length, 1);
+
+  // File holding ONLY an unterminated fragment: repaired to empty — and this is
+  // now distinguishable from "never wrote anything", which is the whole point.
+  await writeFile(journalPath, '{"schema":"tre-supervisor/1","id":"d-9"');
+  const emptied = await DecisionJournal.open(journalPath);
+  assert.equal(emptied.tornTailRepaired, true);
+  assert.deepEqual((await emptied.read()).records, []);
+  assert.equal((await stat(journalPath)).size, 0);
+});
+
+test("duplicate JSON keys are rejected on every read boundary (post-commit F3)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+
+  // Last-wins would forge the effective actionId; we reject the ambiguity.
+  await writeFile(journal.path,
+    '{"schema":"tre-supervisor/1","id":"d-1","ts":1,"episodeId":"ep","kind":"decision-outcome",'
+    + '"actionId":"benign","actionId":"dangerous","acked":true,"progress":"none"}\n');
+  await assert.rejects(journal.read(), /repeats the key "actionId"/);
+
+  // Nested duplicates too.
+  await writeFile(journal.path,
+    '{"schema":"tre-supervisor/1","id":"d-1","ts":1,"episodeId":"ep","kind":"decision-intent","actionId":"a",'
+    + '"rung":"r","action":"retry","observation":{"signals":[{"kind":"guard-stop","kind":"guard-stop"}]}}\n');
+  await assert.rejects(journal.read(), /repeats the key "kind"/);
+
+  // Escaped-unicode and plain spellings of one key are the SAME key.
+  await writeFile(journal.path,
+    '{"schema":"tre-supervisor/1","id":"d-1","notes":"a","not\\u0065s":"b","ts":1,"episodeId":"ep",'
+    + '"kind":"decision-outcome","actionId":"a","acked":true,"progress":"none"}\n');
+  await assert.rejects(journal.read(), /repeats the key "notes"/);
+
+  // Legitimate JSON where the same string appears in different objects is fine.
+  await writeFile(journal.path, JSON.stringify({ ...outcome(), notes: JSON.stringify({ id: 1, kind: "x" }) }) + "\n");
+  assert.equal((await journal.read()).records.length, 1);
+
+  // graph.json goes through the same boundary check.
+  const graphPath = join(dir, "graph.json");
+  await writeFile(graphPath, '{"schema":"tre-graph/1","episodeId":"ep","episodeId":"evil","goal":"x","tasks":[]}');
+  await assert.rejects(readEpisodeGraph(graphPath), /repeated key "episodeId"/);
+});
+
+test("read() no longer advertises an unobservable malformed counter (post-commit F1)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const result = await journal.read();
+  assert.deepEqual(Object.keys(result).sort(), ["duplicateIds", "records", "tornTail"]);
+  // Corruption throws instead of being counted, so no successful read can
+  // ever carry a corrupt-record tally.
+  await writeFile(journal.path, JSON.stringify(intent()) + "\n{bad\n" + JSON.stringify(outcome()) + "\n");
+  await assert.rejects(journal.read(), EpisodeSchemaError);
 });
