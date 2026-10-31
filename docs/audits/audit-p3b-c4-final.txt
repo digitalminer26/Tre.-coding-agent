@@ -1,0 +1,3 @@
+Q4: NO REMAINING DEFECTS FOUND.
+
+Q5: GO — commit is appropriate because the remaining concerns are latent, unreachable-in-practice paths (notably the defensive `ready` handoff splice) and disk-failure-only windows that do not violate the row-1/row-2 contract without I/O failure. The prior cycles traced the risky offset/pendingInjected/drainMemory interactions and found no provable double-delivery or offset-advance defect absent an unreachable state or disk failure. Any further hardening should be follow-up cleanup, not a blocker for this diff.

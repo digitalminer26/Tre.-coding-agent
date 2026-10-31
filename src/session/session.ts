@@ -22,7 +22,7 @@
  *    not an exception; structural corruption is.
  */
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, open, readFile, readdir, truncate } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, stat, truncate } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -413,14 +413,28 @@ export class Session {
     return new Session(path, header, handle);
   }
 
-  /** Append one message to the log. Resolves with the new entry's id. */
+  /** Append one message to the log. Resolves with the new entry's id.
+   *
+   *  P3b audit F3 (docs/11 §13.1 durability scoping): a message carrying a
+   *  steering envelope with a NON-EMPTY requestId is a steer RECEIPT — the
+   *  ack authority for file-backed steering (§14.2 dedup, §13.3 crash
+   *  eligibility) — so it is fsynced before the append resolves. A crash
+   *  between the append landing in the OS cache and the queue observing it
+   *  must never leave the queue ahead of the durable transcript (the ack
+   *  could advance a cursor the receipt can't). Plain messages (and
+   *  telegram steers with an empty requestId — no external cursor) keep
+   *  process-death durability only, per §13.1. A failed sync REJECTS the
+   *  append (fail closed: an un-synced receipt must not look recorded). */
   appendMessage(message: AgentMessage, steering?: SteeringMeta): Promise<string> {
-    return this.write({
-      type: "message",
-      id: randomUUID(),
-      message,
-      ...(steering !== undefined ? { steering } : {}),
-    });
+    return this.write(
+      {
+        type: "message",
+        id: randomUUID(),
+        message,
+        ...(steering !== undefined ? { steering } : {}),
+      },
+      steering !== undefined && steering.requestId !== "",
+    );
   }
 
   /** Record a model switch (the CLI resolves it against models.json on resume). */
@@ -522,11 +536,117 @@ export class Session {
 
   private async write(
     entry: Extract<SessionEntry, { id: string }>,
+    /** When true, fsync the append before resolving (steer receipts — see
+     *  appendMessage; the handle is opened "a", so "r+" gets the same fd). */
+    sync = false,
   ): Promise<string> {
     const handle = this.handle;
     if (!handle) throw new Error("session is closed");
     // One append per entry: a kill between appends can only tear the last line.
+    // Cycle-1 audit (F3 follow-up): a failed receipt sync must also ROLL
+    // BACK the appended line. The queue reads the transcript with its own
+    // readFileSync (not through this handle), so a line that landed in the
+    // page cache but never synced could be observed by a later drain,
+    // settle pendingInjected, and advance the persisted offset — and a
+    // power loss then loses the receipt with the queue ahead of the
+    // transcript (the exact state the sync-before-ack contract forbids).
+    // Truncating back to the pre-append size makes the rejection visible:
+    // the queue never saw a receipt, never acks, and the request is
+    // re-delivered (row 1). Rollback is best-effort: on a failing disk the
+    // truncate may fail too — the rejection still stands (fail closed).
+    let rollbackTo = -1;
+    if (sync) {
+      try {
+        rollbackTo = (await handle.stat()).size;
+      } catch {
+        rollbackTo = -1; // stat failed: reject-only on sync failure, no rollback
+      }
+    }
     await handle.appendFile(JSON.stringify(entry) + "\n");
+    if (sync) {
+      try {
+        await handle.sync();
+      } catch (err) {
+        {
+          // Roll back the un-synced line. Order matters: reopen FIRST, then
+          // truncate, then swap (see NUL-hole note). Empirically (macOS +
+          // Node 20), appending through an "a"-handle that was ftruncate'd
+          // underneath writes at the stale pre-truncate EOF — leaving a NUL
+          // hole the next load() rejects as corrupt. A fresh handle appends
+          // at the real EOF. Cycle-2 audit: every failure path here keeps
+          // the ORIGINAL handle installed and closes the fresh one (no fd
+          // leak); the rejection still stands (fail closed). The residual
+          // windows (stat + re-stat both failed; truncate failed so the
+          // receipt stays page-cache-visible) are disk-failure-only states
+          // where no in-handle repair is possible — §13.1's repair on the
+          // next open is the backstop. Appends are serialized by the
+          // driver's await-per-event persist path (cycle-2 Q1d: a
+          // concurrent write() mid-rollback could lose a line, but no
+          // caller in this codebase writes off the persist chain).
+          let fresh: FileHandle | null = null;
+          let target = rollbackTo;
+          let verifyTail = false;
+          const line = JSON.stringify(entry) + "\n";
+          const lineLen = Buffer.byteLength(line, "utf8");
+          if (target < 0) {
+            // Cycle-2 audit Q1(a): stat failed before the append, so we
+            // have no pre-size. Re-stat NOW via the PATH (a fresh fd — the
+            // original handle may itself be the failure source, e.g.
+            // EBADF). Cycle-3 audit (Medium): do NOT blindly truncate
+            // size-lineLen — if any other line landed after the receipt
+            // (caller-invariant violation) that would eat the WRONG bytes.
+            // The tail is VERIFIED byte-for-byte against the receipt line
+            // below before truncating; mismatch aborts the rollback
+            // (reject-only, fail closed).
+            try {
+              const now = (await stat(this.path)).size;
+              if (now >= lineLen) {
+                target = now - lineLen;
+                verifyTail = true;
+              }
+            } catch {
+              target = -1;
+            }
+          }
+          try {
+            fresh = await open(this.path, "a");
+            if (target < 0) throw new Error("no rollback size");
+            if (verifyTail) {
+              // An "a"-handle cannot read (EBADF) — verify through a
+              // short-lived read-only handle.
+              const rh = await open(this.path, "r");
+              try {
+                const tail = Buffer.alloc(lineLen);
+                const { bytesRead } = await rh.read(tail, 0, lineLen, target);
+                if (bytesRead !== lineLen || tail.toString("utf8") !== line) {
+                  throw new Error("rollback tail mismatch");
+                }
+              } finally {
+                await rh.close().catch(() => {});
+              }
+            }
+            if (rollbackTo < 0) {
+              await fresh.truncate(target);
+            } else {
+              await handle.truncate(target);
+            }
+            // Cycle-3 audit (Low 3): only swap if close() has not run
+            // during the awaits above (close() nulls this.handle); without
+            // the guard the rollback would resurrect a usable handle on a
+            // CLOSED session.
+            if (this.handle === handle) {
+              this.handle = fresh;
+              fresh = null;
+            }
+          } catch {
+            // best effort: original handle stays installed
+          }
+          if (fresh) await fresh.close().catch(() => {});
+          if (this.handle !== handle) await handle.close().catch(() => {});
+        }
+        throw err;
+      }
+    }
     return entry.id;
   }
 }

@@ -15,7 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -827,4 +827,127 @@ test("P1: a progressNudge before a compaction boundary does not break the kept-e
   const ctx = replayContext(loaded.entries);
   assert.equal(ctx.length, 2);
   assert.equal(ctx[1]!.content, "two");
+});
+
+// ── P3b audit F3: steer receipts sync before the append resolves (§13.1) ──
+
+/** Instrument FileHandle#sync for one test body: returns the call log and
+ *  the unhook. The prototype is taken from a real handle instance (the
+ *  @types surface declares FileHandle only as an interface — no runtime
+ *  export). The append hook accumulates what each handle appended, so a
+ *  sync call records whether the receipt line was in the append stream at
+ *  sync time (the sync-before-resolve proof: a receipt must be durable
+ *  before the caller can ack it). */
+async function hookSync(): Promise<{ calls: { syncAt: () => string }[]; unhook: () => void }> {
+  const probeDir = await mkdtemp(join(tmpdir(), "om-sess-probe-"));
+  const probe = await open(join(probeDir, "h"), "a");
+  type Hookable = { sync(): Promise<void>; appendFile(data: string | Uint8Array): Promise<void> };
+  const proto = Object.getPrototypeOf(probe) as Hookable;
+  await probe.close();
+  const calls: { syncAt: () => string }[] = [];
+  const realSync = proto.sync;
+  const realAppend = proto.appendFile;
+  const state = { current: "" };
+  proto.appendFile = function (this: Hookable, data: string | Uint8Array) {
+    state.current += typeof data === "string" ? data : Buffer.from(data).toString("utf8");
+    return realAppend.call(this, data);
+  };
+  proto.sync = function (this: Hookable) {
+    const snapshot = state.current;
+    calls.push({ syncAt: () => snapshot });
+    return realSync.call(this);
+  };
+  return { calls, unhook: () => { proto.sync = realSync; proto.appendFile = realAppend; } };
+}
+
+test("F3: a request-carrying steer receipt is fsynced BEFORE the append resolves (ack authority, §13.1)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-fsync-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "receipt.jsonl");
+  const s = await Session.create(path);
+  const hook = await hookSync();
+  t.after(hook.unhook);
+  const id = await s.appendMessage(userMsg("steer text", 1), { requestId: "req-7", source: "file" });
+  assert.equal(hook.calls.length, 1, "the receipt append is synced exactly once");
+  assert.ok(hook.calls[0]!.syncAt().includes('"requestId":"req-7"'),
+    "the recorded line is in the append buffer at sync time (sync comes after the append)");
+  // A plain message (process-death durability only) must NOT sync — the
+  // hot path keeps its performance profile (§13.1 R3 scoping).
+  const before = hook.calls.length;
+  await s.appendMessage(userMsg("plain", 2));
+  await s.appendMessage(userMsg("telegram steer", 3), { requestId: "", source: "telegram" });
+  assert.equal(hook.calls.length, before, "plain and empty-requestId appends never sync");
+  await s.close();
+  const loaded = await loadSession(path);
+  assert.equal(loaded.entries.length, 4); // header + 3
+  assert.ok(id);
+});
+
+test("F3: a failed receipt sync REJECTS the append AND rolls the line back (the queue must never observe an un-synced receipt)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-fsync-fail-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "receipt-fail.jsonl");
+  const s = await Session.create(path);
+  const sizeBefore = (await readFile(path)).length;
+  const probe = await open(join(dir, "probe"), "a");
+  const proto = Object.getPrototypeOf(probe) as { sync(): Promise<void> };
+  await probe.close();
+  const real = proto.sync;
+  proto.sync = () => Promise.reject(new Error("simulated EIO"));
+  t.after(() => { proto.sync = real; });
+  await assert.rejects(
+    () => s.appendMessage(userMsg("steer text", 1), { requestId: "req-8", source: "file" }),
+    /simulated EIO/,
+    "the sync failure propagates instead of resolving an undurable receipt",
+  );
+  // Cycle-1 audit: the appended-but-un-synced line must NOT stay visible
+  // (the file-queue reads the transcript with its own readFileSync — an
+  // observed un-synced receipt would settle pendingInjected and advance
+  // the persisted offset, breaking the ack authority). Rollback to the
+  // pre-append size:
+  const after = await readFile(path);
+  assert.equal(after.length, sizeBefore, "the failed receipt line is truncated away (rollback)");
+  const loaded = await loadSession(path);
+  assert.ok(!loaded.entries.some((e) => e.type === "message" && e.message.content === "steer text"),
+    "no entry with the rejected receipt id is loadable");
+  // The handle is still usable for non-sync appends (the write path did not
+  // wedge): plain appends keep working after a failed receipt.
+  await s.appendMessage(userMsg("plain after failure", 2));
+  await s.close();
+  const loaded2 = await loadSession(path);
+  assert.ok(loaded2.entries.some((e) => e.type === "message" && e.message.content === "plain after failure"),
+    "the session keeps appending after a failed receipt");
+});
+
+test("F3: rollback recovers when the pre-append stat fails (cycle-2 Q1a: path re-stat + exact-line truncate)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "om-sess-fsync-statfail-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "stat-fail.jsonl");
+  const s = await Session.create(path);
+  const sizeBefore = (await readFile(path)).length;
+  const probe = await open(join(dir, "probe"), "a");
+  const proto = Object.getPrototypeOf(probe) as { sync(): Promise<void>; stat(): Promise<{ size: number }> };
+  await probe.close();
+  const realSync = proto.sync;
+  const realStat = proto.stat;
+  proto.stat = () => Promise.reject(new Error("simulated stat EIO"));
+  proto.sync = () => Promise.reject(new Error("simulated sync EIO"));
+  t.after(() => { proto.sync = realSync; proto.stat = realStat; });
+  await assert.rejects(
+    () => s.appendMessage(userMsg("steer with broken pre-stat", 1), { requestId: "req-9", source: "file" }),
+    /simulated sync EIO/,
+  );
+  // The fallback re-stats via the path and truncates exactly the receipt
+  // line through the fresh handle — the file is back to its committed state:
+  const after = await readFile(path);
+  assert.equal(after.length, sizeBefore, "the path re-stat fallback rolled the receipt line back");
+  proto.stat = realStat;
+  proto.sync = realSync;
+  await s.appendMessage(userMsg("plain after stat-fail", 2));
+  await s.close();
+  const loaded = await loadSession(path);
+  assert.ok(!loaded.entries.some((e) => e.type === "message" && e.message.content === "steer with broken pre-stat"),
+    "the rolled-back receipt never loads");
+  assert.ok(loaded.entries.some((e) => e.type === "message" && e.message.content === "plain after stat-fail"),
+    "the session (with the swapped-in fresh handle) keeps appending cleanly");
 });

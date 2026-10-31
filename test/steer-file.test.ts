@@ -121,6 +121,49 @@ test("torn trailing line is held (never delivered, never repaired), joined on ne
   q.close();
 });
 
+test("mixed batch (complete line + torn tail in ONE scan): tail joins exactly once, persisted offset is the partial's line start (audit F1)", async () => {
+  // The two scan branches must share ONE consumed-offset convention: the
+  // held bytes sit immediately BEFORE `offset`. Setting `offset` to just
+  // past the last delivered line instead (the first cut) made the NEXT
+  // scan re-read the held bytes and prepend them to the completed line —
+  // the reframed line fails to parse, and the steer is silently lost
+  // (counted malformed, never delivered). This test fails on the old code:
+  // s2 comes back as a malformed line, not a delivery.
+  const { dir, steerPath, sessionPath, q } = await makeHarness();
+  appendFileSync(steerPath, JSON.stringify({ id: "m1", text: "first" }) + "\n" + '{"id":"m2","tex'); // complete line + torn tail, one write
+  const got1 = q.drain();
+  assert.deepEqual(got1.map((e) => (e as SteerEntry).requestId), ["m1"], "the complete line delivers, the tail is held");
+  const got2pre = q.drain();
+  assert.deepEqual(got2pre, [], "still held until the line completes");
+  // Cycle-1 audit (clamp isolation): record the delivered line so
+  // pendingInjected is EMPTY, forcing saveState's clamp to do the real
+  // work: persisted offset must be the PARTIAL's line start (past line
+  // m1), never buf.length — an implementation that drops the `- heldLen`
+  // subtraction loses the torn bytes on restart.
+  recordSteer(sessionPath, "m1", "first");
+  q.drain();
+  const midState = readState(steerPath);
+  const line1Bytes = Buffer.byteLength(JSON.stringify({ id: "m1", text: "first" }) + "\n", "utf8");
+  assert.equal(midState.offset, line1Bytes, "clamp holds the persisted offset at the torn line start (empty pendingInjected)");
+  appendRaw(steerPath, 't":"joined"}\n'); // finish the torn line
+  const got2 = q.drain();
+  assert.equal(got2.length, 1, "the completed line delivers exactly once (no duplicated fragment, no malformed skip)");
+  assert.equal((got2[0] as SteerEntry).requestId, "m2");
+  assert.equal((got2[0] as SteerEntry).text, "joined");
+  // The unified invariant also fixes the PERSISTED offset: saveState's
+  // clamp (offset − heldLen) lands on the partial's line start, never
+  // INSIDE the last delivered line.
+  recordSteer(sessionPath, "m1", "first");
+  recordSteer(sessionPath, "m2", "joined");
+  q.drain();
+  const state = readState(steerPath);
+  const lineBytes =
+    Buffer.byteLength(JSON.stringify({ id: "m1", text: "first" }) + "\n", "utf8") +
+    Buffer.byteLength(JSON.stringify({ id: "m2", text: "joined" }) + "\n", "utf8");
+  assert.equal(state.offset, lineBytes, "once settled, the offset sits at EOF — past both delivered lines");
+  q.close();
+});
+
 // ---------------------------------------------------------------------------
 // §14.2 validation table
 // ---------------------------------------------------------------------------

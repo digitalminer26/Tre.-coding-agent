@@ -214,13 +214,20 @@ function scanJsonl(path: string, cursor: ScanCursor): ScanResult {
   }
   for (const line of all.subarray(0, lastNL).toString("utf8").split("\n")) lines.push(line);
   cursor.partialB64 = all.subarray(lastNL + 1).toString("base64");
-  // Absolute offset just past the last newline: the scan window started
-  // (logically) at cursor.offset - held.length; the newline sits at
-  // lastNL within the window.
-  const endOff = cursor.offset - held.length + lastNL + 1;
-  cursor.offset = endOff;
+  // Absolute offset just past the last delivered line (the caller's line
+  // walk is anchored here). The CONSUMED offset is a different quantity:
+  // everything read this scan (the window minus the torn tail's bytes were
+  // consumed INTO the partial), so `offset` advances to buf.length — the
+  // SAME convention as the partial-only branch above. One invariant for
+  // both branches: the partial's bytes sit immediately BEFORE `offset`,
+  // at [offset - heldLen, offset). Setting offset to `end` here instead
+  // (the first cut) re-read those bytes on the next scan and duplicated
+  // the held fragment, and made saveState clamp the persisted offset INTO
+  // the last delivered line (both pinned by a mixed-batch regression test).
+  const end = cursor.offset - held.length + lastNL + 1;
+  cursor.offset = buf.length;
   cursor.headB64 = headOf(buf);
-  return { lines, end: endOff, resumed, scanned: true };
+  return { lines, end, resumed, scanned: true };
 }
 
 /** First HEAD_LEN bytes of a buffer as base64 (clamped to the size). */
@@ -340,6 +347,26 @@ export class FileSteeringQueue implements SteeringQueue {
     this.readSteerFile();
     this.settlePending();
     this.saveState();
+    const out: (string | SteerEntry)[] = this.mem.splice(0, this.mem.length);
+    out.push(...this.ready.splice(0, this.ready.length));
+    return out;
+  }
+
+  /**
+   * `SteeringQueue.drainMemory` (P3b audit F2): hand off the pushed items
+   * AND any file entries already accepted by a previous scan — WITHOUT
+   * scanning the steer file. Safe for the driver's detach handoff: new
+   * appends stay in the file (delivered on the next run's scan, per the
+   * persisted offset). Entries handed off here are already in
+   * `pendingInjected`, so their lines' offsets are already held back — the
+   * §13.3 crash-eligibility rule holds regardless of who consumes them.
+   * The `ready` splice is defensive: after every drain() ready is empty
+   * (drain() always splices it into its return), so in practice only mem
+   * items hand off here — but draining the field keeps the contract "no
+   * accepted entry may remain in the queue when the driver detaches".
+   */
+  drainMemory(): (string | SteerEntry)[] {
+    if (this.closed) return [];
     const out: (string | SteerEntry)[] = this.mem.splice(0, this.mem.length);
     out.push(...this.ready.splice(0, this.ready.length));
     return out;

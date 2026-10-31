@@ -1118,3 +1118,40 @@ test("R4-R2: main() one-shot — stop() racing startup exits 130, body never run
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── P3b audit F2: detach must NOT scan a file-backed queue ─────────────────
+//
+// `FileSteeringQueue.drain()` scans the steer FILE. The detach handoff
+// runs at every turn END; with a full drain it would claim NEW file
+// requests into the idle-pending buffer — model work outside any run's
+// budget, flattened to text by the idle prompt path (no requestId: no
+// ack, no dedup, no transcript authority). The handoff must use
+// `drainMemory()` (memory pushes only) when the queue has one.
+
+test("F2: detach hands off ONLY memory pushes from a file-backed queue — never scans the steer file", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tg-f2-"));
+  const steerPath = path.join(dir, "steer.jsonl");
+  const sessionPath = path.join(dir, "session.jsonl");
+  fs.writeFileSync(sessionPath, "");
+  const { FileSteeringQueue } = await import("../src/steer/file-queue.js");
+  const q = new FileSteeringQueue({ path: steerPath, sessionPath, warn: () => {} });
+  const bridge: TelegramBridge = { enabled: false, pollLong: async () => null, send: async () => {} };
+  const driver = new TelegramDriver(bridge, noopHandlers, { allowIdleTurns: false });
+  driver.attachSteerTarget(q, "user");
+  q.push({ text: "memory-pending", source: "tty", requestId: "" }); // TTY text pushed but not drained
+  fs.writeFileSync(steerPath, JSON.stringify({ id: "f2-1", text: "file-steer" }) + "\n"); // appended AFTER the last scan
+  driver.detachSteerTarget(); // turn END handoff
+  // The claim surface is observable at the next attach: memory push yes,
+  // file request NO (it stays in the file for the next run's own scan).
+  const claimed = driver.attachSteerTarget(mkQueue(), "next");
+  assert.deepEqual(claimed.map((s) => s.text), ["memory-pending"],
+    "detach hands off memory pushes only — a NEW file request must not enter the idle buffer (F2)");
+  // And the file line is untouched by the handoff: a fresh queue over the
+  // same file still sees it (delivered with its envelope intact later).
+  const q2 = new FileSteeringQueue({ path: steerPath, sessionPath, warn: () => {} });
+  const got = q2.drain().map((e) => (e as { requestId?: string }).requestId);
+  assert.deepEqual(got, ["f2-1"], "the file request survives the detach for the next scan, id intact");
+  q.close();
+  q2.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});

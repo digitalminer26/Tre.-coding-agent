@@ -188,8 +188,16 @@ export class TelegramDriver {
     this.steerTargetLabel = undefined;
     // P3a: normalize any plain strings left in the dead queue (a caller
     // pushing raw text) so the buffer is uniformly envelopes.
+    // P3b audit F2: hand off ONLY memory pushes — `drainMemory()` when the
+    // queue has a backing store (FileSteeringQueue). A full `drain()` here
+    // would scan the steer file at detach time and claim NEW file requests
+    // into the idle-pending buffer: model work outside any run's budget,
+    // and the idle prompt path flattens envelopes to text (no requestId →
+    // no ack, no dedup). File steers land through the loop's own drains
+    // with their envelope intact, or wait for the next run.
     if (queue) {
-      for (const item of queue.drain()) {
+      const items = queue.drainMemory ? queue.drainMemory() : queue.drain();
+      for (const item of items) {
         this.deferredSteers.push(typeof item === "string" ? { text: item, source: "tty" } : item);
       }
     }

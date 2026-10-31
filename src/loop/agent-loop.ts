@@ -111,6 +111,17 @@ export interface SteeringQueue {
   /** P3a: drains may yield plain strings (TTY — the loop defaults them to
    *  `{requestId:"", source:"tty"}`) or tagged `SteerEntry` items. */
   drain(): (string | SteerEntry)[];
+  /**
+   * Memory-only drain: items from `push()`, WITHOUT scanning any backing
+   * store. Callers that merely relocate a finished queue's contents (the
+   * Telegram driver's detach handoff) must not trigger a fresh scan of an
+   * external source — P3b audit F2: `FileSteeringQueue.drain()` scans the
+   * steer file, so a detach after the run would claim NEW file requests
+   * and hand them to an idle turn (model work outside the run, acked
+   * without a steering envelope). Defaults to `drain()` for queues that
+   * are purely in-memory anyway.
+   */
+  drainMemory?(): (string | SteerEntry)[];
 }
 
 export interface AgentLoopOptions {

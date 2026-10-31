@@ -53,3 +53,7 @@ tre.json
 .build.out
 # measurement scratch space for guard audits — never in git.
 .audit-tmp/
+
+# P3b audit-cycle raw transcripts (128KB reasoning dumps; prompts + final verdicts live in docs/audits/)
+docs/audits/audit-p3b-c[0-9].txt
+docs/audits/audit-c*.log

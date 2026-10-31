@@ -1,0 +1,23 @@
+You are a READ-ONLY adversarial code auditor. Do not edit any file. You may read files and inspect the diff. Output findings only.
+
+CONTEXT
+Repo: Tre.-coding-agent (TypeScript, ESM). Feature: P3b file-backed steering queue — an external supervisor appends JSONL steer requests to a file; the agent's running loop drains them mid-run and persists a transcript receipt (a message entry with steering.requestId). Contracts live in docs/11-orchestrator-schema.md (§13.1 durability/repair, §13.3 crash-eligibility rows 1/2 + I4, §14.2 validation/dedup table).
+
+THREE FIXES JUST LANDED (verify each is CORRECT and COMPLETE, and hunt for new bugs they introduce):
+
+F1 (High) — src/steer/file-queue.ts scanJsonl(): the complete-line branch previously set cursor.offset = "just past the last delivered line" while the partial-only branch set cursor.offset = buf.length. Mixed batches (complete line + torn tail in one scan) re-read the held fragment on the next scan (duplicated bytes → reframed malformed line → lost steer) and saveState()'s clamp (offset - heldLen) landed INSIDE the last delivered line. Fix: unified invariant "the partial's bytes sit immediately BEFORE offset, at [offset-heldLen, offset)"; both branches now set cursor.offset = buf.length; the returned `end` (absolute offset just past the last delivered line, used for lineStart bookkeeping) is computed but no longer assigned to cursor.
+
+F2 (High) — src/telegram/driver.ts detachSteerTarget(): it drained the queue into the idle handoff buffer with a FULL drain(), which for FileSteeringQueue SCANS THE STEER FILE at turn-end — claiming new file requests into a buffer whose idle-prompt path flattens envelopes to plain text (no requestId → no ack, no dedup, model work outside any run budget). Fix: new optional SteeringQueue.drainMemory() (agent-loop.ts interface); FileSteeringQueue implements it (memory pushes + already-scanned ready entries, NO file scan); the driver prefers drainMemory().
+
+F3 (Medium) — src/session/session.ts: request-carrying steer receipts (steering.requestId !== "") now fsync (handle.sync()) before the append resolves; sync failure REJECTS the append (fail closed). Plain messages keep process-death durability only (§13.1 R3).
+
+AUDIT QUESTIONS (answer each concretely, with file:line evidence):
+1. scanJsonl: after the fix, is `end` still correct for the caller's lineStart derivation (trace every use of ScanResult.end — including scanTranscript())? Any off-by-one when resumed=true with a held partial?
+2. scanJsonl: does saveState's clamp hold in EVERY branch (no-complete-line branch, mixed branch, post-rescan)? Construct a byte-level counterexample if it doesn't.
+3. drainMemory(): correctness of the splice on mem+ready; does bypassing saveState() lose anything (pendingInjected hold-back, offset persistence)? Can a ready entry delivered via drainMemory be lost or double-delivered across a crash (row 1/row 2 of §13.3)?
+4. Driver: detach now handoff-list = mem + ready of a FileSteeringQueue. Those entries were already counted as "injected" (pendingInjected) — does the idle turn's delivery still ack them (persist steering.requestId) through the right path, or can they now die in the buffer while the offset is already held back (permanent non-delivery, or re-delivery duplicate)?
+5. F3: is requestId !== "" the right predicate? Check every caller of appendMessage/appendModelChange: are there request-carrying entries that bypass appendMessage (e.g. appendSteerReceipt-like paths, TUI persist tap, cli/main.ts persist tap)? Is rejecting on sync failure safe with respect to the queue's dedup state (queue saw no ack → row 1 redelivery → double transcript insert after restart? or is that exactly the intended fail-closed behavior)?
+6. Any place that constructs a FileSteeringQueue but where drainMemory's absence/silence changes behavior (other implementers of SteeringQueue in src/ — grep them).
+7. Test quality: are the new tests in test/steer-file.test.ts ("mixed batch"), test/session.test.ts (F3 x2), test/telegram-driver.test.ts (F2) asserting the RIGHT invariants? Any hole where a wrong implementation still passes?
+
+OUTPUT FORMAT: numbered findings, each with severity (High/Medium/Low), file:line, why it's wrong (construct the failing scenario step by step), and the minimal fix. If a fix is correct and you cannot break it, say "PASS: <area>" explicitly. No praise, no summary fluff. Findings must be provable from the code, not stylistic.
