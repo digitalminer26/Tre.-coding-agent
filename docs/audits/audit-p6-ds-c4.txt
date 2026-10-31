@@ -1,0 +1,30 @@
+Q1 — (a) SAFE_COMPONENT rejects `..`, `.`, `-foo`, `a/b`, unicode look-alikes and `@{` (all fail the ASCII class or the explicit dot check), but it ALLOWS trailing `.lock` and embedded `..` (`a..b`, `t1.lock`); only `assertValidBranch`'s check-ref-format rejects those, and only in `ensure()`. (b) Every call site (ensure/open/remove) runs `assertSafeComponent`/`taskBranchName` before `taskPath`/branch interpolation; `prune()` takes no ids — no unvalidated interpolation. (c) No: `--stdin` fails SAFE_COMPONENT, and the operand is always prefixed `refs/heads/`, so it can never be an option. (d) Yes: `^{commit}` peels, SHA40 is enforced, and `revArgs` `--`-guards a leading `-` (the appended `^{commit}` preserves the leading dash).
+
+Q2 — The only user-input join is `join(this.wtRoot, taskId)` with taskId validated; the other is internal `join(p, ".git")`. `isWithin`/`pathsEqual` are lexical and documented fail-closed; no unvalidated input reaches a join.
+
+Q3 — `baseCommit: ""` is documented on the `TaskWorktree` field ("\"\" on plain open"); `openTaskWorktree`'s own JSDoc doesn't restate it but the field doc is the contract — no consumer trap.
+
+Q4 — Import block is `node:child_process`, `node:fs`, `node:fs/promises`, `node:path`, `node:util` only; no dynamic import/require; the compartment test enforces it. docs/11 not attached, so no cross-check possible.
+
+Q5 — Sweep table (mutation → failing test):
+(i) drop `refs/heads/` → "remove: a same-named TAG cannot shadow…" ✓
+(ii) single `--force` → "remove: force on a LOCKED worktree overrides…" ✓
+(iii) `dirExists` in entryGone → "ensure: a LOCKED + vanished…" + "prune: a LOCKED stale…" ✓
+(iv) no lockedStale throw → "prune: a LOCKED stale entry…" ✓
+(v) plain branch-in-use → "remove: locked+vanished is stale-registration…" ✓
+(vi) no isDescendantOf → "ensure: a registration whose HEAD does not descend…" ✓
+(vii) no `head !== baseSha` check → **NO TEST** ✗
+(viii) dirty gate after remove → "remove: refuses a dirty worktree…" ✓
+(ix) no placement gate → "open(): wtRoot inside the repository itself…" ✓
+(x) prune-refused return → "prune: reports its own removals and refuses…" ✓
+Also: deleting the `assertValidBranch` call in `ensure()` fails **NO test** (every "bad id" case dies in SAFE_COMPONENT first).
+
+Q6 — docs/11 and HANDOFF are not attached, so no drift is provable; from source the union includes `bad-wt-root` (open-only), `prune-refused` and `locked` (prune), and `removeTaskWorktree`'s JSDoc enumerates its own codes plus prune's extras correctly.
+
+FINDINGS
+- F1 [RISK, coverage] Mutation (vii): the post-creation `head !== baseSha` provenance guard has no failing test (only reachable via a mid-provision race) — untested defensive check.
+- F2 [RISK, coverage] `assertValidBranch` has no failing test: no case exercises a SAFE_COMPONENT-valid but ref-invalid id (`a..b`, `t1.lock`), so removing the call is invisible and degrades `bad-id` to `git-failed`.
+- F3 [LOW] `ensure()` with a regular FILE at `taskPath` yields `git-failed` (dirExists tests directories only) instead of a typed `path-exists`; `remove()` reports `noop` for the same file.
+- F4 [NOT-A-DEFECT] Q1/Q2/Q4 clean; Q3 documented; Q6 unverifiable (docs absent).
+
+VERDICT: REJECT — must-fix F2 (add a check-ref-format-only bad-id regression test), then F1 (fault-injection test or explicit "accepted residual" note); F3 optional. No provable code defect found; the sweep is not fully covered, so ACCEPT is not warranted.

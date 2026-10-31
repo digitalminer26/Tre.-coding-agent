@@ -27,7 +27,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
   WorktreeProvisioner,
@@ -583,6 +583,35 @@ test("remove: locked+vanished is stale-registration with actionable guidance, ne
       assert.ok(m.includes("unlock") && m.includes("prune"), `message must name the recovery path, got: ${m}`);
       return true;
     },
+  );
+});
+
+test("ensure: an id that passes SAFE_COMPONENT but breaks check-ref-format is bad-id, not git-failed (audit ds-c4 F2)", async () => {
+  const { prov, base } = await setup();
+  // "a..b" is SAFE_COMPONENT-legal but no legal ref component — only
+  // assertValidBranch's check-ref-format can see it.
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "a..b", taskId: "t1", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "bad-id"); return true; },
+  );
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "ep", taskId: "t1.lock", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "bad-id"); return true; },
+  );
+});
+
+test("ensure/remove: a plain FILE at the task path is a typed refusal in both directions (audit ds-c4 F3)", async () => {
+  const { prov, base } = await setup();
+  const path = prov.taskPath("tFile");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "occupant\n");
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epW", taskId: "tFile", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "path-exists"); return true; },
+  );
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epW", taskId: "tFile" }),
+    (e: unknown) => { expectCode(e, "not-registered"); return true; },
   );
 });
 

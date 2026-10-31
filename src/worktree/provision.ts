@@ -496,11 +496,13 @@ export class WorktreeProvisioner {
       return { episodeId, taskId, path: entry.path, branch: entry.branch, head: entry.head, baseCommit: baseSha, repoRoot: this.repoRoot, preexisting: true };
     }
 
-    // Unregistered target: a directory git does not manage is never
-    // adopted and never implicitly deleted (git would refuse too — the
-    // explicit error keeps the contract independent of git's wording).
-    if (await dirExists(path)) {
-      throw new WorktreeProvisionError("path-exists", `directory ${path} exists but is not a worktree of ${this.repoRoot} — refusing (never delete unmanaged paths)`);
+    // Unregistered target: anything at the path that git does not manage
+    // (directory OR plain file — ds-c3/c4 F3: a file made `worktree add`
+    // die with raw git-failed downstream) is never adopted and never
+    // implicitly deleted; the typed error keeps the contract independent
+    // of git's wording.
+    if (await pathOccupied(path)) {
+      throw new WorktreeProvisionError("path-exists", `path ${path} exists but is not a worktree of ${this.repoRoot} — refusing (never delete unmanaged paths)`);
     }
 
     if (mode === "detached") {
@@ -544,6 +546,11 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError("git-failed", `fresh worktree at ${path} has no readable HEAD: ${e.message}`, e.detail);
     }
     if (head !== baseSha) {
+      // ds-c4 F1: this guard fires only when the repo mutates between
+      // resolveCommit and `worktree add` materializing it — unreachable
+      // deterministically without fault injection, so it carries no test
+      // (accepted residual, kept loud: a provenance lie here poisons
+      // every P12 merge anchor, so an untested tripwire beats none).
       throw new WorktreeProvisionError("git-failed", `fresh worktree HEAD ${head} does not match pinned base ${baseSha} (repo mutated mid-provision?)`);
     }
     return { episodeId, taskId, path, branch, head, baseCommit: baseSha, repoRoot: this.repoRoot, preexisting: false };
@@ -607,8 +614,11 @@ export class WorktreeProvisioner {
     const path = this.taskPath(taskId);
     const entry = (await listWorktrees(this.repoRoot)).find((e) => pathsEqual(e.path, path));
     if (entry === undefined) {
-      if (await dirExists(path)) {
-        throw new WorktreeProvisionError("not-registered", `${path} is not a worktree of ${this.repoRoot} — refusing to delete an unmanaged directory`);
+      // ds-c4 F3: a plain FILE at the task path must not report a silent
+      // noop — something unmanaged occupies the path the provisioner
+      // owns; say so and refuse.
+      if (await pathOccupied(path)) {
+        throw new WorktreeProvisionError("not-registered", `${path} is not a worktree of ${this.repoRoot} but exists — refusing to touch an unmanaged path`);
       }
       return { episodeId, taskId, path, branch: null, worktreeRemoved: false, branchDeleted: false, forced: false, noop: true };
     }
@@ -867,6 +877,16 @@ async function gitfileExists(p: string): Promise<boolean> {
 async function dirExists(p: string): Promise<boolean> {
   try {
     return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** True when ANY filesystem entry (dir, file, symlink) sits at p. */
+async function pathOccupied(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
   } catch {
     return false;
   }
