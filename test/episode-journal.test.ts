@@ -31,6 +31,7 @@ import {
   readEpisodeGraph,
   readEpisodeState,
   DecisionJournal,
+  duplicateKeyIn,
   STATE_SCHEMA_ID,
   unresolvedSpawns,
   validateSupervisorRecord,
@@ -706,11 +707,102 @@ test("read() no longer advertises an unobservable malformed counter (post-commit
   await assert.rejects(journal.read(), EpisodeSchemaError);
 });
 
+// Deterministic fuzz of the duplicate-key scanner (audit c1, finding 1):
+// the offline 600-document fuzz is now pinned in-repo. Seeded LCG — no
+// Math.random, fully reproducible.
+// Deterministic fuzz of the duplicate-key scanner (audit c1, finding 1):
+// the offline 600-document fuzz is now pinned in-repo. Seeded LCG — fully
+// reproducible, no Math.random. JSON.stringify is the ground truth for
+// well-formedness; the generator keeps keys unique per object.
+test("duplicateKeyIn: deterministic seeded fuzz — no false positives or negatives", async (t) => {
+  void t;
+  let seed = 0xc0ffee;
+  const rnd = (n: number) => { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return seed % n; };
+  const keys = ["id", "kind", "actionId", "notes", "obs", "a", "b", "nested"];
+  const vals = ["1", "true", "null", "-2.5", JSON.stringify('s "q" x'), JSON.stringify('{"id":1}:,[]'), JSON.stringify('x\\y')];
+  function genObj(depth: number): string {
+    const n = 1 + rnd(5);
+    const parts: string[] = [];
+    const used = new Set<string>();
+    for (let i = 0; i < n; i++) {
+      let k = keys[rnd(keys.length)]!;
+      for (let tries = 0; used.has(k) && tries < 32; tries++) k = keys[rnd(keys.length)]!;
+      if (used.has(k)) continue; // extremely unlikely; skip rather than spin
+      used.add(k);
+      const r = rnd(6);
+      const v = depth > 0 && r === 0 ? "{" + genObj(depth - 1) + "}"
+        : depth > 0 && r === 1 ? "[{" + genObj(depth - 1) + "}]"
+        : vals[rnd(vals.length)]!;
+      parts.push(JSON.stringify(k) + ":" + v);
+    }
+    return parts.join(",");
+  }
+  let validCount = 0;
+  for (let i = 0; i < 600; i++) {
+    const doc = "{" + genObj(2) + "}";
+    let parsed: unknown;
+    try { parsed = JSON.parse(doc); } catch { continue; }
+    void JSON.stringify(parsed);
+    validCount++;
+    assert.equal(duplicateKeyIn(doc), undefined, `false positive on ${doc.slice(0, 160)}`);
+  }
+  assert.ok(validCount >= 550, `only ${validCount}/600 generated docs parsed`);
+
+  // Constructed duplicates: repeat the first key of every top-level object.
+  const keyRe = /^("(?:[^"\\]|\\.)*"):/;
+  let dupCount = 0;
+  seed = 0xbeef01;
+  for (let i = 0; i < 600; i++) {
+    const body = genObj(2);
+    const m = keyRe.exec(body);
+    if (!m) continue;
+    const dup = "{" + m[0].slice(0, -1) + ":null," + body + "}"; // "k":null prepended before the real "k":...
+    if (JSON.parse(dup.replace(m[1] + ":null,", "")) === undefined) continue; // ground-truth sanity only
+    dupCount++;
+    const found = duplicateKeyIn(dup);
+    assert.notEqual(found, undefined, `false negative on ${dup.slice(0, 160)}`);
+  }
+  assert.ok(dupCount >= 550, `only ${dupCount} duplicate docs constructed`);
+});
+
+test("duplicateKeyIn: adversarial scanner cases pinned from the offline audit", async (t) => {
+  void t;
+  const H = '{"schema":"tre-supervisor/1","id":"d-1","ts":1,"episodeId":"ep","kind":"decision-outcome","actionId":"a","acked":true,"progress":"none"';
+  assert.equal(duplicateKeyIn(H + ',"notes":"x\\\\","n2":1}'), undefined);
+  assert.equal(duplicateKeyIn(H + ',"notes":"x\\\\","n2":1,"n2":2}'), "n2");
+  assert.equal(duplicateKeyIn(H + ',"notes":"{\\"id\\":1}:,[]"}'), undefined);
+  assert.equal(duplicateKeyIn(H + ',"notes":"ok","obs":[{"k":1,"k":2}]}'), "k");
+  assert.equal(duplicateKeyIn(H + ',"notes":"ok","obs":[{"k":1},{"k":2}]}'), undefined);
+  assert.equal(duplicateKeyIn(H.replace(/,/g, ",\n  ") + ',\n "notes" :\t "ok"\n}'), undefined);
+  assert.equal(duplicateKeyIn(H + ',"notes":"ok","kind" : "x"}'), "kind");
+  assert.equal(duplicateKeyIn(H + ',"notes":"id","id2":"x"}'), undefined);
+  // unicode-escape spelled key equals the plain key (JSON.parse last-wins)
+  assert.equal(duplicateKeyIn('{"actionId":"a","\\u0061ctionId":"b"}'), "actionId");
+});
+
+// Audit c1 finding 2: the tail guard sees the RAW TAIL of an unterminated
+// file — a shape the sequential open() path never hands it (read() rejects
+// the duplicate first, and the write-side race is not deterministically
+// triggerable from the public API). The guard's INPUT CONTRACT is the
+// observable part: duplicateKeyIn must catch duplicates inside COMPLETE but
+// UNTERMINATED JSON, and must not false-positive on clean tails. Together
+// with the open() contract test above, #repairTail's guard line is now
+// covered by committed tests.
+test("duplicateKeyIn: unterminated-tail contract (the exact input #repairTail guards)", async (t) => {
+  void t;
+  assert.equal(duplicateKeyIn('{"a":1,"actionId":"x","actionId":"y"'), "actionId"); // complete-but-unterminated dup
+  assert.equal(duplicateKeyIn('{"a":1,"b":{"c":1'), undefined);                      // clean partial tail
+  assert.equal(duplicateKeyIn('{"a":"unterminated \\" string with ,\"a\":1 inside'), undefined); // inside a (torn) string
+  assert.equal(duplicateKeyIn('{"obs":[{"k":1,"k":2}'), "k");                        // nested dup, unterminated
+  assert.equal(duplicateKeyIn(""), undefined);
+});
+
 // NOTE (honest scope): #repairTail is private and open() calls read() first,
-// which already rejects a complete duplicate-key tail. This test pins the
-// END-TO-END contract (open refuses and never terminates the tail). The
-// in-function guard is defense-in-depth; it is not separately observable
-// through the public API.
+// which already rejects a complete duplicate-key tail — the in-function
+// guard is not reachable through a deterministic public-API call (only via
+// the write-side race open() closes). This test pins the END-TO-END
+// contract; the guard's predicate on its exact raw-tail input is pinned by
+// the unterminated-tail contract test above (audit c1, finding 2).
 test("repair never terminates an unterminated record that repeats a key (d5447d8 audit)", async (t) => {
   const { root, dir } = await tmpEpisode();
   t.after(() => rm(root, { recursive: true, force: true }));

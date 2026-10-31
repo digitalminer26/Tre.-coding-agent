@@ -1,3 +1,26 @@
+## 2026-10-31 — P4 episode journal: audit follow-ups (suite 1509 / 0 / 14)
+
+**Post-commit audits of the P4 journal primitives (docs/11 ledger).** The
+d5447d8 audit added the duplicate-JSON-key boundary (`duplicateKeyIn`) on
+every read boundary; its follow-up (612564a) moved the guard INSIDE
+`#repairTail` (defense in depth — `open()`'s `read()` already rejects the
+duplicate first) and pinned the fail-closed behavior that hand-pretty-printed
+multi-line JSONL is rejected while the writer always emits one line
+(JSON.stringify escapes newlines).
+
+**Implement-audit cycle 1 on 612564a** (auditor claude-haiku-5.5; gpt-6.1-sol
+and gpt-6-astra both 429'd — provider quota): previous finding confirmed
+RESOLVED by independent probes; the two recommendations fixed here —
+(1) the scanner evidence is pinned IN-REPO: a seeded-LCG fuzz (600 generated
+valid docs + 600 constructed duplicates, adversarial values built through
+`JSON.stringify` rather than hand-escaped literals; an early draft of the
+generator double-escaped its own strings and produced mostly invalid docs —
+caught by the parse-count assertion) plus a fixed adversarial case table, via
+a new `@internal` export of `duplicateKeyIn`; (2) the tail guard's INPUT
+CONTRACT (raw, complete-but-unterminated JSON tails) is now unit-pinned,
+since the guard line itself stays reachable only through the write-side race
+`open()` structurally closes. Suite **1509 pass / 0 fail / 14 skip**.
+
 ## 2026-10-30 — wire diagnostics + C43 intent nudge (suite 1453 / 0 / 14)
 
 **describeError cause chain (`f029976`).** A transport-level

@@ -662,8 +662,11 @@ function validateShapeInner(schema: Shape, value: unknown, path: string, ancesto
 
 /** Duplicate keys in one raw JSON object. JSON.parse is LAST-WINS, so a
  *  repeated `kind`/`id`/`actionId` validates as a record the author never
- *  wrote — and decision records drive I2 reconcile. Check the boundary. */
-function duplicateKeyIn(text: string): string | undefined {
+ *  wrote — and decision records drive I2 reconcile. Check the boundary.
+ *  @internal — exported ONLY so tests can pin this predicate directly
+ *  (deterministic fuzz + the tail-repair guard's input contract); production
+ *  callers are read(), parseValidated(), and #repairTail. Do not import. */
+export function duplicateKeyIn(text: string): string | undefined {
   const stack: (Set<string> | null)[] = []; // null = array frame
   let expectKey = false;
   let i = 0;
