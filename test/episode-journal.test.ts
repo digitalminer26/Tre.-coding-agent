@@ -708,12 +708,9 @@ test("read() no longer advertises an unobservable malformed counter (post-commit
 });
 
 // Deterministic fuzz of the duplicate-key scanner (audit c1, finding 1):
-// the offline 600-document fuzz is now pinned in-repo. Seeded LCG — no
-// Math.random, fully reproducible.
-// Deterministic fuzz of the duplicate-key scanner (audit c1, finding 1):
-// the offline 600-document fuzz is now pinned in-repo. Seeded LCG — fully
-// reproducible, no Math.random. JSON.stringify is the ground truth for
-// well-formedness; the generator keeps keys unique per object.
+// the offline 600-document fuzz is now pinned in-repo. Seeded LCG (Math.imul)
+// — fully reproducible, no Math.random. Well-formedness is checked by
+// JSON.parse; the generator keeps keys unique per object.
 test("duplicateKeyIn: deterministic seeded fuzz — no false positives or negatives", async (t) => {
   void t;
   let seed = 0xc0ffee;
@@ -742,7 +739,7 @@ test("duplicateKeyIn: deterministic seeded fuzz — no false positives or negati
     const doc = "{" + genObj(2) + "}";
     let parsed: unknown;
     try { parsed = JSON.parse(doc); } catch { continue; }
-    void JSON.stringify(parsed);
+    void parsed;
     validCount++;
     assert.equal(duplicateKeyIn(doc), undefined, `false positive on ${doc.slice(0, 160)}`);
   }
@@ -756,8 +753,14 @@ test("duplicateKeyIn: deterministic seeded fuzz — no false positives or negati
     const body = genObj(2);
     const m = keyRe.exec(body);
     if (!m) continue;
-    const dup = "{" + m[0].slice(0, -1) + ":null," + body + "}"; // "k":null prepended before the real "k":...
-    if (JSON.parse(dup.replace(m[1] + ":null,", "")) === undefined) continue; // ground-truth sanity only
+    const dup = "{" + m[0].slice(0, -1) + ':{ "__dup__":1 },' + body + "}"; // sentinel prepended before the real "k":<val>
+    // Independent verification of the constructed doc: it must still parse,
+    // and JSON.parse's last-wins must collapse the pair onto the REAL value
+    // (the generator can never emit the sentinel object) — proving the
+    // scanner rejected genuine ambiguity, not a malformed document.
+    const parsedDup = JSON.parse(dup) as Record<string, unknown>;
+    const dupKey = JSON.parse(m[1]!) as string;
+    assert.notDeepEqual(parsedDup[dupKey], { __dup__: 1 }, `last-wins kept the sentinel in ${dup.slice(0, 120)}`);
     dupCount++;
     const found = duplicateKeyIn(dup);
     assert.notEqual(found, undefined, `false negative on ${dup.slice(0, 160)}`);
