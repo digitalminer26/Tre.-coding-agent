@@ -1,0 +1,21 @@
+**Q1.** Not airtight. Symlink and chmod-000 cases fail closed (anchor is realpath'd; EACCES → `git-failed`), and `/` is not a repo so it passes harmlessly. But the containment list uses **raw** registered worktree paths, not realpath'd, so a renamed linked worktree escapes (finding 1). The probe-then-mkdir race is a genuine TOCTOU (finding 2).
+
+**Q2.** wtRoot inside `.git` → anchor = `.git`, common-dir = repoCommon, containment hits the repo → `wt-inside-repo` (acceptable). `listWorktrees` from a linked worktree runs `git worktree list` on the common dir, which lists all entries incl. main, so the containment list is complete. VERIFIED.
+
+**Q3.** Ordering is airtight: `prunable` is checked before `status`, and `git()` (used for status) always throws `git-failed`, never a negative. `probeExit0` callers are `rev-parse --show-toplevel` and `check-ref-format`, neither of which exits 1 for a non-negative reason. VERIFIED.
+
+**Q4.** TOCTOU is real but the resulting state is safe (worktree gone, branch intact, `git-failed` surfaced); accept for P6 as RISK.
+
+**Q5.** `open()` still rejects repo root and exact linked-worktree path (containment hits `repoToplevel` / registered path). `prune()` never used the toplevel probe, so no interaction. Stale comment: header claims worktree-list paths are matched "after realpath", but they aren't (finding 1).
+
+---
+
+**Findings**
+
+1. **CONFIRMED-WRONG (F2).** The containment list `[repoToplevel, ...listWorktrees(repoArg).map(e => e.path)]` uses raw registered paths, not realpath'd, contradicting the fix description. Repro: `ensureTaskWorktree` → `mv <wtRoot>/t1 <wtRoot>/renamed` → `WorktreeProvisioner.open({repoRoot, wtRoot: join(renamed,"sub")})`. Anchor = `renamed` (exists), `rev-parse --git-common-dir` from it returns `repoCommon` (the `.git` file still points at the live gitdir), but `own` contains only the old `t1` path, so `anchorReal` matches nothing → gate passes → `mkdir` creates `sub` **inside our own linked worktree**, violating §5.
+
+2. **RISK (F1).** Probe-then-`mkdir` TOCTOU: a concurrent `git init` of the anchor between `gitVerify` and `mkdir` creates wtRoot inside a repo. Inherent check-then-act; low severity, not deterministically repro'able.
+
+3. **RISK (F5).** Branch-in-use TOCTOU: a second checkout created after the gate lets `worktree remove` succeed and `branch -D` fail → `git-failed` with worktree gone / branch intact. Safe state, error surfaced; accept for P6.
+
+4. **VERIFIED.** Q2 (`.git` placement → `wt-inside-repo`; linked-worktree `listWorktrees` complete), Q3 (negative-marker ordering and `probeExit0` callers), Q5 (repo-root and exact-worktree rejection; `prune()` unaffected).

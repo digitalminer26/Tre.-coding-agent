@@ -1,3 +1,46 @@
+## 2026-10-31 — P6 worktree provisioning + 4-cycle audit (suite 1608 / 0 / 14)
+
+**P6 implemented (docs/11 §11.1, §5, §14.1/§14.5).** `src/worktree/provision.ts`
+ships `WorktreeProvisioner` — git worktree provisioning ONLY (integration is
+P12): `open()` placement gates (wtRoot outside our repo AND any foreign repo,
+bare included — authority = `rev-parse --path-format=absolute --git-common-dir`
+on the nearest existing directory ancestor, checked BEFORE any mkdir, so a
+refused open creates nothing); `ensureTaskWorktree` open-or-create idempotent
+with branch `agent/<episodeId>/<taskId>` pinned at the resolved base sha +
+post-creation HEAD verification, crash-recovery re-attach (branch at base,
+registration gone), `branch-conflict` never-reset, `path-exists` never-adopt,
+`stale-registration` until prune; `removeTaskWorktree` conservative teardown
+(registered-only; dirty gate incl. untracked BEFORE mutation; deleteBranch
+gated on `base..branch`-empty proof — never `branch -d` heuristics — plus a
+branch-checked-out-elsewhere pre-gate; force = explicit discard); `prune()`
+refuses when any stale entry lies outside wtRoot (git's prune is repo-global)
+and reports exact removals by registry diff; `resolveCommit` option-safe
+(`--` separator, `^{commit}` peel, never a HEAD fallback). All git via fixed
+argv execFile; probe negatives classified honestly (exit 1 + the full
+search-exhausted wording only — a broken-gitlink `not a git repository:
+(null)` is a hard git-failed, never "outside any repo"). Provenance return
+feeds the §14.1 AttemptRecord. Two enforced compartment guards (node:-only
+imports; nothing outside src/worktree imports it). 34 tests on real git repos.
+
+**Audit series (deepseek-v4.1-flash-1017 read-only;
+`docs/audits/audit-p3b-p6c{1..4}.txt`).** Cycle 1: 2 CONFIRMED-WRONG (open()
+mkdir'd before validating; foreign BARE repos undetected by `--show-toplevel`)
++ 3 RISK (dash-rev escaping, probe-exit collapse, partial delete via
+`branch -D` on a double-checked-out branch) — all five fixed with
+regressions. Cycle 2: 1 CONFIRMED-WRONG (a linked worktree RENAMED behind
+git's back escaped registry-path containment) — fixed by replacing the
+containment list with the stricter authority rule: anchor resolving to OUR
+common git dir → refused unconditionally (git's own view is the authority).
+Cycle 3: REJECT — 2 more (broken-gitlink stderr matched the loose
+"not a git repository" marker → treated as outside; `nearestExisting` could
+anchor on the `.git` GITFILE → ENOTDIR) — both fixed + regressions. Cycle 4:
+**ACCEPT — no findings**; residual TOCTOU accepted for P6 under the §14.5
+caller fence (git rejects concurrent duplicates; safe-state on failure).
+
+**Next:** P7 (attempt runner & ownership recovery — the fence the
+provisioner's idempotence assumes) or P8 (durable accounting), per the docs/11
+dependency graph (P0+P4+P5+P6 → P12 is deferred; P7 precedes auto-scheduling).
+
 ## 2026-10-31 — P4 episode journal: audit follow-ups (suite 1509 / 0 / 14)
 
 **Post-commit audits of the P4 journal primitives (docs/11 ledger).** The

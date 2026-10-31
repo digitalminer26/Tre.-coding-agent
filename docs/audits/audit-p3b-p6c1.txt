@@ -1,0 +1,29 @@
+1. No shell injection; branch/path positionals are safe (branch check-ref-format + safe components, path absolute). However `escapeRev` is not a true `--` separator: it prefixes `--` to the same token, so a leading-dash rev becomes option-like and can yield exit 128 → `git-failed` instead of `unresolvable-base`. No known option-confusion injection found.
+
+2. Most refusals hold, but `open()` mutates before the placement gate: it `mkdir`s `wtRoot` before checking inside-repo/foreign-repo, so a refused open leaves a directory inside the repo/foreign repo. Foreign bare repos are missed because `rev-parse --show-toplevel` fails in bare repos, so `wtRoot` inside a bare foreign repo is accepted. Dirty and branch-delete gates in `removeTaskWorktree` do run before worktree removal.
+
+3. Concurrent `ensure` is safe but not idempotent: both can pass `listWorktrees`/`dirExists`, then one `worktree add` wins and the other gets `git-failed`; git rejects duplicate path/branch. A branch created between check and add similarly yields `git-failed`, not adoption/reset. No unsafe TOCTOU found; caller fence is required.
+
+4. `isWithin` is separator-correct on POSIX: `/a` is not within `/ab`, `/a/b` is within `/a`, and `pathsEqual` handles exact `wtRoot`. Refusal covers stale entries git marks prunable; the bare main entry is not stale. Windows separator mismatch is a risk if git emits `/` while `realpath` uses `\`.
+
+5. `gitVerify`’s exit-1-as-null is correct for `rev-parse --verify --quiet`, but `escapeRev` can turn a leading-dash rev into an option-like arg and produce exit 128, thrown as `git-failed` instead of `unresolvable-base`. `probeExit0` collapses all non-zero exits to false, so real git failures are misreported as `not-a-git-repo`/`bad-id` and can skip the foreign-repo probe.
+
+6. Fresh creation verifies `HEAD == baseSha`; the open path returns `entry.head` from the `worktree list` snapshot and does not re-verify, so a concurrent HEAD move can yield a stale head. That is acceptable for P6 if documented as git’s registry view, but the “HEAD at return time” claim is overstated.
+
+Findings:
+
+1. **CONFIRMED-WRONG** — `open()` creates `wtRoot` before placement validation. Repro: `repo=/tmp/r; open({repoRoot:repo, wtRoot:join(repo,"wt")})` creates `/tmp/r/wt`, then throws `wt-inside-repo`. Same for a foreign repo. Violates “refusal never mutates.”
+
+2. **CONFIRMED-WRONG** — foreign bare repos are not detected. Repro: `git init --bare /tmp/other.git; open({repoRoot:/tmp/repo, wtRoot:join("/tmp/other.git","episode-wt")})` creates the dir inside the bare repo, `probeExit0(show-toplevel)` is false, and no `wt-in-other-repo` is thrown. Violates §5.
+
+3. **RISK** — `escapeRev("-h")` returns `---h^{commit}`, still option-like; if git treats it as an unknown option, exit 128 is surfaced as `git-failed` instead of `unresolvable-base`. Proper form is a separate `--` argument.
+
+4. **RISK** — `probeExit0` treats any non-zero as false, so a corrupt/unreadable repo is reported as `not-a-git-repo` rather than `git-failed`; in the foreign-repo probe it can skip detection.
+
+5. **RISK** — `removeTaskWorktree({deleteBranch:true})` can remove the worktree and then fail `branch -D` if the branch is checked out in another worktree (created with `worktree add --force`), leaving a partial mutation. The error surfaces, but the worktree is already gone.
+
+6. **VERIFIED** — `isWithin` separator handling is correct on POSIX for `/a` vs `/ab` and `/a/b` vs `/a`.
+
+7. **VERIFIED** — concurrent `ensure` is safe via git’s own rejection; no unsafe TOCTOU found.
+
+8. **VERIFIED** — fresh creation verifies HEAD against the base pin; open-path head is a registry snapshot, acceptable for P6 but the claim is stronger than the code.

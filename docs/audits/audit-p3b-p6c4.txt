@@ -1,0 +1,7 @@
+1. No remaining §5 bypass found: a stray empty/broken `.git` DIR either yields the parenthesized negative (correctly “not a repo”) or a hard git error (`git-failed`, fail-closed); permission-denied mid-walk cannot cross out of a repo without the subsequent `mkdir` failing; macOS `/private/tmp` is handled by `realpath` on the anchor and the stored `wtRoot`. The only false positives are fail-closed corrupt-repo/git-wording cases, not normal episode dirs.
+
+2. Acceptable for P6. The full parenthesized marker is version-fragile, but any unrecognized wording becomes `git-failed` with stderr, so the failure is closed and operator-visible; no silent acceptance. Not a must-fix.
+
+3. ACCEPT. The c3 F1/F2 fixes are correct and regression-tested; no remaining §5 placement bypass found. Residual TOCTOU and fail-closed false positives are accepted under §14.5.
+
+Findings: None.
