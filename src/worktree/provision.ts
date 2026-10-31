@@ -57,7 +57,7 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -882,12 +882,18 @@ async function dirExists(p: string): Promise<boolean> {
   }
 }
 
-/** True when ANY filesystem entry (dir, file, symlink) sits at p. */
+/** True when ANY filesystem entry (dir, file, symlink — live OR dangling)
+ *  sits at p. lstat, not stat: a dangling symlink IS an occupant (git's
+ *  own `worktree add` refuses it), and swallowing its ENOENT here would
+ *  hand the refusal to raw git-failed — the exact class ds-c4 F3 typed
+ *  (ds-c5 F5). Only ENOENT/ENOTDIR mean "nothing here"; any other stat
+ *  error fails CLOSED as occupied. */
 async function pathOccupied(p: string): Promise<boolean> {
   try {
-    await stat(p);
+    await lstat(p);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
   }
 }

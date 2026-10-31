@@ -25,7 +25,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -583,6 +583,21 @@ test("remove: locked+vanished is stale-registration with actionable guidance, ne
       assert.ok(m.includes("unlock") && m.includes("prune"), `message must name the recovery path, got: ${m}`);
       return true;
     },
+  );
+});
+
+test("ensure/remove: a DANGLING SYMLINK at the task path is occupied, not absent (audit ds-c5 F5)", async () => {
+  const { prov, base } = await setup();
+  const path = prov.taskPath("tLink");
+  await mkdir(dirname(path), { recursive: true });
+  await symlink(join(dirname(path), "nowhere"), path);
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epX", taskId: "tLink", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "path-exists"); return true; },
+  );
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epX", taskId: "tLink" }),
+    (e: unknown) => { expectCode(e, "not-registered"); return true; },
   );
 });
 

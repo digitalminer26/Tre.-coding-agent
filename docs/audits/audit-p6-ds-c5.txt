@@ -1,0 +1,21 @@
+**A.** I ran nothing (read-only, no shell), and the 50-test body is not in the attachment — only this commit's diff hunks — so items (vii)-(x) cannot be re-mutation-tested here. The two new tests exist and bind as written: `"a..b"`/`"t1.lock"` reach `assertValidBranch` because both pass SAFE_COMPONENT, and the plain-FILE test asserts `path-exists` then `not-registered`. The only guard I can still name as untested is (vii) `head !== baseSha`, now an explicit accepted-residual comment at the guard.
+
+**B.** Yes — CONFIRMED-WRONG (F1): the P6 row is designated the contract ("see the P6 row for the full contract") yet omits `bad-wt-root` and `locked`, keeps the pre-C8 deletion proof, and says "unmanaged dir".
+
+**C.** No adjacent break: the registry hit is handled before `pathOccupied`, so registered-but-gone → `stale-registration` → `prune()` → unregistered+absent → fresh create still converges; `pathOccupied` can never fire on a converged path. `remove`'s noop is unchanged for a truly absent path (stat ENOENT → false → same `noop:true` return), so the existing noop test still asserts the right thing; only a *dangling symlink* slips (F2).
+
+**D.** Sequence behaves as the tests' names claim: pin reachable from episode/main → unadvanced branch deletes; post-commit `base..branch` non-empty and pin no longer the branch's sole owner → refuse; force discards. No visible name/assert mismatch; the "base == tip refused" case's test text is not in the attachment, so its correction is unverified.
+
+FINDINGS
+
+1. **CONFIRMED-WRONG** — docs/11 §11.1 P6 row (the row the ledger calls "the full contract") omits ERROR UNION members now in code: `bad-wt-root` (c3 `open()` refusal) and `locked` (c5 `remove` refusal) appear nowhere; code: `throw new WorktreeProvisionError("path-exists"…)` / `"not-registered"` / `"locked"`.
+2. **CONFIRMED-WRONG** — same row still says `"unmanaged dir → path-exists never adopted/deleted"`; code doc-comment and new test cover "directory OR plain file": `if (await pathOccupied(path)) throw … "path-exists"` (and `not-registered` on remove).
+3. **CONFIRMED-WRONG** — same row states deletion is "gated on base-commit proof `base..branch` empty"; c5 replaced that proof (independent-pin via `for-each-ref --contains` + ancestor check) precisely because the quoted proof is unsound (`baseCommit: tip` case) — the row describes the rejected gate.
+4. **CONFIRMED-WRONG (minor, same row)** — "34 tests on real git repos" vs 50 tests / suite 1597; and no mention of the (vii) `head !== baseSha` accepted residual the code comment claims as documented.
+5. **RISK** — `pathOccupied` uses `stat` (follows links) and swallows every error: a dangling symlink at `taskPath` → ENOENT → "unoccupied" → `worktree add` dies `git-failed` ("already exists"), and `remove` returns `noop:true` with an entry still at the path — the same F3 class the commit set out to type; `lstat`, or ENOENT/ENOTDIR-only, closes it.
+6. **NOT-A-DEFECT** — ensure crash-recovery convergence and the remove noop test are unaffected (see C).
+7. **NOT-A-DEFECT** — deleting the timestamp/gate paths is untouched by this diff; `pathOccupied` cannot be reached for registered worktrees, so no adoption or deletion path widened.
+
+VERDICT: **REJECT** — must-fix (docs-only, plus one che
+
+ap code hardening): (a) in docs/11 §11.1 P6 row add `bad-wt-root`, `locked`, and `not-registered`-on-occupied-file to the error contract; (b) replace "unmanaged dir → path-exists" with dir-or-file; (c) replace the `base..branch`-only proof sentence with the independent-pin (`--contains`) + ancestor + `base..branch` gate and say why; (d) update 34→50 tests and record (vii) as the accepted untested tripwire; (e) optional: `lstat` in `pathOccupied`. I earned no ACCEPT: I executed nothing (no vitest, no git repro) — every claim above is reasoned from the attached diff and docs/11 text, and the per-series standard (c2 F2) makes drift on the error union a blocking defect.

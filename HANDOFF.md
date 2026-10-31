@@ -36,6 +36,12 @@ residual). Suite **1597 pass / 0 fail / 14 skip**, gate clean.
 an audit. Cycles must use a different family, and cycle-4-style ACCEPTs
 should say which model signed off.
 
+## 2026-11-01 — P6 ds-audit series (cycles 1-5, suite 1611 / 0 / 14, 51 worktree tests)
+
+The full post-commit audit series with deepseek-v4.1-flash-1017 landed on main (`673d4a1` -> final cycle-5 commit). Twelve real defects fixed across five cycles; the headline class: **git ref-resolution semantics** — a same-named TAG shadows a branch in `rev-parse`/`rev-list` (refs/tags/ precedes refs/heads/), which hollowed the deleteBranch proof after the C8 fix; every proof operand is now `refs/heads/`-qualified. Second class: **LOCKED worktrees** — git never marks locked entries prunable (locked+vanished dirs masqueraded live everywhere; liveness is now the `<path>/.git` gitfile), single `--force` cannot remove a locked worktree (`-f -f` required). Third: raw errnos and silent noops escaping the typed contract (wtRoot-as-file, plain-file/dangling-symlink at the task path -> `bad-wt-root` / `path-exists` / `not-registered`).
+
+**Process lessons (both hurt, both kept):** (1) the same-family auditor rule still applies — this series ran auditor+implementer in one family, and the auditor was WRONG twice (claimed tag-shadowing on `worktree add`, whose commit-ish is branch-oriented; claimed recreated dirs escape `prunable`, which git decides via `<path>/.git`). Neither was "fixed" — both were disproven by experiment and PINED with regression tests, and the proposed fix for the first would have introduced a real detached-worktree defect. **Never implement an audit claim without reproducing it first.** (2) The docs P6 row is designated the full contract; three cycles of code fixes silently drifted it (it described the rejected `base..branch`-only proof). Error-union changes must land in the same commit as the code.
+
 ## 2026-10-31 — P6 worktree provisioning + 4-cycle audit (suite 1608 / 0 / 14)
 
 **P6 implemented (docs/11 §11.1, §5, §14.1/§14.5).** `src/worktree/provision.ts`
