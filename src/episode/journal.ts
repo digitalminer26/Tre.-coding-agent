@@ -555,6 +555,13 @@ export class DecisionJournal {
     if (buf[buf.length - 1] === 0x0a) return false; // terminated — clean
     const lastNL = buf.lastIndexOf(0x0a);
     const tail = buf.subarray(lastNL + 1).toString("utf8");
+    // Same ambiguity boundary as read(): a complete-but-unterminated tail with
+    // a repeated key must not be terminated into the journal. Checked here
+    // rather than relying on open() calling read() first.
+    const duplicated = duplicateKeyIn(tail);
+    if (duplicated !== undefined) {
+      throw new EpisodeSchemaError(`decisions.jsonl: unterminated tail repeats the key ${JSON.stringify(duplicated)} — refusing to repair an ambiguous record`);
+    }
     let parsed: unknown;
     try { parsed = JSON.parse(tail); } catch {
       await truncate(this.path, lastNL + 1);

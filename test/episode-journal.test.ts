@@ -705,3 +705,30 @@ test("read() no longer advertises an unobservable malformed counter (post-commit
   await writeFile(journal.path, JSON.stringify(intent()) + "\n{bad\n" + JSON.stringify(outcome()) + "\n");
   await assert.rejects(journal.read(), EpisodeSchemaError);
 });
+
+// NOTE (honest scope): #repairTail is private and open() calls read() first,
+// which already rejects a complete duplicate-key tail. This test pins the
+// END-TO-END contract (open refuses and never terminates the tail). The
+// in-function guard is defense-in-depth; it is not separately observable
+// through the public API.
+test("repair never terminates an unterminated record that repeats a key (d5447d8 audit)", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  const dupTail = '{"schema":"tre-supervisor/1","id":"d-1","ts":1,"episodeId":"ep","kind":"decision-outcome","actionId":"a","actionId":"b","acked":true,"progress":"none"}';
+  await writeFile(journal.path, dupTail); // complete JSON, newline lost
+  await assert.rejects(DecisionJournal.open(journal.path), /repeats the key "actionId"/);
+  assert.equal(await readFile(journal.path, "utf8"), dupTail); // not terminated, not mutated
+});
+
+test("pretty-printed (multi-line) record is rejected fail-closed, writer output is always one line", async (t) => {
+  const { root, dir } = await tmpEpisode();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const journal = await DecisionJournal.forEpisode(dir);
+  await journal.append({ ...outcome(), notes: "line1\nline2" });
+  const raw = await readFile(journal.path, "utf8");
+  assert.equal(raw.split("\n").length - 1, 1); // embedded newline is escaped by JSON.stringify
+  assert.equal((await journal.read()).records.length, 1);
+  await writeFile(journal.path, JSON.stringify(outcome(), null, 2) + "\n");
+  await assert.rejects(journal.read(), EpisodeSchemaError);
+});
