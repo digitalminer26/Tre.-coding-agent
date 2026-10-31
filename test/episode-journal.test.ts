@@ -737,9 +737,7 @@ test("duplicateKeyIn: deterministic seeded fuzz — no false positives or negati
   let validCount = 0;
   for (let i = 0; i < 600; i++) {
     const doc = "{" + genObj(2) + "}";
-    let parsed: unknown;
-    try { parsed = JSON.parse(doc); } catch { continue; }
-    void parsed;
+    try { JSON.parse(doc); } catch { continue; } // well-formedness check only; result unused
     validCount++;
     assert.equal(duplicateKeyIn(doc), undefined, `false positive on ${doc.slice(0, 160)}`);
   }
