@@ -84,6 +84,7 @@ export type ProvisionErrorCode =
   | "prune-refused"             // stale entries exist outside our wtRoot
   | "branch-in-use"             // deleteBranch refused: branch checked out in another worktree
   | "locked"                    // worktree is `git worktree lock`ed — explicit unlock required
+  | "bad-wt-root"               // wtRoot exists as a non-directory (open() refuses)
   | "git-failed";               // any other git failure (command + stderr attached)
 
 export class WorktreeProvisionError extends Error {
@@ -411,7 +412,19 @@ export class WorktreeProvisioner {
       }
     }
     const wtArg = resolve(options.wtRoot);
-    await mkdir(wtArg, { recursive: true });
+    try {
+      await mkdir(wtArg, { recursive: true });
+    } catch (err) {
+      // ds-c3 F4: wtRoot existing as a NON-DIRECTORY (regular file,
+      // symlink to a file) makes even `recursive` mkdir throw EEXIST
+      // (verified) — a raw errno escaping the typed contract. Everything
+      // that is not "already a directory" is a placement refusal.
+      const e = err as { code?: string };
+      if (e.code === "EEXIST" || e.code === "ENOTDIR") {
+        throw new WorktreeProvisionError("bad-wt-root", `wtRoot exists but is not a directory: ${wtArg} (${e.code}) — refusing to provision under it`);
+      }
+      throw new WorktreeProvisionError("bad-wt-root", `cannot create wtRoot ${wtArg}: ${e.code ?? String(err)}`);
+    }
     return new WorktreeProvisioner(repoToplevel, await realpath(wtArg), warn);
   }
 
@@ -428,6 +441,17 @@ export class WorktreeProvisioner {
    *   branch at base → `worktree add <path> <branch>` (crash-recovery re-attach)
    *   branch moved   → `branch-conflict` (never reset, never rebased — P7/P12 territory)
    * Post-creation HEAD is verified against the base pin.
+   * A preexisting LIVE entry that is `git worktree lock`ed is ACCEPTED
+   * (ds-c2 Q5 adjudication, documented per its recommendation): the lock
+   * is an admin signal aimed at removal/prune (git's canonical use is
+   * holding a worktree during submodule migration), not a provenance
+   * gate — refusing it would break ensure()'s idempotence for callers
+   * that lock their own dirs. Hazard to state for callers: writing into
+   * a worktree another process is mid-migration on can corrupt that
+   * migration; the orchestrator (P7 fence) owns who writes where, so
+   * locks inside our wtRoot are ours to interpret, not git's to police.
+   * Locked entries whose directory is GONE are staleness, not liveness
+   * (entryGone: <path>/.git gitfile must exist).
    */
   async ensureTaskWorktree(params: EnsureTaskWorktreeParams): Promise<TaskWorktree> {
     const { episodeId, taskId } = params;
@@ -815,10 +839,16 @@ function nearestExisting(p: string): string {
  */
 async function entryGone(entry: WorktreeEntry): Promise<boolean> {
   if (entry.prunable) return true;
-  // ds-c2 F5: check for the worktree gitfile, not just the directory —
-  // a vanished-then-recreated plain directory (or empty dir) would pass
-  // a bare dirExists and be returned as a live worktree whose writes go
-  // nowhere. Every LINKED worktree has <path>/.git by definition.
+  // ds-c3 F1 adjudication: the auditor claimed unlocked entries whose
+  // directory was deleted AND RECREATED escape `prunable` (git would see
+  // the path exist and call it live). DISPROVEN experimentally twice on
+  // git 2.54 (locked and unlocked): git's prune check inspects the
+  // GITFILE <path>/.git, not <path> — a recreated plain directory still
+  // lists `prunable gitdir file points to non-existent location`. So
+  // unlocked entries need no extra stat (and none is done: a redundant
+  // stat that fails for permission reasons would falsely claim staleness
+  // where git says healthy). Only LOCKED entries need our own check —
+  // git never marks them prunable, whatever it finds on disk.
   if (entry.locked) return !(await gitfileExists(entry.path));
   return false;
 }

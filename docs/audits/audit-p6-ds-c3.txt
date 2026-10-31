@@ -1,0 +1,24 @@
+Q1 — The asymmetry is a real hole. `entryGone` only consults `gitfileExists` when `entry.locked`; for an UNLOCKED entry it trusts `prunable`, and git's prune reason for a missing worktree is derived from the worktree path ("gitdir file points to non-existent location"), so recreating a plain directory at that path clears it. Decisive repro: `wt=…/wt/t1; rm -rf $wt; mkdir $wt; git -C repo worktree list --porcelain` (no `prunable` line expected), then `prov.ensureTaskWorktree(...)` returns `preexisting:true` for a directory containing no `.git`. The F5 test only proves the locked branch; the same `<path>/.git` check is needed unconditionally (or at least also for unlocked).
+
+Q2 — Mixed stale+live is fine: stale throws and names `unlock`/`prune` plus "also live at …", which is the actionable priority. Ordering (self-gone → foreign → locked → dirty → users → proof → mutation) means a *dirty* worktree with a stale user fires `dirty` first; that is sane (cheapest, most local refusal first, nothing mutated either way), though the operator needs two calls. Note the dirty gate runs `git status` in `entry.path` before the users gate, which is harmless.
+
+Q3 — CONFIRMED doc drift: the `ensureTaskWorktree` doc comment (and the class "Conservative rules" block) says nothing about accepting a preexisting LOCKED live entry or the mid-submodule-migration write hazard; cycle-2 Q5 asked for that documentation and only `removeTaskWorktree`'s comment was updated. Check: read the `ensureTaskWorktree` JSDoc — no mention of `locked`.
+
+Q4 — Safe. `removed = stale.filter(e => !after.has(e.path))` is a subset of the before/stale list, so concurrent additions in `after` are ignored and can never produce negative counts; no crash, no invented paths. Concurrent *deletions* between list and prune just shrink `before`'s relevance and stay correct.
+
+Q5 — Sound. `resolveCommit` runs `rev-parse --verify --quiet <rev>^{commit}` via `revArgs` (dash-guarded) and rejects anything not `/^[0-9a-f]{40}$/`, so `baseSha` is canonical; every proof operand (`for-each-ref --contains`, `merge-base --is-ancestor`, `rev-list baseSha..refs/heads/...`, `rev-parse refs/heads/...`) uses `baseSha`/qualified refs, and `params.baseCommit` reaches no other command. `@{-1}` resolves to a sha and is validated, so it cannot leak through.
+
+Q6 — The ds-c1 F1 test is mutation-safe: revert the qualification and `rev-parse --verify agent/epL/t1` resolves to the tag at `base`, so `base..branch` is empty, no `unmerged` is thrown, `branch -D` deletes the advanced branch and `assert.rejects` fails. The only message-text assertions are on our own strings (`/outside/`, `unlock`/`prune`), not transient git wording.
+
+Q7 — Sweep found two additional issues plus the Q1 hole below; nothing else new: `prune()`'s foreign/locked refusals, the `-f -f` combination, `nearestExisting` ENOENT/ENOTDIR-only, and `pathsEqual` residuals all behave as documented.
+
+FINDINGS
+- F1 [HIGH, must-fix] `entryGone` (provision.ts:820) misses UNLOCKED entries whose path was recreated as a plain/empty dir — `ensureTaskWorktree`/`openTaskWorktree` return `preexisting:true` for a non-worktree and `removeTaskWorktree` then dies with `git-failed` from `git status`; fix: after the `prunable` check, `return !(await gitfileExists(entry.path));` for all linked entries. Repro: ensure ep/t1 → `rm -rf`+`mkdir` path → ensure again.
+- F2 [HIGH, build] test/worktree-provision.test.ts:30 imports `dirname` and never uses it — `tsc` fails under `noUnusedLocals` (CI red); verify `grep -n noUnusedLocals tsconfig*.json`. Repro: `npx tsc --noEmit`.
+- F3 [LOW, doc, confirmed] `ensureTaskWorktree` JSDoc + class "Conservative rules" never document accepting a LOCKED live entry (mid-submodule-migration write hazard) — the cycle-2 Q5 recommendation is unfulfilled, while `removeTaskWorktree`'s comment was updated.
+- F4 [LOW] `open()` leaks a raw `EEXIST` (not `WorktreeProvisionError`) when `wtRoot` exists as a regular file: `anchor` walks to the parent, gates pass, `mkdir(wtArg,{recursive:true})` throws. Repro: `touch x/wt; WorktreeProvisioner.open({wtRoot:'x/wt',...})`.
+- F5 [NOT-A-DEFECT] `prune()` `removed` = stale∩¬after, additions ignored, no negatives/crash (Q4).
+- F6 [NOT-A-DEFECT] ds-c1 F1 tag test catches a qualification revert via the `unmerged` assertion (Q6).
+- F7 [NOT-A-DEFECT] `resolveCommit` canonicalizes + validates SHA40; no raw `params.baseCommit` reaches a git command unguarded (Q5).
+
+VERDICT: REJECT — must-fix F1 (unlocked recreated-dir masquerade; one-line `entryGone` change plus an unlocked regression test) and F2 (unused `dirname` import breaks the build under `noUnusedLocals`). F3/F4 are follow-ups; everything else audited clean.

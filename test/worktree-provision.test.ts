@@ -27,7 +27,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   WorktreeProvisioner,
@@ -583,6 +583,31 @@ test("remove: locked+vanished is stale-registration with actionable guidance, ne
       assert.ok(m.includes("unlock") && m.includes("prune"), `message must name the recovery path, got: ${m}`);
       return true;
     },
+  );
+});
+
+test("open(): wtRoot existing as a regular FILE is a typed bad-wt-root refusal, not raw EEXIST (audit ds-c3 F4)", async () => {
+  const { dir, repo } = await setup();
+  const filePath = join(dir, "file-as-wtroot");
+  await writeFile(filePath, "not a directory\n");
+  await assert.rejects(
+    WorktreeProvisioner.open({ repoRoot: repo, wtRoot: filePath }),
+    (e: unknown) => { expectCode(e, "bad-wt-root"); return true; },
+  );
+});
+
+test("ensure: an UNLOCKED entry whose dir was recreated as a plain dir is still prunable-stale (audit ds-c3 F1 disproven, pinned)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epV", taskId: "t1", baseCommit: base });
+  await rm(wt.path, { recursive: true, force: true });
+  await mkdir(wt.path, { recursive: true }); // plain dir, no .git gitfile
+  // git's prune check inspects <path>/.git, not <path>: a recreated
+  // plain directory STILL lists prunable (verified git 2.54) — this test
+  // pins that behavior against a git change that would break entryGone's
+  // unlocked fast-path.
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epV", taskId: "t1", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "stale-registration"); return true; },
   );
 });
 
