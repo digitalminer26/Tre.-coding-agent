@@ -27,6 +27,8 @@ import {
   projectSessionReplay,
   projectWorkerEnvelope,
   parseWorkerEnvelope,
+  parseFleetEnvelope,
+  FleetObserver,
   writeLiveMarker,
   readLiveMarker,
   type SessionEntryShape,
@@ -362,6 +364,121 @@ test("live marker: round-trip and staleness by age", async () => {
   assert.equal(old!.fresh, false, "marker older than 60s is stale (dead-pid false positive guard)");
 
   assert.equal(await readLiveMarker(dir, "nope", now), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// FleetObserver — per-episode tre-fleet/1 envelope stream (§8/S7)
+// ---------------------------------------------------------------------------
+
+test("FleetObserver emits seq-ordered tre-fleet/1 envelopes to events/fleet.jsonl", async () => {
+  const dir = await freshDir();
+  const sess = join(dir, "w1.jsonl");
+  await writeFile(sess, '{"type":"message","id":"m1","message":{"role":"assistant","model":"m","content":[{"type":"toolCall","id":"t1","name":"bash"}],"stopReason":"toolUse"}}\n');
+  const obs = new FleetObserver(dir);
+  obs.watchWorker("w1", sess, { taskId: "task-1" });
+  const envs = await obs.refresh({ now: 1_700_000_000_000 });
+  assert.equal(envs.length, 1);
+  assert.deepEqual(obs.watchedWorkers(), ["w1"]);
+  assert.equal(obs.evidenceOf("w1").lastTool, "bash");
+  const env = envs[0]!;
+  assert.equal(env.schema, "tre-fleet/1");
+  assert.equal(env.episodeId, dir.split("/").pop());
+  assert.equal(env.workerId, "w1");
+  assert.equal(env.taskId, "task-1");
+  assert.equal(env.seq, 0);
+  assert.equal(env.workerState, "tool");
+  assert.deepEqual(env.source, { kind: "session", entryId: "m1" });
+  const onDisk = await readJsonl(join(dir, "events", "fleet.jsonl"));
+  assert.equal(onDisk.length, 1);
+  assert.deepEqual(onDisk[0], JSON.parse(JSON.stringify(env)));
+  // no new records → no new envelopes (stream stays append-only, no churn)
+  assert.deepEqual(await obs.refresh({ now: 1_700_000_000_001 }), []);
+});
+
+test("FleetObserver recovers seq from the stream high-water mark after restart (torn lines skipped)", async () => {
+  const dir = await freshDir();
+  const sess = join(dir, "w1.jsonl");
+  await writeFile(sess, '{"type":"message","id":"m1","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"a"}],"stopReason":"stop"}}\n');
+  const o1 = new FleetObserver(dir);
+  o1.watchWorker("w1", sess);
+  const first = await o1.refresh({ now: 1000 });
+  assert.equal(first[0]!.seq, 0);
+  // Simulate a crash mid-append: a torn line at the tail of OUR stream.
+  await appendLine(join(dir, "events", "fleet.jsonl"), '{"seq":42,"torn":');
+  const o2 = new FleetObserver(dir);
+  o2.watchWorker("w1", sess);
+  await writeFile(sess, '{"type":"message","id":"m1","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"a"}],"stopReason":"stop"}}\n{"type":"message","id":"m2","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"b"}],"stopReason":"stop"}}\n');
+  const second = await o2.refresh({ now: 2000 });
+  assert.equal(second.length, 1, "only the new record emits (offsets persisted across restart)");
+  assert.equal(second[0]!.seq, 1, "torn tail carries no readable seq → high-water mark is the last PARSED line (0); reusing 1 is safe because the torn envelope was never deliverable");
+  // a *complete* high-seq line does bump the mark:
+  await appendLine(join(dir, "events", "fleet.jsonl"), '{"schema":"tre-fleet/1","episodeId":"x","workerId":"w1","seq":42,"ts":1,"workerState":"unknown","stale":false,"source":{"kind":"decision","id":"d"},"event":{}}');
+  const o3 = new FleetObserver(dir);
+  o3.watchWorker("w1", sess);
+  await writeFile(sess, '{"type":"message","id":"m1","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"a"}],"stopReason":"stop"}}\n{"type":"message","id":"m2","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"b"}],"stopReason":"stop"}}\n{"type":"message","id":"m3","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"c"}],"stopReason":"stop"}}\n');
+  const third = await o3.refresh({ now: 3000 });
+  assert.equal(third[0]!.seq, 43, "complete seq-42 line bumps the mark past it");
+});
+
+test("FleetObserver.emitDecision interleaves decision envelopes verbatim", async () => {
+  const dir = await freshDir();
+  const obs = new FleetObserver(dir);
+  const decision = { action: "kill", reason: "identical-batch", policy: "S2" };
+  const env = await obs.emitDecision("dec-1", decision, { workerId: "w1", taskId: "t9", now: 5000 });
+  assert.deepEqual(env.source, { kind: "decision", id: "dec-1" });
+  assert.deepEqual(env.event, decision);
+  assert.equal(env.workerState, "unknown", "a decision says nothing about worker state (I3)");
+  assert.equal(env.taskId, "t9");
+  const onDisk = await readJsonl(join(dir, "events", "fleet.jsonl"));
+  assert.deepEqual(onDisk.map((r) => r.seq), [0]);
+  await assert.rejects(() => obs.emitDecision("", {}), /decision id is required/);
+});
+
+test("FleetObserver creates events/ on demand (no P4-layout precondition)", async () => {
+  const dir = await freshDir(); // deliberately NO events/ subdir
+  const obs = new FleetObserver(dir);
+  const env = await obs.emitDecision("dec-1", { action: "nudge" }, { now: 1 });
+  assert.equal(env.seq, 0);
+  const sess = join(dir, "w.jsonl");
+  await writeFile(sess, '{"type":"message","id":"m1","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"x"}],"stopReason":"stop"}}\n');
+  obs.watchWorker("w", sess);
+  const envs = await obs.refresh({ now: 2 });
+  assert.equal(envs.length, 1);
+  assert.deepEqual(envs[0]!.source, { kind: "session", entryId: "m1" });
+});
+
+// ---------------------------------------------------------------------------
+// parseFleetEnvelope — strict §8 validation
+// ---------------------------------------------------------------------------
+
+async function minimalEnvelope(): Promise<Record<string, unknown>> {
+  const dir = await freshDir();
+  const obs = new FleetObserver(dir);
+  const env = await obs.emitDecision("dec-1", { action: "x" }, { now: 1 });
+  return JSON.parse(JSON.stringify(env)) as Record<string, unknown>;
+}
+
+test("parseFleetEnvelope: accepts a well-formed envelope and rejects foreign payloads", async () => {
+  const base = await minimalEnvelope();
+  assert.equal(parseFleetEnvelope(base).source.kind, "decision");
+  for (const bad of [undefined, null, 42, "x", [], { ...base, schema: "tre.observe.v1" }]) {
+    assert.throws(() => parseFleetEnvelope(bad), /envelope/);
+  }
+});
+
+test("parseFleetEnvelope: source.kind is a checked closed set (audit finding 2)", async () => {
+  const base = await minimalEnvelope();
+  // unknown kind must be rejected even when it carries plausible fields
+  assert.throws(
+    () => parseFleetEnvelope({ ...base, source: { kind: "weird", id: "x", entryId: "y" } }),
+    /source\.kind must be "session"\|"decision"/,
+  );
+  // each kind demands its own discriminator field
+  assert.throws(() => parseFleetEnvelope({ ...base, source: { kind: "session" } }), /entryId/);
+  assert.throws(() => parseFleetEnvelope({ ...base, source: { kind: "decision" } }), /\bid\b/);
+  // and the happy paths pass
+  const happy = parseFleetEnvelope({ ...base, source: { kind: "session", entryId: "e1" } });
+  assert.equal(happy.source.kind === "session" && happy.source.entryId, "e1");
 });
 
 // ---------------------------------------------------------------------------

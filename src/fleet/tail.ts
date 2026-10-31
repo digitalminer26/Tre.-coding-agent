@@ -13,9 +13,10 @@
  * Contracts this file honors:
  *  - Observation-only: never opens a worker file for writing and never
  *    repairs a torn tail (§13.1 repair stays with the exclusive writer —
- *    the worker). A partial trailing line is held in a private buffer and
- *    its bytes are NOT reflected in the persisted offset, so a crash
- *    mid-line loses nothing and redelivers nothing.
+ *    the worker). A partial trailing line is held in a private buffer; the
+ *    persisted offset covers the consumed bytes and the held partial is
+ *    persisted alongside it (base64), so a crash mid-line loses nothing
+ *    and redelivers nothing.
  *  - §13.1 reconcile on the consumer side: truncation (size < offset) or
  *    in-place replacement (size equal, head fingerprint or mtime moved)
  *    resets the cursor to 0 and re-reads — the tail repair the worker
@@ -33,8 +34,8 @@
  * supervisor (P6+) wires it in — the test suite enforces that promise.
  */
 import { createHash } from "node:crypto";
-import { rmSync } from "node:fs";
-import { open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdirSync, rmSync } from "node:fs";
+import { mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 
 // ─────────────────────────── JsonlTailer ───────────────────────────
 
@@ -861,6 +862,7 @@ export function parseFleetEnvelope(rec: unknown): FleetEnvelope {
   if (!src || typeof src !== "object") throw new Error('envelope missing required field: source (kind "session"|"decision")');
   if (src.kind === "session" && typeof src.entryId !== "string") throw new Error("session source missing required field: entryId");
   if (src.kind === "decision" && typeof src.id !== "string") throw new Error("decision source missing required field: id");
+  if (src.kind !== "session" && src.kind !== "decision") throw new Error(`envelope.source.kind must be "session"|"decision" (got ${JSON.stringify(src.kind)})`);
   if (!("event" in r)) throw new Error("envelope missing required field: event");
   if (r.schema !== "tre-fleet/1") throw new Error(`envelope.schema must be "tre-fleet/1" (got ${JSON.stringify(r.schema)})`);
   const env: FleetEnvelope = {
@@ -950,6 +952,7 @@ export class FleetObserver {
       }
     }
     if (emitted.length > 0) {
+      await mkdir(joinPath(this.episodeDir, "events"), { recursive: true });
       await appendSynced(
         joinPath(joinPath(this.episodeDir, "events"), "fleet.jsonl"),
         emitted.map((e) => JSON.stringify(e)).join("\n") + "\n",
@@ -982,6 +985,7 @@ export class FleetObserver {
       event: decision,
     };
     if (opts?.taskId) env.taskId = opts.taskId;
+    await mkdir(joinPath(this.episodeDir, "events"), { recursive: true });
     await appendSynced(joinPath(this.episodeDir, "events", "fleet.jsonl"), JSON.stringify(env) + "\n");
     return env;
   }
@@ -1122,6 +1126,7 @@ async function appendSynced(path: string, data: string): Promise<void> {
 
 /** tmp + fsync + rename (atomic replacement; process-death durability). */
 async function writeJsonSynced(path: string, value: unknown): Promise<void> {
+  mkdirSync(parentDirOf(path), { recursive: true }); // our own outputs only — never the watched files
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(tmp, JSON.stringify(value) + "\n");
   const fh = await open(tmp, "r+");
