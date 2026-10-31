@@ -490,6 +490,18 @@ export class WorktreeProvisioner {
         // Crash-recovery attach: the branch exists at base (created by a
         // prior attempt) but its worktree registration is gone — `add`
         // without -b re-binds the existing branch.
+        // ds-c2 F1 adjudication: the auditor claimed a same-named TAG
+        // shadows this unqualified operand and detaches the worktree, and
+        // proposed qualifying with `refs/heads/<branch>` — BOTH claims
+        // were DISPROVEN by experiment on git 2.54: with
+        // refs/tags/agent/e/t present, `worktree add p agent/e/t` still
+        // checks out the BRANCH (worktrees/<id>/HEAD is the symref
+        // refs/heads/...; porcelain lists the branch — and still does
+        // when the tag is force-moved AHEAD of it), while the proposed
+        // `worktree add p refs/heads/feat` silently produces a DETACHED
+        // worktree — the "fix" would have introduced the exact defect it
+        // claimed. `worktree add`'s commit-ish is branch-oriented, unlike
+        // plain rev-parse. Regression-tested; do NOT qualify this operand.
         await git(this.repoRoot, ["worktree", "add", "--quiet", path, branch as string]);
       } else {
         await git(this.repoRoot, ["worktree", "add", "--quiet", "--no-track", "-b", branch as string, path, baseSha]);
@@ -547,11 +559,21 @@ export class WorktreeProvisioner {
    *    untracked; ignored-only worktrees pass) unless force,
    *  - deleteBranch requires baseCommit proof (`base..branch` empty)
    *    unless force — deleting unmerged work is an explicit discard,
-   *  - then `worktree remove` (--force only when forced), then `branch -D`
+   *  - then `worktree remove` (--force for dirty, `-f -f` additionally
+   *    when LOCKED — git requires the double force to override a lock;
+   *    audit ds-c1 F2), then `branch -D`
    *    AFTER the manual base-pinned gate (never `branch -d`: its
    *    heuristic is merged-into-HEAD, not base-relative). A branch
    *    checked out in another worktree makes `branch -D` fail —
-   *    surfaced, not bypassed.
+   *    surfaced, not bypassed. A user whose directory is gone yields
+   *    stale-registration guidance, never a circular branch-in-use (ds-c2 F4).
+   *  Error codes thrown: not-registered, stale-registration, foreign-branch,
+   *  locked, dirty, branch-in-use, no-base-for-branch-delete, unmerged,
+   *  git-failed (prune() also throws prune-refused and locked).
+   *  Branch names beginning with "-" are rejected by git's own
+   *  check-ref-format (verified: `git branch -- -foo` → "not a valid
+   *  branch name"), so registry-sourced operands cannot inject options;
+   *  every proof operand is ref-qualified anyway (ds-c1 F1 / ds-c2 F7).
    */
   async removeTaskWorktree(params: RemoveTaskWorktreeParams): Promise<RemoveReport> {
     const { episodeId, taskId } = params;
@@ -595,9 +617,25 @@ export class WorktreeProvisioner {
       // Pre-gate (audit F5): a branch checked out in ANOTHER worktree
       // would let `worktree remove` succeed and then fail `branch -D` —
       // a partial mutation. Refuse BEFORE touching anything.
-      const users = (await listWorktrees(this.repoRoot)).filter((e) => e.branch === entry.branch && !pathsEqual(e.path, entry.path));
-      if (users.length > 0) {
-        throw new WorktreeProvisionError("branch-in-use", `branch ${entry.branch} is also checked out at ${users.map((u) => u.path).join(", ")} — refusing partial removal`);
+      // Audit ds-c2 F4: a user whose directory is GONE (locked entries are
+      // never marked prunable) is not a live checkout — reporting plain
+      // branch-in-use sends the operator in circles, because unlock+prune
+      // is the fix and reaching it is safe. Refuse with actionable stale
+      // guidance instead. Live users keep the original refusal.
+      const otherUsers = (await listWorktrees(this.repoRoot)).filter((e) => e.branch === entry.branch && !pathsEqual(e.path, entry.path));
+      const staleUsers: string[] = [];
+      const liveUsers: string[] = [];
+      for (const u of otherUsers) {
+        (await entryGone(u) ? staleUsers : liveUsers).push(u.path);
+      }
+      if (staleUsers.length > 0) {
+        throw new WorktreeProvisionError(
+          "stale-registration",
+          `branch ${entry.branch} is also registered at ${staleUsers.join(", ")} whose director${staleUsers.length > 1 ? "ies are" : "y is"} gone — unlock them if needed and prune() before removing this worktree${liveUsers.length > 0 ? ` (also live at ${liveUsers.join(", ")})` : ""}`,
+        );
+      }
+      if (liveUsers.length > 0) {
+        throw new WorktreeProvisionError("branch-in-use", `branch ${entry.branch} is also checked out at ${liveUsers.join(", ")} — refusing partial removal`);
       }
       if (!force) {
         const base = params.baseCommit;
@@ -777,8 +815,23 @@ function nearestExisting(p: string): string {
  */
 async function entryGone(entry: WorktreeEntry): Promise<boolean> {
   if (entry.prunable) return true;
-  if (entry.locked) return !(await dirExists(entry.path));
+  // ds-c2 F5: check for the worktree gitfile, not just the directory —
+  // a vanished-then-recreated plain directory (or empty dir) would pass
+  // a bare dirExists and be returned as a live worktree whose writes go
+  // nowhere. Every LINKED worktree has <path>/.git by definition.
+  if (entry.locked) return !(await gitfileExists(entry.path));
   return false;
+}
+
+/** True when `<p>/.git` exists (file OR dir): the definition of a live
+ *  linked-worktree checkout. Stat errors (ENOENT etc.) mean absent. */
+async function gitfileExists(p: string): Promise<boolean> {
+  try {
+    await stat(join(p, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function dirExists(p: string): Promise<boolean> {

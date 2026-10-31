@@ -27,7 +27,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
   WorktreeProvisioner,
@@ -552,6 +552,64 @@ test("ensure: a LOCKED + vanished registration is stale-registration, not preexi
     prov.ensureTaskWorktree({ episodeId: "epP", taskId: "t1", baseCommit: base }),
     (e: unknown) => { expectCode(e, "stale-registration"); return true; },
   );
+});
+
+test("remove: force removes a LOCKED + DIRTY worktree in one shot (audit ds-c2 F3)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epQ", taskId: "t1", baseCommit: base });
+  await writeFile(join(wt.path, "dirt.txt"), "uncommitted\n");
+  await git(repo, "worktree", "lock", wt.path);
+  const rep = await prov.removeTaskWorktree({ episodeId: "epQ", taskId: "t1", force: true });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal(existsSync(wt.path), false);
+  assert.equal((await listWorktrees(repo)).some((e) => e.path === wt.path), false);
+});
+
+test("remove: locked+vanished is stale-registration with actionable guidance, never a circular refusal (audit ds-c2 F4)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epS", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  await rm(wt.path, { recursive: true, force: true });
+  // Proven experimentally: git cannot host a SECOND live checkout of the
+  // branch while a stale registration claims it (worktree add refuses),
+  // so the reachable collision state is exactly this one — the gate's
+  // staleUsers/liveUsers split must report the stale state, and it must
+  // name the recovery (unlock + prune).
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epS", taskId: "t1", deleteBranch: true }),
+    (e: unknown) => {
+      expectCode(e, "stale-registration");
+      const m = (e as WorktreeProvisionError).message;
+      assert.ok(m.includes("unlock") && m.includes("prune"), `message must name the recovery path, got: ${m}`);
+      return true;
+    },
+  );
+});
+
+test("ensure: a locked entry whose path was recreated as a plain dir is stale, not a live worktree (audit ds-c2 F5)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epT", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  await rm(wt.path, { recursive: true, force: true });
+  await mkdir(wt.path, { recursive: true }); // plain dir, no .git gitfile
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epT", taskId: "t1", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "stale-registration"); return true; },
+  );
+});
+
+test("ensure: a same-named tag does NOT detach the crash-recovery attach (audit ds-c2 F1 disproven — keep operand unqualified)", async () => {
+  const { prov, repo, base } = await setup();
+  // Create the branch at base WITHOUT a worktree registration (crash
+  // simulation), then plant a same-named tag, then re-ensure: git 2.54
+  // rebinds the BRANCH (branch-oriented commit-ish), not the tag.
+  const branch = taskBranchName("epU", "t1");
+  await git(repo, "branch", branch, base);
+  await git(repo, "tag", branch, base);
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epU", taskId: "t1", baseCommit: base });
+  assert.equal(wt.branch, branch);
+  const headRef = await git(wt.path, "symbolic-ref", "HEAD");
+  assert.equal(headRef.trim(), `refs/heads/${branch}`);
 });
 
 test("prune: a LOCKED stale entry under wtRoot is refused, never a silent skip (audit ds-c1 F3)", async () => {
