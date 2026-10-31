@@ -243,10 +243,10 @@ async function isDescendantOf(repoRoot: string, head: string, base: string): Pro
   if (head === base) return true;
   // `--is-ancestor A B` is true when A is an ancestor of B: we ask whether
   // BASE is an ancestor of HEAD (the pin's invariant), not the reverse.
-  return probeExit0(repoRoot, ["merge-base", "--is-ancestor", base, head]).then(
-    (baseIsAncestorOfHead) => baseIsAncestorOfHead,
-    () => false,
-  );
+  // Exit 1 is the documented "no"; ANY undocumented failure (timeout,
+  // corrupt repo, invalid head object) PROPAGATES as git-failed rather
+  // than being masked into a permanent-looking branch-conflict (ds-c1 F4).
+  return probeExit0(repoRoot, ["merge-base", "--is-ancestor", base, head]);
 }
 
 // ---------------------------------------------------------------------------
@@ -444,8 +444,13 @@ export class WorktreeProvisioner {
 
     if (entry !== undefined) {
       // Registered with THIS repo: the open path (never re-`add`).
-      if (entry.prunable) {
-        throw new WorktreeProvisionError("stale-registration", `worktree at ${path} is registered but its directory is gone — call prune() first`);
+      if (await entryGone(entry)) {
+        throw new WorktreeProvisionError(
+          "stale-registration",
+          entry.locked
+            ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
+            : `worktree at ${path} is registered but its directory is gone — call prune() first`,
+        );
       }
       if (mode === "branch" && entry.branch !== branch) {
         throw new WorktreeProvisionError("foreign-branch", `worktree ${path} is on branch ${JSON.stringify(entry.branch ?? "(detached)")}, expected ${JSON.stringify(branch)} — refusing to adopt`);
@@ -520,8 +525,13 @@ export class WorktreeProvisioner {
     const path = this.taskPath(taskId);
     const entry = (await listWorktrees(this.repoRoot)).find((e) => pathsEqual(e.path, path));
     if (entry === undefined) return null;
-    if (entry.prunable) {
-      throw new WorktreeProvisionError("stale-registration", `worktree at ${path} is registered but its directory is gone — call prune() first`);
+    if (await entryGone(entry)) {
+      throw new WorktreeProvisionError(
+        "stale-registration",
+        entry.locked
+          ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
+          : `worktree at ${path} is registered but its directory is gone — call prune() first`,
+      );
     }
     const expected = taskBranchName(episodeId, taskId);
     if (entry.branch !== null && entry.branch !== expected) {
@@ -556,23 +566,23 @@ export class WorktreeProvisioner {
       }
       return { episodeId, taskId, path, branch: null, worktreeRemoved: false, branchDeleted: false, forced: false, noop: true };
     }
-    if (entry.prunable) {
+    if (await entryGone(entry)) {
       throw new WorktreeProvisionError(
         "stale-registration",
         entry.locked
-          ? `worktree at ${path} is registered, LOCKED, and its directory is gone — \`git worktree unlock\` then \`git worktree prune\` (prune() cannot complete a locked entry)`
+          ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
           : `worktree at ${path} is registered but its directory is gone — call prune() instead of remove`,
       );
-    }
-    // Audit C6: git refuses `worktree remove` on a locked entry without
-    // --force; say so up front instead of surfacing a bare git-failed
-    // after the dirty gate has already run.
-    if (entry.locked && !force) {
-      throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force to discard`);
     }
     const expected = taskBranchName(episodeId, taskId);
     if (entry.branch !== null && entry.branch !== expected) {
       throw new WorktreeProvisionError("foreign-branch", `worktree ${path} is on branch ${JSON.stringify(entry.branch)} — refusing to remove a foreign worktree`);
+    }
+    // Audit C6 (+ ds-c1 F6 ordering): locked refusals come AFTER the
+    // foreign check so a locked FOREIGN entry is never advertised as
+    // force-discardable (force would then hit foreign-branch anyway).
+    if (entry.locked && !force) {
+      throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force (force discards uncommitted work AND overrides the lock)`);
     }
 
     // Dirty gate (strictly conservative: includes untracked).
@@ -603,23 +613,42 @@ export class WorktreeProvisioner {
         // deleted (the episode branch, main, a tag). A base reachable
         // ONLY through this branch is not a pin at all — it is the
         // branch's own history, and deleting it would lose that history.
-        const tip = (await git(this.repoRoot, ["rev-parse", "--verify", entry.branch])).trim();
+        // (ds-c1 F8: `for-each-ref --contains` requires git >= 2.7 — on
+        // older git this fails CLOSED with git-failed, never silently.
+        // Residual by design: containment via an unrelated tag at the
+        // branch tip satisfies independence; that is the caller's own
+        // pinning, and the commit object survives through that ref, so
+        // no work becomes unreachable — deletion of the LOCAL branch
+        // then discards nothing that the caller has not pinned.)
+        // Audit ds-c1 F1: `entry.branch` UNQUALIFIED resolves through
+        // git's ref-rev-parse rules, where refs/tags/ comes BEFORE
+        // refs/heads/ — a same-named tag shadows the branch, so the gate
+        // would check the tag's history while `branch -D` deletes the real
+        // branch (proven: tag `agent/e/t` at base beats the advanced
+        // branch in `rev-parse --verify`). Every operand is qualified.
+        const branchRef = `refs/heads/${entry.branch}`;
+        const tip = (await git(this.repoRoot, ["rev-parse", "--verify", branchRef])).trim();
         const containing = (await git(this.repoRoot, ["for-each-ref", "--contains", baseSha, "--format=%(refname)"])).trim().split("\n").filter((r) => r !== "" && r !== `refs/heads/${entry.branch}`);
         if (containing.length === 0) {
           throw new WorktreeProvisionError("no-base-for-branch-delete", `baseCommit ${baseSha} is reachable only through ${entry.branch} itself (tip ${tip}) — it is not an independent pin and cannot prove the branch is unadvanced (pass the pin the branch was created at, or force)`);
         }
-        const isBaseInBranch = await probeExit0(this.repoRoot, ["merge-base", "--is-ancestor", baseSha, tip]);
+        const isBaseInBranch = await probeExit0(this.repoRoot, ["merge-base", "--is-ancestor", baseSha, branchRef]);
         if (!isBaseInBranch) {
           throw new WorktreeProvisionError("no-base-for-branch-delete", `baseCommit ${baseSha} is not an ancestor of ${entry.branch} (tip ${tip}) — it cannot prove the branch is unadvanced (pass the branch's own pin, or force)`);
         }
-        const ahead = await git(this.repoRoot, ["rev-list", "--max-count=1", `${baseSha}..${entry.branch}`]);
+        const ahead = await git(this.repoRoot, ["rev-list", "--max-count=1", `${baseSha}..${branchRef}`]);
         if (ahead.trim() !== "") {
           throw new WorktreeProvisionError("unmerged", `branch ${entry.branch} has commits past ${baseSha} — integration is P12; refusing to delete (force discards)`);
         }
       }
     }
 
-    await git(this.repoRoot, ["worktree", "remove", ...(force ? ["--force"] : []), entry.path]);
+    // Audit ds-c1 F2: a LOCKED worktree needs `-f -f` (git: "use
+    // 'remove -f -f' to override or unlock first") — a single --force
+    // fails late with git-failed after every gate passed. Verified
+    // against git 2.54; double force only for locked entries.
+    const forceArgs = !force ? [] : entry.locked ? ["-f", "-f"] : ["--force"];
+    await git(this.repoRoot, ["worktree", "remove", ...forceArgs, entry.path]);
     let branchDeleted = false;
     if (params.deleteBranch === true && entry.branch !== null) {
       await git(this.repoRoot, ["branch", "-D", entry.branch]);
@@ -639,7 +668,13 @@ export class WorktreeProvisioner {
    */
   async prune(): Promise<{ removed: string[] }> {
     const before = await listWorktrees(this.repoRoot);
-    const stale = before.filter((e) => e.prunable);
+    // Locked entries are NEVER marked prunable by git (see entryGone) —
+    // without this, a locked+vanished registration under wtRoot would be
+    // skipped by `git worktree prune` while prune() reported success.
+    const stale: WorktreeEntry[] = [];
+    for (const e of before) {
+      if (await entryGone(e)) stale.push(e);
+    }
     const foreign = stale.filter((e) => !pathsEqual(e.path, this.wtRoot) && !isWithin(e.path, this.wtRoot));
     if (foreign.length > 0) {
       // I8: a refusal is an ERROR, never a return value a caller can ignore
@@ -649,6 +684,18 @@ export class WorktreeProvisioner {
         "prune-refused",
         `refusing to prune: ${foreign.length} stale registration(s) lie outside ${this.wtRoot} — another tool's admin metadata is not ours to prune`,
         { stderr: foreign.map((e) => e.path).sort().join("\n") },
+      );
+    }
+    // Audit ds-c1 F3: git's prune SKIPS locked entries, so without this
+    // gate prune() would return success while a locked stale entry under
+    // our own wtRoot survived — the same silent-incomplete-success class
+    // as C1. Refuse; the operator unlocks, then prune converges.
+    const lockedStale = stale.filter((e) => e.locked);
+    if (lockedStale.length > 0) {
+      throw new WorktreeProvisionError(
+        "locked",
+        `refusing to prune: ${lockedStale.length} stale registration(s) under ${this.wtRoot} are LOCKED — git's prune skips them; run \`git worktree unlock\` then prune again`,
+        { stderr: lockedStale.map((e) => e.path).sort().join("\n") },
       );
     }
     if (stale.length === 0) return { removed: [] };
@@ -717,6 +764,21 @@ function nearestExisting(p: string): string {
     if (parent === cur) return cur; // filesystem root (existsSync should stop us)
     cur = parent;
   }
+}
+
+/**
+ * True when a registry entry's directory is GONE. git marks unlocked
+ * vanished entries `prunable`, but NEVER marks a LOCKED one (locked means
+ * "admin metadata is held on purpose") — so locked entries need an
+ * explicit directory check or they masquerade as live (audit ds-c1 F3:
+ * prune() skipped them silently and ensure() returned preexisting:true
+ * for a vanished locked dir; verified: `worktree list --porcelain` shows
+ * `locked` with NO `prunable` line after rm -rf of a locked worktree).
+ */
+async function entryGone(entry: WorktreeEntry): Promise<boolean> {
+  if (entry.prunable) return true;
+  if (entry.locked) return !(await dirExists(entry.path));
+  return false;
 }
 
 async function dirExists(p: string): Promise<boolean> {

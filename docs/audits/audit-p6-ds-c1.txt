@@ -1,0 +1,472 @@
+Let me analyze carefully. Need to answer Q1-Q6 concisely, then findings, then verdict.
+
+Let me walk the code.
+
+Q1: C5 descendant gate. `isDescendantOf(repoRoot, entry.head, baseSha)`:
+- head === "" → false → branch-conflict. But prunable handled earlier; a non-prunable entry with empty head? `worktree list --porcelain` always prints HEAD for non-bare entries. Bare entry has no HEAD line → head "". Bare entry path wouldn't equal taskPath normally. But a bare repo registered as a worktree? Not typical. Actually `git worktree list --porcelain` for the main worktree of a bare repo prints "bare" and no HEAD. But path wouldn't be under wtRoot. So fine.
+- head === base → true.
+- base is ancestor of head → true (task work committed).
+- base ahead of head → is-ancestor(base, head) false → refused. Correct: the branch is behind the requested base; adopting would return baseCommit=newBase with head=oldHead — false provenance. Refusal is safe direction. But could a legit crash-recovery re-attach be wrongly refused? Consider: ensure(base=B1) creates branch at B1, worktree registered. Then... base moved to B2 (descendant of B1). Retry with B2 → refused. That's intended per C5. But what about the case where the branch was created at B1 and the caller retries with the SAME base B1 — head==base → ok. What about a task that committed work and then the caller retries with the original base B1 — head is descendant → ok. Good.
+- DIVERGED: is-ancestor false → branch-conflict. Correct (can't prove provenance).
+- head is ancestor of base (branch behind base): refused. Is that safe? Yes, fail-closed. Could a legit crash-recovery be wrongly refused? Scenario: ensure(base=B1) creates branch at B1. Then the branch is reset? No. Hmm, what about: branch created at B1, worktree registered, then the branch is advanced by task work, then... no. What about a scenario where the branch was created at B1, then the repo's main advanced to B2, and the caller retries with B2 — refused, intended. But what about the "crash between branch creation and worktree registration" path? That's the unregistered path, not this one. So no wrong refusal for legit recovery.
+
+Wait — one subtle path: `entry.head` is the registry HEAD, which is the worktree's HEAD. If the worktree is on the branch and the branch is at base, head==base. Fine.
+
+But there's a real issue: the gate uses `entry.head` from the registry, which is a snapshot. If the worktree's HEAD is detached at some commit... but branch check already ensures branch matches. Actually for mode "branch", entry.branch must equal branch. So HEAD is the branch tip. Fine.
+
+Another: `isDescendantOf` catches probeExit0 rejection and returns false — but probeExit0 only throws git-failed for real failures (not documented negatives). So a real git failure (e.g., corrupt repo) is converted to `false` → branch-conflict, masking a git failure as a conflict. That's a misclassification: a transient git failure (timeout, EIO) becomes branch-conflict instead of git-failed. Is that a defect? It's fail-closed (refuses), but the error code is misleading and the caller may treat branch-conflict as a permanent conflict. Also `merge-base --is-ancestor` exit 1 is a documented negative (code===1 → false), so the `.then(..., () => false)` catch is only for real failures. Converting git-failed to false is a code-contract mismatch. RISK.
+
+Also: `merge-base --is-ancestor base head` — if `head` is not a valid commit (e.g., registry head is a sha that no longer exists after gc), git exits 128 with "fatal: Not a valid commit name" — not a documented negative → git-failed → caught → false → branch-conflict. Misleading but fail-closed.
+
+Q2: C8 proof.
+(a) Attacker caller chooses base pinned by a tag/other ref that happens to be the branch tip. E.g., branch tip T, and a tag `v` points at T. Then for-each-ref --contains T returns refs/tags/v (and refs/heads/agent/...). Filter removes only the branch ref, so containing = [refs/tags/v] → non-empty. is-ancestor(T, tip=T) → true. rev-list T..branch empty → deletes branch, losing the commit T? Wait, T is still reachable via the tag, so the commit isn't lost. But the branch's unmerged work relative to the intended base is lost from the branch. Hmm, but the caller explicitly asserted base=T. The gate's purpose is to prevent deleting unmerged work. If base==tip and a tag points at tip, the commit is preserved by the tag, so no data loss of the commit itself. But the branch's work is "unmerged" relative to the real base. The caller asserted base=T, which is the branch tip — that's the caller's assertion. Is that acceptable? The doc says "explicit base = caller's assertion". But the C8 fix's stated purpose was to prevent base==tip. With a tag at tip, the independent-containment check passes and base==tip deletion proceeds. So the C8 fix is bypassable by any ref pointing at the tip — including the episode branch? No, only refs other than the branch. But a tag, or origin/main if the branch was pushed, or another branch. So the "independent pin" check does NOT actually prevent base==tip deletion when the tip is reachable from any other ref. That's a hole relative to the stated fix intent. However, is it data loss? The commit remains reachable via the other ref, so `git branch -D` doesn't lose the commit object. But the branch's unmerged work is discarded — which is exactly what the gate is supposed to prevent. The caller passing base=tip is asserting "the branch is unadvanced relative to tip" which is trivially true. Hmm. The real protection should be: base must be an ancestor of the branch AND base != tip? No — base==tip is legitimate when the branch is unadvanced and the caller passes the branch's own tip? No, the caller should pass the pin (the base the branch was created at), not the tip. The C8 fix's test asserts base==tip is refused. But with a tag at tip, it's not refused. So the fix is incomplete: the test only covers the case where the tip is reachable ONLY via the branch. If the branch was pushed to origin (common in a real workflow), origin/agent/... points at tip, so containing is non-empty and base==tip deletion proceeds. That's a CONFIRMED hole in the C8 fix — the exact scenario the fix claims to close (base==tip) is still reachable whenever the tip has any other ref. Severity: data loss of unmerged branch work (the commit survives via the other ref, but the branch and its work are deleted without proof). Actually wait — if origin/agent/ep/t points at tip, then the work is preserved on the remote-tracking ref. But the local branch deletion still discards the local branch. The "unmerged" gate is about integration, not object preservation. So yes, the gate is bypassed.
+
+Let me double check: `for-each-ref --contains baseSha` lists refs whose history contains baseSha. If baseSha == tip and origin/agent/ep/t == tip, then refs/remotes/origin/agent/ep/t contains it. Filter only removes `refs/heads/${entry.branch}`. So containing non-empty. Then is-ancestor(tip, tip) true. rev-list tip..branch empty. → deletes. So the C8 fix does not close base==tip when the branch is pushed. CONFIRMED-WRONG (or at least a significant hole). The test "a base equal to the branch tip is NOT proof" passes only because no other ref points at tip.
+
+Also (a) more generally: any tag at the tip. So the "independent pin" is not independent of the branch's own commits — a tag created at the tip is still the branch's own history. The check should be: base must be an ancestor of the branch AND base must be reachable from a ref that is not a descendant... hmm, actually the correct check is that base is reachable from a ref other than the branch, but that ref could be a tag at the tip. The real invariant: base must be an ancestor of the branch tip, and the branch must have no commits past base. If base==tip, then the branch has no commits past base — trivially. The problem is the caller can choose base=tip. The only way to prevent that is to require base to be the pin recorded at creation (which the provisioner doesn't store) or to require base != tip. But base != tip is wrong for a legitimately unadvanced branch? No — if the branch is unadvanced, its tip == base (the pin). So base==tip is the NORMAL case for an unadvanced branch! Wait. Let's think: branch created at base B. No commits. tip == B. Caller calls remove with baseCommit=B. Then base==tip, and the branch is unadvanced. The old test did exactly this: `baseCommit: refs/heads/agent/epE/t1` (the branch itself) — that's base==tip. The new test uses `baseCommit: base` where base is the original base sha, and tip==base (no commits). So base==tip is the normal unadvanced case! The C8 fix's test "a base equal to the branch tip is NOT proof" uses a branch that HAS a commit (tip != base), and passes base=tip. So the distinction is: base==tip where tip is the branch's own commit (advanced) vs base==tip where tip is the original pin (unadvanced). The provisioner cannot distinguish these without knowing the original pin. The independent-containment check is a heuristic: if the tip is reachable from another ref, it's "probably" the pin. But that's exactly wrong when the branch was pushed.
+
+Hmm, so the C8 fix is fundamentally heuristic. The test "unadvanced branch deletes cleanly with baseCommit proof" passes base=base (original), tip==base, and containing includes refs/heads/main (main is at base) → non-empty → passes. Good. The C8 test passes base=tip (advanced), tip reachable only via the branch → containing empty → refused. But if the branch were pushed, it would pass. So the fix is incomplete. This is a real finding.
+
+(b) for-each-ref --contains on a base equal to tip of branch under deletion but ALSO contained in origin/main — deletes correctly? If base==tip and origin/main contains it (i.e., the branch tip is merged into origin/main), then the work is integrated, so deletion is fine. containing non-empty → proceeds. Correct.
+
+(c) detached entry (branch===null) skips the whole gate — reachable with deleteBranch:true? In removeTaskWorktree, `if (params.deleteBranch === true && entry.branch !== null)` — so detached skips. deleteBranch:true with a detached entry: branchDeleted stays false, worktree removed. No branch to delete. Fine. But the dirty gate still applies. OK.
+
+(d) base resolves to a commit only reachable via a COMMITTER-NAME ref containing newline-like refnames — parse break? `for-each-ref --format=%(refname)` outputs one ref per line. Ref names cannot contain newlines (git check-ref-format forbids control chars). So no parse break. But `%(refname)` could contain... no. Fine. However, the `.trim().split("\n")` — if a ref name contains a newline it's illegal. So NOT-A-DEFECT.
+
+(e) git <2.7-era for-each-ref without --contains? `--contains` was added in git 2.7 (2016). The module documents "verified on git 2.54". If run on older git, `for-each-ref --contains` fails with "unknown option" → git() throws git-failed. That's fail-closed (refuses deletion), not a data-loss hole. But it's an undocumented version assumption. RISK (documented? The doc says "verified on git 2.54" for probes, not for for-each-ref). Minor.
+
+Q3: prune() throws on foreign stale — WHERE: before or after `stale.length === 0` early return? The foreign check is BEFORE the `stale.length === 0` return. So if foreign.length > 0, it throws even if... well, foreign is a subset of stale, so if foreign.length > 0 then stale.length > 0. So the early return is unreachable when foreign exists. Fine. But: can a state exist where foreign stale exists AND removal was supposed to proceed for our own? Yes — if there's a foreign stale entry AND our own stale entry, prune() throws and does NOT remove our own. The caller must clear the foreign entry first (as the test does). Is that acceptable? The doc says "refuses when ANY stale entry lies outside wtRoot". So it's by design. But it means a single foreign stale entry blocks all cleanup of our own — a denial of cleanup. The test demonstrates this: it manually runs `git worktree prune` to clear the foreign entry. In production, the caller can't clear a foreign entry (it's another tool's). So prune() is permanently blocked until the foreign entry is resolved externally. That's a design consequence, arguably acceptable (conservative), but it's a liveness issue. RISK.
+
+Error detail leak (paths) — fine, paths are operator-visible.
+
+prune() with entry whose path EQUALS wtRoot itself (stale): `!pathsEqual(e.path, this.wtRoot) && !isWithin(...)` — pathsEqual excludes it from foreign. So wtRoot itself stale is treated as ours. Then `git worktree prune` — would git prune a worktree registered at wtRoot? If wtRoot is a registered worktree and its dir is gone... but wtRoot is created by open() (mkdir). If wtRoot itself is a registered worktree, that's weird. Actually the isWithin check: `isWithin(e.path, this.wtRoot)` — for e.path == wtRoot, isWithin returns false (child.startsWith(parent + sep) — wtRoot doesn't start with wtRoot+sep). So pathsEqual is the only thing excluding it. Correct.
+
+wtRoot itself stale + mkdir already done in a prior open — converges? If wtRoot is a registered worktree whose dir was deleted, then open() would mkdir it again (recreating the dir), so it's no longer prunable. Hmm, but if wtRoot is a registered worktree, open()'s placement gate would refuse (wtRoot inside our repo? No — wtRoot is a worktree of our repo, so its git-common-dir is our repo → wt-inside-repo). So open() would refuse. So this state is unreachable via open(). Unless the worktree registration is at wtRoot but the dir is gone and open() mkdirs it before... no, the gate runs before mkdir. So unreachable. NOT-A-DEFECT.
+
+Q4: locked handling.
+- ensure() preexisting path does NOT check locked. Should it reject? A locked worktree is still usable (lock just prevents removal/prune). ensure() is open-or-create; adopting a locked worktree is fine — the lock is an operator signal, not a correctness issue. Accepting is right. NOT-A-DEFECT.
+- remove: locked+force → `worktree remove --force` on a locked entry. Does git remove a locked worktree with --force? Let me recall git semantics. `git worktree remove` refuses if the worktree is locked, even with --force? Actually, from git docs: "unlock" is needed. Let me check: git worktree remove: "If the worktree is locked, it cannot be removed unless --force is given twice"? Hmm. Let me recall the actual behavior. In git, `git worktree remove` on a locked worktree: the code checks `if (worktree->lock_reason && !force) die("cannot remove a locked working tree")`. With --force, it proceeds? Let me think. Actually I recall: `git worktree remove --force` does remove a locked worktree. Let me verify from git source: builtin/worktree.c, remove_worktree: 
+```
+if (worktree->lock_reason) {
+    if (!force)
+        die(_("cannot remove a locked working tree"));
+    ...
+}
+```
+Hmm, I'm not 100% sure. Let me recall the actual message: "fatal: cannot remove a locked working tree, lock reason: ..." and "use 'remove -f -f' to override or unlock first". Yes! I recall git requires `-f -f` (force twice) to remove a locked worktree. From git docs for `worktree remove`: "-f: ... If the worktree is locked, this option must be given twice to remove it." Let me check: git-worktree(1): "remove: ... -f, --force: ... If the worktree is locked, this option must be given twice to remove it." Hmm, I think that's right. Actually I recall the message: "fatal: cannot remove a locked working tree, lock reason: ...; use 'remove -f -f' to override or unlock first". Yes, that's a real git message. So `worktree remove --force` (single -f) on a locked entry FAILS. Our code passes `--force` once. So the force path on a locked entry produces a late git-failed after the dirty gate passed — exactly the "misleading partial force" the question asks about. CONFIRMED-WRONG (or RISK): force on a locked worktree does not remove it; the code claims force is the explicit override but git requires -f -f. The test only tests the non-force locked refusal, not force. So this is a real gap.
+
+Wait, let me be careful. The git message: "fatal: cannot remove a locked working tree, lock reason: %s\nuse 'remove -f -f' to override or unlock first". Yes, I'm fairly confident. So single --force fails. The code's `locked` error message says "unlock it, or pass force to discard" — but force alone doesn't work. That's a doc/behavior mismatch. CONFIRMED-WRONG.
+
+- Stale branch: stale+locked message tells operator to unlock+prune manually. Is there a code path that completes prune for locked stale entries? prune() calls bare `git worktree prune` — git skips locked entries. So prune() with a locked+vanished entry under wtRoot: foreign check (not foreign, it's under wtRoot), then `git worktree prune` skips it, after-set diff → removed excludes it, returns success with removed:[] (or removed of other entries). So prune() reports success but did not remove the locked stale entry. Is that acceptable? The question asks: must it now surface 'locked'? The remove() path surfaces locked for stale+locked, but prune() silently succeeds. A caller doing `await prune(); proceed` believes cleanup succeeded while a locked stale entry remains. That's the same class as C1 (silent incomplete success). CONFIRMED-WRONG or RISK. The doc says prune "reports exactly what it removed" — removed:[] is accurate (it removed nothing), but the caller may not check. Hmm, the return value is accurate. But the C1 fix's rationale was "a refusal is an error, never a return value a caller can ignore". A locked stale entry is a refusal by git, silently. So prune() should surface it. I'd call it RISK/CONFIRMED-WRONG (contract inconsistency). Let me classify as CONFIRMED-WRONG (incomplete success) or RISK. The question explicitly asks "is reporting an incomplete success acceptable, or must it now surface 'locked'?" I'll say it's a defect: prune() should detect locked stale entries under wtRoot and throw `locked` (or report them), consistent with C1/C6. Severity moderate.
+
+Actually wait — does `git worktree prune` skip locked entries? Yes, git's prune skips locked worktrees (that's the point of lock). So removed:[] and success. Confirmed.
+
+Q5: nearestExisting fail-closed on ELOOP. Symlink loop → statSync throws ELOOP → now throws git-failed with message "cannot inspect ... while validating wtRoot placement (ELOOP)". The code is git-failed but it's a placement error, not a git failure. Misleading code. RISK (minor). Could be a dedicated code, but git-failed is the catch-all. The message is clear. Minor.
+
+lstat vs stat: statSync FOLLOWS symlinks. So if wtRoot is a symlink to /repo/sub, nearestExisting(resolve(wtRoot)) — resolve() is lexical, doesn't resolve symlinks. statSync follows the symlink, so if the symlink target exists and is a directory, statSync returns isDirectory true → anchor = the symlink path (not the target). Then `realpath(anchor)` resolves the symlink → /repo/sub. Then `gitVerify(anchorReal, rev-parse --git-common-dir)` runs in /repo/sub → returns our repo's common dir → wt-inside-repo. So it's caught. Good. But what if the symlink target is inside a repo but the symlink itself is outside? realpath resolves it, so the probe runs in the target → caught. So fail-closed. NOT-A-DEFECT.
+
+But wait: what if wtRoot is a symlink to a directory that doesn't exist yet? statSync follows → ENOENT → walk up to the symlink's parent. Then anchor = parent (outside repo), probe passes, mkdir(wtArg) — mkdir on a symlink path? `mkdir(wtArg, {recursive:true})` where wtArg is the symlink path — if the symlink exists but points to a nonexistent target, mkdir fails ENOENT? Actually mkdir on a dangling symlink: EEXIST? Hmm. Edge case. Then realpath(wtArg) fails → open() throws raw error (not ProvisionError). Minor. But the question asks about symlinked wtRoot passing the gate and landing inside a repo. If the symlink target exists and is inside a repo, realpath catches it. If the symlink is created AFTER open() (TOCTOU), out of scope (caller fence). So NOT-A-DEFECT for the stated scenario.
+
+Actually, one more: `nearestExisting` uses statSync which follows symlinks, but the anchor returned is the unresolved path. Then realpath(anchor) is used for the probe. So the probe runs on the real target. Good.
+
+Q6: Anything else.
+
+Let me scan for issues.
+
+1. `isDescendantOf` catches all probeExit0 rejections → false. As noted, masks git-failed as branch-conflict. RISK.
+
+2. C8: `for-each-ref --contains` — the filter `r !== refs/heads/${entry.branch}`. But what about `refs/heads/agent/ep/t` vs the branch name? entry.branch is "agent/ep/t" (without refs/heads/). So `refs/heads/${entry.branch}` = "refs/heads/agent/ep/t". Correct.
+
+3. C8: `git rev-parse --verify entry.branch` — entry.branch is a branch name; if it starts with "-"? Branch names are validated by check-ref-format, and taskBranchName produces "agent/..." so no leading dash. Fine.
+
+4. C8: `rev-list --max-count=1 ${baseSha}..${entry.branch}` — baseSha is a 40-hex sha, entry.branch is a branch name. No injection. Fine.
+
+5. `resolveCommit` uses `revArgs(`${rev}^{commit}`)` — if rev starts with "-", it becomes ["--", "-h^{commit}"]. Good. But if rev is "main^{commit}" and main is fine. What about rev containing ".." or spaces? It's a single argv element, no shell. Fine.
+
+6. `git()` error message includes `args.join(" ")` — could leak? Not a security issue.
+
+7. `execFile` timeout leaves git orphaned mid-`worktree add` leaving partial registration. If `git worktree add` times out (30s), execFile kills the process (SIGTERM). Git may have created the branch and/or the worktree dir but not completed registration. On retry: ensure() → listWorktrees → if registration exists, preexisting path; if not, dirExists(path) → if the dir was created but not registered → path-exists (refuses, never adopts). So a partial `worktree add` leaves an unregistered dir → path-exists on retry, requiring manual cleanup. Is that a defect? The doc says "a crash between branch creation and worktree registration converges on retry" — but that's the branch-created-only case (no dir). If the dir was created but registration incomplete, retry gives path-exists, not convergence. That's a real gap in the idempotence claim. But is it reachable? `git worktree add` creates the dir and registers; if killed mid-way, the dir may exist without registration. Then retry → path-exists. The doc's claim "converges on retry" is only true for the branch-only crash. RISK (doc overclaim / non-convergence). Also the timeout kill: execFile with timeout sends SIGTERM; git may not clean up. This is a real sequential-use defect (retry after timeout). Classify RISK.
+
+8. `openTaskWorktree` returns `baseCommit: ""` — documented. Fine.
+
+9. `removeTaskWorktree` noop returns `forced: false` even if force:true — C7 judged NOT-A-DEFECT. Fine.
+
+10. `removeTaskWorktree`: the dirty gate runs `git(entry.path, ["status", ...])`. If entry.path is a locked worktree and force is true, the dirty gate runs, then `worktree remove --force` fails (locked, needs -f -f). As noted.
+
+11. `removeTaskWorktree`: `entry.locked && !force` throws locked BEFORE the foreign-branch check. So a locked foreign-branch worktree reports `locked` instead of `foreign-branch`. Minor ordering: the foreign-branch check is after the locked check. A locked foreign worktree → locked error, not foreign-branch. Is that wrong? It's still a refusal, but the code is less specific. Minor RISK. Actually the locked check is before the expected-branch check. So a locked worktree on a foreign branch reports "locked" and suggests force — but force would then hit foreign-branch. Misleading. Minor.
+
+12. `prune()`: `foreign` uses `!pathsEqual(e.path, this.wtRoot) && !isWithin(e.path, this.wtRoot)`. If e.path is a sibling with a prefix, isWithin handles sep. Fine.
+
+13. `listWorktrees` parsing: `line.startsWith("prunable")` — git prints "prunable" or "prunable <reason>". Fine. `locked` similarly. But the order of checks: `line.startsWith("prunable")` before `locked`. Fine.
+
+14. `listWorktrees`: a worktree path containing a newline? Git porcelain quotes paths with special chars? Actually `worktree list --porcelain` does NOT quote paths (unlike `-z`). A path with a newline would break parsing. But paths are under wtRoot with safe taskIds, so no newlines. The main worktree path could contain a newline if the repo is at such a path — then parsing breaks. Edge case, not reachable via our taskIds. Minor.
+
+15. `open()`: `repoCommonArg` from `rev-parse --path-format=absolute --git-common-dir`. If repoArg is a linked worktree, common dir is the main .git. Fine.
+
+16. `open()`: the placement gate compares `commonReal === repoCommon`. If the anchor is inside a DIFFERENT repo that happens to share... no.
+
+17. `open()`: `nearestExisting(resolve(options.wtRoot))` — if wtRoot is a relative path, resolve makes it absolute. Fine.
+
+18. `assertSafeComponent` allows "a..b"? SAFE_COMPONENT allows dots, so "a..b" passes. Then taskBranchName → "agent/ep/a..b" → check-ref-format rejects ".." → bad-id. Good. But taskPath("a..b") → join(wtRoot, "a..b") — "a..b" is a valid filename, not a traversal. Fine. What about taskId "..."? SAFE_COMPONENT: starts with ".", so rejected (must start with alnum). Good.
+
+19. `taskPath` uses join(wtRoot, taskId) — taskId validated. Fine.
+
+20. `removeTaskWorktree`: after `worktree remove`, `branch -D entry.branch`. If branch -D fails (e.g., branch checked out elsewhere — but pre-gate checked), the worktree is already removed → partial mutation. The pre-gate checks `users` via listWorktrees. But between the pre-gate and branch -D, another worktree could be added (concurrent — out of scope). Sequential: fine.
+
+21. `removeTaskWorktree` with deleteBranch and force: skips the base proof entirely, deletes branch. Fine (explicit discard).
+
+22. `removeTaskWorktree`: the `users` pre-gate filters `e.branch === entry.branch && !pathsEqual(e.path, entry.path)`. If the same branch is checked out at the same path (impossible). Fine.
+
+23. `prune()`: after `git worktree prune`, `removed = stale.filter(e => !after.has(e.path))`. If a stale entry was locked, it remains → not in removed. Returns success. As discussed.
+
+24. `prune()`: `stale.length === 0` early return after foreign check. If stale is empty, foreign is empty, so the foreign check doesn't throw. Fine.
+
+25. Error-code contract: `prune-refused` detail uses `{ stderr: ... }` — the detail type is `{command?, stderr?}`. Fine.
+
+26. Doc comment on `prune()` says "reports exactly what it removed" — accurate.
+
+27. Doc comment on `removeTaskWorktree` says "then `worktree remove` (--force only when forced)" — but for locked, --force once is insufficient. Doc lie.
+
+28. The `locked` error message says "unlock it, or pass force to discard" — but force alone doesn't work (needs -f -f). Doc/behavior mismatch. CONFIRMED.
+
+29. `isDescendantOf` doc says "An empty/unknown head is NOT a descendant (fail closed)." Fine.
+
+30. Test "ensure: a registration whose HEAD does not descend from the pin is refused" — the comment says "the pin for a retried attempt is now a descendant of the branch, so the branch is NOT at/past the new base." Wait: movedBase is a descendant of base (main advanced). The branch is at base. So base is an ancestor of movedBase, i.e., the branch head (base) is an ANCESTOR of movedBase. is-ancestor(movedBase, base) → false → refused. Correct. The comment is a bit confusing but the test is right.
+
+31. Test "remove: a base equal to the branch tip is NOT proof" — as discussed, only passes because no other ref points at tip. The test asserts the right thing but the implementation is bypassable. The test is not "wrong" but incomplete.
+
+32. `for-each-ref --contains` with `--format=%(refname)` — if there are no refs containing, output is empty → trim → "" → split → [""] → filter removes "" → []. Good.
+
+33. `git rev-parse --verify entry.branch` — if entry.branch is a branch name that also matches a tag? `rev-parse --verify agent/ep/t` resolves to the branch (refs/heads/). Fine.
+
+34. `resolveCommit` for base: if base is a branch name that moved, resolves to current tip. Fine.
+
+35. `open()`: `existsSync(repoArg)` then `probeExit0(repoArg, rev-parse --show-toplevel)`. If repoArg is a file, probe fails → not-a-git-repo. Fine.
+
+36. `open()`: `realpath(toplevel).catch(() => resolve(toplevel))` — if realpath fails, falls back to lexical. Could that cause a wrong comparison? If toplevel is a symlink and realpath fails (shouldn't), fallback. Minor.
+
+37. `nearestExisting`: the loop `if (parent === cur) return cur;` — at filesystem root, statSync("/") succeeds and isDirectory → returns "/". So the parent check is unreachable. Fine.
+
+38. `nearestExisting` throws WorktreeProvisionError from a sync function — fine.
+
+39. `dirExists` catches all errors → false. If stat fails with EACCES, dirExists returns false → ensure() proceeds to `worktree add` which fails. Minor fail-open? Actually it's used to detect an unmanaged dir; if EACCES, it returns false and git add fails → git-failed. Fail-closed enough. Minor.
+
+40. `removeTaskWorktree`: `if (entry === undefined) { if (await dirExists(path)) throw not-registered; return noop }`. If dirExists returns false due to EACCES, returns noop — but the dir might exist. Then the caller thinks nothing to remove. Minor.
+
+41. Injection: `git(this.repoRoot, ["branch", "-D", entry.branch])` — entry.branch comes from the registry, could be a branch name starting with "-"? Git branch names can't start with "-" (check-ref-format rejects). But the registry is git's own output; a malicious repo could have a branch named "-D"? No, git forbids. Fine.
+
+42. `git(this.repoRoot, ["worktree", "remove", ...(force ? ["--force"] : []), entry.path])` — entry.path from registry. If entry.path starts with "-"? Paths are absolute (start with "/"), so no. Fine.
+
+43. `git(this.repoRoot, ["worktree", "add", "--quiet", path, branch])` — path is absolute. Fine.
+
+44. `git(this.repoRoot, ["worktree", "add", "--quiet", "--no-track", "-b", branch, path, baseSha])` — branch validated, path absolute, baseSha 40-hex. Fine.
+
+45. `git(path, ["rev-parse", "HEAD"])` — fine.
+
+46. `git(this.repoRoot, ["for-each-ref", "--contains", baseSha, "--format=%(refname)"])` — baseSha 40-hex. Fine.
+
+47. `probeExit0(this.repoRoot, ["merge-base", "--is-ancestor", baseSha, tip])` — fine.
+
+48. `git(this.repoRoot, ["rev-list", "--max-count=1", `${baseSha}..${entry.branch}`])` — fine.
+
+49. `git(this.repoRoot, ["rev-parse", "--verify", entry.branch])` — fine.
+
+50. `gitVerify(this.repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])` — branch validated. Fine.
+
+51. `assertValidBranch` uses `check-ref-format refs/heads/${branch}` — branch from taskBranchName, safe. Fine.
+
+52. `resolveCommit` with rev = "HEAD" — resolves. Fine.
+
+53. `open()`: `gitVerify(anchorReal, ["rev-parse", "--path-format=absolute", "--git-common-dir"])` — if anchorReal is inside a repo, returns the common dir. If anchorReal is a bare repo root, returns the bare dir. Fine.
+
+54. `open()`: if `commonOut` is null (not in a repo), proceeds. But `gitVerify` returns null for exit 1 OR documented negatives. `rev-parse --git-common-dir` outside a repo exits 128 with "not a git repository (or any of the parent directories)" → documented negative → null. Good. But if it exits 1 for some other reason? `rev-parse --git-common-dir` doesn't use exit 1 normally. Fine.
+
+55. `open()`: the anchor probe uses `gitVerify` which maps exit 1 to null. If the anchor is a corrupt repo, `rev-parse --git-common-dir` might exit 128 with a different message → git-failed. Good.
+
+56. `open()`: `mkdir(wtArg, {recursive:true})` then `realpath(wtArg)`. If wtArg is a symlink to a dir, realpath resolves. Fine.
+
+57. `open()`: the placement gate checks the anchor, but after mkdir, the realpath'd wtRoot could be inside a repo if a symlink was created between the gate and mkdir (TOCTOU). Out of scope (caller fence? Actually this is a filesystem race, not a caller race). The doc says "no directory is created before the gates pass". A symlink race is a residual. Minor.
+
+58. `removeTaskWorktree`: the dirty gate uses `git(entry.path, ...)`. If entry.path is a locked worktree, status works. Fine.
+
+59. `removeTaskWorktree`: if `entry.branch === null` (detached) and deleteBranch:true, the branch gate is skipped, worktree removed, branchDeleted false. Fine.
+
+60. `removeTaskWorktree`: if `entry.branch !== null` but `entry.branch !== expected` → foreign-branch. But this check is AFTER the locked check. As noted.
+
+61. `removeTaskWorktree`: the `expected` branch is computed from episodeId/taskId. If the worktree is on the expected branch, fine.
+
+62. `ensureTaskWorktree`: the preexisting path checks `mode === "branch" && entry.branch !== branch`. If mode is "branch" and entry.branch is null (detached), `null !== branch` → foreign-branch. Good.
+
+63. `ensureTaskWorktree`: the preexisting path does NOT check `entry.locked`. As discussed, accepting is fine.
+
+64. `ensureTaskWorktree`: the preexisting path returns `head: entry.head` — a registry snapshot. If the worktree's HEAD changed between listWorktrees and return, stale. Minor TOCTOU.
+
+65. `ensureTaskWorktree`: the C5 gate uses `entry.head` from the registry. If the worktree is on the branch and the branch advanced, entry.head is the branch tip. is-ancestor(base, tip) → true. Good.
+
+66. `ensureTaskWorktree`: if the branch exists at base but the worktree registration is gone (crash recovery), the unregistered path: `existingTip === baseSha` → `worktree add path branch`. Then HEAD check. Good.
+
+67. `ensureTaskWorktree`: if the branch exists at base but the worktree dir exists unregistered → path-exists (checked before the branch logic). So crash recovery with a leftover dir → path-exists. As discussed (timeout partial). RISK.
+
+68. `ensureTaskWorktree`: if the branch exists at a DIFFERENT sha → branch-conflict. Good.
+
+69. `ensureTaskWorktree`: if the branch doesn't exist → `worktree add -b branch path baseSha`. Good.
+
+70. `ensureTaskWorktree`: the post-creation HEAD check `head !== baseSha` → git-failed. But if the repo mutated mid-provision (e.g., a hook), the worktree is left registered. The error is thrown but the worktree remains. On retry, the preexisting path: entry.head (the mutated head) vs baseSha → is-ancestor? If the mutation advanced the branch, head is a descendant → adopted. If diverged → branch-conflict. So a mid-provision mutation leaves a registered worktree that may be adopted or refused. The doc says "repo mutated mid-provision?" — the error is thrown but no cleanup. Is that a defect? The worktree is left behind; the caller must clean up. Minor RISK.
+
+71. `openTaskWorktree`: does NOT check locked. Fine (read-only).
+
+72. `openTaskWorktree`: returns `baseCommit: ""`. Documented.
+
+73. `openTaskWorktree`: does NOT verify the head descends from anything (no base). Fine.
+
+74. `listWorktrees`: the `flush` pushes entries with `path` defined. If a "worktree " line is followed by no HEAD (bare), head "". Fine.
+
+75. `listWorktrees`: the main worktree of a bare repo has "bare" line, no HEAD. Fine.
+
+76. `listWorktrees`: a worktree with a detached HEAD has no "branch" line → branch null. Fine.
+
+77. `listWorktrees`: a worktree with a branch not under refs/heads/ (e.g., refs/remotes/)? `worktree list` only shows local branches. Fine.
+
+78. `listWorktrees`: the "locked" line can be "locked" or "locked <reason>". Handled.
+
+79. `listWorktrees`: the "prunable" line can be "prunable" or "prunable <reason>". Handled.
+
+80. `listWorktrees`: the order of lines: worktree, HEAD, branch, locked, prunable. The parser handles any order. Fine.
+
+81. `listWorktrees`: a path containing a newline breaks parsing. Edge case.
+
+82. `prune()`: `before.filter(e => e.prunable)` — if a worktree is prunable AND locked, it's in stale. foreign check. Then `git worktree prune` skips locked. As discussed.
+
+83. `prune()`: if `git worktree prune` fails (e.g., permission), git() throws git-failed. Fine.
+
+84. `prune()`: the `removed` computation uses `after.has(e.path)` — if a path was re-registered with the same path (unlikely), it wouldn't be in removed. Fine.
+
+85. `prune()`: the warn message. Fine.
+
+86. `isWithin`: `child.startsWith(parent.endsWith(sep) ? parent : parent + sep)`. If parent is "/", parent + sep = "//" — child "/a" doesn't start with "//" → false. So isWithin("/a", "/") is false. But wtRoot is never "/". Minor.
+
+87. `pathsEqual`: string equality. Documented residual.
+
+88. `nearestExisting`: `statSync(cur).isDirectory()` — if cur is a symlink to a directory, statSync follows → isDirectory true → returns cur (the symlink path). Then realpath resolves. Fine.
+
+89. `nearestExisting`: if cur is a symlink to a file, statSync follows → isDirectory false → walks up. Fine.
+
+90. `nearestExisting`: if cur is a broken symlink, statSync throws ENOENT → walks up. Fine.
+
+91. `nearestExisting`: if cur is a symlink loop, statSync throws ELOOP → throws git-failed. As discussed.
+
+92. `dirExists`: uses `stat` (follows symlinks). If path is a symlink to a dir, returns true. Fine.
+
+93. `open()`: `existsSync(repoArg)` — if repoArg is a symlink to a repo, existsSync true, probe works. Fine.
+
+94. `open()`: `repoToplevel` is realpath'd. `this.repoRoot` is the realpath'd toplevel. `listWorktrees(this.repoRoot)` — git worktree list from the toplevel. Fine.
+
+95. `open()`: `this.wtRoot` is realpath'd. `taskPath` joins. Fine.
+
+96. `open()`: the placement gate compares `commonReal === repoCommon`. If the anchor is inside our repo but via a different path spelling, realpath normalizes. Fine.
+
+97. `open()`: if the anchor is inside a foreign repo that is a symlink to our repo? realpath normalizes. Fine.
+
+98. `open()`: if the anchor is inside a foreign repo whose common dir is a symlink to our common dir? realpath normalizes. Fine.
+
+99. `open()`: the `wt-in-other-repo` check uses `commonReal` but the message says "git dir". Fine.
+
+100. `open()`: if the anchor is a bare repo that is OUR repo? `commonReal === repoCommon` → wt-inside-repo. Fine.
+
+Now, the most significant findings:
+
+F1 (C8 bypass): base==tip deletion still possible when the tip is reachable from any other ref (tag, remote-tracking branch, another branch). The C8 fix's independent-containment check is satisfied by any such ref, so the exact data-loss scenario the fix claims to close remains reachable. CONFIRMED-WRONG. Repro: create branch at base, commit work (tip T), `git tag vT T` (or push to origin), then `removeTaskWorktree({baseCommit: T, deleteBranch: true})` → containing = [refs/tags/vT] → passes → branch deleted, unmerged work discarded. The test only covers the no-other-ref case.
+
+Wait, but is the commit "lost"? The tag preserves it. But the branch's unmerged work is discarded — the gate's purpose. The doc says "deleting unmerged work is refused unless force". Here it's deleted without force. So CONFIRMED-WRONG (data loss of the branch's unmerged state, though the commit object survives via the tag). Actually, if the tag is at T and the branch is at T, deleting the branch doesn't lose the commit. But the "unmerged" check is about whether the branch has commits past the base. With base=T, there are none. The caller asserted base=T. The fix's intent was to prevent the caller from asserting base=tip. The independent-containment check is a proxy that fails when the tip has another ref. So the fix is incomplete. I'll classify CONFIRMED-WRONG (the stated C8 defect is not fully closed).
+
+Hmm, but one could argue: if the tip is reachable from origin/main, the work IS merged, so deletion is fine. If the tip is reachable from a tag, the tag is an independent pin — the caller's assertion is "the branch is unadvanced relative to the tag", which is true. The data-loss concern is only if the commit is unreachable after deletion. If a tag points at it, it's reachable. So maybe it's acceptable? The question (a) asks: "can an attacker caller still delete an UNMERGED branch by choosing a base pinned by a tag/other ref that happens to be the branch tip? Is that acceptable (explicit base = caller's assertion) or a hole?" I think it's a hole relative to the fix's stated intent, but the commit is preserved. The branch's unmerged work is discarded without force. I'll call it RISK/CONFIRMED-WRONG. Given the audit's adversarial stance, I'll call it CONFIRMED-WRONG (the C8 fix is bypassable; the test is insufficient).
+
+Actually, let me reconsider the severity. The gate's contract: "deleting unmerged work is refused unless force". "Unmerged work" = commits on the branch not in the base. If base=tip, there are no such commits by definition. The caller is asserting the base. The provisioner cannot know the "true" base. The C8 fix tries to infer it from refs. The inference is unsound. The only sound fix is to require the caller to pass the pin recorded at creation (which the provisioner doesn't store) or to require base != tip AND base is an ancestor. But base==tip is the normal unadvanced case. Hmm. Actually, the sound check is: base must be an ancestor of the branch tip, and the branch tip must be reachable from a ref other than the branch (i.e., the work is integrated somewhere). That's what the fix does. If the tip is reachable from a tag, the work is "preserved" but not necessarily "integrated". The distinction between a tag and a merge is not made. So the fix conflates "reachable from another ref" with "integrated". A tag at the tip is not integration. So the fix is unsound for tags. For origin/main, it's sound (merged). For a tag, it's not. So the finding stands: a tag at the tip bypasses the gate.
+
+F2 (locked force): `worktree remove --force` (single -f) does not remove a locked worktree; git requires `-f -f`. The code's `locked` message says "pass force to discard", and the force path passes a single `--force`, so it fails with a late git-failed after the dirty gate. CONFIRMED-WRONG (misleading force path; the test doesn't cover force on locked).
+
+Let me double-check git semantics. From git-worktree(1) man page, `remove`:
+"-f: By default, remove refuses to remove dirty worktrees... This option can be given twice to remove a locked worktree."
+Hmm, actually I recall: "If the worktree is locked, this option must be given twice to remove it." Yes. And the error message: "fatal: cannot remove a locked working tree, lock reason: %s\nuse 'remove -f -f' to override or unlock first". So single --force fails. CONFIRMED.
+
+F3 (prune locked stale silent success): prune() with a locked+vanished entry under wtRoot: foreign check passes (it's ours), `git worktree prune` skips locked, after-diff → removed excludes it, returns `{removed: []}` success. The caller believes cleanup succeeded. Inconsistent with C1/C6. CONFIRMED-WRONG (or RISK). I'll call it CONFIRMED-WRONG (incomplete success, same class as C1).
+
+F4 (isDescendantOf masks git-failed as branch-conflict): the `.then(..., () => false)` converts a real git failure (timeout, corrupt repo, invalid head sha) into `false` → branch-conflict. The caller sees a permanent conflict instead of a transient git failure. RISK.
+
+F5 (timeout partial worktree add → path-exists, not convergence): the doc claims crash-recovery convergence, but a killed `worktree add` can leave an unregistered dir → retry gives path-exists. RISK (doc overclaim / non-convergence).
+
+F6 (locked check before foreign-branch check): a locked foreign-branch worktree reports `locked` and suggests force, but force then hits foreign-branch. Minor RISK.
+
+F7 (ELOOP → git-failed misclassification): minor RISK.
+
+F8 (for-each-ref --contains requires git >= 2.7): undocumented version assumption; on older git, deletion is refused with git-failed (fail-closed). RISK (minor).
+
+F9 (prune foreign blocks own cleanup): a single foreign stale entry permanently blocks prune of our own entries. Design consequence; RISK (liveness).
+
+F10 (listWorktrees path with newline): edge case, not reachable via safe taskIds. NOT-A-DEFECT.
+
+F11 (C5 gate: head ancestor of base refused): safe direction, no wrong refusal for legit recovery. NOT-A-DEFECT.
+
+F12 (C5 gate: empty head): prunable handled earlier; a non-prunable entry with empty head (bare) wouldn't match taskPath. NOT-A-DEFECT.
+
+F13 (C8 (c) detached skips gate): no branch to delete. NOT-A-DEFECT.
+
+F14 (C8 (d) newline refnames): illegal ref names. NOT-A-DEFECT.
+
+F15 (C8 (e) old git): fail-closed. RISK (minor).
+
+F16 (prune wtRoot itself stale): excluded from foreign correctly; unreachable via open(). NOT-A-DEFECT.
+
+F17 (ensure locked preexisting): accepting is right. NOT-A-DEFECT.
+
+F18 (symlinked wtRoot): realpath catches. NOT-A-DEFECT.
+
+F19 (C7 noop forced:false): NOT-A-DEFECT.
+
+F20 (doc comment on removeTaskWorktree says "--force only when forced" — for locked, insufficient). Part of F2.
+
+F21 (error-code contract: `prune-refused` detail uses stderr field for paths — fine).
+
+F22 (test "remove: a base equal to the branch tip is NOT proof" — the test is correct but incomplete; it doesn't test the tag/remote case). Part of F1.
+
+F23 (test "ensure: a registration whose HEAD does not descend" — comment says "the pin for a retried attempt is now a descendant of the branch" — actually movedBase is a descendant of base, and the branch is at base, so the branch is an ancestor of movedBase. The comment is slightly off but the test is right. NOT-A-DEFECT (comment nit).
+
+F24 (removeTaskWorktree: `entry.locked && !force` throws before the dirty gate — good, no mutation. But the locked check is before the foreign-branch check, as F6.
+
+F25 (removeTaskWorktree: force on a locked worktree — the dirty gate runs `git status` on the locked worktree, which works. Then `worktree remove --force` fails. The dirty gate is not a mutation, so no partial state. But the error is late. F2.
+
+F26 (open(): `mkdir(wtArg, {recursive:true})` after the gate — if wtArg is a dangling symlink, mkdir fails with EEXIST? Actually mkdir on a dangling symlink: the symlink exists, so mkdir returns EEXIST. Then open() throws a raw SystemError (not ProvisionError). Minor RISK. Let me think: `mkdir("/path/to/dangling-symlink", {recursive:true})` — Node's mkdir with recursive on an existing symlink to a nonexistent target: it tries to create the dir at the symlink path; the symlink exists, so it may return EEXIST or follow the symlink and create the target? Actually mkdir(2) on a symlink returns EEXIST. With recursive:true, Node's mkdir checks if the path exists (lstat?) — it may treat the symlink as existing and return success without creating the target. Then realpath(wtArg) fails (dangling) → open() throws a raw error. So a dangling symlink at wtRoot → raw error, not ProvisionError. Minor RISK. But is this reachable? The caller controls wtRoot. Edge case.
+
+F27 (open(): the placement gate uses `nearestExisting` which follows symlinks via statSync, but returns the unresolved path; then realpath. If the symlink target is inside a repo, caught. If the symlink is created after the gate, TOCTOU. Out of scope? The caller fence is about concurrent callers, not filesystem races. But this is a residual. Minor.
+
+F28 (removeTaskWorktree: `git(entry.path, ["status", ...])` — if entry.path is a worktree whose .git is broken, status fails → git-failed. Fine.
+
+F29 (removeTaskWorktree: after `worktree remove`, `branch -D` — if the branch was already deleted (e.g., by another process), branch -D fails → git-failed, but the worktree is already removed. Partial mutation. Sequential: the branch exists (entry.branch from registry). If the branch was deleted between listWorktrees and branch -D (concurrent — out of scope). Fine.
+
+F30 (ensureTaskWorktree: the C5 gate runs `isDescendantOf` which calls `probeExit0` — if the head is a sha that no longer exists (gc'd), merge-base fails → git-failed → caught → false → branch-conflict. Misleading. Part of F4.
+
+F31 (ensureTaskWorktree: the preexisting path returns `head: entry.head` — if the worktree is on the branch but the branch was advanced by another process, entry.head is the snapshot. Fine.
+
+F32 (ensureTaskWorktree: the C5 gate does NOT check that the branch tip equals entry.head. If the worktree is on the branch but the branch was advanced (e.g., by a commit in the worktree), entry.head is the branch tip. Fine.
+
+F33 (ensureTaskWorktree: the C5 gate for mode "detached": entry.branch is null, entry.head is the detached HEAD. is-ancestor(base, head) — if the detached worktree is at base, true. If the detached worktree has commits (detached HEAD advanced), head is a descendant → true. If the detached worktree is at a different commit (not descendant) → refused. Is that right? A detached worktree provisioned at base, then the caller checks out a different commit → head not descendant → refused. That's fail-closed. Fine.
+
+F34 (ensureTaskWorktree: the C5 gate for mode "detached" with entry.head == base → true. Fine.
+
+F35 (ensureTaskWorktree: the C5 gate uses `this.repoRoot` as cwd for merge-base. The head sha is in the repo. Fine.
+
+F36 (removeTaskWorktree: the C8 gate uses `entry.branch` in `rev-parse --verify entry.branch` — if the branch name is ambiguous with a tag, rev-parse may resolve to the tag? `rev-parse --verify agent/ep/t` — git's disambiguation: refs/heads/agent/ep/t vs refs/tags/agent/ep/t. If both exist, git warns "refname is ambiguous" and picks one (usually the tag? or the branch?). Actually `rev-parse --verify <name>` follows the refname resolution rules: refs/<name>, refs/tags/<name>, refs/heads/<name>, refs/remotes/<name>, refs/remotes/<name>/HEAD. The order is: $GIT_DIR/<name>, refs/<name>, refs/tags/<name>, refs/heads/<name>, ... So a tag with the same name as the branch would win! Then `tip` would be the tag's commit, not the branch's tip. And `rev-list base..entry.branch` — the `entry.branch` in the range is also resolved by the same rules, so it would use the tag too. Hmm, but `entry.branch` is "agent/ep/t" and the branch is "refs/heads/agent/ep/t". If a tag "agent/ep/t" exists, `rev-parse --verify agent/ep/t` resolves to the tag. Then the gate checks the tag's history, not the branch's. And `branch -D entry.branch` — `git branch -D agent/ep/t` deletes the branch (branch command uses refs/heads/). So the gate could be checking the wrong ref. Is this reachable? A tag named "agent/ep/t" — the caller could create one. Then the gate's `tip` is the tag's commit, and `rev-list base..agent/ep/t` uses the tag. If the tag is at base, the gate passes, and `branch -D` deletes the branch (which may have unmerged commits). That's a data-loss hole! Let me verify: `git rev-parse --verify agent/ep/t` with both refs/heads/agent/ep/t and refs/tags/agent/ep/t — git prints a warning "refname 'agent/ep/t' is ambiguous" and resolves to... the order in git's ref_rev_parse_rules: "%.*s", "refs/%.*s", "refs/tags/%.*s", "refs/heads/%.*s", "refs/remotes/%.*s", "refs/remotes/%.*s/HEAD". So refs/tags/ comes BEFORE refs/heads/. So the tag wins. So yes, a tag with the same name as the branch shadows the branch in `rev-parse --verify entry.branch` and in `rev-list base..entry.branch`. The gate would check the tag's history. If the tag is at base (or an ancestor), the gate passes, and `branch -D` deletes the branch with unmerged commits. CONFIRMED-WRONG (data loss via ref shadowing). This is a real finding! The fix should use `refs/heads/${entry.branch}` explicitly in rev-parse and rev-list.
+
+Wait, but `entry.branch` comes from the registry, which is the branch name. The `rev-list base..entry.branch` — the range `base..entry.branch` — git resolves `entry.branch` via the same rules. So a tag shadows. And `branch -D entry.branch` — the `branch` command operates on refs/heads/, so it deletes the branch. So the gate checks the tag, the deletion deletes the branch. Data loss. This is a serious finding. Let me double-check the `for-each-ref --contains baseSha` — it lists all refs containing baseSha, including the tag. The filter removes only `refs/heads/${entry.branch}`. So the tag remains in `containing`. So the independent-containment check passes. Then `is-ancestor(baseSha, tip)` where tip is the tag's commit. If the tag is at base, true. Then `rev-list base..entry.branch` — resolves entry.branch to the tag (at base) → empty. Gate passes. `branch -D` deletes the branch (with unmerged commits). CONFIRMED-WRONG. This is a variant of F1 but more concrete: ref shadowing. Actually F1 (tag at tip) and this (tag at base with the same name) are related. The root cause: `entry.branch` is used unqualified in rev-parse/rev-list, so a same-named tag shadows it. The fix: use `refs/heads/${entry.branch}`.
+
+Hmm, but is a tag named "agent/ep/t" plausible? An attacker caller could create it. The audit is adversarial. So yes, CONFIRMED-WRONG.
+
+Let me also check `gitVerify(this.repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])` in ensure — that's qualified. Good. But the C8 gate uses unqualified `entry.branch`. So the fix is inconsistent.
+
+Also `git(this.repoRoot, ["branch", "-D", entry.branch])` — the branch command is fine (operates on refs/heads/). But if a tag shadows, `branch -D` still deletes the branch. So the gate is bypassed.
+
+This is a strong finding. Let me make it F1 (or a separate finding).
+
+Let me also check `git(this.repoRoot, ["rev-parse", "--verify", entry.branch])` — unqualified. Yes.
+
+So F1: C8 gate uses unqualified `entry.branch` in `rev-parse --verify` and `rev-list`, so a same-named tag (or other ref earlier in git's resolution order) shadows the branch; the gate checks the shadow ref while `branch -D` deletes the real branch. CONFIRMED-WRONG (data loss).
+
+And F2: tag at tip (different name) bypasses the independent-containment check. CONFIRMED-WRONG (or RISK).
+
+Let me also check the `for-each-ref --contains` filter: `r !== refs/heads/${entry.branch}`. If the branch is "agent/ep/t", the filter removes "refs/heads/agent/ep/t". But if there's a tag "refs/tags/agent/ep/t", it remains. So the tag counts as an independent pin. That's F2.
+
+Now, let me also check the `is-ancestor` direction in C8: `probeExit0(this.repoRoot, ["merge-base", "--is-ancestor", baseSha, tip])` — baseSha is an ancestor of tip. Correct.
+
+And `rev-list --max-count=1 ${baseSha}..${entry.branch}` — if entry.branch is shadowed by a tag, the range uses the tag. F1.
+
+Let me also check the `tip` variable: `git rev-parse --verify entry.branch` — shadowed. F1.
+
+OK, so the C8 fix has two holes: ref shadowing (F1) and tag-at-tip (F2). Both are data-loss.
+
+Now let me also check the C5 gate for ref shadowing: `isDescendantOf(this.repoRoot, entry.head, baseSha)` — entry.head is a sha from the registry, baseSha is a resolved sha. No ref names. So no shadowing. Fine.
+
+Let me also check `resolveCommit` — uses `revArgs(`${rev}^{commit}`)`. If rev is "agent/ep/t" and a tag shadows, it resolves to the tag. But that's the caller's baseCommit, and the caller's assertion. Fine.
+
+Now, the `removeTaskWorktree` C8 gate: `const tip = (await git(this.repoRoot, ["rev-parse", "--verify", entry.branch])).trim();` — if entry.branch is shadowed, tip is the tag's commit. Then `is-ancestor(baseSha, tip)` checks the tag. Then `rev-list base..entry.branch` checks the tag. Then `branch -D entry.branch` deletes the branch. So the gate is bypassed. CONFIRMED.
+
+Let me also check: does `git branch -D agent/ep/t` with a tag "agent/ep/t" delete the branch or the tag? `git branch -D` operates on branches (refs/heads/), so it deletes the branch. The tag remains. So the branch's unmerged commits are lost (unless reachable elsewhere). CONFIRMED data loss.
+
+Now, let me also check the `users` pre-gate: `listWorktrees` returns branch names; `e.branch === entry.branch` — string comparison. Fine.
+
+Let me also check `removeTaskWorktree`'s `entry.branch !== expected` — string comparison. Fine.
+
+Now, let me also check the `prune()` foreign check with a locked stale entry: as F3.
+
+Let me also check `prune()` with a stale entry whose path is a symlink? `listWorktrees` returns the registered path. `isWithin` is lexical. Fine.
+
+Let me also check `open()`'s `nearestExisting` with a path that is a symlink to a directory inside a repo: statSync follows → isDirectory true → anchor = symlink path → realpath → target inside repo → probe → caught. Fine.
+
+Let me also check `open()`'s `nearestExisting` with a path that is a symlink to a directory OUTSIDE any repo: anchor = symlink path → realpath → target outside → probe null → proceeds → mkdir(wtArg) — wtArg is the symlink path; mkdir on an existing symlink to a dir: EEXIST? With recursive:true, Node's mkdir may return success if the path exists (it checks). Then realpath(wtArg) → target. So wtRoot is the target. Fine.
+
+Let me also check `open()`'s `nearestExisting` with a path that is a symlink to a directory inside a repo, but the symlink is created AFTER the gate (TOCTOU). Out of scope? The caller fence is about concurrent callers, not filesystem races. But the doc says "no directory is created before the gates pass". A symlink race is a residual. Minor.
+
+Now, let me also check the `removeTaskWorktree` dirty gate: `git(entry.path, ["status", "--porcelain", "--untracked-files=all"])`. If the worktree is locked, status works. Fine.
+
+Let me also check the `removeTaskWorktree` force path: `worktree remove --force` on a locked entry fails (F2). On a non-locked dirty entry, --force works. Fine.
+
+Let me also check the `removeTaskWorktree` force path on a locked entry: the dirty gate runs, then `worktree remove --force` fails. The worktree is not removed. The error is git-failed. The caller may retry with force again (same failure). The `locked` message says "pass force to discard" — misleading. F2.
+
+Now, let me also check the `ensureTaskWorktree` C5 gate for a worktree that is locked: ensure accepts it (no locked check). Fine.
+
+Let me also check the `ensureTaskWorktree` C5 gate for a worktree whose HEAD is a sha that is not in the repo (e.g., the worktree was created from a different repo)? merge-base fails → git-failed → caught → false → branch-conflict. Misleading. F4.
+
+Let me also check the `ensureTaskWorktree` C5 gate for a worktree whose HEAD is a tag? entry.head is a sha. Fine.
+
+Now, let me also check the `listWorktrees` parsing of the "locked" line: `line === "locked" || line.startsWith("locked ")`. Git prints "locked" or "locked <reason>". Fine. But what if the reason contains a newline? Git's porcelain doesn't quote; a lock reason with a newline would break parsing. Edge case. Minor.
+
+Let me also check the `listWorktrees` parsing of the "prunable" line: same. Fine.
+
+Let me also check the `listWorktrees` parsing of the "worktree " line: a path with a newline breaks. Edge case.
+
+Now, let me also check the `open()` placement gate: `gitVerify(anchorReal, ["rev-parse", "--path-format=absolute", "--git-common-dir"])`. If the anchor is inside a repo but the repo is corrupt, gitVerify may return null (exit 1) or throw. If it returns null, the gate passes and mkdir proceeds inside a corrupt repo. Is that a hole? `rev-parse --git-common-dir` in a corrupt repo: it may still return the common dir (it doesn't need objects). If the repo is so corrupt that rev-parse fails with exit 1? Unlikely. Minor.
+
+Let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a worktree whose .git file points to a missing gitdir (broken gitlink), gitVerify throws git-failed (documented negative requires the full parenthesized wording; the broken gitlink message is "not a git repository: (null)" which doesn't match). Good.
+
+Now, let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a bare repo, `rev-parse --git-common-dir` returns the bare dir. Good.
+
+Now, let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a submodule? `rev-parse --git-common-dir` returns the submodule's git dir. Good.
+
+Now, let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a linked worktree, `rev-parse --git-common-dir` returns the main .git. Good.
+
+Now, let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a worktree whose .git file points to a gitdir, `rev-parse --git-common-dir` returns the common dir. Good.
+
+Now, let me also check the `open()` placement gate: if the anchor is inside a repo but the repo is a worktree whose .git file points to a gitdir that is a symlink? realpath normalizes. Fine.
+
+OK, I think I have enough. Let me also check the test file for wrong assertions.
+
+Test "remove: a base equal to the branch tip is NOT proof" — as discussed, it passes but doesn't cover the tag/remote case. The test is correct for its scenario. Not wrong, but incomplete.
+
+Test "ensure: a registration whose HEAD does not descend from the pin is refused" — the comment says "the pin for a retried attempt is now a descendant of the branch, so the branch is NOT at/past the new base." Actually movedBase is a descendant of base, and the branch is at base, so the branch is an ancestor of movedBase. The comment is slightly off but the test is right. Not a defect.
+
+Test "remove: a locked worktree is refused with `locked`" — only tests non-force. Doesn't test force. Incomplete (F2).
+
+Test "prune: reports its own removals and refuses..." — tests foreign refusal. Doesn't test locked stale. Incomplete (F3).
+
+Test "listWorktrees parses the registry" — doesn't test locked parsing. Incomplete.
+
+Test "open(): wtRoot inside a RENAMED linked worktree" — good.
+
+Test "open(): broken-gitlink anchor is a HARD error" — good.
+
+Test "open(): wtRoot under a linked worktree's .git GITFILE anchors on the worktree" — good.
+
+Test "ensure: crash-recovery re-attach" — good.
+
+Test "ensure: existing branch NOT at base → branch-conflict" — good.
+
+Test "remove: deleteBranch refuses when the branch is checked out elsewhere" — good.
+
+Test "remove: refuses a foreign-branch registration" — good.
+
+Test "remove: noop when nothing is registered; refuses unmanaged directories" — good.
+
+Test "remove: vanished directory → stale-registration" — good.
+
+Test "remove: deleteBranch gated on base-commit proof; unmerged refused; force discards" — good.
+
+Test "remove: unadvanced branch deletes cleanly with baseCommit proof" — uses base=base, tip=base

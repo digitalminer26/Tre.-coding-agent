@@ -497,6 +497,81 @@ test("ensure: a registration whose HEAD does not descend from the pin is refused
   assert.equal(again.head, first.head);
 });
 
+test("remove: a same-named TAG cannot shadow the branch in the deletion proof (audit ds-c1 F1)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epL", taskId: "t1", baseCommit: base });
+  await writeFile(join(wt.path, "work.txt"), "task output\n");
+  await git(wt.path, "add", "work.txt");
+  await git(wt.path, "commit", "-m", "task work");
+  // A tag with the SAME NAME as the branch: git's ref-resolution order
+  // puts refs/tags/ before refs/heads/, so an unqualified `rev-parse
+  // agent/epL/t1` answers with the TAG's commit (verified against git
+  // 2.54) — the old gate "proved" unadvanced-ness against the tag while
+  // `branch -D` deleted the real (advanced) branch.
+  await git(repo, "tag", "agent/epL/t1", base);
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epL", taskId: "t1", baseCommit: base, deleteBranch: true }),
+    (e: unknown) => { expectCode(e, "unmerged"); return true; },
+  );
+  assert.notEqual(await gitMaybe(repo, "rev-parse", "--verify", "--quiet", "refs/heads/agent/epL/t1"), null);
+});
+
+test("remove: force on a LOCKED worktree overrides the lock via double -f (audit ds-c1 F2)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epM", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  // git refuses a locked removal with a SINGLE --force ("use 'remove -f
+  // -f'"); the force path must pass the double force or it dies late.
+  const rep = await prov.removeTaskWorktree({ episodeId: "epM", taskId: "t1", force: true });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal((await listWorktrees(repo)).some((e) => e.path === wt.path), false);
+  assert.equal(existsSync(wt.path), false);
+});
+
+test("remove: locked + foreign reports foreign-branch, not a discardable locked (audit ds-c1 F6)", async () => {
+  const { prov, repo, base } = await setup();
+  const path = prov.taskPath("tN");
+  await git(repo, "branch", "foreignN", base);
+  await git(repo, "worktree", "add", "--quiet", path, "foreignN");
+  await git(repo, "worktree", "lock", path);
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epN", taskId: "tN", force: true }),
+    (e: unknown) => { expectCode(e, "foreign-branch"); return true; },
+  );
+});
+
+test("ensure: a LOCKED + vanished registration is stale-registration, not preexisting (audit ds-c1 F3)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epP", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  await rm(wt.path, { recursive: true, force: true });
+  // git does NOT mark locked entries prunable — without an explicit
+  // directory check the vanished worktree would be returned as live with
+  // preexisting:true.
+  await assert.rejects(
+    prov.ensureTaskWorktree({ episodeId: "epP", taskId: "t1", baseCommit: base }),
+    (e: unknown) => { expectCode(e, "stale-registration"); return true; },
+  );
+});
+
+test("prune: a LOCKED stale entry under wtRoot is refused, never a silent skip (audit ds-c1 F3)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epO", taskId: "t1", baseCommit: base });
+  await git(repo, "worktree", "lock", wt.path);
+  await rm(wt.path, { recursive: true, force: true });
+  // git's prune SKIPS locked entries — returning {removed: []} would tell
+  // the caller cleanup succeeded while the stale registration survives.
+  await assert.rejects(
+    prov.prune(),
+    (e: unknown) => { expectCode(e, "locked"); return true; },
+  );
+  assert.equal((await listWorktrees(repo)).some((e) => e.path === wt.path), true);
+  // After an explicit unlock, prune converges.
+  await git(repo, "worktree", "unlock", wt.path);
+  const done = await prov.prune();
+  assert.deepEqual(done.removed, [wt.path]);
+});
+
 test("remove: a locked worktree is refused with \`locked\`, not a bare git failure (audit C6)", async () => {
   const { prov, repo, base } = await setup();
   const wt = await prov.ensureTaskWorktree({ episodeId: "epK", taskId: "t1", baseCommit: base });
