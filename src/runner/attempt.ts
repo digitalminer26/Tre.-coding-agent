@@ -380,14 +380,22 @@ interface ChildEntry {
   exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
 
-/** Total order over attempt records: newest `ts` wins; `id` is the
- *  deterministic tiebreak (F1: never "any newer record" — ties must not
- *  make the newest-tuple set ambiguous). */
-function recordNewerThan(a: AttemptRecord, b: AttemptRecord): boolean {
-  const ta = a.ts ?? 0;
-  const tb = b.ts ?? 0;
-  if (ta !== tb) return ta > tb;
-  return (a.id ?? "") > (b.id ?? "");
+/**
+ * Lifecycle-transition recency is CAUSAL, never wall-clock (audit F1):
+ * a record's position in the journal's APPEND ORDER IS its causality.
+ * `record.ts` is the machine clock — it can step backward and collides
+ * within one millisecond across generations — and `id` is a random UUID
+ * whose lexical order carries no causal meaning, so ordering transitions
+ * by ts/id could invert a supersede and a stop recorded microseconds
+ * apart. The seq map (append index per record id, first occurrence wins)
+ * is built once per reconcile from the already-read records.
+ */
+function seqMapOf(records: SupervisorRecord[]): Map<string, number> {
+  const m = new Map<string, number>();
+  records.forEach((r, i) => {
+    if (!m.has(r.id)) m.set(r.id, i);
+  });
+  return m;
 }
 
 const runners = new Map<string, AttemptRunner | Promise<AttemptRunner>>();
@@ -411,6 +419,7 @@ export class AttemptRunner {
    *  attemptId allocation, the intent append, and the child registration
    *  are ONE critical section per episode instance. */
   private spawnQueue: Promise<unknown> = Promise.resolve();
+  private spawnActive = 0; // F3: count of queued-or-active spawn transactions
   private closed = false;
 
   private constructor(opts: AttemptRunnerOptions, journal: DecisionJournal) {
@@ -474,6 +483,14 @@ export class AttemptRunner {
    *  host process may exit); the durable records remain. */
   close(force = false): void {
     if (this.closed) return;
+    // F3 (audit): a queued-or-active spawn transaction OWNS the writer
+    // slot. Closing mid-transaction let the old runner continue through
+    // nodeSpawn and the ok-append AFTER a reopen had put a second
+    // writer on the journal (two live workers, one attemptId). Refuse
+    // while any transaction is in flight — the registry reservation is
+    // retained until it settles. force detaches (same policy as live
+    // children); the pre-spawn closure recheck below covers that path.
+    if (!force && this.spawnActive > 0) throw new RunnerError("ownership-fence", "refusing to close while a spawn transaction is in flight — await it first (or close(true) to force)");
     if (!force && this.hasLiveChildren) throw new RunnerError("ownership-fence", "refusing to close while a child is live — stop() first (or close(true) to detach tracking)");
     if (force) for (const e of this.children.values()) if (!e.exited) { try { e.child.unref(); } catch { /* already reaped */ } }
     this.closed = true;
@@ -544,14 +561,16 @@ export class AttemptRunner {
    *  rejections; a closed runner refuses before any mutation. */
   private async enqueueSpawn<T>(fn: () => Promise<T>): Promise<T> {
     if (this.closed) throw new RunnerError("bad-input", "runner is closed");
+    this.spawnActive += 1; // F3: counted synchronously — queued AND active
     const prev = this.spawnQueue;
     let release!: () => void;
     this.spawnQueue = new Promise<void>((res) => { release = res; });
-    await prev.catch(() => { /* prior caller's refusal is not ours to carry */ });
-    this.assertOpen();
     try {
+      await prev.catch(() => { /* prior caller's refusal is not ours to carry */ });
+      this.assertOpen();
       return await fn();
     } finally {
+      this.spawnActive -= 1;
       release();
     }
   }
@@ -572,7 +591,7 @@ export class AttemptRunner {
     this.assertOpen();
     const entry = this.children.get(canonicalPath(handle.session));
     if (!entry || entry.exited) throw new RunnerError("not-running", `no live child for session ${JSON.stringify(handle.session)} started by this runner instance`);
-    const escalated = await this.terminate(entry);
+    let escalated = await this.terminate(entry);
     const { code, signal } = await entry.exitPromise;
     if (!entry.pgid) {
       // Non-detached: no private group to sweep — the direct child's
@@ -586,6 +605,11 @@ export class AttemptRunner {
     // SIGKILL sweep + re-verify; EPERM ⇒ undeterminable.
     let verdict = this.groupAlive(entry.pgid);
     if (verdict === "alive") {
+      // F7 (audit): this post-exit sweep IS a SIGKILL escalation of the
+      // stop — SIGTERM did not take (a grandchild survived the group
+      // TERM) — so `escalated` reports true even when terminate()
+      // returned false on an immediate leader exit.
+      escalated = true;
       this.signalGroup(entry, "SIGKILL");
       // Bounded poll: a SIGKILL'd member's exit reaping is async in the
       // kernel; kill(-pgid,0) may still answer "alive" for a moment
@@ -680,6 +704,14 @@ export class AttemptRunner {
     assertTask(t, this.episodeId);
     if (!ATTEMPT_ID.test(attemptId)) throw new RunnerError("bad-input", `attemptId must match "<taskId>-a<N>" (got ${JSON.stringify(attemptId)})`);
     if (typeof evidence !== "string" || evidence.trim().length === 0) throw new RunnerError("bad-input", "confirmStopped requires a non-empty evidence string (what proves the worker stopped)");
+    // F4 (audit): serialize with run()/resume() on the SAME spawn
+    // mutex. A confirmation interleaved with a live spawn could read
+    // pre-append records, judge the tuple dead, and append its
+    // "failed" resolve under a generation a concurrent spawn already
+    // superseded. Enqueue first, then re-read EVERYTHING (records,
+    // state hint, probes) inside the critical section — the
+    // revalidation IS the fresh read under the mutex.
+    return this.enqueueSpawn(async () => {
     const records = await this.records();
     const tuple = records.filter((r) => r.kind === "attempt" && r.episodeId === t.episodeId && r.taskId === t.taskId && r.attemptId === attemptId);
     if (tuple.length === 0) throw new RunnerError("bad-input", `no attempt record for ${t.episodeId}/${t.taskId}/${attemptId}`, { attemptId });
@@ -724,13 +756,35 @@ export class AttemptRunner {
     // ownership against a live higher-generation tuple. A legacy tuple
     // (no generation) confirms as legacy.
     const record: AttemptRecord = { ...latest, id: newDecisionId(), ts: Date.now(), spawnOutcome: "failed", ...(typeof latest.spawnGen === "number" ? { spawnGen: latest.spawnGen } : {}) };
+    // F4 (audit): generation-checked revalidation immediately before
+    // the append — a spawn that raced in after our first read (only
+    // possible pre-mutex-serialization) would have appended a HIGHER
+    // spawnGen for this session; confirming a stale tuple then must
+    // refuse rather than rewrite ownership. (Records are re-read
+    // here so the check sees the exact durable state we append onto.)
+    const fresh = await this.records();
+    const tupleFresh = fresh.filter((r) => r.kind === "attempt" && r.episodeId === t.episodeId && r.taskId === t.taskId && r.attemptId === attemptId);
+    const latestFresh = tupleFresh[tupleFresh.length - 1] as AttemptRecord | undefined;
+    if (latestFresh && latestFresh.id !== latest.id) {
+      // A different record is now the tuple's latest — a spawn/resume
+      // appended under this tuple between our reads. Note: "ok" alone
+      // is the NORMAL confirmation target (spawn-ok then stopped);
+      // only a CHANGED latest id is evidence of a race.
+      throw new RunnerError("ownership-fence", `attempt ${attemptId} changed under us (spawn revalidated it) — re-run confirmStopped against the new state`, { attemptId });
+    }
+    const sessionGenFresh = Math.max(0, ...(fresh.filter((r): r is AttemptRecord => r.kind === "attempt" && r.episodeId === t.episodeId && r.sessionPath === t.session).map((r) => r.spawnGen ?? 0)));
+    if (typeof latest.spawnGen === "number" && sessionGenFresh > latest.spawnGen) {
+      throw new RunnerError("ownership-fence", `session ${JSON.stringify(t.session)} has a newer spawn generation ${sessionGenFresh} than the confirmed tuple (${latest.spawnGen}) — this confirmation is stale`, { attemptId, sessionGenFresh });
+    }
     await this.appendRecord(record);
     // Clear the stale hint ONLY when it still describes this tuple
     // (F12: never clobber a newer attempt's live row).
-    if (row && row.attemptId === attemptId && row.session === t.session) {
+    const rowNow = (await this.readState())?.tasks?.[t.taskId];
+    if (rowNow && rowNow.attemptId === attemptId && rowNow.session === t.session) {
       await this.writeStateHint(t, attemptId, undefined, "paused");
     }
     return record;
+    });
   }
 
   /** Re-write the S6 pid-hint row (e.g. after a hint-write failure).
@@ -833,6 +887,15 @@ export class AttemptRunner {
         continue; // group reaped (or no group claim): disproven
       }
       if (a.groupProbe?.running === true) throw new RunnerError("prior-attempt-running", `attempt ${a.record.attemptId}: its process GROUP (pgid ${a.groupProbe.pgid}) has members (I1: park, do not re-spawn onto it)`, { attemptId: a.record.attemptId, pgid: a.groupProbe.pgid });
+      // F5 (audit): a DEAD leader pid + an UNDETERMINABLE group (EPERM
+      // on kill(-pgid,0) — members owned by another uid) is NOT death
+      // proof: grandchildren may still own the session. Every fence
+      // branch parks on unknown group liveness — the own-exited-child
+      // branch already did; the reopened/foreign branch must too, or
+      // reconcile parks while run() spawns onto the survivor group.
+      if (a.groupProbe && a.groupProbe.running === undefined) {
+        throw new RunnerError("prior-attempt-unresolved", `attempt ${a.record.attemptId}: group liveness of pgid ${a.groupProbe.pgid} is undeterminable (EPERM — foreign-owner group?) — leader death alone is not group death: park or confirmStopped with group evidence`, { attemptId: a.record.attemptId, pgid: a.groupProbe.pgid });
+      }
       if (a.probe && a.probe.running === true && a.probe.sameUid !== false) {
         throw new RunnerError("prior-attempt-running", `attempt ${a.record.attemptId} discovered RUNNING at pid ${a.probe.pid} — park (I1)`, { attemptId: a.record.attemptId, pid: a.probe.pid });
       }
@@ -865,20 +928,25 @@ export class AttemptRunner {
    * Liveness discovery is JOURNAL-FIRST (F6): a tuple's recorded `pid`
    * (or a matching state.json hint row when the record predates P7
    * audit) is probed whenever we are not the parent. `blocking` is the
-   * newest tuple PER SESSION PATH (F1/F2: latest `ts`, id tiebreak);
-   * older tuples on the same path are superseded and reported under
+   * newest tuple PER SESSION PATH (F1: causality = journal append order,
+   * F2); older tuples on the same path are superseded and reported under
    * `superseded*`. Pure observation.
    */
   private async analyze(task: AttemptTask, records: SupervisorRecord[], probes: ReconcileResult["probes"]): Promise<{
     all: AttemptView[]; latest?: AttemptView; unresolved: AttemptView[]; spawned: AttemptView[]; live: AttemptView[]; foreignLive: { attemptId: string; taskId: string }[]; blocking: AttemptView[]; supersededThisTask: AttemptView[];
   }> {
-    // latest record per tuple, ACROSS tasks (the fence joins on session)
+    // F1 (audit): causality index over the journal — append position IS
+    // the causal order (first occurrence wins for a duplicated id).
+    const seqOf = seqMapOf(records);
+    // latest record per tuple, ACROSS tasks (the fence joins on session).
+    // F1 (audit): "latest" is journal append order (causality), never
+    // the wall-clock ts or the lexical UUID id.
     const byTuple = new Map<string, AttemptRecord>();
     for (const r of records) {
       if (r.kind !== "attempt" || r.episodeId !== task.episodeId) continue;
       const k = tupleKey(r);
       const prev = byTuple.get(k);
-      if (!prev || recordNewerThan(r as AttemptRecord, prev)) byTuple.set(k, r as AttemptRecord);
+      if (!prev || (seqOf.get(r.id) ?? -1) > (seqOf.get(prev.id) ?? -1)) byTuple.set(k, r as AttemptRecord);
     }
     // newest tuple per session path (F1/F2): a tuple is newest if no
     // other tuple on the same session path is newer than it. An
@@ -896,34 +964,58 @@ export class AttemptRunner {
       all.push(view);
     }
     // Ownership newest-per-session by SPAWN GENERATION (audit finding 3),
-    // falling back to ts/id only for legacy records (generation 0): a
-    // confirmation of an old tuple must never make that tuple "newest"
-    // and drop a live newer tuple's claim from the fence. A positively
-    // live tuple (own child) is NEVER superseded — liveness overrides
-    // any ordering.
+    // with legacy generation-0 tuples ordered by DURABLE LOG POSITION
+    // (audit F2) — never by the confirmation's wall clock. A confirmation
+    // of an old tuple must never make that tuple "newest" and drop a
+    // live newer tuple's claim from the fence, and a positively live
+    // tuple (own child OR discovered live/group-live) is NEVER superseded
+    // — liveness overrides any ordering. So the supersession pass runs
+    // AFTER the probes below have filled in `view.probe`/`view.groupProbe`.
     const genOf = (v: AttemptView): number => v.record.spawnGen ?? 0;
-    const genBySession = new Map<string, number>();
-    for (const view of all) {
-      const sess = view.record.sessionPath;
-      const g = genOf(view);
-      if (g > (genBySession.get(sess) ?? 0)) genBySession.set(sess, g);
-    }
-    const supersededSet = new Set<AttemptView>();
-    for (const view of all) {
-      if (view.live === true) continue; // finding 3: never discard a positively live claim
-      if (genOf(view) === 0) {
-        // Legacy tuple (no generation anywhere on its session): old
-        // ts/id rule — superseded by any NEWER RESOLVED tuple on the
-        // same session (unresolved intents never supersede).
-        for (const other of all) {
-          if (other === view || other.record.sessionPath !== view.record.sessionPath) continue;
-          if (other.record.spawnOutcome === undefined || other.record.spawnOutcome === null) continue;
-          if (recordNewerThan(other.record, view.record)) { supersededSet.add(view); break; }
-        }
-        continue;
+    const markSuperseded = (): Set<AttemptView> => {
+      const genBySession = new Map<string, number>();
+      for (const view of all) {
+        const sess = view.record.sessionPath;
+        const g = genOf(view);
+        if (g > (genBySession.get(sess) ?? 0)) genBySession.set(sess, g);
       }
-      if (genOf(view) < (genBySession.get(view.record.sessionPath) ?? 0)) supersededSet.add(view);
-    }
+      const superseded = new Set<AttemptView>();
+      for (const view of all) {
+        // F2 (audit): positive liveness — own child or a discovered
+        // running pid/group — is never discarded by an ordering rule.
+        if (view.live === true || view.probe?.running === true || view.groupProbe?.running === true) continue;
+        if (genOf(view) === 0) {
+          // Legacy tuple (generation 0): ordered by FIRST SPAWN position
+          // in the durable journal (F1: append order is causality, not
+          // the machine clock). A confirmation resolve of a legacy tuple
+          // sits after that tuple's spawns, so taking the FIRST spawn
+          // resolve means confirming an old tuple cannot reorder it
+          // against a newer one. An unresolved intent is not spawn
+          // evidence and never supersedes.
+          const firstSpawnSeq = (v: AttemptView): number => {
+            if (v.record.spawnOutcome !== "ok" && v.record.spawnOutcome !== "failed") return -1;
+            let first = seqOf.get(v.record.id) ?? -1;
+            for (const r of records) {
+              if (r.kind === "attempt" && tupleKey(r as AttemptRecord) === tupleKey(v.record) && (r.spawnOutcome === "ok" || r.spawnOutcome === "failed")) {
+                const s = seqOf.get(r.id);
+                if (s !== undefined && s < first) first = s;
+              }
+            }
+            return first;
+          };
+          for (const other of all) {
+            if (other === view || other.record.sessionPath !== view.record.sessionPath) continue;
+            const mine = firstSpawnSeq(view);
+            const theirs = firstSpawnSeq(other);
+            if (mine >= 0 && theirs > mine) { superseded.add(view); break; }
+          }
+          continue;
+        }
+        if (genOf(view) < (genBySession.get(view.record.sessionPath) ?? 0)) superseded.add(view);
+      }
+      for (const v of all) v.superseded = superseded.has(v);
+      return superseded;
+    };
     // ps probes on process evidence (journal pid first, F6; legacy hint
     // rows still probed when a record carries no pid — F10 keeps both
     // paths tested until the field is universally deployed).
@@ -957,7 +1049,7 @@ export class AttemptRunner {
       const g = this.groupAlive(view.record.pgid);
       view.groupProbe = { pgid: view.record.pgid, running: g === "alive" ? true : g === "reaped" ? false : undefined };
     }
-    for (const view of all) view.superseded = supersededSet.has(view);
+    const supersededSet = markSuperseded(); // F2: after the probes — liveness overrides ordering
 
     const foreignLive: { attemptId: string; taskId: string }[] = [];
     const entry = this.children.get(task.session);
@@ -977,7 +1069,7 @@ export class AttemptRunner {
     const spawned = all.filter((v) => v.record.spawnOutcome === "ok" && thisTask(v) && notSuperseded(v));
     const supersededThisTask = all.filter((v) => supersededSet.has(v) && thisTask(v));
     let latest: AttemptView | undefined;
-    for (const view of all) if (thisTask(view) && (!latest || recordNewerThan(view.record, latest.record))) latest = view;
+    for (const view of all) if (thisTask(view) && (!latest || (seqOf.get(view.record.id) ?? -1) > (seqOf.get(latest.record.id) ?? -1))) latest = view;
     return { all, latest, unresolved, spawned, live, foreignLive, blocking, supersededThisTask };
   }
 
@@ -999,6 +1091,9 @@ export class AttemptRunner {
       throw new RunnerError("spawn-failed", `spawner ${JSON.stringify(this.spawner.kind)} returned an invalid spawn spec: ${specError}`);
     }
     const detached = spec.detached ?? true;
+    // F3 (audit): closure recheck immediately before the process is
+    // created (forced close may have landed during the awaits above).
+    this.assertOpen();
     let child: ReturnType<typeof nodeSpawn>;
     try {
       child = nodeSpawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, detached, stdio: "ignore" });
@@ -1014,6 +1109,13 @@ export class AttemptRunner {
       settle({ code, signal });
     });
     child.once("error", () => { /* classified via the wait below / exit channel */ });
+
+    // F3 (audit): closure gate before the "ok" resolve append. close()
+    // refuses while a transaction is in flight, but close(true) forces
+    // — after a forced close we must not advertise the spawn as ok on
+    // a journal a reopened writer now owns; the child stays tracked
+    // and the intent parks (I2-conservative).
+    this.assertOpen();
 
     // Wait until the process provably EXISTS before claiming "ok" —
     // 'error' without 'spawn' means the process NEVER existed.
@@ -1034,6 +1136,12 @@ export class AttemptRunner {
     // resolve append so a failed resolve still leaves a visible live
     // child; losing tracking of a live child is the worse failure).
     this.children.set(task.session, entry);
+    // F3 (audit): last closure gate before the "ok" resolve append —
+    // close() refuses while a transaction is in flight, but close(true)
+    // forces; after a forced close we must not advertise the spawn ok
+    // on a journal a reopened writer now owns. The child stays tracked
+    // and the intent parks (I2-conservative).
+    this.assertOpen();
     // "ok" resolve carries the process identity INTO THE JOURNAL (F6):
     // restart discovery no longer depends on the single-row state hint.
     await this.appendRecord({ ...resolveLike(intent, "ok"), pid: child.pid, ...(entry.pgid !== undefined ? { pgid: entry.pgid } : {}) });
@@ -1101,12 +1209,33 @@ export class AttemptRunner {
     const path = join(this.dir(), "state.json");
     try {
       const state = await readEpisodeState(path);
-      if (state.episodeId !== this.episodeId) throw new RunnerError("bad-input", `state.json episodeId ${JSON.stringify(state.episodeId)} does not match runner episode ${JSON.stringify(this.episodeId)}`);
+      if (state.episodeId !== this.episodeId) {
+        // F6 (audit): a wrong-identity cache is not authoritative —
+        // the journal is. Warn and treat as absent (rebuild-from-
+        // journal); never let a stale/misplaced cache fail the run.
+        this.warnStateOnce(`state.json episodeId ${JSON.stringify(state.episodeId)} does not match runner episode ${JSON.stringify(this.episodeId)} — ignoring the cache, deriving from the journal`);
+        return undefined;
+      }
       return state;
     } catch (e) {
       if (isEnoent(e)) return undefined;
-      throw e instanceof RunnerError ? e : new RunnerError("bad-input", `state.json unreadable: ${msg(e)}`, { cause: msg(e) });
+      // F6 (audit): corrupt / half-written hint cache. The S6 contract
+      // is explicit: a corrupt cache means rebuild-from-files, never a
+      // failed run. The journal is the authority; the cache is a
+      // derived accelerator. Surface ONE warning and continue with no
+      // cache (legacy hints it held are then absent — the fence stays
+      // conservative: absence of hint never proves liveness either
+      // way, claims without journal evidence park as before).
+      this.warnStateOnce(`state.json unreadable (${msg(e)}) — ignoring the cache, deriving from the journal`);
+      return undefined;
     }
+  }
+
+  private stateWarned = false;
+  private warnStateOnce(text: string): void {
+    if (this.stateWarned) return;
+    this.stateWarned = true;
+    process.emitWarning(`AttemptRunner[${this.episodeId}]: ${text}`, "TreStateCacheWarning");
   }
 
   // ────────────────────────────── internals ─────────────────────────────────
@@ -1122,6 +1251,11 @@ export class AttemptRunner {
   }
 
   private async appendRecord(record: AttemptRecord): Promise<void> {
+    // F3 (audit): a closed runner never mutates the journal — close()
+    // refuses while a transaction is in flight, but a forced close
+    // (or a close between the last gate and this append) must still
+    // stop writes dead rather than interleave with a reopened writer.
+    this.assertOpen();
     try { await this.journal.append(record); }
     catch (e) { throw new RunnerError("journal-failed", `journal append failed: ${msg(e)}`, { record, cause: msg(e) }); }
   }

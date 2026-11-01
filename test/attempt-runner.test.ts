@@ -19,9 +19,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as procSpawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   AttemptRunner,
@@ -602,6 +603,228 @@ test("Fg: concurrent AttemptRunner.open() for the same episode yields ONE instan
   const r3 = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner() });
   t.after(() => r3.close(true));
   assert.notEqual(r3, r1);
+});
+
+// ─────────────── p7-remediation-audit cycle-1 regression tests ─────────────
+
+/** Accurate same-uid liveness probe (kill(pid,0)): running iff ESRCH
+ *  is NOT returned. Deterministic where `ps` is blocked/inconclusive. */
+const killProbe = async (p: number): Promise<PidStatus> => {
+  try { process.kill(p, 0); return { running: true, sameUid: true }; } catch { return { running: false, sameUid: true }; }
+};
+
+// C1-F1(a): tuple state selected by generation + append order — a
+// seeded record with a FUTURE timestamp must not hide a real resumed
+// generation appended after it (audit repro: ts=Date.now()+100000).
+test("C1-F1: a future-ts failed record cannot hide a live resumed generation across reopen (causal selection, not wall clock)", async (t) => {
+  const { root, session } = await fixture();
+  await seedAttemptRecord(join(root, "ep-p7"), { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 1, ts: Date.now() + 100_000 });
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(60), probes: { pidAlive: killProbe } });
+  const h = await runner.resume(task(session), "t1-a1"); // real sleep, generation 2
+  t.after(() => { try { process.kill(h.pid!, "SIGKILL"); } catch { /* gone */ } });
+  assert.ok((h.pid ?? 0) > 0);
+  runner.close(true); // lost-supervisor detach
+  const runner2 = await AttemptRunner.open({ root, episodeId: "ep-p7", probes: { pidAlive: killProbe } });
+  t.after(() => runner2.close(true));
+  const rec = await runner2.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "the resumed gen-2 process is the tuple's latest — discovered RUNNING ⇒ park (the higher-ts seeded record would have said spawn)");
+  await assert.rejects(runner2.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running", "a second worker must not start while the resumed generation is live");
+});
+
+// C1-F1(b): equal-millisecond intent + outcome pair — the outcome sits
+// later in the journal, so latest-per-tuple must pick the FAILED
+// outcome (id "d-a" sorts before "d-z" lexically; lexical order is not
+// causal order) and must NOT park.
+test("C1-F1: equal-ts intent/outcome pair resolves by JOURNAL POSITION, not id/ts — reconcile spawns, never parks", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { id: "d-z", attemptId: "t1-a1", sessionPath: session, spawnOutcome: null, spawnGen: 1, ts: 123 });
+  await seedAttemptRecord(dir, { id: "d-a", attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 1, ts: 123 });
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "spawn", "the later-appended failed outcome wins over its equal-ts intent");
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a2");
+  await runner.stop(h);
+});
+
+// C1-F2: legacy generation-zero history — confirming an old dead tuple
+// with a fresh timestamp must NOT supersede a discovered-LIVE newer
+// legacy tuple (audit repro: a2 owns a real detached sleep).
+test("C1-F2: legacy gen-0 — confirmation of a dead old tuple never supersedes a live newer tuple (log position + liveness, not ts)", async (t) => {
+  const { root, dir, session } = await fixture();
+  const child = procSpawn("/bin/sleep", ["60"], { detached: true, stdio: "ignore" });
+  const alivePid = child.pid!;
+  child.unref();
+  t.after(() => { try { process.kill(-alivePid, "SIGKILL"); } catch { /* gone */ } });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", ts: 1, pid: 999991 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", ts: 2, pid: alivePid, pgid: alivePid });
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
+  t.after(() => runner.close(true));
+  const before = await runner.reconcile(task(session));
+  assert.equal(before.decision.action, "park", "a2 discovered live ⇒ park before anything else");
+  await runner.confirmStopped(task(session), "t1-a1", "pid 999991 ESRCH — the old process is gone");
+  const after = await runner.reconcile(task(session));
+  assert.equal(after.decision.action, "park", "the fresh-ts confirmation of a1 must NOT drop a2's live claim");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running", "run refuses while a2's real process is alive");
+  // recovery: kill a2's group ⇒ ownership released, spawn allowed
+  for (let i = 0; i < 100; i++) { try { process.kill(-alivePid, "SIGKILL"); await new Promise((r) => setTimeout(r, 20)); } catch { break; } }
+  await runner.confirmStopped(task(session), "t1-a2", "SIGKILL -pgid reaped the survivor group; kill(-pgid,0) ESRCH");
+  const rec3 = await runner.reconcile(task(session));
+  assert.equal(rec3.decision.action, "spawn", "all legacy claims resolved ⇒ spawn");
+});
+
+// C1-F3: close() must refuse while a spawn transaction is in flight
+// (queued OR active) — the writer slot stays reserved until it settles.
+test("C1-F3: close() refuses during an active AND a queued spawn transaction; succeeds after they settle", async (t) => {
+  const { root, session } = await fixture();
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(60), probes: { pidAlive: killProbe } });
+  // gate the FIRST journal append (the intent) to hold a transaction open
+  const j = runner as unknown as { journal: { append: (r: AttemptRecord) => Promise<void> } };
+  const origAppend = j.journal.append.bind(j.journal);
+  let releaseAppend!: () => void;
+  let first = true;
+  j.journal.append = async (rec: AttemptRecord) => {
+    if (first) { first = false; await new Promise<void>((res) => { releaseAppend = res; }); }
+    await origAppend(rec);
+  };
+  const p1 = runner.run(task(session));               // active: paused at intent append
+  const p2 = runner.run(task(session, { taskId: "t2", session: join(root, "ep-p7", "sessions", "t2.jsonl") })); // queued behind p1
+  for (let i = 0; i < 200 && typeof releaseAppend !== "function"; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(typeof releaseAppend, "function", "the first intent append reached the gate");
+  assert.throws(() => runner.close(), (e: RunnerError) => e.code === "ownership-fence" && /spawn transaction/.test(e.message), "close refuses while the transaction is active");
+  releaseAppend();
+  const h = await p1;
+  t.after(() => { try { process.kill(h.pid!, "SIGKILL"); } catch { /* gone */ } });
+  const h2 = await p2;
+  try {
+    assert.throws(() => runner.close(), (e: RunnerError) => e.code === "ownership-fence", "close refuses while children are live");
+  } finally { /* expected */ }
+  await runner.stop(h);
+  await runner.stop(h2);
+  runner.close(); // settled & drained: plain close now succeeds
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "bad-input", "closed runner refuses");
+});
+
+// C1-F4: confirmStopped is serialized with run/resume on the SAME
+// spawn mutex. Audit repro: stale confirm of gen-1 (probe delayed)
+// racing a real resume to gen-2 — the confirmation must not land a
+// stale failed record + hint clear over the live gen-2 worker.
+test("C1-F4: confirmStopped serializes with resume — stale confirmation cannot clobber a live same-attempt resume or its hint", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991 });
+  let spawnCount = 0;
+  const countingSpawner = { kind: "c1-f4", spawn: () => { spawnCount += 1; return { command: "/bin/sleep", args: ["60"] }; } };
+  // gate the dead-PID probe so the confirmation pauses INSIDE its check
+  let releaseProbe!: () => void;
+  const gate = new Promise<void>((res) => { releaseProbe = res; });
+  const gatedProbe = async (p: number): Promise<PidStatus> => {
+    if (p === 999991) await gate;
+    return killProbe(p);
+  };
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: countingSpawner, probes: { pidAlive: gatedProbe } });
+  const confirmP = runner.confirmStopped(task(session), "t1-a1", "old pid gone (audit stale-confirm race)");
+  await new Promise((r) => setImmediate(r));
+  const resumeP = runner.resume(task(session), "t1-a1");   // queues behind the mutex
+  releaseProbe();
+  const confirmed = await confirmP;
+  const h = await resumeP;
+  t.after(async () => { try { await runner.stop(h); } catch { /* already stopped */ } runner.close(true); });
+  assert.equal(confirmed.spawnOutcome, "failed");
+  assert.equal(spawnCount, 1, "exactly ONE process spawned — the serialized order is confirm-then-resume, no interleaved overwrite");
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "running", "the gen-2 worker owns the session afterwards");
+  const st = await readEpisodeState(join(dir, "state.json"));
+  assert.equal(st.tasks.t1?.attemptId, "t1-a1");
+  assert.equal(st.tasks.t1?.pid, h.pid, "the final hint row describes the LIVE resumed process, not a cleared stale row");
+});
+
+// C1-F5: undeterminable GROUP (EPERM on kill(-pgid,0)) with a dead
+// leader parks EVERY entry point — reconcile, run, AND resume (the
+// audit: run spawned a real worker while reconcile parked).
+test("C1-F5: EPERM/unknown group liveness parks reconcile AND refuses run/resume (every fence branch agrees)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991 });
+  // intercept ONLY the signal-0 group probe for pgid 999991
+  const origKill = process.kill;
+  const patched = ((pid: number, sig?: NodeJS.Signals | number) => {
+    if (pid === -999991 && (sig === 0 || sig === undefined)) {
+      const e = Object.assign(new Error("operation not permitted"), { code: "EPERM" }) as NodeJS.ErrnoException & Error;
+      throw e;
+    }
+    return (origKill as (p: number, s?: NodeJS.Signals | number) => boolean)(pid, sig);
+  }) as typeof process.kill;
+  process.kill = patched;
+  t.after(() => { process.kill = origKill; });
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: async (p: number) => (p === 999991 ? { running: false, sameUid: true } : undefined) } });
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "unknown group liveness ⇒ park");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved", "run must NOT spawn onto an undeterminable group");
+  await assert.rejects(runner.resume(task(session), "t1-a1"), (e: RunnerError) => e.code === "prior-attempt-unresolved", "resume parks too");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "leader pid ESRCH"), (e: RunnerError) => e.code === "ownership-fence", "confirmStopped refuses on unknown group (unchanged)");
+  const recsAfter = await runner.records();
+  const attemptsAfter = recsAfter.filter((r) => r.kind === "attempt" && r.attemptId === "t1-a1" && r.spawnOutcome === "ok");
+  assert.equal(attemptsAfter.length, 1, "NO new spawn happened for the fenced tuple");
+});
+
+// C1-F6: corrupt / half-written / wrong-identity state.json is a
+// NON-authoritative cache — warn and rebuild from the journal, never
+// fail reconcile or block a run (S6 contract).
+test("C1-F6: corrupt, half-written and wrong-identity state.json degrade to journal-led recovery with a warning", async (t) => {
+  const { root, dir, session } = await fixture();
+  const warnings: string[] = [];
+  const onWarning = (w: Error): void => { warnings.push(w.message); };
+  process.on("warning", onWarning);
+  t.after(() => process.off("warning", onWarning));
+
+  // (a) half-written JSON
+  await writeFile(join(dir, "state.json"), '{"tasks":');
+  const r1 = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
+  const rec1 = await r1.reconcile(task(session));
+  assert.equal(rec1.decision.action, "spawn", "corrupt cache: journal says nothing is live ⇒ spawn");
+  const h = await r1.run(task(session));
+  assert.ok((h.pid ?? 0) > 0, "run proceeds despite the corrupt cache");
+  await r1.stop(h);
+  r1.close();
+
+  // (b) wrong-identity cache (valid shape, foreign episodeId)
+  const r2 = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
+  await writeEpisodeState(join(dir, "state.json"), { schema: STATE_SCHEMA_ID, episodeId: "ep-someone-elses", tasks: { t1: { status: "running", attemptId: "t1-a1", session } } });
+  const rec2 = await r2.reconcile(task(session)); // the foreign row claims t1 running — must NOT throw nor be believed
+  assert.ok(["spawn", "park"].includes(rec2.decision.action), `journal-led decision, got ${rec2.decision.action}`);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(warnings.some((w) => w.includes("state.json")), `a state.json warning surfaced, got ${JSON.stringify(warnings)}`);
+  r2.close();
+});
+
+// C1-F7: stop() with a TERM-ignoring SURVIVING GRANDCHILD: the
+// post-exit SIGKILL sweep must be reported as an escalation.
+test("C1-F7: surviving grandchild after group SIGTERM — stop() reports escalated:true and confirmed group reap", async (t) => {
+  const { root, session } = await fixture();
+  const marker = join(root, "grandchild-ready");
+  const grandchild = `trap '' TERM; touch '${marker}'; i=0; while [ $i -lt 200000000 ]; do i=$((i+1)); done`;
+  const sq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`; // POSIX-safe nesting
+  const parentScript = `sh -c ${sq(grandchild)} & wait`;
+  const runner = await AttemptRunner.open({
+    root, episodeId: "ep-p7",
+    spawner: { kind: "c1-f7", spawn: () => ({ command: "/bin/sh", args: ["-c", parentScript] }) },
+    probes: { pidAlive: killProbe },
+  });
+  const h = await runner.run(task(session));
+  const leaderPid = h.pid!;
+  t.after(() => { try { process.kill(-leaderPid, "SIGKILL"); } catch { /* gone */ } });
+  // readiness-synchronized: wait for the grandchild's marker
+  for (let i = 0; i < 250 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(existsSync(marker), "grandchild reported readiness");
+  const res = await runner.stop(h);
+  assert.equal(res.stopped, true, "stop completes only on confirmed group death");
+  assert.equal(res.escalated, true, "the post-exit SIGKILL sweep IS an escalation (audit: was reported false)");
+  assert.equal(res.groupStatus, "reaped", "group verified reaped via kill(-pgid,0) ESRCH");
+  // the grandchild is really gone
+  let survivors = 0;
+  try { process.kill(-leaderPid, 0); survivors = 1; } catch { survivors = 0; }
+  assert.equal(survivors, 0, "no survivor after the sweep");
 });
 
 // ───────────────────────────── boundary guard ───────────────────────────────
