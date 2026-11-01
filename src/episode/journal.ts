@@ -375,6 +375,29 @@ export interface AttemptRecord extends RecordEnvelope {
    *  never wall-clock timestamps, where generations exist; records
    *  without the field are legacy (generation 0). */
   spawnGen?: number;
+  /** A (audit): the spawn mode this tuple actually forked under —
+   *  stamped on the "ok" resolve alongside pid/pgid (the mode is only
+   *  known once the spec is built, which is AFTER the intent append).
+   *  Confirmations COPY it via the latest-record spread. Consumers
+   *  reading a stopped/group verdict must know whether a private group
+   *  existed at all: non-detached children share a foreign group that
+   *  the runner can neither sweep nor probe. Absent on records
+   *  predating the field. */
+  detached?: boolean;
+  /** A (audit): true ONLY on a `failed` resolve produced by the spawn
+   *  machinery AT SPAWN TIME (spawn error / invalid spec / user-spawner
+   *  throw / child died before it could be confirmed). A confirmStopped
+   *  "failed" is a CONFIRMATION (written at reopen): it says when a death
+   *  was observed, never when the process spawned — it must never
+   *  participate in spawn ordering (firstSpawnSeq). */
+  spawnEvidence?: boolean;
+  /** A (audit): true ONLY on the resolve written by confirmStopped —
+   *  an explicit confirmation written at reopen time. Its append position
+   *  reflects WHEN it was written, never when the process spawned, so it
+   *  must never participate in legacy spawn ordering (firstSpawnSeq):
+   *  a late confirmation of an old tuple would re-supersede the newer
+   *  live tuple. */
+  confirmation?: boolean;
 }
 
 export type SupervisorRecord =
@@ -417,6 +440,9 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
     model: id, worktreePath: id, spawnOutcome: nullable(choice("ok", "failed")),
     pid: revision, pgid: revision, // P7 audit F1/F6: stamped on the "ok" resolve (see AttemptRecord)
     spawnGen: revision, // P7 audit finding 3: causal generation per session (see AttemptRecord)
+    detached: bool, // A (audit): spawn mode stamped on the "ok" resolve (see AttemptRecord)
+    spawnEvidence: bool, // A (audit): failed-resolve from the spawn machinery itself (see AttemptRecord)
+    confirmation: bool, // A (audit): resolve written by confirmStopped — never spawn evidence (see AttemptRecord)
   }, ["attemptId", "sessionPath"]),
 };
 

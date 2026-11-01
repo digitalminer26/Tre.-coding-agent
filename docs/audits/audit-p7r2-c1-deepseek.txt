@@ -1,0 +1,487 @@
+Let me analyze the code carefully for the specific attack surface questions.
+
+Let me focus on the key areas.
+
+**Q1: Causal ordering — seqMapOf + byTuple latest + markSuperseded**
+
+`seqMapOf` builds a map of record id → first append index. `byTuple` picks latest per tuple by seq. `markSuperseded` uses generation, with legacy gen-0 using firstSpawnSeq.
+
+Let me look at `firstSpawnSeq`:
+```js
+const firstSpawnSeq = (v: AttemptView): number => {
+  if (v.record.spawnOutcome !== "ok" && v.record.spawnOutcome !== "failed") return -1;
+  let first = seqOf.get(v.record.id) ?? -1;
+  for (const r of records) {
+    if (r.kind === "attempt" && tupleKey(r as AttemptRecord) === tupleKey(v.record) && (r.spawnOutcome === "ok" || r.spawnOutcome === "failed")) {
+      const s = seqOf.get(r.id);
+      if (s !== undefined && s < first) first = s;
+    }
+  }
+  return first;
+};
+```
+
+Wait — `v.record` is the LATEST record of the tuple (from byTuple). If the latest record is a "failed" confirmation (from confirmStopped), then `v.record.spawnOutcome === "failed"`, so it doesn't return -1. Then it iterates all records of the tuple and finds the MIN seq of any ok/failed record. So for a tuple that had ok then a confirm-failed, firstSpawnSeq = the ok record's seq. Good.
+
+But consider: a tuple that had a "failed" spawn (real spawn failure, never existed) — firstSpawnSeq = that failed record's seq. That's fine.
+
+Now the concern: "can two legacy tuples tie, or can a failed-then-retried tuple's first-spawn position be misread?"
+
+Consider a legacy tuple that first had a real spawn failure (failed at seq 5), then was retried via resume and got ok at seq 10. firstSpawnSeq = min(5, 10) = 5. That's the first spawn attempt position. Fine.
+
+Now consider two legacy tuples on the same session. Tuple A: ok at seq 5. Tuple B: ok at seq 10. A.firstSpawnSeq=5, B.firstSpawnSeq=10. For A: theirs(B)=10 > mine(5) → A superseded. For B: theirs(A)=5, not > 10 → B not superseded. Good.
+
+Now the tie case: two legacy tuples with the SAME firstSpawnSeq. Can that happen? Each record has a unique id and unique seq. firstSpawnSeq returns the min seq of ok/failed records for that tuple. Two different tuples can't share a record, so their min seqs are different... unless one tuple has no ok/failed record (returns -1). If both return -1, neither supersedes. If one returns -1 and other returns 5: for the -1 one, `mine >= 0` is false, so not superseded. For the 5 one, theirs(-1) > 5 is false, not superseded. So both block. That's conservative — fine.
+
+Hmm, but wait. There's a subtle issue. Consider a legacy tuple whose LATEST record is an unresolved intent (spawnOutcome null), but it had an earlier ok. Actually can that happen? A tuple: ok at seq 5, then... resume appends intent (null) at seq 10, then ok at seq 12. Latest = ok at 12. firstSpawnSeq = min(5,12)=5. Fine.
+
+But what if resume appends intent (null) at seq 10 and then the process crashes before ok? Latest = intent (null). Then `v.record.spawnOutcome` is null → firstSpawnSeq returns -1. So this tuple is treated as "not spawn evidence" and never supersedes. But it also has an earlier ok at seq 5. Hmm, but the tuple is unresolved (latest is intent), so it blocks via the unresolved branch. That's conservative.
+
+Actually wait — the concern in the prompt: "a tuple that should be superseded but keeps blocking". Let me think about the generation branch.
+
+Generation branch: `if (genOf(view) < (genBySession.get(view.record.sessionPath) ?? 0)) superseded.add(view);`
+
+genBySession is the max generation across all views on that session. So a view is superseded if its gen < max gen on session. But what about a view whose gen EQUALS the max? Not superseded. If two tuples share the same max generation... can that happen? nextSpawnGen allocates max+1 from records. Two spawns on one session can't share a generation (per the comment, under mutex). But across a crash/restart? If a supervisor crashed after appending intent with gen N but before... hmm. Actually nextSpawnGen reads records; if intent with gen N is durable, next spawn gets N+1. So no two tuples share gen N unless... a resume of the same tuple reuses? No, resume calls nextSpawnGen too, so it gets a new gen. Wait, resume appends a new intent with a new spawnGen. So the same tuple can have multiple generations! Let me check.
+
+In `resume`: `return this.spawnAttempt(t, attemptId, true, nextSpawnGen(records, t.session));` — yes, resume allocates a new spawnGen. So a single tuple (same attemptId) can have records with gen 1, then gen 2 after resume. byTuple picks the LATEST record (by seq), which would be the gen-2 ok. So the tuple's view has gen 2. Fine.
+
+But now consider: tuple A (attemptId a1) has gen 1 ok. Then tuple B (a2) spawns with gen 2. Then resume of a1 → gen 3. Now byTuple for a1 = latest = gen 3 record. genBySession max = 3. a1 gen 3 not superseded, a2 gen 2 < 3 superseded. But a2's process might still be alive! Wait — but the liveness override: `if (view.live === true || view.probe?.running === true || view.groupProbe?.running === true) continue;` — so if a2 is discovered live, it's not superseded. Good.
+
+But what if a2's process is alive but NOT discovered (probe inconclusive/undefined)? Then it gets superseded and doesn't block. Hmm, but that's the general supersession assumption: a later generation implies the prior was confirmed stopped. Is that guaranteed? The fence requires prior stopped before spawning a new gen. So if gen 3 exists, gen 2's process was confirmed stopped before gen 3 spawned. So a2 being alive would be a contradiction... unless the confirmation was wrong. OK.
+
+Now the real question: **can a tuple get superseded while its process is still live?** The liveness override checks `view.live === true || view.probe?.running === true || view.groupProbe?.running === true`. But what about `view.probe?.running === undefined` (inconclusive) or `view.groupProbe?.running === undefined` (EPERM)? Those are NOT overridden — they can be superseded. But if superseded, they don't block. Is that a problem? If a tuple's liveness is undeterminable but it's superseded by a higher gen, the assumption is the higher gen's spawn confirmed it stopped. But if the confirmation was based on... hmm.
+
+Actually here's a potential issue: the liveness override only protects against supersession when liveness is POSITIVELY true. But consider a tuple with gen 1 that is discovered live (probe running true) — it's protected. Good. But what about a tuple with gen 1 whose group is alive (groupProbe running true) — protected. Good.
+
+Now, the prompt asks about "a legacy/gen-mixed session where a confirmation of an old tuple reorders ownership." Let me think about gen-mixed: tuple A is legacy (gen 0), tuple B is gen 1. genBySession max = 1. A gen 0 < 1 → A superseded (unless live). B gen 1 not superseded. So A is superseded by B. But what if A is actually the newer one in reality? No — gen 1 was allocated after gen 0, so B is causally newer. Fine.
+
+But here's a subtle one: what if tuple A is legacy gen 0 and has a live process, and tuple B is gen 1 but its process is dead? A is protected by liveness override (not superseded), B is gen 1 (not superseded). Both block. A blocks because live. Fine, conservative.
+
+Now let me look at the **legacy firstSpawnSeq with a confirmation**. The prompt says: "a confirmation of an old tuple reorders ownership." Consider legacy tuple A: ok at seq 5. Legacy tuple B: ok at seq 10. Now confirmStopped(A) appends a failed record at seq 20. byTuple for A = latest = failed at seq 20. firstSpawnSeq(A) = min over ok/failed records of A = min(5, 20) = 5. So A's firstSpawnSeq stays 5. Good — the confirmation doesn't reorder. That's the fix.
+
+But wait — what if the confirmation record is the ONLY ok/failed record? No, A had ok at 5.
+
+Hmm, what about a tuple that had ONLY an intent (null) and then a confirmation (failed)? firstSpawnSeq: v.record.spawnOutcome = "failed" (the confirmation), so it doesn't return -1. Then it looks for ok/failed records of the tuple: only the confirmation at seq 20. first = 20. So firstSpawnSeq = 20. Now compare with another legacy tuple B: ok at seq 10. For A: theirs(B)=10 > mine(20)? No. For B: theirs(A)=20 > mine(10)? Yes → B superseded! 
+
+So: tuple A was an unresolved intent (crashed spawner, never spawned), then confirmed stopped (failed at seq 20). Tuple B spawned ok at seq 10. Now B gets superseded by A's confirmation! That's an inversion: A's confirmation (which is just bookkeeping, A never had a process) supersedes B which actually spawned.
+
+Wait, but is this a real problem? Let me think. A is an intent that never resolved. B spawned ok at seq 10. But wait — how did B spawn if A was unresolved? The fence would block B's spawn while A is unresolved. Unless A was confirmed before B spawned. But here A's confirmation is at seq 20, AFTER B's ok at seq 10. So the order is: A intent (seq 5), B ok (seq 10), A confirm-failed (seq 20). But B couldn't have spawned at seq 10 while A was unresolved at seq 5... unless A was superseded or the fence allowed it. Hmm, actually the fence blocks on unresolved intents. So this sequence shouldn't happen through the runner. But it could happen through out-of-band seeding or a different code path. Actually, this is a contrived scenario.
+
+Let me reconsider. Actually the more realistic concern: A is a legacy tuple with ok at seq 5, then confirm-failed at seq 20. B is legacy with ok at seq 10. firstSpawnSeq(A) = min(5,20)=5. firstSpawnSeq(B)=10. A: theirs(B)=10>5 → A superseded. B: theirs(A)=5, not >10 → B not superseded. So B blocks, A superseded. Correct.
+
+Now the intent-only case: A intent at seq 5, confirm-failed at seq 20 (no ok). firstSpawnSeq(A) = 20 (the failed confirmation). B ok at seq 10. B: theirs(A)=20 > 10 → B superseded. A: theirs(B)=10, not > 20 → A not superseded. So A blocks (it's failed, so actually `blocking` filter excludes failed: `v.record.spawnOutcome !== "failed"`). Wait, A's latest is failed, so A is excluded from blocking. And B is superseded. So NOTHING blocks! That means a spawn is allowed. But B's process (ok at seq 10) might still be alive!
+
+Hold on. Let me re-examine. `blocking = all.filter((v) => notSuperseded(v) && v.record.spawnOutcome !== "failed" && ...)`. A's latest record is failed → excluded from blocking regardless. B is superseded → excluded. So blocking is empty → spawn allowed. But B spawned ok and its process could be alive!
+
+But wait — is B's process discovered live? If B's process is alive and probeable, the liveness override would prevent B's supersession: `if (view.live === true || view.probe?.running === true || view.groupProbe?.running === true) continue;`. So if B is discovered live, it's not superseded and blocks. But if B's liveness is undeterminable (probe undefined, no pgid), then B gets superseded and doesn't block. That's the I3 violation: silence (undeterminable) treated as evidence.
+
+Hmm, but this requires the contrived sequence where A is intent-only then confirmed. Let me think if this is reachable.
+
+Actually, let me reconsider whether this is reachable. For A to be intent-only (no ok) and then confirmed, confirmStopped requires the latest to be unresolved (null) or ok. A's latest is null (intent) → confirmable. confirmStopped appends failed. So yes, A: intent(null) → confirm(failed). This is the normal "crashed spawner, confirm it's dead" flow.
+
+Now B: for B to spawn ok at seq 10, the fence must have allowed it. At the time B spawned, A was unresolved (intent at seq 5, no confirm yet). The fence would block B on A's unresolved intent! So B couldn't spawn through the runner. Unless... A was superseded at that time? A is gen 0 legacy. Hmm.
+
+Actually wait, maybe A and B are on the same session but A is a DIFFERENT task. The fence joins on session across tasks. So B (task t2) spawning while A (task t1) is unresolved would be blocked. So this sequence is not reachable through the runner's own fence.
+
+But could it be reachable through out-of-band journal writes (a different supervisor, or manual)? The audit is about the code's correctness given the journal. The journal is the authority. If the journal contains this sequence (from a buggy prior version or external writer), the code should handle it conservatively. But is that a "provable defect"? It's a RISK at best.
+
+Let me look for something more concrete.
+
+Actually, let me reconsider the firstSpawnSeq more carefully. The issue: for a tuple whose latest is a confirmation-failed but which had NO prior ok/failed (intent-only), firstSpawnSeq returns the confirmation's seq. This makes the confirmation look like a "spawn position" at a late seq, which can supersede other tuples. This is exactly the "confirmation reorders ownership" bug that F2/C1-F2 was supposed to fix, but only for tuples that HAD a prior spawn. For intent-only tuples, the fix is incomplete.
+
+But is it reachable? Let me think about a realistic scenario within the runner:
+
+Scenario: 
+1. run() on session S, task t1 → intent a1 (null) at seq 0. Spawn fails (e.g., ENOENT) → resolveLike failed at seq 1. So a1: intent(null) seq0, failed seq1. firstSpawnSeq(a1) = 1 (the failed). 
+2. Now run() again → a2. Fence: a1's latest is failed → excluded from blocking. So a2 spawns ok at seq 2-3. 
+3. Now confirmStopped(a1)? a1's latest is failed → confirmStopped throws "already resolved". So can't confirm a1.
+
+Hmm. So a1 can't be re-confirmed.
+
+What about: a1 intent(null) seq0, then confirmStopped(a1) → failed seq1. Then a2 spawns ok seq2. Now firstSpawnSeq(a1)=1, firstSpawnSeq(a2)=2. a1: theirs(a2)=2>1 → a1 superseded. a2: theirs(a1)=1 not>2 → not superseded. a2 blocks. Fine.
+
+Now reverse: a2 spawns ok seq2, THEN confirmStopped(a1) at seq3. But a1 was already confirmed at seq1 (failed). Can't re-confirm. So no.
+
+What if a1 is intent(null) seq0, a2 spawns ok seq2 (but fence would block on a1 unresolved!). So a2 can't spawn while a1 unresolved. So the only way a2 spawns is if a1 is resolved (failed) or superseded. If a1 resolved failed at seq1, then a2 ok seq2. Then a1 can't be re-confirmed. So the "intent-only then late confirm" scenario requires a1 to be unresolved when a2 spawns, which the fence prevents.
+
+Therefore, within the runner's own discipline, the intent-only-late-confirm inversion is not reachable. It's a RISK for out-of-band journals.
+
+Hmm, let me look at other areas.
+
+**Q2: Fence completeness — failed after ok, pgid not copied to confirm record**
+
+The prompt hints: "a tuple whose LATEST record is spawnOutcome:'failed' after a real ok (failed = negative evidence only when the runner observed 'error' before 'spawn' — confirmStopped also appends 'failed'; can a confirm on tuple X unblock a session while tuple X's group is still alive but pgid-unknown-to-this-code, e.g. pgid recorded only on the ok record and not copied to the confirm record)?"
+
+Let me check confirmStopped's record construction:
+```js
+const record: AttemptRecord = { ...latest, id: newDecisionId(), ts: Date.now(), spawnOutcome: "failed", ...(typeof latest.spawnGen === "number" ? { spawnGen: latest.spawnGen } : {}) };
+```
+
+It spreads `...latest`, so it copies pid, pgid, etc. from the latest record. So if latest is the ok record with pgid, the confirm record has pgid. Good.
+
+But wait — what if the latest record is the INTENT (null) which has no pid/pgid, but an EARLIER ok record had pgid? Can that happen? A tuple: ok at seq5 (with pgid), then resume appends intent(null) at seq10 (no pid/pgid), then crash before ok. Latest = intent(null). confirmStopped: latest is null → confirmable. record = {...intent, spawnOutcome:"failed"}. The intent has no pgid! So the confirm record has no pgid. But the earlier ok record at seq5 had a pgid whose group might still be alive!
+
+Wait, but the resume intent at seq10 — did the resume spawn a process? If resume appended intent then crashed, the process may or may not exist. But the EARLIER ok at seq5 — that process was confirmed stopped before resume (fence requires it). So its group should be reaped. Hmm, but was it? The fence requires the prior tuple's group reaped before resume. So the seq5 process's group is gone. So no live group from seq5.
+
+But actually, resume is the SAME tuple. So the fence for resume checks the tuple's own latest (ok at seq5) — requires group reaped. So yes, seq5's group is reaped before resume. So the intent at seq10 has no live group from seq5. OK.
+
+But what about the confirmStopped group check? It checks `latest.pgid`. If latest is the intent (no pgid), it skips the group check. But the intent's process (from resume) — did it spawn? If resume crashed after intent but before spawn, no process. If it spawned but crashed before ok, the process exists but no pid/pgid recorded. Then confirmStopped would confirm it away without checking the group! But there's no pgid to check. This is the "intent-only tuple confirmed while a process this supervisor spawned-but-never-ok-recorded is alive" scenario from Q3.
+
+Actually this is inherent: if the process spawned but the ok record was never written (crash between spawn and ok append), the journal has only the intent with no pid/pgid. confirmStopped can't check liveness (no pid). It relies on the evidence string. That's the I2 "discover-or-park" — the caller must provide evidence. So it's by design. But the prompt asks: "Can an intent-only tuple be confirmed while a process this supervisor spawned-but-never-ok-recorded is alive?" Yes — but that's the caller's responsibility (evidence). The code can't know the pid. Hmm, but is there a check for own children? confirmStopped checks `this.children` for a live child with matching attemptId. If the process was spawned by THIS instance, it's in children. But if spawned by a PREVIOUS instance (crash), it's not in children. So a previous instance's spawned-but-unrecorded process could be confirmed away. That's the I2 gap — but it's inherent to the crash scenario and the evidence requirement is the mitigation. Not a new defect.
+
+Let me look at the groupProbe lookup reading `view.record.pgid` of the LATEST record. In analyze:
+```js
+for (const view of all) {
+  if (view.live === true || typeof view.record.pgid !== "number") continue;
+  const g = this.groupAlive(view.record.pgid);
+  ...
+}
+```
+view.record is the latest record of the tuple (from byTuple). If the latest is a confirm-failed that copied pgid from ok, fine. If the latest is an intent (no pgid) but an earlier ok had pgid... then groupProbe is skipped. But as discussed, the earlier ok's group was reaped before resume. Hmm, but what if the tuple is: ok(seq5, pgid=100), then confirm-failed(seq10, copies pgid=100). Latest = confirm-failed with pgid=100. groupProbe checks pgid 100. Good.
+
+What if: ok(seq5, pgid=100), then resume intent(seq10, no pgid), then resume ok(seq12, pgid=200). Latest = ok seq12 with pgid=200. groupProbe checks 200. But what about pgid 100? It was reaped before resume (fence). OK.
+
+Now the specific concern: "can a confirm on tuple X unblock a session while tuple X's group is still alive but pgid-unknown-to-this-code, e.g. pgid recorded only on the ok record and not copied to the confirm record?" We established the confirm copies from latest. If latest is ok, pgid copied. If latest is intent (no pgid), the ok's pgid is not copied — but that ok's group was reaped. So no live group. Unless the fence didn't actually verify... 
+
+Hmm wait, actually there's a subtle case. What if the tuple's latest is an intent (null) that was appended by resume, but the resume's spawn FAILED to record ok (crash), AND the earlier ok's process group was NOT actually reaped because... no, the fence for resume requires it.
+
+Let me move on.
+
+**Q3: confirmStopped evidence — pid/pgid survive onto confirmation records**
+
+We saw the spread copies pid/pgid. But the discovered-running refusal probes `latest.pid` and a matching hint row. If latest is the intent (no pid), candidatePids is empty (unless hint row). So an intent-only tuple with a live process (spawned by previous instance, no pid recorded) can be confirmed. That's the I2 gap. But the evidence string is required. Hmm.
+
+Actually, let me reconsider: the prompt says "If the latest record is the confirm-pending 'failed'/'intent copy with pid stripped… does pid/pgid actually survive onto confirmation records (check the spread in confirmStopped)?" The spread `{...latest}` copies pid/pgid. So they survive. Unless latest is intent (no pid). So the answer: pid/pgid survive when latest is ok; when latest is intent, there's nothing to copy. So an intent-only tuple can be confirmed while a process spawned-but-never-ok-recorded is alive. This is a real gap but it's the I2 design (evidence required). Let me classify as RISK.
+
+Actually, wait. Let me reconsider the discovered-running refusal more carefully. It probes `latest.pid`. But what if the tuple has an EARLIER ok record with a pid, and the latest is a resume-intent (no pid)? Then latest.pid is undefined, so the earlier ok's pid is NOT probed. But the earlier ok's process was confirmed stopped before resume. So it's dead. OK.
+
+Hmm, but what if the earlier ok's process is NOT dead (the fence was bypassed somehow)? Then confirmStopped wouldn't probe it. But that requires the fence to have been bypassed. Not a code defect per se.
+
+Let me look at Q4.
+
+**Q4: stop()/terminate/signalGroup — stopped:true without confirmed group death, unbounded await, terminate race**
+
+`stop()`:
+```js
+let escalated = await this.terminate(entry);
+const { code, signal } = await entry.exitPromise;
+```
+`await entry.exitPromise` — this is unbounded. If the child never exits (e.g., SIGKILL failed due to EPERM, or the child is unkillable), this hangs forever. The prompt asks about "hang risk". 
+
+Let me trace: terminate() sends SIGTERM, waits stopTimeoutMs, if timed out sends SIGKILL. Then stop() awaits entry.exitPromise. If SIGKILL also fails (EPERM — foreign uid, but the child is OUR child so same uid... actually the child is our child, so SIGKILL should work). But if the child is in an uninterruptible state (D state), SIGKILL won't reap it until it returns. So `await entry.exitPromise` could hang. This is a real hang risk. But is it a "provable defect"? The prompt explicitly asks. Let me classify as RISK (hang risk, no timeout on the final await).
+
+Actually, more concretely: after SIGKILL escalation, if the process is stuck in D state (uninterruptible sleep, e.g., NFS), the exit event never fires, and `await entry.exitPromise` hangs forever. There's no timeout. This is a real defect — stop() can hang indefinitely. Classify as RISK/CONFIRMED-WRONG? It's a liveness/hang issue. The contract says stop() should return an honest verdict. A hang is not an honest verdict. I'll call it RISK (plausible, hard to repro deterministically).
+
+Now the terminate() immediate-exit branch racing the 'exit' event:
+```js
+private async terminate(entry: ChildEntry): Promise<boolean> {
+  this.signalGroup(entry, "SIGTERM");
+  if (entry.exited) {
+    if (entry.pgid && this.groupAlive(entry.pgid) === "alive") {
+      this.signalGroup(entry, "SIGKILL");
+      return true;
+    }
+    return false;
+  }
+  ...
+}
+```
+If entry.exited is true (leader already exited), it checks groupAlive. If alive, SIGKILL and return true. But then stop() does `await entry.exitPromise` — which is already resolved (exited). Then groupAlive again. OK.
+
+The race: between `if (entry.exited)` check and the group probe, the 'exit' event could fire. But entry.exited is set in the exit handler. If it's false at the check, we go to the timeout branch. The timeout branch waits for exitPromise or timeout. If exit fires during the wait, exitPromise resolves, timedOut=false, return false. Then stop() awaits exitPromise (resolved). Then groupAlive. OK.
+
+Hmm, what if entry.exited is true but the group probe says "reaped" (not alive)? return false. Then stop() awaits exitPromise (resolved), groupAlive → reaped → stopped:true. Fine.
+
+What if entry.exited is true, groupAlive returns "unknown" (EPERM)? The condition `=== "alive"` is false, so return false (no SIGKILL). Then stop() awaits exitPromise, groupAlive → "unknown" → verdict="unknown", stopped=false, groupStatus="unknown". OK, honest.
+
+Now the C2-1 fix: signalGroup catches EPERM and returns (doesn't throw). So if SIGTERM to the group gets EPERM (foreign members), it silently returns. Then terminate() proceeds. If entry.exited is false, it waits stopTimeoutMs, then SIGKILL (also EPERM, silently returns), returns true (escalated). Then stop() awaits exitPromise. If the leader (our child) is still alive (SIGTERM/SIGKILL to group failed with EPERM because... wait, the leader is our child, same uid, so kill(-pgid) should work for the leader). Hmm, EPERM on kill(-pgid) means SOME member is foreign, but the leader is ours. Actually kill(-pgid, sig) sends to all members; if any member is foreign, does it return EPERM? Let me think. `kill(-pgid, sig)` — POSIX: if the process has permission to send to at least one process in the group, it succeeds (returns 0) but may not signal all. Actually, the behavior: kill() returns 0 if at least one signal was sent, or -1 with EPERM if no permission for any. Hmm, actually the man page: "If pid is less than -1, then sig is sent to every process in the process group whose ID is -pid." And EPERM: "The process does not have permission to send the signal to any of the target processes." So EPERM means NO target could be signaled. But the leader is our child (same uid), so we CAN signal it. So EPERM shouldn't happen for our own child's group... unless the leader already exited and only foreign members remain. 
+
+So the C2-1 scenario: leader exited, group has foreign members. signalGroup SIGTERM → EPERM → return. terminate: entry.exited true → groupAlive → "unknown" (EPERM) → not "alive" → return false. stop(): await exitPromise (resolved), groupAlive → "unknown" → stopped:false, groupStatus:"unknown". Honest. Good.
+
+But wait — the C2-1 fix changed signalGroup to swallow EPERM. But in the post-exit SIGKILL sweep in stop():
+```js
+if (verdict === "alive") {
+  escalated = true;
+  this.signalGroup(entry, "SIGKILL");
+  ...
+}
+```
+If verdict is "alive" (group has members, we can signal at least one), SIGKILL. If that gets EPERM (now swallowed), the poll continues. verdict stays "alive" (or becomes unknown). After 25 polls, stopped = (verdict === "reaped") = false. groupStatus = "alive" or "unknown". Honest.
+
+Hmm, but here's a subtle issue with the C2-1 fix: signalGroup now swallows EPERM. But in terminate(), the SIGTERM is sent via signalGroup. If it gets EPERM (swallowed), terminate proceeds as if the signal was sent. But actually, if EPERM, the signal was NOT delivered to any process. So the leader (if alive) didn't get SIGTERM. Then terminate waits stopTimeoutMs, then SIGKILL (also EPERM, swallowed), returns true. Then stop() awaits exitPromise — the leader is still alive (never signaled)! So `await entry.exitPromise` HANGS. 
+
+Wait, but can the leader be alive AND kill(-pgid) return EPERM? The leader is our child (same uid). kill(-pgid) sends to the group including the leader. If we can signal the leader, kill returns 0 (not EPERM). So EPERM only if we can't signal ANY member, which means the leader is not in the group or already dead. If the leader is alive and in the group, we can signal it → no EPERM. So the hang scenario requires the leader to be alive but not signalable — contradiction. Unless the leader changed its pgid (setsid) — then it's not in the group. But then kill(-pgid) targets the old group (foreign members), EPERM. And the leader (now in a different group) is alive. Then terminate's SIGTERM/SIGKILL to the old group does nothing to the leader. stop() awaits exitPromise — leader alive → HANG.
+
+Hmm, but if the leader called setsid, it's no longer our child's group. Actually the leader is still our child (we spawned it). Its exit event fires when it exits. If it's alive, exitPromise pending. So stop() hangs. But this requires the child to setsid, which is unusual. And the C2-1 fix made signalGroup swallow EPERM, so terminate returns true (escalated) without actually killing the leader. Then stop() hangs on exitPromise.
+
+Actually wait, let me re-read terminate:
+```js
+private async terminate(entry: ChildEntry): Promise<boolean> {
+  this.signalGroup(entry, "SIGTERM");
+  if (entry.exited) { ... }
+  const timedOut = await new Promise<boolean>((res) => {
+    const timer = setTimeout(() => res(true), this.stopTimeoutMs);
+    entry.exitPromise.then(() => { clearTimeout(timer); res(false); });
+  });
+  if (timedOut && !entry.exited) {
+    this.signalGroup(entry, "SIGKILL");
+    return true;
+  }
+  return false;
+}
+```
+So terminate waits stopTimeoutMs. If the leader doesn't exit (because signals went to the wrong group), timedOut=true, SIGKILL to old group (EPERM, swallowed), return true. Then stop() awaits exitPromise — leader still alive → HANG.
+
+So the C2-1 fix introduces a hang: previously, EPERM would throw, propagating out of stop() (an error, not a hang). Now it's swallowed, and stop() proceeds to `await entry.exitPromise` which never resolves. This is a regression introduced by the fix! The prompt explicitly says "a fix may have introduced an inversion the tests don't cover."
+
+But wait — is this reachable? The leader must be alive but not in the signaled group. That requires the child to setsid or change pgid. For a detached spawn, the child is the group leader (pgid=pid). If the child calls setsid, it becomes a new session leader with a new pgid. Then kill(-oldpgid) targets the old group (now empty or foreign). Hmm, if the old group is empty, kill returns ESRCH (swallowed). If foreign members, EPERM. Either way, the leader (in new group) is not signaled. stop() hangs.
+
+Actually, even simpler: what if the child is alive but the group probe returns EPERM because a foreign process joined the group? No, the leader is ours.
+
+Hmm, let me reconsider. Actually the more direct hang: even without EPERM, if the child ignores SIGKILL (impossible for SIGKILL) or is in D state. SIGKILL can't be ignored, but a process in uninterruptible sleep (D) won't die until the syscall returns. So `await entry.exitPromise` hangs. This is a pre-existing hang risk, not introduced by C2-1. But C2-1 makes it worse by swallowing EPERM.
+
+Let me focus on the most defensible finding. The unbounded `await entry.exitPromise` after SIGKILL escalation is a hang risk. The prompt explicitly asks. I'll report it as RISK.
+
+Actually, let me reconsider whether there's a cleaner CONFIRMED-WRONG. Let me look at the terminate immediate-exit branch more carefully.
+
+```js
+this.signalGroup(entry, "SIGTERM");
+if (entry.exited) {
+  if (entry.pgid && this.groupAlive(entry.pgid) === "alive") {
+    this.signalGroup(entry, "SIGKILL");
+    return true;
+  }
+  return false;
+}
+```
+
+Race: entry.exited is checked. Suppose it's false at the check. We go to the timeout branch. The child exits during the wait → exitPromise resolves → timedOut=false → return false. Then stop() awaits exitPromise (resolved), groupAlive. Fine.
+
+Suppose entry.exited is true at the check (leader already exited before terminate). groupAlive → "alive" (grandchildren). SIGKILL, return true. stop() awaits exitPromise (resolved), groupAlive → poll. Fine.
+
+Now the race the prompt mentions: "terminate()'s immediate-exit branch racing the 'exit' event between the check and the group probe?" If entry.exited is true, the exit event already fired (entry.exited set in handler). So no race there. If entry.exited is false, we don't enter the branch. So the "race" is: entry.exited false at check, but the child exits right after, and we go to the timeout branch which handles it via exitPromise. So no bug. Actually the immediate-exit branch is only entered when entry.exited is already true. So no race. OK.
+
+Hmm, but there's a subtle issue: `if (entry.exited)` — entry.exited is set in the 'exit' handler. But the 'exit' event fires when the process exits, and entry.exited is set synchronously in the handler. So if entry.exited is true, the exit event fired. Fine.
+
+Let me look at Q5.
+
+**Q5: open()/close() — double-writer windows**
+
+open() claims synchronously with a pending promise. close() deletes from runners. If close() is called while a pending open is in flight... Let me trace.
+
+open(): sets runners.set(dir, pending). Then awaits pending, sets runners.set(dir, runner). If close() is called on the runner (which doesn't exist yet)... you can't close a runner that isn't returned yet. So the caller must have the runner instance. 
+
+But consider: open() returns runner. Then close() deletes runners. Then open() again → new pending → new runner. But the OLD runner might still have queued transactions (spawnQueue). close() refuses if spawnActive > 0 (unless force). If force, it sets closed=true and deletes. But the old runner's queued transactions: enqueueSpawn checks `if (this.closed) throw` at entry, and `this.assertOpen()` after prev. So a queued transaction that was enqueued before close(force) will, when it runs, hit assertOpen() and throw. Good. But what about a transaction that's already past assertOpen and in the middle of spawnAttempt? It has assertOpen() gates before nodeSpawn and before ok-append. So it would throw at the next gate. But the child might already be spawned (between nodeSpawn and the gate). Then the child is tracked in children (set before the ok-append gate). But the runner is closed and a new runner opened. The old runner's child is orphaned (tracked in old runner's children map, but old runner is closed). The new runner doesn't know about it. So two writers? The new runner could spawn on the same session. Hmm.
+
+But this is the "forced close" path, which is documented as "force only forgets tracking". The contract says close() refuses mid-transaction unless force. With force, the caller accepts the risk. So not a defect per se.
+
+But the prompt asks: "writes to the journal after close from an in-flight transaction that passes every assertOpen gate." Let me check: appendRecord calls assertOpen() at the start. So a journal write after close would throw. But there's a window: assertOpen() passes, then close() happens, then journal.append() executes. The append is not atomic with the check. So a write could land after close. But close() refuses while spawnActive > 0 (unless force). So with non-force close, no in-flight transaction. With force, the caller accepts. Hmm.
+
+Actually, let me look at the specific gate in spawnAttempt:
+```js
+this.assertOpen();
+await this.appendRecord({ ...resolveLike(intent, "ok"), pid: child.pid, ... });
+```
+appendRecord does assertOpen() then journal.append(). Between the assertOpen in spawnAttempt and the assertOpen in appendRecord, close could happen. But appendRecord's assertOpen would catch it. Between appendRecord's assertOpen and journal.append, close could happen. Then the append lands after close. But close(force) is the only way to close mid-transaction. So it's the force path. Not a new defect.
+
+Let me look at Q6.
+
+**Q6: writeStateHint advance/rewind rule**
+
+```js
+if (prev.attemptId !== undefined && prev.attemptId !== attemptId) {
+  if (attemptNumber(attemptId) <= attemptNumber(prev.attemptId)) {
+    return `... refusing to rewind ...`;
+  }
+}
+```
+
+The prompt asks: "can a stale writer (lower attempt number via a DIFFERENT task id colliding on attemptNumber? cleared rows?) clobber a live row". 
+
+The row is keyed by taskId: `state.tasks[t.taskId]`. So a different taskId writes to a different row. No collision. But attemptNumber is per attemptId. Two different tasks could have the same attemptNumber (t1-a1 and t2-a1). But they write to different rows (t1 vs t2). So no collision.
+
+What about a cleared row? If prev.attemptId is undefined (cleared), the check `prev.attemptId !== undefined` is false, so no rewind check. So a cleared row can be written by any attempt. Is that a problem? If the row was cleared (pid removed, status paused) but attemptId still set... Actually confirmStopped clears via writeStateHint(t, attemptId, undefined, "paused") which sets attemptId to the same attemptId (not undefined). So the row keeps its attemptId. So prev.attemptId is defined. Hmm.
+
+Wait, writeStateHint sets `row = { ...prev, status, attemptId, session }`. So attemptId is always set to the passed attemptId. So a cleared row (pid undefined) still has attemptId. So the rewind check applies.
+
+What if the row is entirely absent (prev = { status })? Then prev.attemptId is undefined → no rewind check → any attempt writes. That's fine (first write).
+
+Hmm, what about the "wrong-episode cache get adopted anywhere other than readState's warn-and-ignore"? readState checks episodeId and returns undefined if mismatch. All callers use readState. So no adoption. Good.
+
+Let me look at Q7.
+
+**Q7: spawnAttempt — window between nodeSpawn and children.set**
+
+```js
+child = nodeSpawn(...);
+...
+const entry: ChildEntry = { child, ... };
+child.once("exit", ...);
+child.once("error", ...);
+this.assertOpen();
+try {
+  await new Promise<void>((res, rej) => {
+    const onError = (e) => rej(e);
+    child.once("error", onError);
+    child.once("spawn", () => { child.removeListener("error", onError); res(); });
+  });
+} catch (e) {
+  await this.appendRecord(resolveLike(intent, "failed")).catch(() => {});
+  throw new RunnerError("spawn-failed", ...);
+}
+entry.pgid = detached ? child.pid : undefined;
+this.children.set(task.session, entry);
+```
+
+So between nodeSpawn and children.set, there's an await (the spawn event). During this await, the child is NOT in children. If stop() is called during this window, it won't find the entry (children.get returns undefined) → throws "not-running". But the child exists! So stop() can't stop it. But stop() is called with a handle, and the handle isn't returned until spawnAttempt completes. So the caller can't call stop() before run() returns. Unless another caller... but run() is serialized. So no concurrent stop() during spawn. Hmm.
+
+But what about the 'error' after 'spawn' (ENOEXEC/EACCES post-spawn)? The spawn event fires, then an error could fire later. The code removes the error listener on spawn. So a post-spawn error is not caught by the spawn-wait. But the 'error' handler `child.once("error", () => {})` is a no-op. So a post-spawn error is swallowed. The child might have exited with an error. The exit event fires. So the handle's exited promise resolves. But the ok record was already written (after spawn). So the journal says ok but the process failed. Hmm. Is that a defect? The ok record means "process existed" (spawn event fired). A post-spawn error (e.g., ENOEXEC) — actually ENOEXEC happens before spawn? Let me think. For nodeSpawn, the 'spawn' event fires when the process is successfully spawned. 'error' fires if the process could not be spawned (ENOENT, EACCES) or killed. ENOEXEC... Actually, if the command exists but isn't executable, node emits 'error' with EACCES before 'spawn'. So 'error' before 'spawn' → caught. Post-spawn errors are rare (e.g., kill failure). So probably fine.
+
+The prompt asks: "ok-record pid/pgid capture vs entry.pgid set AFTER the spawn-event await — stop() before pgid set?" Since stop() can't be called before run() returns, and run() returns after spawnAttempt completes (pgid set), this isn't reachable. Unless the handle is somehow available... no.
+
+Hmm, but wait: what about the 'exit' event firing before children.set? If the child exits immediately (e.g., /bin/sh -c 'exit 0'), the exit event fires during the spawn-event await. entry.exited = true. Then children.set(entry) with exited=true. Then the ok record is written. Then run() returns a handle with exited=true. Then stop() would throw "not-running" (entry.exited). But the process already exited. So stop() throwing is... hmm, the caller might want to know it exited. But stop() throws not-running. That's a minor issue. Actually the handle.exited promise resolves. So the caller can await that. OK.
+
+Let me look at Q8.
+
+**Q8: Error contract — mutation before bad-input refusal, raw exceptions, lying codes**
+
+run(): assertOpen, canonicalTask, assertTask (bad-input), then enqueueSpawn. Inside enqueueSpawn, records() (read), then fenceOrThrow, then spawnAttempt. So bad-input is checked before any mutation. Good.
+
+But wait — `nextAttemptId(t.taskId, ...attemptCandidates(records, t.taskId, await this.readState(), t.attemptId))`. readState is a read, not a mutation. OK.
+
+resume(): assertOpen, canonicalTask, assertTask, ATTEMPT_ID check, then enqueueSpawn. Inside, records(), tuple check (bad-input if empty), session binding check (bad-input), fenceOrThrow, spawnAttempt. So bad-input before mutation. Good.
+
+confirmStopped(): assertOpen, canonicalTask, assertTask, ATTEMPT_ID check, evidence check, then enqueueSpawn. Inside, records(), tuple check, unresolved check, live-child check, discovered-running check, group check, then appendRecord. So bad-input before mutation. Good.
+
+writeStateHint(): assertOpen, canonicalTask, assertTask, then try { readState, ... writeEpisodeState }. The write is a mutation. But assertTask is before. Good. But writeStateHint catches all errors and returns a string (stateWarning). So no raw exception. But it also swallows bad-input? No, assertTask throws before the try. Wait, assertTask is before the try block. So bad-input throws. Good.
+
+Hmm, but writeStateHint's catch returns a string for ANY error, including a RunnerError from... no, the try only wraps readState/writeEpisodeState. OK.
+
+Now, raw exceptions: `this.journal.append` in appendRecord is wrapped. `readEpisodeState` in readState is wrapped. `nodeSpawn` is wrapped in try/catch. `process.kill` in signalGroup is wrapped (ESRCH/EPERM swallowed, else throw). But signalGroup throwing a non-ESRCH/EPERM error propagates out of terminate → stop(). Is that a raw exception? It's a raw NodeJS error (e.g., EINVAL). stop() would throw it. That's a raw (non-RunnerError) exception escaping a public method. Hmm. But EINVAL for kill is rare. Let me note it.
+
+Actually, `groupAlive` catches all and returns "unknown". So no throw there.
+
+Let me look at `probe`: catches and returns undefined. Good.
+
+Now, error codes that lie: "spawn-failed" is used for both spec validation failure and spawn error. That's fine. "not-running" for stop() when no live child. Fine.
+
+Hmm, let me reconsider the C2-1 fix and whether it introduces a lie. signalGroup swallows EPERM. In terminate(), if SIGTERM gets EPERM (swallowed), terminate proceeds. If the leader is alive (but not signalable — contradiction as discussed), it waits and SIGKILLs. But if the leader is our child, we can signal it. So EPERM on the group means the leader is dead. So terminate's `if (entry.exited)` — if the leader is dead, entry.exited should be true (exit event fired). But there's a race: the leader died but the exit event hasn't fired yet (entry.exited still false). Then terminate goes to the timeout branch, waits stopTimeoutMs, the exit event fires during the wait → timedOut=false → return false. Then stop() awaits exitPromise (resolved). Fine.
+
+OK let me now think about the most concrete, provable defects.
+
+Let me reconsider Q1's legacy firstSpawnSeq with a confirmation of an intent-only tuple. Actually, let me reconsider whether there's a simpler inversion.
+
+Consider two legacy tuples A and B on the same session, both gen 0. A: ok at seq 5. B: ok at seq 10. Now confirmStopped(B) appends failed at seq 20. byTuple(B) = latest = failed at seq 20. firstSpawnSeq(B) = min(10, 20) = 10. firstSpawnSeq(A) = 5. A: theirs(B)=10 > 5 → A superseded. B: theirs(A)=5 not > 10 → B not superseded. But B's latest is failed → excluded from blocking. So blocking = {} (A superseded, B failed). So spawn allowed. But A's process (ok at seq 5) — was it confirmed stopped? A is superseded by B (B is newer). The supersession assumes A was confirmed stopped before B spawned. So A's process is dead. OK, so spawn allowed is correct.
+
+But wait — what if A's process is actually alive (discovered)? Then A is protected by liveness override (not superseded). So A blocks. Good.
+
+Now the intent-only case again: A: intent(null) seq5, confirm-failed seq20. B: ok seq10. firstSpawnSeq(A) = 20 (only failed record). firstSpawnSeq(B) = 10. A: theirs(B)=10 not > 20 → A not superseded. But A's latest is failed → excluded from blocking. B: theirs(A)=20 > 10 → B superseded. So blocking = {} (A failed, B superseded). Spawn allowed. But B's process (ok seq10) might be alive! If B is discovered live, protected. If B's liveness undeterminable, B superseded → not blocking → spawn allowed over a possibly-live B. 
+
+But as I argued, this sequence (A intent, B ok, A confirm) is not reachable through the runner because B couldn't spawn while A unresolved. Unless A was confirmed BEFORE B spawned, but then A's confirm is at seq < B's ok. Let me redo: A intent seq5, A confirm-failed seq6, B ok seq10. firstSpawnSeq(A) = 6 (the failed). firstSpawnSeq(B) = 10. A: theirs(B)=10 > 6 → A superseded. B: theirs(A)=6 not > 10 → B not superseded. B blocks. A failed excluded. So B blocks. Correct.
+
+So the inversion requires A's confirm AFTER B's ok, which requires B to spawn while A unresolved — blocked by fence. So not reachable. RISK at most.
+
+Hmm, let me look for something else. Let me reconsider the generation branch and the liveness override.
+
+The liveness override: `if (view.live === true || view.probe?.running === true || view.groupProbe?.running === true) continue;`. This protects a view from supersession if positively live. But what about a view whose probe is `running: undefined` (inconclusive) or `groupProbe.running: undefined` (EPERM)? Those are NOT protected. So a view with undeterminable liveness can be superseded. Is that a problem? If a view is superseded, it doesn't block. But its liveness is undeterminable — I3 says silence is not evidence. So superseding an undeterminable view and allowing a spawn violates I3!
+
+Wait, but supersession is based on generation/order, not liveness. The assumption is: a higher generation implies the lower was confirmed stopped. So even if the lower's liveness is now undeterminable, the higher generation's spawn confirmed it stopped. So it's safe to supersede. Hmm, but is that assumption valid? The higher generation was allocated after the lower was confirmed stopped (fence). So yes.
+
+But what if the higher generation's spawn was itself based on a flawed confirmation? That's a different bug.
+
+Actually, let me reconsider: the liveness override is there to handle the case where a lower-generation tuple is discovered live DESPITE being superseded (which would indicate the confirmation was wrong). So the override is a safety net. For undeterminable liveness, the safety net doesn't trigger, so the tuple is superseded. But if the confirmation was correct, the tuple is dead, so superseding is fine. If the confirmation was wrong (tuple actually alive but undeterminable), then superseding allows a spawn over a live process. But that's the confirmation's fault, not the supersession's. Hmm.
+
+OK, let me look at a different angle. Let me examine the `blocking` filter:
+```js
+const blocking = all.filter((v) => notSuperseded(v) && v.record.spawnOutcome !== "failed" && (v.record.sessionPath === task.session || thisTask(v)));
+```
+
+So blocking includes views on the task's session OR the task's own tuples. And excludes failed. And excludes superseded.
+
+Now, a view with spawnOutcome "failed" is excluded. But what if the "failed" is a confirmStopped confirmation of a tuple whose process is actually alive (the confirmation was wrong)? Then it's excluded from blocking, and a spawn is allowed. But confirmStopped checks liveness before confirming (probes pid, checks group). So a wrong confirmation requires the liveness check to pass incorrectly. E.g., the pid probe says dead but the process is alive (pid reuse? no, pid reuse means a different process). Or the group check passes but the group is alive (EPERM → "unknown" → confirmStopped refuses). So confirmStopped is conservative. OK.
+
+Let me look at the `unresolved` filter:
+```js
+const unresolved = all.filter((v) => (v.record.spawnOutcome === undefined || v.record.spawnOutcome === null) && thisTask(v));
+```
+This includes unresolved intents of THIS task, regardless of supersession. But `blocking` uses notSuperseded. So an unresolved intent that is superseded is in `unresolved` but not `blocking`. The fence iterates `blocking`, so a superseded unresolved intent doesn't block. Is that correct? An unresolved intent that is superseded — the supersession means a newer tuple spawned. But an unresolved intent means the spawner may have died before observing the prior. The header says "an unresolved intent does NOT supersede (its spawner may have died before ever observing the prior)". But can an unresolved intent BE superseded? In markSuperseded, an unresolved intent (gen 0, firstSpawnSeq returns -1) is never superseded by the legacy branch (mine >= 0 is false). For the generation branch, an unresolved intent with gen N: if gen N < max gen, it's superseded. So an unresolved intent with a lower generation CAN be superseded. Is that correct? If a newer generation spawned, it confirmed the prior stopped. But the unresolved intent's process may have never been observed. Hmm. Actually, if the unresolved intent has gen N and a newer gen N+1 spawned, the fence for gen N+1 required the gen N tuple's liveness disproven. But the gen N tuple is unresolved (no ok record, no pid). How was its liveness disproven? Via confirmStopped (evidence) or... the fence for an unresolved intent requires confirmStopped. So the gen N+1 spawn required the gen N intent to be confirmed (failed). But if it's confirmed, its latest is failed, not unresolved. So an unresolved intent with gen N can't coexist with a gen N+1 spawn unless the confirmation didn't happen. Contradiction. So an unresolved intent is never superseded by a higher gen (because the higher gen couldn't spawn). Unless out-of-band. OK.
+
+Hmm, I'm spending a lot of time. Let me look at the specific C2-1 fix and the hang more carefully, since the prompt emphasizes "a fix may have introduced an inversion."
+
+The C2-1 fix: signalGroup swallows EPERM. Let me trace the scenario where this causes a problem.
+
+Scenario: stop() on a child whose group has a foreign member (EPERM on kill(-pgid)). 
+- terminate(): signalGroup(SIGTERM) → EPERM → swallowed. entry.exited? If the leader is alive, false. Wait for stopTimeoutMs. If the leader doesn't exit (SIGTERM not delivered because EPERM means no member signaled — but the leader is ours, so it should be signaled... unless the leader is not in the group). 
+
+Hmm, actually let me reconsider kill(-pgid) semantics. If the leader is our child and in the group, kill(-pgid, SIGTERM) sends to all members including the leader. The leader is ours (same uid), so we have permission. So kill returns 0 (success), not EPERM. EPERM only if we can't signal ANY member. So if the leader is in the group and alive, no EPERM. So EPERM implies the leader is not in the group (dead or setsid'd). If dead, entry.exited should be true (eventually). If setsid'd, the leader is alive but not in the group → EPERM on the old group → swallowed → terminate waits → SIGKILL to old group (EPERM, swallowed) → return true → stop() awaits exitPromise → leader alive → HANG.
+
+But setsid by the child is unusual. And even before C2-1, this would throw EPERM (not hang). So C2-1 changed a throw into a hang. That's a regression. But is it "provable"? It requires the child to setsid. Hard to repro deterministically but possible.
+
+Actually, let me reconsider. Even simpler: the leader is alive, in the group, but the group ALSO has a foreign member. kill(-pgid) — does it return EPERM or 0? POSIX: "If the process has permission to send the signal to at least one process in the group, kill() returns 0." Actually, let me verify. The Linux man page for kill(2): "EPERM: The process does not have permission to send the signal to any of the target processes." So if it can signal at least one, it returns 0. So with the leader (ours) in the group, kill returns 0. So EPERM only if NO member is signalable, i.e., the leader is not in the group. So the hang requires the leader to not be in the group. OK.
+
+So the C2-1 hang is a real but narrow regression. Let me classify as RISK.
+
+Actually, let me reconsider the more general hang: `await entry.exitPromise` after SIGKILL. Even without EPERM, if the child is in D state, SIGKILL won't reap it. So stop() hangs. This is a pre-existing issue, not introduced by C2-1. But the prompt asks about it. I'll report as RISK.
+
+Let me now look at Q2's specific hint about "pgid recorded only on the ok record and not copied to the confirm record." We established the confirm copies from latest. But what if the latest is the ok record, and the confirm copies pgid. Then the confirm record has pgid. groupProbe reads view.record.pgid (the confirm's pgid). Good.
+
+But wait — what if the tuple has: ok(seq5, pgid=100), then resume intent(seq10, no pgid), then resume ok(seq12, pgid=200). Latest = ok seq12, pgid=200. Now confirmStopped: latest is ok → confirmable. record = {...ok seq12, failed}. pgid=200 copied. groupProbe checks 200. But what about pgid 100? The seq5 process's group. It was reaped before resume (fence). So dead. OK.
+
+Hmm, what if the resume's fence didn't check the group? Let me check fenceOrThrow for resume. It calls analyze, which probes groupProbe for every view with a pgid. The tuple's latest is ok seq5 (pgid=100) at resume time. groupProbe checks 100. If alive, fence throws. So resume requires 100 reaped. Good.
+
+OK, let me look at a different potential issue: the `byTuple` latest selection uses `seqOf.get(r.id)`. seqOf is built with first-occurrence-wins. If a record id appears twice (duplicate), seqOf has the first. But byTuple compares seqOf.get(r.id) for each record. If two records have the same id (duplicate), they'd have the same seq, and the comparison `>` would not update. So the first occurrence wins. But duplicates shouldn't happen (newDecisionId is unique). OK.
+
+Let me look at the `latest` computation in analyze:
+```js
+let latest: AttemptView | undefined;
+for (const view of all) if (thisTask(view) && (!latest || (seqOf.get(view.record.id) ?? -1) > (seqOf.get(latest.record.id) ?? -1))) latest = view;
+```
+This picks the view with the highest seq among this task's views. But `all` is built from byTuple.values(), so each view is a tuple's latest record. So `latest` is the tuple whose latest record has the highest seq. That's the most recently appended tuple. OK.
+
+Now let me look at Q6 more. The writeStateHint rewind check uses attemptNumber. But what if the row's attemptId is from a DIFFERENT task? No, the row is keyed by taskId. So the row's attemptId is for this task. OK.
+
+Hmm, what about the "cleared rows" — if confirmStopped clears the row (pid undefined, status paused) but keeps attemptId. Then a stale writer with a lower attemptNumber is refused. Good. But what if the row is cleared to attemptId undefined? writeStateHint always sets attemptId. So never undefined after a write. But the initial state (no row) has prev = { status }, attemptId undefined. So the first write sets it. OK.
+
+Let me look at Q7's "stop() before pgid set" again. Actually, there's a subtle issue: `entry.pgid = detached ? child.pid : undefined;` is set AFTER the spawn-event await. But `this.children.set(task.session, entry)` is also after. So during the spawn-event await, the entry is not in children. If the child exits during this await (e.g., immediate exit), the exit handler sets entry.exited=true. Then children.set(entry) with exited=true. Then the ok record is written. Then run() returns. So the handle has exited=true. stop() would throw not-running. But the process already exited. Hmm, the caller might expect stop() to return stopped:true. But it throws. Is that a defect? The contract says stop() throws not-running when "no live child was started here". But a child WAS started (and exited). So the error code "not-running" is technically accurate (no LIVE child). But the caller might be confused. Minor.
+
+Actually, let me reconsider: the ok record is written even if the child already exited. So the journal says ok (process existed) but the process is dead. That's accurate (it existed). OK.
+
+Let me look at the `child.once("error", () => {})` no-op handler. If an error fires after spawn (post-spawn error), it's swallowed. But the exit event should fire. Actually, for a post-spawn error (e.g., the process was killed by a signal we sent), the 'error' event might fire with the kill error. But we handle exit separately. Hmm.
+
+Let me now think about the most defensible findings to report. I need to be concise and give numbered findings with repro steps.
+
+Let me reconsider the C2-1 fix once more for a cleaner defect. The fix swallows EPERM in signalGroup. But signalGroup is also called in the post-exit SIGKILL sweep in stop(). If that SIGKILL gets EPERM (swallowed), the poll continues. After 25 polls, verdict stays "alive" or "unknown". stopped=false. Honest. OK.
+
+But here's a thought: in terminate(), the SIGTERM is sent. If it gets EPERM (swallowed), terminate proceeds as if sent. But the leader might be alive (if setsid'd). Then terminate waits stopTimeoutMs, SIGKILL (EPERM, swallowed), returns true. stop() awaits exitPromise → hang. This is the regression. Let me report it.
+
+Actually, wait. Let me reconsider whether the leader can be alive and EPERM. If the leader setsid'd, it's in a new group. kill(-oldpgid) targets the old group. If the old group is empty (leader left, no other members), kill returns ESRCH (swallowed). If the old group has foreign members, EPERM. Either way, the leader (new group) is not signaled. So the leader stays alive. stop() hangs. But this requires setsid. Hmm.
+
+Alternatively, the leader could be alive but the group probe returns EPERM because... no, the leader is in the group.
+
+Let me think about whether there's a simpler hang. Actually, the simplest: the child ignores SIGTERM (stubborn), terminate times out, SIGKILL. SIGKILL always kills (unless D state). So normally no hang. The hang requires D state or setsid. Both are edge cases. RISK.
+
+Let me look for a CONFIRMED-WRONG. Let me re-examine the `blocking` filter and the fence for a specific scenario.
+
+Actually, let me reconsider Q2's hint about "a tuple whose LATEST record is spawnOutcome:'failed' after a real ok." The blocking filter excludes failed. So a tuple with latest=failed is excluded from blocking. But what if the failed is a confirmStopped confirmation, and the tuple's process is actually alive (the confirmation was wrong)? Then it's excluded and a spawn is allowed. But confirmStopped checks liveness. So a wrong confirmation requires the liveness check to pass incorrectly.
+
+But here's a specific case: confirmStopped checks `latest.pgid` for the group. If latest is the ok record with pgid, it checks. But what if the ok record has NO pgid (non-detached spawn)? Then confirmStopped skips the group check. And the pid check: if the pid is dead (probe says dead), confirm succeeds. But the process might have children (non-detached, no group). Hmm, non-detached means no private group, so children are in the parent's group. The pid check only checks the leader. If the leader is dead but children are alive (in the parent's group), confirm succeeds and a spawn is allowed. But the children are in the parent's group (the supervisor's group), not a private group. So they're not "owned" by the attempt in the group sense. Hmm, this is the non-detached case, which is documented as "no controllable group". So the leader's exit is the full evidence. OK.
+
+Let me look at the `groupProbe` for a view whose latest is a confirm-failed that copied pgid. The groupProbe checks the pgid. If alive, the view is... wait, the view's latest is failed, so it's excluded from blocking. But the groupProbe is still computed. And the liveness override: `if (view.groupProbe?.running === true) continue;` — so a failed view with a live group is NOT superseded (protected). But it's excluded from blocking anyway (failed). So the live group doesn't block! 
+
+Wait, let me re-read. blocking = `notSuperseded(v) && v.record.spawnOutcome !== "failed" && ...`. So a failed view is excluded from blocking regardless of groupProbe. So if a tuple's latest is a confirm-failed (copied pgid) and the group is still alive, the view is excluded from blocking → spawn allowed over a live group!
+
+But confirmStopped checks the group before confirming: `if (typeof latest.pgid === "number") { const g = this.groupAlive(latest.pgid); if (g === "alive") throw ...; if (g === "unknown") throw ...; }`. So confirmStopped refuses if the group is alive. So a confirm-failed record implies the group was reaped at confirmation time. But the group could become alive AGAIN after confirmation (a new process joins the pgid? unlikely, pgid reuse). Or the group was reaped at confirmation but a grandchild was spawned after? No, the group is reaped means no members. A new member can't join a reaped group (the pgid is gone). So the group stays reaped. OK.
+
+Hmm, but what about the pid? confirmStopped checks the pid (probe). If the pid is dead, confirm succeeds. But the pid could be reused by a new process (different process, same pid). Then the probe says running (the new process). But confirmStopped would refuse (running). So no.
+
+OK, I'm going in circles. Let me settle on the findings I'm most confident about.
+
+Let me reconsider the firstSpawnSeq intent-only inversion once more, but check if it's reachable via a DIFFERENT task. The fence joins on session across tasks. So if task t1 has an unresolved intent on session S, task t2 can't spawn on S. So the inversion (t2 spawns while t1 unresolved) is blocked. So not reachable. RISK.
+
+Let me look at the `markSuperseded` generation branch for a mixed legacy/gen scenario. Suppose tuple A is legacy (gen 0) with ok at seq5. Tuple B is gen 1 with ok at seq10. genBySession max = 1. A gen 0 < 1 → A superseded (unless live). B gen 1 not superseded. So A superseded. But A's process (ok seq5) — was it confirmed stopped before B spawned? B is gen 1, allocated after A. The fence for B required A's liveness disproven. So A is dead. OK.
+
+But what if A is discovered live? Then A protected (not superseded). A blocks. B gen 1 not superseded. Both block. A blocks because live. Good.
+
+Now, what if A is legacy gen 0 and B is gen 1, but A is NEWER in reality (appended after B)? Can that happen? gen 1 is allocated as max+1. If A (gen 0) is appended after B (gen 1), then A's gen is 0 (legacy, no spawnGen). But A was appended after B. So A is causally newer but has gen 0. Then genBySession max = 1 (B). A gen 0 < 1 → A superseded. But A is newer! So A's claim is dropped. Is this reachable? A legacy record (no spawnGen) appended after a gen-1 record. This would happen if a legacy supervisor (old code) appended a record after a new supervisor (new code) appended a gen-1 record. Mixed versions. Hmm. Or if a record is seeded without spawnGen. The test C1-F2 seeds legacy records. But in production, a legacy record after a gen record is unusual. RISK.
+
+Actually, the prompt explicitly asks about "a legacy/gen-mixed session where a confirmation of an old tuple reorders ownership." Let me think: tuple A legacy gen 0, ok seq5. Tuple B gen 1, ok seq10. Now

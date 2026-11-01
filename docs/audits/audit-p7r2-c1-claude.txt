@@ -1,0 +1,46 @@
+**1. Causal ordering.** `markSuperseded` ranks legacy (gen-0) tuples by `firstSpawnSeq`, which takes the minimum position over every `ok` or `failed` record of the tuple. That includes `failed` records written by `confirmStopped`, which are not spawn evidence. The generation branch is safe because confirm copies `spawnGen`. The legacy branch is not: an unrelated confirmation can reorder a tuple (finding A). Two legacy tuples cannot tie, since each record has a unique seq.
+
+**2. Fence completeness.** `blocking` drops every `failed` tuple, so the fence trusts `confirmStopped`'s group check as the only guard for it. `confirmStopped` copies `...latest`, so pid/pgid survive confirm records. The gap is an unresolved intent whose latest record carries no pid/pgid, because the spawn crashed before the ok append (finding B).
+
+**3. confirmStopped evidence.** The confirm spread does carry pid/pgid from the latest record. An intent-only tuple can still be confirmed while its spawned process is alive, because the pid and pgid were never journalled. An undefined pid probe is accepted, which the test suite itself exercises (finding F).
+
+**4. stop/terminate.** `stopped:true` is returned on leader exit alone when the spawn is non-detached (finding D). The post-SIGKILL `await entry.exitPromise` is unbounded, and C2-1's silent EPERM return makes an unsignalable live leader a hang rather than an error (finding E). The immediate-exit branch is benign because a later `groupAlive` re-verifies.
+
+**5. open()/close().** Mid-transaction writes are gated by `assertOpen` before every append and before `nodeSpawn`, so after a forced close a stale transaction fails closed. I found no provable double-writer window.
+
+**6. writeStateHint.** Rows are keyed per taskId, so a different task cannot collide with or clobber another task's row. Rewinds are refused by attempt number. VERIFIED.
+
+**7. spawnAttempt.** `children.set` happens after the spawn event, but the intent is already durable and `run` is serialized, so the window is parked by reconcile. The ok-record pid/pgid is set before its append. A crash between `nodeSpawn` and the ok append leaves no pid anywhere (see B).
+
+**8. Error contract.** `this.spawner.spawn(...)` runs after the intent append and outside any try, so a throwing custom spawner leaks a raw `Error` and leaves a dangling unresolved intent (finding C).
+
+**Findings**
+
+- **A — CONFIRMED-WRONG (Q1, reorder).** Repro:
+  1. Legacy tuple `t1-a1` (no spawnGen) gets `ok` with pid P at journal position 1. Its probe is inconclusive (ps blocked), so `view.probe.running` is undefined and it is not protected from supersession.
+  2. Tuple `t1-a2` gets an unresolved intent at position 2, and its supervisor crashes.
+  3. `confirmStopped(t1-a2, "evidence")` appends a `failed` record at position 3.
+  4. `firstSpawnSeq(t1-a2)=3 > firstSpawnSeq(t1-a1)=1`, so `t1-a1` is superseded.
+  5. `reconcile` / `run` → expected: park (P's liveness is unproven); actual: `spawn`, over a possibly live worker.
+
+- **B — CONFIRMED-WRONG (Q2/Q3, fence hole).** Repro:
+  1. `run(t1)` → `t1-a1` ok, pid P, pgid P; `stop` reaps the group.
+  2. `resume(t1,"t1-a1")` appends an intent with no pid/pgid; the worker spawns and survives; the supervisor crashes before the ok append.
+  3. New runner: the latest record has no pid/pgid, and the hint row (pid P) probes dead. `reconcile` parks, but the group of the crashed spawn is never probed.
+  4. `confirmStopped(t1,"t1-a1","…")` skips the group check (`latest.pgid` undefined) and appends `failed`.
+  5. `run(t1)` → expected: park; actual: `t1-a2` spawns onto the live worker.
+
+- **C — CONFIRMED-WRONG (Q8, raw exception).** Repro: a custom spawner whose `spawn()` throws. `spawnAttempt` has already appended the intent, and the throw escapes as a raw `Error`, not `spawn-failed`, leaving an unresolved intent with no outcome. Expected: a `RunnerError` and a `failed` resolve.
+
+- **D — CONFIRMED-WRONG (Q4, group stop claim).** Repro: a spawner returns `detached:false`; the worker forks a grandchild. `stop()` returns `stopped:true` on leader exit alone, the grandchild survives, and no pgid is recorded. `reconcile` then returns `spawn`, and a second worker starts on the session. Expected per the doc: `stopped:true` only with confirmed group death.
+
+- **E — RISK (Q4, hang after C2-1).** `signalGroup` now swallows EPERM. If the leader is alive and unsignalable (e.g. a setuid child), TERM and KILL both silently no-op, and `stop()` awaits `exitPromise` with no bound. The pre-diff code threw instead of hanging.
+
+- **F — RISK (Q3, I3).** `confirmStopped` refuses only a RUNNING or group-unknown signal. An inconclusive pid probe (undefined) is accepted, and the suite asserts this. Pairs with B.
+
+VERDICT: REJECT — must-fixes, by severity:
+1. D: `stopped:true` on a non-detached spawn must not claim group death; report unknown (or refuse) and keep the fence closed.
+2. B: journal pid/pgid before the spawn is treated as started (or record the group on intent), and make confirm refuse when no group evidence exists for an unresolved tuple whose process may have spawned.
+3. A: exclude `confirmStopped` `failed` records from `firstSpawnSeq` (only `spawnOutcome` from the spawn itself counts), and never supersede a tuple whose liveness is undefined.
+4. C: wrap `spawner.spawn()` in the failure path so it resolves the intent `failed` and throws `RunnerError("spawn-failed")`.
+5. E: bound the post-SIGKILL wait and surface `groupStatus:"unknown"` instead of hanging.

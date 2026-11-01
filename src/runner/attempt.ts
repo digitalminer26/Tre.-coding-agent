@@ -97,6 +97,11 @@ export class RunnerError extends Error {
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ATTEMPT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*-a[0-9]+$/;
 
+// E (audit): bound on waiting for the leader to actually exit after an
+// escalation to SIGKILL. An unsignalizable leader (EPERM) would make an
+// unbounded exit wait a hang — on timeout the verdict is "unknown".
+const POST_KILL_EXIT_WAIT_MS = 2_000;
+
 /** Task identity for one run/resume. `session` is the worker session FILE
  *  path — the resource the ownership fence is drawn on (§14.5 pairs
  *  session+worktree; later phases layer the worktree fence on this
@@ -592,11 +597,31 @@ export class AttemptRunner {
     const entry = this.children.get(canonicalPath(handle.session));
     if (!entry || entry.exited) throw new RunnerError("not-running", `no live child for session ${JSON.stringify(handle.session)} started by this runner instance`);
     let escalated = await this.terminate(entry);
-    const { code, signal } = await entry.exitPromise;
+    // E (audit): after an escalation the leader may be UNSIGNALABLE
+    // (EPERM swallowed by signalGroup) — `await exitPromise` alone is
+    // then a hang, not a stop. Bound the post-SIGKILL exit wait: on
+    // timeout report the honest verdict (stopped:false / "unknown")
+    // and return; the child stays tracked and the fence stays closed.
+    const exit = await Promise.race([
+      entry.exitPromise,
+      escalated ? delay(POST_KILL_EXIT_WAIT_MS).then(() => undefined) : new Promise<never>(() => {}),
+    ]);
+    if (exit === undefined) {
+      // Only reachable when escalated (the non-escalated race arm
+      // never resolves): SIGKILL was sent but the leader never exited.
+      return { attemptId: entry.attemptId, stopped: false, escalated, code: null, signal: null, groupStatus: "unknown" };
+    }
+    const { code, signal } = exit;
     if (!entry.pgid) {
-      // Non-detached: no private group to sweep — the direct child's
-      // waitpid-class exit is the full evidence we possess.
-      return { attemptId: entry.attemptId, stopped: true, escalated, code, signal };
+      // D (audit): Non-detached: the child shares SOMEONE ELSE's group
+      // (typically this supervisor's own), so there is no private group
+      // we can sweep or probe — the direct child's waitpid-class exit
+      // disproves only the LEADER, and a forked grandchild survives in
+      // the inherited group. `stopped:true` would claim group death we
+      // do not possess: report stopped:false. groupStatus "reaped"
+      // keeps its contract meaning (the DIRECT child is reaped); the
+      // inherited group's liveness is simply undeterminable here.
+      return { attemptId: entry.attemptId, stopped: false, escalated, code, signal, groupStatus: "reaped" };
     }
     // The exit event reaps the DIRECT child; the group may still hold
     // grandchildren (F5). Verify with kill(-pgid,0) — NOT `ps` (blocked
@@ -738,6 +763,39 @@ export class AttemptRunner {
       if (status && status.running && status.sameUid !== false) {
         throw new RunnerError("ownership-fence", `pid ${pid} recorded for attempt ${attemptId} is RUNNING — the worker is alive; park, do not confirm`, { pid, evidence });
       }
+      // F (audit): an INCONCLUSIVE liveness probe is NOT acceptance —
+      // absence of evidence is not evidence of absence. Every recorded
+      // pid (journal FIRST, best-effort hint second) must resolve to a
+      // DETERMINISTIC negative verdict (running:false); an undefined
+      // probe verdict means ownership is undeterminable: refuse, keep
+      // the fence closed. (Deterministic here means the probe ANSWERED
+      // dead — ESRCH-class — not "the probe could not run".)
+      if (status === undefined) {
+        throw new RunnerError("ownership-fence", `liveness of pid ${pid} (recorded for attempt ${attemptId}) is INCONCLUSIVE — the probe could not determine it; confirm requires deterministic negative evidence (running:false)`, { pid, evidence });
+      }
+    }
+    // F (audit): a legacy tuple with neither pid nor pgid has nothing
+    // to probe — confirming it rests on evidence-free absence. Require
+    // at least one process identifier before a confirmation is valid.
+    if (typeof latest.pid !== "number" && typeof latest.pgid !== "number") {
+      throw new RunnerError("ownership-fence", `attempt ${attemptId} recorded NO pid and NO pgid — nothing can be probed to prove the worker stopped; a confirmation over an identifier-less tuple is unverified absence`, { evidence });
+    }
+    // B (audit): an UNRESOLVED tuple journalled no pgid — the crash sat
+    // between the fork and the "ok" resolve, so the spawn mode (and
+    // hence the group) was never recorded. Leader death alone is NOT
+    // group death. Conservatively probe the recorded pid AS a
+    // hypothetical detached group (pgid === pid for every runner spawn
+    // today): ESRCH ⇒ that group is gone and the only consistent group
+    // story holds; anything else (members alive, or EPERM-undeterminable
+    // — e.g. the child re-parented into an inherited foreign group) is
+    // refusal territory: a worker that may have forked into an
+    // unjournalled group can never be disproven, so refuse and keep the
+    // fence closed.
+    if (unresolved && typeof latest.pgid !== "number" && typeof latest.pid === "number") {
+      const hg = this.groupAlive(latest.pid);
+      if (hg !== "reaped") {
+        throw new RunnerError("ownership-fence", `attempt ${attemptId} is UNRESOLVED and journalled no pgid — leader pid ${latest.pid} is dead but group liveness of its unrecorded group is ${hg === "alive" ? "ALIVE (survivors in the group)" : "undeterminable"}; a spawn that crashed before journalling its group can never be confirmed from leader death alone`, { pid: latest.pid, evidence });
+      }
     }
     // F5 (audit): a dead leader pid is NOT proof of group death. If the
     // tuple recorded a pgid, confirming requires the GROUP to be reaped
@@ -755,7 +813,7 @@ export class AttemptRunner {
     // spawnGen: confirming is not a new spawn, so it must never reorder
     // ownership against a live higher-generation tuple. A legacy tuple
     // (no generation) confirms as legacy.
-    const record: AttemptRecord = { ...latest, id: newDecisionId(), ts: Date.now(), spawnOutcome: "failed", ...(typeof latest.spawnGen === "number" ? { spawnGen: latest.spawnGen } : {}) };
+    const record: AttemptRecord = { ...latest, id: newDecisionId(), ts: Date.now(), spawnOutcome: "failed", confirmation: true, ...(typeof latest.spawnGen === "number" ? { spawnGen: latest.spawnGen } : {}) };
     // F4 (audit): generation-checked revalidation immediately before
     // the append — a spawn that raced in after our first read (only
     // possible pre-mutex-serialization) would have appended a HIGHER
@@ -992,14 +1050,30 @@ export class AttemptRunner {
           // resolve means confirming an old tuple cannot reorder it
           // against a newer one. An unresolved intent is not spawn
           // evidence and never supersedes.
+          //
+          // A (audit): ONLY spawn EVENTS anchor a tuple's position — an
+          // intent record (written before the fork: the causal spawn
+          // position) or a NON-confirmation "ok" resolve. Failed resolves
+          // are excluded outright: spawnEvidence ones mean the process
+          // never existed; confirmation ones say when a death was
+          // OBSERVED, not when the process spawned. A confirmation "ok"
+          // resolve is excluded too — its append position is the
+          // confirmation's, not the spawn's. Anchoring on a
+          // confirmation's position orders tuples by WHEN-CONFIRMED, so
+          // a late confirmation of an old tuple could supersede a newer
+          // tuple whose spawn merely hadn't been confirmed yet.
+          const isSpawnEvent = (r: AttemptRecord): boolean =>
+            r.spawnOutcome === null
+              ? r.spawnEvidence !== true // intent: the spawn event itself
+              : r.spawnOutcome === "ok" && r.confirmation !== true;
           const firstSpawnSeq = (v: AttemptView): number => {
             if (v.record.spawnOutcome !== "ok" && v.record.spawnOutcome !== "failed") return -1;
-            let first = seqOf.get(v.record.id) ?? -1;
+            let first = -1;
             for (const r of records) {
-              if (r.kind === "attempt" && tupleKey(r as AttemptRecord) === tupleKey(v.record) && (r.spawnOutcome === "ok" || r.spawnOutcome === "failed")) {
-                const s = seqOf.get(r.id);
-                if (s !== undefined && s < first) first = s;
-              }
+              if (r.kind !== "attempt" || tupleKey(r as AttemptRecord) !== tupleKey(v.record)) continue;
+              if (!isSpawnEvent(r as AttemptRecord)) continue;
+              const s = seqOf.get(r.id);
+              if (s !== undefined && (first < 0 || s < first)) first = s;
             }
             return first;
           };
@@ -1084,10 +1158,20 @@ export class AttemptRunner {
     };
     await this.appendRecord(intent);
 
-    const spec = this.spawner.spawn(task, attemptId, { resume });
+    // C2-C (cycle-2 audit): the spawner callback is USER code — a throw
+    // here (after the intent is durable) must resolve the intent `failed`
+    // and surface as RunnerError("spawn-failed"), not a raw Error with a
+    // dangling unresolved intent parked in the journal.
+    let spec: WorkerSpawn;
+    try {
+      spec = this.spawner.spawn(task, attemptId, { resume });
+    } catch (e) {
+      await this.appendRecord(resolveLike(intent, "failed", { spawnEvidence: true })).catch(() => { /* journal divergence surfaces below via records() */ });
+      throw new RunnerError("spawn-failed", `spawner ${JSON.stringify(this.spawner.kind)} threw before producing a spawn spec: ${msg(e)}`, { cause: msg(e) });
+    }
     const specError = validateSpawnSpec(spec, this.commandCheck);
     if (specError) {
-      await this.appendRecord(resolveLike(intent, "failed")).catch(() => { /* journal divergence surfaces below via records() */ });
+      await this.appendRecord(resolveLike(intent, "failed", { spawnEvidence: true })).catch(() => { /* journal divergence surfaces below via records() */ });
       throw new RunnerError("spawn-failed", `spawner ${JSON.stringify(this.spawner.kind)} returned an invalid spawn spec: ${specError}`);
     }
     const detached = spec.detached ?? true;
@@ -1098,7 +1182,7 @@ export class AttemptRunner {
     try {
       child = nodeSpawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, detached, stdio: "ignore" });
     } catch (e) {
-      await this.appendRecord(resolveLike(intent, "failed")).catch(() => {});
+      await this.appendRecord(resolveLike(intent, "failed", { spawnEvidence: true })).catch(() => {});
       throw new RunnerError("spawn-failed", `spawn(${spec.command}) threw: ${msg(e)}`, { cause: msg(e) });
     }
     let settle!: (v: { code: number | null; signal: NodeJS.Signals | null }) => void;
@@ -1126,7 +1210,7 @@ export class AttemptRunner {
         child.once("spawn", () => { child.removeListener("error", onError); res(); });
       });
     } catch (e) {
-      await this.appendRecord(resolveLike(intent, "failed")).catch(() => {});
+      await this.appendRecord(resolveLike(intent, "failed", { spawnEvidence: true })).catch(() => {});
       throw new RunnerError("spawn-failed", `worker process ${spec.command} failed to spawn: ${msg(e)}`, { cause: msg(e) });
     }
     entry.pgid = detached ? child.pid : undefined;
@@ -1144,7 +1228,7 @@ export class AttemptRunner {
     this.assertOpen();
     // "ok" resolve carries the process identity INTO THE JOURNAL (F6):
     // restart discovery no longer depends on the single-row state hint.
-    await this.appendRecord({ ...resolveLike(intent, "ok"), pid: child.pid, ...(entry.pgid !== undefined ? { pgid: entry.pgid } : {}) });
+    await this.appendRecord({ ...resolveLike(intent, "ok", { detached }), pid: child.pid, ...(entry.pgid !== undefined ? { pgid: entry.pgid } : {}) });
 
     const stateWarning = await this.writeStateHint(task, attemptId, child.pid, "running");
     return { episodeId: task.episodeId, taskId: task.taskId, attemptId, session: task.session, pid: child.pid, detached, exited: exitPromise, stateWarning };
@@ -1271,11 +1355,13 @@ export class AttemptRunner {
 
 // ────────────────────────────── helpers ─────────────────────────────────────
 
-function resolveLike(intent: AttemptRecord, outcome: "ok" | "failed"): AttemptRecord {
+function resolveLike(intent: AttemptRecord, outcome: "ok" | "failed", extra?: Partial<AttemptRecord>): AttemptRecord {
   // Fresh envelope ONLY — spawnGen (and every identity field) is COPIED
   // from the intent (finding 3): the resolve of a generation belongs to
-  // that generation, whatever its wall-clock ts says.
-  return { ...intent, id: newDecisionId(), ts: Date.now(), spawnOutcome: outcome };
+  // that generation, whatever its wall-clock ts says. `extra` marks the
+  // resolve's EPISTEMIC SOURCE (spawnEvidence / confirmation) — never
+  // identity.
+  return { ...intent, id: newDecisionId(), ts: Date.now(), spawnOutcome: outcome, ...extra };
 }
 
 /** Causal spawn generation for one session path (finding 3): 1 + the max
