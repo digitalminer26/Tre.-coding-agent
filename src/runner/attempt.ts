@@ -1180,7 +1180,15 @@ export class AttemptRunner {
       if (entry.pgid) process.kill(-entry.pgid, sig);
       else if (entry.child.pid) process.kill(entry.child.pid, sig);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      // C2-1 (cycle-2 audit): EPERM means the group holds FOREIGN-uid
+      // members we cannot signal — that is an UNDETERMINABLE liveness
+      // state, not an error to propagate: stop() must return the
+      // honest verdict (stopped:false / groupStatus:"unknown"), never
+      // throw, or a caller treating a throw as "not stopped" could
+      // loop into kill-then-rationalize. ESRCH = already gone (wanted).
+      if (code === "ESRCH" || code === "EPERM") return;
+      throw e;
     }
   }
 
