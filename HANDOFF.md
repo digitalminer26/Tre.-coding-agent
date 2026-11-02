@@ -1,3 +1,39 @@
+## 2026-11-02 — P8 first increment: budget ledger & spend authority (`src/budget/`); suite 1728 / 0 / 14
+
+`src/budget/ledger.ts` (~1,300 lines, 31 tests in `test/budget-ledger.test.ts`,
+docs/12): one self-contained module (`node:` builtins only — the P4 journal
+queue is re-implemented in-module rather than imported, per the fleet
+pattern; compartment guard test proves nothing outside `src/budget/` imports
+it and it imports nothing). Two halves: **BudgetLedger** — append-only JSONL
+per episode (schema `tre.ledger.v1`, four kinds: `spend` / `res-open` /
+`res-close` / `wallclock`) with the P4 durability discipline (fsync before
+return, serialized appends, torn-tail repair, mid-file corruption fails
+closed, dup record ids reported, dup-lineId spend refused `dup-line`);
+**check()** — the pure gate over a `projectLedger` snapshot: ten budget denial
+codes across episode/task/attempt compartments (consumed + live holds + the
+new reservation floor), plus the authority half (`authority-missing`,
+`external-not-allowed`, `estimate-invalid`). A pass mints an opaque
+`ActionReceipt` (module-private WeakMap + SHA-256 digest over the canonical
+action spec — check(X)-then-act(Y) fails loud); `reserve()` re-validates the
+receipt AND re-runs check() inside the serialized append queue (refresh-first,
+R6/R7 pre-empted). D1: in-module `DEFAULT_RATES` (exact > prefix > provider >
+fallback, provenance derived by the resolver itself, never hand-claimed),
+per-episode overrides, rate FROZEN onto each record at ingest — history never
+reprices. D2: the reservation floor derives from the episode's own
+per-attempt caps; callers raise, never lower; raises are recorded on the
+intent. A6: an open run-reservation consumes an attempt slot (reservations
+ARE attempts); resume into a never-reserved attempt denies. Ingest from
+session JSONL goes through the P5 tailer's offset discipline (own cursor
+file, never mutates the session; only assistant-entries with a usage block
+ledger; unknown-priced entries flagged `fallbackPricedCount`, never silently
+free per I3). Wallclock windows per task and per attempt. Bugs found and
+fixed by the test suite: ingest dedup race (guard inside the queue),
+`ts: 0` falsy bug, reserve/closeReservation queue deadlock, compartment
+null-stop on the upward roll-up, A6 presence via the ever-reserved trail
+(not the usage roll-up). Mutation sweep proves every denial code reachable
+and `allowed` iff denials empty. P8 NOT yet accepted — independent
+fresh-family audit decides (docs/12 §5 bar).
+
 ## 2026-10-31 — P7 remediation against the working-tree audit (all 9 findings + dead code); suite 1638 / 0 / 14
 
 `src/runner/attempt.ts` (1,215 lines, 27 tests named per finding) now

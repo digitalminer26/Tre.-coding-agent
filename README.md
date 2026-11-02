@@ -51,6 +51,8 @@ The TUI's `/display-bottom` opens an interactive field picker (↑/↓ + space
 - `docs/08-loop-hardening.md` — loop/stall guard status and follow-ups
 - `docs/09-linux-sandbox.md` — Linux bash sandbox (Bubblewrap) boundary and mount order (Darwin stays on Seatbelt)
 - `docs/10-mcp-scope.md` — MCP (tier 1 stdio tools, shipped; `mcp_resource` resource reading done 2026-10-15 — the rest of tier 2 deferred) + the one CLI asymmetry (`--tools` filters built-ins only; MCP tools are additive, per-server `tools` allowlist is the MCP-scoped equivalent)
+- `docs/11-orchestrator-schema.md` — orchestrator workstream schema (P0–P13): journal/decision format (§13–14) the fleet, runner, and budget modules are built on
+- `docs/12-p8-accounting-authority.md` — P8 budget ledger & spend authority: per-episode JSONL ledger (spend/reservations/wallclock, P4 durability), the pure `check()` gate minting capability receipts, rate table + per-episode overrides (implemented 2026-11-02, `src/budget/`)
 - `docs/tui-mouse-selection/PLAN.md` — TUI in-app mouse selection + `/copy` (implemented)
 - `docs/workstream-input/plan.md` — responsive input during workstreams: stream-render coalescing + immediate interactive paints (implemented)
 - `HANDOFF.md` — dated implementation history (historical statuses may be superseded)
