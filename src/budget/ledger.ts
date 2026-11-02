@@ -306,6 +306,21 @@ export interface ReservationCloseRecord extends LedgerEnvelope {
   /** The res-open record id. */
   refId: string;
   reason: ReservationCloseReason;
+  /** C2-F7: the terminal-outcome attestation a REAL close carries —
+   *  what happened, and a reference to the artifact proving it. A
+   *  res-close without attest on the ledger is a legacy/observed record
+   *  (schema-valid, but reserve()/close() never writes one). */
+  attest?: { outcome: string; evidence: string; spawnStarted?: boolean };
+}
+
+/** C2-F6: an UNATTESTED close attempt. Recorded so the request itself is
+ *  auditable, but it is a pure observation — it never removes a hold,
+ *  refunds a slot, or ends a wallclock interval. Only an attested
+ *  res-close terminates a reservation (docs/12 §4). */
+export interface BudgetCloseRequestRecord extends LedgerEnvelope {
+  kind: "close-request";
+  refId: string;
+  reason: ReservationCloseReason;
 }
 
 /** Per-attempt wallclock window, appended by the supervisor when an
@@ -315,7 +330,7 @@ export interface WallclockRecord extends LedgerEnvelope {
   seconds: number;
 }
 
-export type LedgerRecord = SpendRecord | ReservationOpenRecord | ReservationCloseRecord | WallclockRecord;
+export type LedgerRecord = SpendRecord | ReservationOpenRecord | ReservationCloseRecord | BudgetCloseRequestRecord | WallclockRecord;
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0 && v.length <= 512 && !/[\u0000-\u001f]/.test(v);
@@ -391,6 +406,27 @@ export function validateLedgerRecord(record: unknown): asserts record is LedgerR
       if (!isNonEmptyString(r.refId)) throw new BudgetLedgerError("schema", "res-close: refId invalid");
       if (!(RESERVATION_CLOSE_REASONS as readonly string[]).includes(r.reason as string))
         throw new BudgetLedgerError("schema", `res-close: reason must be one of ${RESERVATION_CLOSE_REASONS.join("|")}`);
+      // C2-F6: an attested close must carry a REAL attestation — a
+      // half-present one (outcome without evidence etc.) is a schema lie.
+      // An absent attest is legal only for observed/legacy records:
+      // closeReservation() never WRITES an unattested res-close.
+      if (r.attest !== undefined) {
+        const a = r.attest as Record<string, unknown>;
+        if (typeof r.attest !== "object" || r.attest === null || Array.isArray(r.attest))
+          throw new BudgetLedgerError("schema", "res-close: attest must be an object");
+        if (!isNonEmptyString(a.outcome) || (a.outcome as string).trim() === "")
+          throw new BudgetLedgerError("schema", "res-close: attest.outcome must be a non-empty string (C2-F6)");
+        if (!isNonEmptyString(a.evidence) || (a.evidence as string).trim() === "")
+          throw new BudgetLedgerError("schema", "res-close: attest.evidence must be a non-empty string (C2-F6)");
+        if (a.spawnStarted !== undefined && typeof a.spawnStarted !== "boolean")
+          throw new BudgetLedgerError("schema", "res-close: attest.spawnStarted must be a boolean when present");
+      }
+      break;
+    }
+    case "close-request": {
+      if (!isNonEmptyString(r.refId)) throw new BudgetLedgerError("schema", "close-request: refId invalid");
+      if (!(RESERVATION_CLOSE_REASONS as readonly string[]).includes(r.reason as string))
+        throw new BudgetLedgerError("schema", `close-request: reason must be one of ${RESERVATION_CLOSE_REASONS.join("|")}`);
       break;
     }
     case "wallclock": {
@@ -486,9 +522,12 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
   const wallclockS = new Map<string, number>();
   const attemptWallclockS = new Map<string, number>();
   const open = new Map<string, ReservationOpenRecord>(); // res-open id, superseded by close
+  const allReservations = new Map<string, ReservationOpenRecord>(); // every res-open (first-wins) — C2-F8: windows survive close
   const runOpens = new Map<string, ReservationOpenRecord>(); // durable run reservations
   const closedRefs = new Set<string>(); // first-close-wins (never double-refund)
   const reasonIsReleasedRef = new Map<string, string>(); // refId → first close reason
+  const releaseAttestOkRef = new Set<string>(); // refId → first close is an evidenced release (C2-F6)
+  const closeTsRef = new Map<string, number>(); // refId → first close ts (C2-F8 interval end)
   const actionIds = new Map<string, ReservationOpenRecord>(); // A2 uniqueness source
   const strategyUses = new Map<string, number>(); // A9 repeat counts
   const reservedAttempts = new Set<string>(); // every attempt ever reserved (A6 trail)
@@ -510,12 +549,14 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
   for (const record of records) {
     if (ids.has(record.id)) {
       if (!duplicateIds.includes(record.id)) duplicateIds.push(record.id);
-      // A duplicate id is REPORTED but the record still folds (it may be a
-      // legitimately redelivered line — spend lineId dedup below protects
-      // money; id duplication itself is an operator-visible anomaly).
-    } else {
-      ids.add(record.id);
+      // C2: a replayed record is REPORTED and SKIPPED (first-wins), for
+      // every kind and contribution. Folding a duplicate a second time
+      // double-charged attempt slots and strategy uses (audit C2) while
+      // the hold itself deduped — an inconsistent anomaly. Money dedupes
+      // by lineId; record identity dedupes here, once, for all kinds.
+      continue;
     }
+    ids.add(record.id);
     switch (record.kind) {
       case "spend": {
         if (record.episodeId === undefined) break;
@@ -540,6 +581,7 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
         // A2 actionId uniqueness source (first record wins; reserve()
         // enforces idempotent redelivery against this inside the queue).
         if (!actionIds.has(record.actionId)) actionIds.set(record.actionId, record);
+        if (!allReservations.has(record.id)) allReservations.set(record.id, record); // C2-F8: windows survive close
         // A9: strategy repeat counts over durable reservations.
         if (record.strategyId !== undefined) {
           const sk = JSON.stringify([record.episodeId, record.taskId ?? null, record.strategyId]);
@@ -555,6 +597,12 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
           runOpens.set(record.id, record);
         }
         if (open.has(record.id)) break; // duplicate res-open id: first wins (reported above)
+        // C2-F4: a close recorded BEFORE its res-open in the file still
+        // excludes the hold — closed refs never re-open, regardless of
+        // record order (the documented "closes anywhere in the file
+        // apply" contract). Attempt slots/strategy uses above are
+        // history (the attempt was used); only the live HOLD is excluded.
+        if (closedRefs.has(record.id)) break;
         open.set(record.id, record);
         break;
       }
@@ -564,7 +612,15 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
         // A8: refund ONLY the justified failed-spawn/release case; the
         // res-open may appear later in the file than its close, so the
         // refund decision is deferred to the post-pass below.
-        if (!reasonIsReleasedRef.has(record.refId)) reasonIsReleasedRef.set(record.refId, record.reason);
+        if (!reasonIsReleasedRef.has(record.refId)) {
+          reasonIsReleasedRef.set(record.refId, record.reason);
+          // C2-F6: the slot refund requires an EVIDENCED release — a
+          // negative-spawn attestation on the close record. An unattested
+          // observed 'released' still removes the hold (it is a terminal
+          // fact on the trail) but never refunds the attempt slot.
+          if (record.reason === "released" && record.attest?.spawnStarted === false) releaseAttestOkRef.add(record.refId);
+        }
+        if (!closeTsRef.has(record.refId)) closeTsRef.set(record.refId, record.ts); // C2-F8: interval end
         open.delete(record.refId);
         break;
       }
@@ -595,19 +651,41 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
     }
   }
 
-  // A1/F17 (docs/12 §2): supervisor downtime counts toward the attempt it
-  // spans. Every OPEN reservation that names an attempt anchors that
-  // attempt; elapsed time from the earliest anchor to `now` is live
-  // wallclock (a dead supervisor buys no free time). Recorded windows
-  // (completed, evidence-backed) sum on top; overlapping open holds on
-  // one attempt dedupe to the earliest anchor. Determinism holds: the
-  // fold is a pure function of (records, now) — A7.
-  const liveStart = new Map<string, number>();
-  for (const reservation of open.values()) {
-    if (reservation.attemptId === undefined || !(reservation.ts > 0)) continue;
+  // A1/F17 + C2-F8 (docs/12 §2): supervisor downtime counts toward the
+  // attempt it spans — and the time it counted is NOT erased at close.
+  // Every reservation that names an attempt contributes a wallclock
+  // interval [open.ts, close_ts or now] (C2-F8: closing used to zero the
+  // elapsed live window, so a short-lived reservation paid nothing for
+  // the downtime it represented, and a re-reservation of the same attempt
+  // double-counted the same span). Overlapping open intervals on one
+  // attempt take the max; closed [start,end] windows sum on top — the
+  // fold stays a pure function of (records, now): A7.
+  // C2-F8 precedence: an attempt that has an EXPLICIT recordWallclock
+  // window is judged by the supervisor's own accounting; reservation-
+  // derived intervals are a downtime PROXY only for attempts with no
+  // explicit window (killing the audit's explicit-100s + live-100s = 200s
+  // double count).
+  const explicitWindowKeys = new Set<string>();
+  for (const record of records) {
+    if (record.kind === "wallclock" && record.taskId !== undefined && record.attemptId !== undefined)
+      explicitWindowKeys.add(JSON.stringify([record.episodeId, record.taskId, record.attemptId]));
+  }
+  const closedWindows = new Map<string, number>(); // sum of closed intervals per attempt key
+  const liveStart = new Map<string, number>(); // earliest still-open anchor
+  for (const reservation of allReservations.values()) {
+    // C2: epoch 0 is a VALID start anchor (audit: a ts=0 reservation
+    // must contribute elapsed, not be silently skipped).
+    if (reservation.attemptId === undefined || !Number.isFinite(reservation.ts) || reservation.ts < 0) continue;
     const key = JSON.stringify([reservation.episodeId, reservation.taskId ?? null, reservation.attemptId]);
-    const prev = liveStart.get(key);
-    if (prev === undefined || reservation.ts < prev) liveStart.set(key, reservation.ts);
+    if (explicitWindowKeys.has(key)) continue; // supervisor window owns this attempt's time
+    const closeTs = closeTsRef.get(reservation.id);
+    if (closeTs === undefined) {
+      const prev = liveStart.get(key);
+      if (prev === undefined || reservation.ts < prev) liveStart.set(key, reservation.ts);
+    } else {
+      const dur = Math.max(0, (closeTs - reservation.ts) / 1000);
+      closedWindows.set(key, (closedWindows.get(key) ?? 0) + dur);
+    }
   }
   for (const [key, startedAt] of liveStart) {
     const elapsed = Math.max(0, (now - startedAt) / 1000);
@@ -616,14 +694,22 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
     attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + elapsed);
     if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + elapsed);
   }
+  for (const [key, dur] of closedWindows) {
+    if (dur <= 0) continue;
+    const [, taskId] = JSON.parse(key) as [string, string | null, string];
+    attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + dur);
+    if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + dur);
+  }
 
   // A8: refund a run slot ONLY for a justified 'released' (failed-spawn)
   // close — settled/expired/abandoned keep the slot consumed (audit:
   // settled runs must never re-open the attempt budget). Deferred here so
   // close-records BEFORE their res-open in the file still refund (first
   // close per refId wins; closedRefs guarantees single refund).
+  // C2-F6: the refund additionally requires the evidenced attestation
+  // (spawnStarted===false) recorded on the close itself.
   for (const [refId, run] of runOpens) {
-    if (reasonIsReleasedRef.get(refId) !== "released") continue;
+    if (reasonIsReleasedRef.get(refId) !== "released" || !releaseAttestOkRef.has(refId)) continue;
     const taskKey = JSON.stringify([run.episodeId, run.taskId ?? null]);
     attemptsUsed.set(taskKey, Math.max(0, (attemptsUsed.get(taskKey) ?? 0) - 1));
   }
@@ -682,6 +768,21 @@ export interface GatePolicy {
     approvedModels?: readonly string[];
     /** Per-diagnosis caps (docs/12 §1). */
     diagnostics?: { maxToolCalls?: number; maxUsd?: number };
+    /** C2-F3 (audit): injected REAL-PATH resolver closing the symlink
+     *  class the lexical canonicalize cannot see. Contract (host-owned,
+     *  synchronous): given a canonical absolute path under `root`,
+     *  resolve the LONGEST EXISTING prefix through every symlink
+     *  (realpath semantics) and append the nonexistent remainder
+     *  verbatim — a nonexistent leaf is NOT an error. Return `undefined`
+     *  on any resolver failure (the gate then FAILS CLOSED for that
+     *  path). When absent, the gate's guarantee is lexical-only and its
+     *  docs must be read that way: symlinks are unjudged and the
+     *      executor must re-resolve at act time (the TOCTOU recheck
+     *  contract — the gate judges the path, the act-time recheck owns
+     *  the window between them; this increment has no enforcing
+     *  executor, so a deployment that touches a live filesystem MUST
+     *  inject this resolver). */
+    resolveRealPath?: (absPathUnderRoot: string) => string | undefined;
   };
   /** D1 override table, consulted before DEFAULT_RATES. */
   rates?: readonly RateEntry[];
@@ -787,9 +888,12 @@ export function reserveDefault(action: LedgerGatedAction): { usd: number; turns:
 /** A3: canonicalize a request path against the trusted root. Relative
  *  paths resolve under the root; absolute paths must stay inside it.
  *  `..` segments are resolved lexically; a path that escapes the root
- *  canonicalizes to `undefined` (denied — a symlink check is the
- *  executor's job at act-time; the gate refuses every textual escape).
- *  Pure, synchronous, no I/O. */
+ *  canonicalizes to `undefined` (denied). NOTE (C2-F3): this is LEXICAL
+ *  only — it cannot see symlinks. A deployment whose gate shares a live
+ *  filesystem with the act injects authority.resolveRealPath (see
+ *  GatePolicy) so every existing component is realpath-judged; the
+ *  act-time executor owns the TOCTOU recheck between gate judgment and
+ *  action. Pure, synchronous, no I/O. */
 export function canonicalizePath(p: string, root: string): string | undefined {
   if (typeof p !== "string" || p === "" || p.includes("\0")) return undefined;
   const r = posix.normalize(root);
@@ -867,6 +971,8 @@ export function validateGatePolicy(policy: GatePolicy): GatePolicy {
       if (m !== undefined && (!Number.isFinite(m) || m < 0)) throw new BudgetLedgerError("bad-input", "authority.diagnostics.maxToolCalls must be finite non-negative");
       if (mu !== undefined && (!Number.isFinite(mu) || mu < 0)) throw new BudgetLedgerError("bad-input", "authority.diagnostics.maxUsd must be finite non-negative");
     }
+    if (a.resolveRealPath !== undefined && typeof a.resolveRealPath !== "function")
+      throw new BudgetLedgerError("bad-input", "authority.resolveRealPath must be a function (C2-F3) or absent");
   }
   return policy;
 }
@@ -879,6 +985,15 @@ export function validateGatePolicy(policy: GatePolicy): GatePolicy {
 export function canonicalActionSpec(policy: GatePolicy, request: GateRequest, reserve: { usd: number; turns: number }): string {
   return JSON.stringify([
     policy.episodeId,
+    // C2-F2: the authority ROOT is part of the checked spec (paths are
+    // judged against it) — a receipt is bound to the root it was granted
+    // under; swapping policy.authority.root between check and reserve
+    // changes the digest and is refused.
+    policy.authority?.root ?? null,
+    // C2-F3: the resolver CONTRACT is digest-bound — a policy that drops
+    // or adds the symlink resolver between check and reserve changes the
+    // spec and is refused.
+    policy.authority?.resolveRealPath !== undefined,
     request.taskId ?? null,
     request.attemptId ?? null,
     request.action,
@@ -954,6 +1069,31 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
         if (canon === undefined) {
           deny("path-not-granted", `path ${JSON.stringify(p)} escapes the authority root ${JSON.stringify(root)} (traversal/absolute outside root refused)`);
           continue;
+        }
+        // C2-F3: when a real-path resolver is injected, EVERY existing
+        // symlink component is resolved and the REAL location is judged
+        // too: it must stay inside the root AND satisfy the same
+        // notPaths/paths globs. A resolver failure fails closed.
+        if (auth.resolveRealPath !== undefined) {
+          const real = auth.resolveRealPath(canon);
+          if (real === undefined) {
+            deny("path-not-granted", `path ${JSON.stringify(p)}: resolveRealPath(${JSON.stringify(canon)}) failed — refusing unresolvable path (C2-F3, fail closed)`);
+            continue;
+          }
+          const realCanon = canonicalizePath(real, root);
+          if (realCanon === undefined) {
+            deny("path-not-granted", `path ${JSON.stringify(p)} resolves through a symlink to ${JSON.stringify(real)} — outside the authority root ${JSON.stringify(root)} (C2-F3)`);
+            continue;
+          }
+          const realDeniedGlob = (auth.notPaths ?? []).find((g) => globMatch(g, realCanon, root));
+          if (realDeniedGlob !== undefined) {
+            deny("path-not-granted", `path ${JSON.stringify(p)} resolves to ${JSON.stringify(realCanon)} matching denied glob ${JSON.stringify(realDeniedGlob)} (C2-F3)`);
+            continue;
+          }
+          if (!(auth.paths ?? []).some((g) => globMatch(g, realCanon, root))) {
+            deny("path-not-granted", `path ${JSON.stringify(p)} resolves to ${JSON.stringify(realCanon)} which matches no granted glob (symlink escape, C2-F3)`);
+            continue;
+          }
         }
         const deniedGlob = (auth.notPaths ?? []).find((g) => globMatch(g, canon, root));
         if (deniedGlob !== undefined) {
@@ -1057,7 +1197,15 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
   // ── mint (A4: only path to a receipt) ──
   const ttl = policy.reservationTtlMs !== undefined ? policy.reservationTtlMs : RESERVATION_TTL_MS;
   if (!Number.isFinite(ttl) || ttl <= 0) throw new BudgetLedgerError("bad-input", "policy.reservationTtlMs must be finite > 0");
+  // C2-F9 (F18 remainder): a nonfinite/negative `now` used to mint a
+  // receipt whose expiry comparisons fail OPEN (NaN expiry verifies
+  // against nothing; Infinity never expires). Time is a validation
+  // boundary like every other: a garbage clock is a caller bug, thrown.
+  if (!Number.isFinite(now) || now < 0)
+    throw new BudgetLedgerError("bad-input", `check: now must be a finite non-negative epoch ms (got ${String(now)}) — a garbage clock never mints a receipt`);
   const expiresAt = now + ttl;
+  if (!Number.isFinite(expiresAt) || expiresAt <= now)
+    throw new BudgetLedgerError("bad-input", `check: expiry ${String(expiresAt)} must be finite and strictly after now (${String(now)})`);
   if (denials.length > 0) {
     return { allowed: false, denials, reserve, estimateRaised, expiresAt };
   }
@@ -1066,6 +1214,11 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     digest, episodeId: policy.episodeId, taskId: request.taskId, attemptId: request.attemptId,
     action: request.action, actionId: request.actionId, grantedBy: grantedBy!, sideEffect: request.authority.sideEffect,
     reserveUsd, reserveTurns, expiresAt,
+    // C2-F1/F2/F11: root + raw estimate + raise decision freeze HERE.
+    policyRoot: policy.authority?.root ?? "/",
+    ...(request.estimate?.usd !== undefined ? { rawEstimateUsd: request.estimate.usd } : {}),
+    ...(request.estimate?.turns !== undefined ? { rawEstimateTurns: request.estimate.turns } : {}),
+    estimateRaised,
     // A3/F1: the immutable canonical request snapshot — reserve() compares
     // against THESE frozen values, never against a live request reference.
     ...(request.paths !== undefined ? { paths: [...request.paths] } : {}),
@@ -1099,6 +1252,15 @@ interface ReceiptInner {
   model?: string;
   toolCalls?: number;
   strategyId?: string;
+  // ── C2-F1/F2/F11: the full mint-time snapshot — authority root and the
+  // caller's RAW estimate (raise provenance) are bound too, so neither
+  // drifts between check and reserve. ──
+  policyRoot: string;
+  rawEstimateUsd?: number;
+  rawEstimateTurns?: number;
+  /** The mint-time D2 raise decision — the durable record must carry
+   *  THIS, never a value re-derived from a mutable request (C2-F11). */
+  estimateRaised: boolean;
 }
 
 /**
@@ -1123,6 +1285,9 @@ export class ActionReceipt {
     if (inner.episodeId !== spec.episodeId) return { ok: false, reason: `receipt is bound to episode '${inner.episodeId}'` };
     if (inner.taskId !== spec.taskId) return { ok: false, reason: `receipt is bound to task ${JSON.stringify(inner.taskId ?? null)}` };
     const at = now ?? Date.now();
+    // C2-F9: a NaN `at` makes `at >= expiresAt` false — comparisons with
+    // NaN FAIL OPEN, so a garbage verify-clock used to pass. Not anymore.
+    if (!Number.isFinite(at)) return { ok: false, reason: `verify clock is not finite (${String(at)})` };
     if (at >= inner.expiresAt) return { ok: false, reason: `receipt expired at ${inner.expiresAt} (now ${at})` };
     return { ok: true };
   }
@@ -1337,7 +1502,28 @@ export class BudgetLedger {
     }
     if (st.size === 0) return false;
     const buf = await readFile(this.path);
-    if (buf[buf.length - 1] === 0x0a) return false; // terminated — clean
+    if (buf[buf.length - 1] === 0x0a) {
+      // C2-F12: a TERMINATED file with trailing blank line(s) ("rec\n\n")
+      // used to be reported clean while the next honest append turned
+      // that blank mid-file corruption (the F9 poison class narrowed to
+      // whitespace). Normalize it durably — cut the blanks through a
+      // synced handle — before any write is admitted.
+      const text = buf.toString("utf8");
+      const lines = text.split("\n");
+      lines.pop(); // drops the trailing "" (file ends with \n)
+      let last = lines.length - 1;
+      while (last >= 0 && lines[last]!.trim() === "") last--;
+      if (last === lines.length - 1) return false; // terminated, no blank tail — clean
+      const cutLen = Buffer.byteLength(lines.slice(0, last + 1).join("\n") + (last >= 0 ? "\n" : ""), "utf8");
+      const normHandle = await fsOpen(this.path, "r+");
+      try {
+        await normHandle.truncate(cutLen);
+        await normHandle.sync();
+      } finally {
+        await normHandle.close();
+      }
+      return true;
+    }
     const lastNL = buf.lastIndexOf(0x0a);
     const tail = buf.subarray(lastNL + 1).toString("utf8");
 
@@ -1646,63 +1832,116 @@ export class BudgetLedger {
     receipt: ActionReceipt,
     options: { clock?: Clock } = {},
   ): Promise<ReservationOpenRecord> {
+    // C2-F1: snapshot the request SYNCHRONOUSLY at call time (deep over
+    // every checked field) and freeze the copy. Every validation below —
+    // entry-time AND inside the serialized queue — judges THIS frozen
+    // copy, so mutating the live request across awaits (identity swap
+    // included) cannot change what admission judges. A queueMicrotask
+    // that rebinds the caller's variable or mutates the object now
+    // judges nothing.
+    const req: GateRequest = {
+      ...request,
+      authority: { ...request.authority },
+      ...(request.estimate !== undefined ? { estimate: { ...request.estimate } } : {}),
+      ...(request.paths !== undefined ? { paths: [...request.paths] } : {}),
+    };
+    Object.freeze(req);
+    Object.freeze(req.authority);
+    if (req.estimate !== undefined) Object.freeze(req.estimate);
+    if (req.paths !== undefined) Object.freeze(req.paths);
     const clock = options.clock ?? Date.now;
+    // C2-F10: policy validation runs on EVERY public policy-consuming
+    // call — including idempotent redelivery (the old code returned the
+    // prior record before any policy check, so a policy poisoned to
+    // NaN caps after the first reserve still returned "success").
+    validateGatePolicy(policy);
     // Consume-side checks that don't depend on ledger state (fail before
     // any I/O — a forged handle never touches the disk path).
     const inner = receiptInner(receipt);
     const now = clock();
     const specOk = await Promise.resolve(receipt.verify(
-      { action: request.action, actionId: request.actionId, episodeId: policy.episodeId, taskId: request.taskId },
+      { action: req.action, actionId: req.actionId, episodeId: policy.episodeId, taskId: req.taskId },
       now,
     ));
     if (!specOk.ok) throw new BudgetLedgerError("receipt-invalid", `reserve: ${specOk.reason}`);
-    if (inner.grantedBy !== request.authority.grantedBy || inner.sideEffect !== request.authority.sideEffect) {
+    if (inner.grantedBy !== req.authority.grantedBy || inner.sideEffect !== req.authority.sideEffect) {
       throw new BudgetLedgerError("receipt-invalid", "reserve: authority differs from the grant the receipt was minted for");
     }
-    // F1: the PRESENTED request must equal the frozen snapshot the receipt
-    // was minted from, field by field. The old code recomputed the digest
-    // from the live request's fields — circular, so a mutated
-    // request.estimate sailed through. Compare primitives, not references.
+    // C2-F1/F11: the PRESENTED request must equal the frozen snapshot the
+    // receipt was minted from, field by field — including the RAW
+    // estimate (raise provenance below the floor is rewritable otherwise).
     const sameOpt = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
     if (
-      !sameOpt(request.paths, inner.paths) ||
-      !sameOpt(request.install, inner.install) ||
-      !sameOpt(request.network, inner.network) ||
-      !sameOpt(request.model, inner.model) ||
-      !sameOpt(request.toolCalls, inner.toolCalls) ||
-      !sameOpt(request.strategyId, inner.strategyId) ||
-      request.attemptId !== inner.attemptId
+      !sameOpt(req.paths, inner.paths) ||
+      !sameOpt(req.install, inner.install) ||
+      !sameOpt(req.network, inner.network) ||
+      !sameOpt(req.model, inner.model) ||
+      !sameOpt(req.toolCalls, inner.toolCalls) ||
+      !sameOpt(req.strategyId, inner.strategyId) ||
+      req.attemptId !== inner.attemptId ||
+      !sameOpt(req.estimate?.usd, inner.rawEstimateUsd) ||
+      !sameOpt(req.estimate?.turns, inner.rawEstimateTurns)
     ) {
-      throw new BudgetLedgerError("receipt-mismatch", "reserve: request fields differ from the canonical snapshot the receipt was minted for (A3/F1)");
+      throw new BudgetLedgerError("receipt-mismatch", "reserve: request fields differ from the canonical snapshot the receipt was minted for (A3/F1/C2-F11)");
     }
-    const presentedDigest = canonicalActionSpec(policy, request, { usd: inner.reserveUsd, turns: inner.reserveTurns });
+    // C2-F2: the authority root the caller presents at reserve must be the
+    // root the receipt was granted under (also inside the digest).
+    if ((policy.authority?.root ?? "/") !== inner.policyRoot)
+      throw new BudgetLedgerError("receipt-mismatch", "reserve: policy.authority.root differs from the receipt's granted root (A3/C2-F2)");
+    const presentedDigest = canonicalActionSpec(policy, req, { usd: inner.reserveUsd, turns: inner.reserveTurns });
     const presentedHash = createHash("sha256").update(presentedDigest, "utf8").digest("hex");
     if (presentedHash !== inner.digest) {
       throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec does not match the receipt's digest (check(X)-then-act(Y) refused)");
     }
     return this.enqueue(async (): Promise<ReservationOpenRecord> => {
-      // ── F5: expiry re-verified INSIDE the serialized queue ──
+      // ── F5 + C2-F9: expiry re-verified INSIDE the serialized queue; a
+      // nonfinite admission clock is refused, never compared to NaN ──
       const admissionAt = clock();
+      if (!Number.isFinite(admissionAt) || admissionAt < 0)
+        throw new BudgetLedgerError("receipt-invalid", `reserve: injected admission clock is not a finite non-negative epoch ms (${String(admissionAt)})`);
       if (admissionAt >= inner.expiresAt) {
         throw new BudgetLedgerError("receipt-invalid", `reserve: receipt expired at ${inner.expiresAt} (admission time ${admissionAt}) — re-check with a live clock`);
       }
+      // ── C2-F1: digest re-verified against the FROZEN request inside
+      // the queue — the policy object may have been mutated since call
+      // time (root/episode are digest-bound); nothing re-reads the live
+      // request object. ──
+      const queueDigest = createHash("sha256").update(canonicalActionSpec(policy, req, { usd: inner.reserveUsd, turns: inner.reserveTurns }), "utf8").digest("hex");
+      if (queueDigest !== inner.digest) {
+        throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec (or digest-bound policy surface) changed between call and admission — refused (A4/C2-F1)");
+      }
       // ── F3: actionId uniqueness / idempotent redelivery, inside the ──
       // queue so two racing reserves of the same actionId serialize.
-      const prior = (await this.snapshotAt(admissionAt)).actionIds.get(request.actionId);
+      const prior = (await this.snapshotAt(admissionAt)).actionIds.get(req.actionId);
       if (prior !== undefined) {
         if (
-          prior.action === request.action &&
+          prior.action === req.action &&
           prior.reservedUsd === inner.reserveUsd &&
           prior.reservedTurns === inner.reserveTurns &&
           prior.receiptDigest === inner.digest
         ) {
+          // C2-F10: idempotent redelivery is ALREADY RECORDED — do not
+          // execute — never fresh permission. The refreshed policy is
+          // re-checked before handing back the old record: authority
+          // revocation (e.g. allowExternalEffects flipped false) since
+          // the first reserve turns the redelivery into a typed
+          // policy-revoked error instead of a silent success. Callers
+          // that ACT on a successful reserve() must dedupe by actionId
+          // — this branch proves a past intent, it authorizes nothing.
+          const redelivery = check(policy, req, await this.snapshotAt(admissionAt), admissionAt);
+          if (!redelivery.allowed) {
+            throw new BudgetLedgerError(
+              "policy-revoked",
+              `reserve: actionId ${req.actionId} was recorded earlier, but the CURRENT policy denies it (${redelivery.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}) — redelivery is observation-only under a revoked policy (C2-F10)`,
+            );
+          }
           return prior; // idempotent redelivery: same spec, no second record
         }
-        throw new BudgetLedgerError("action-used", `reserve: actionId ${request.actionId} is already reserved by ${prior.id} (a used action identity never authorizes another issue)`);
+        throw new BudgetLedgerError("action-used", `reserve: actionId ${req.actionId} is already reserved by ${prior.id} (a used action identity never authorizes another issue)`);
       }
       // ── refresh-first (the queue-serialized recheck) ──
       const fresh = await this.snapshotAt(admissionAt);
-      const refreshed = check(policy, request, fresh, admissionAt);
+      const refreshed = check(policy, req, fresh, admissionAt);
       if (!refreshed.allowed) {
         throw new BudgetLedgerError("denied", `reserve: refreshed gate denied — ${refreshed.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}`);
       }
@@ -1718,18 +1957,20 @@ export class BudgetLedger {
         id: `b-${randomUUID()}`,
         ts: 0, // stamped by appendInside from the clock (F15)
         episodeId: policy.episodeId,
-        ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
-        ...(request.attemptId !== undefined ? { attemptId: request.attemptId } : {}),
+        ...(req.taskId !== undefined ? { taskId: req.taskId } : {}),
+        ...(req.attemptId !== undefined ? { attemptId: req.attemptId } : {}),
         kind: "res-open",
-        actionId: request.actionId,
-        action: request.action,
+        actionId: req.actionId,
+        action: req.action,
         reservedUsd: inner.reserveUsd,
         reservedTurns: inner.reserveTurns,
         expiresAt: inner.expiresAt,
         grantedBy: inner.grantedBy,
         sideEffect: inner.sideEffect,
         receiptDigest: inner.digest,
-        estimateRaised: refreshed.estimateRaised,
+        // C2-F11: raise provenance is the MINT decision frozen on the
+        // receipt — never re-derived from the (mutable) request.
+        estimateRaised: inner.estimateRaised,
         // A3 durable authority trail: every checked surface field.
         ...(inner.strategyId !== undefined ? { strategyId: inner.strategyId } : {}),
         ...(inner.paths !== undefined ? { paths: inner.paths.map((p) => canonicalizePath(p, policy.authority?.root ?? "/") ?? p) } : {}),
@@ -1738,28 +1979,94 @@ export class BudgetLedger {
         ...(inner.model !== undefined ? { model: inner.model } : {}),
         ...(inner.toolCalls !== undefined ? { toolCalls: inner.toolCalls } : {}),
       };
-      await this.appendInside(record, clock);
+      // ── C2-F7: FINAL admission boundary. The write stamp is sampled
+      // FIRST and expiry is re-verified against it, so the durable intent
+      // can never carry a ts past its own expiresAt (the old flow wrote
+      // with a later clock sample and never rechecked). One accepted
+      // timestamp governs both the check and the record. ──
+      const writeAt = clock();
+      if (!Number.isFinite(writeAt) || writeAt < 0)
+        throw new BudgetLedgerError("receipt-invalid", `reserve: write clock is not a finite non-negative epoch ms (${String(writeAt)})`);
+      if (writeAt >= inner.expiresAt) {
+        throw new BudgetLedgerError("receipt-invalid", `reserve: receipt expired at ${inner.expiresAt} before the durable write (write time ${writeAt}) — nothing was recorded`);
+      }
+      record.ts = writeAt;
+      await this.appendInside(record, () => writeAt);
       return record;
     });
   }
 
-  /** Close an open reservation (A2). Refuses to close a closed or unknown
-   *  reservation — double-close would release the same hold twice. */
+  /** Close an open reservation (A2) WITH a terminal-outcome attestation
+   *  (C2-F7, docs/12 §4: "an open reservation keeps charging until an
+   *  evidence-backed terminal close"). A close is a claim that the action
+   *  reached a terminal state; the claim now carries named provenance:
+   *    outcome: what actually happened ("spawned-and-finished",
+   *             "spawn-failed-unstarted", "supervisor-abandoned", …)
+   *    evidence: a non-empty reference to the artifact proving it
+   *             (stdout log path, spawn-error id, decision-intent id).
+   *  A reason WITHOUT attestation no longer releases anything: it is
+   *  recorded as kind "close-request" (visible in projections, changes
+   *  nothing) and the caller must close again with attestation. An
+   *  attested "released" additionally requires negative evidence that the
+   *  spawn never started (the ONLY slot-refund case, A8). */
   async closeReservation(
     refId: string,
     reason: ReservationCloseReason,
+    attest: { outcome: string; evidence: string; spawnStarted?: boolean } | undefined,
     options: { clock?: Clock } = {},
-  ): Promise<ReservationCloseRecord> {
+  ): Promise<ReservationCloseRecord | BudgetCloseRequestRecord> {
     assertSafeId(refId, "refId");
     if (!(RESERVATION_CLOSE_REASONS as readonly string[]).includes(reason)) {
       throw new BudgetLedgerError("bad-input", `close reason must be one of ${RESERVATION_CLOSE_REASONS.join("|")}`);
     }
+    // C2-F6: an attested close validates its attestation BEFORE any I/O.
+    // A close is a claim about a terminal outcome; the claim must name
+    // itself and point at the artifact — an empty/whitespace outcome or
+    // evidence reference is a bare assertion, refused outright.
+    if (attest !== undefined) {
+      if (typeof attest.outcome !== "string" || attest.outcome.trim() === "" || attest.outcome.length > 512 || /[\u0000-\u001f]/.test(attest.outcome))
+        throw new BudgetLedgerError("bad-input", "attest.outcome must be a non-empty single-line string (what happened)");
+      if (typeof attest.evidence !== "string" || attest.evidence.trim() === "" || attest.evidence.length > 512 || /[\u0000-\u001f]/.test(attest.evidence))
+        throw new BudgetLedgerError("bad-input", "attest.evidence must be a non-empty single-line reference to the proving artifact (log path / error id / intent id)");
+      if (attest.spawnStarted !== undefined && typeof attest.spawnStarted !== "boolean")
+        throw new BudgetLedgerError("bad-input", "attest.spawnStarted must be a boolean when present");
+    }
+    // Snapshot the attestation synchronously — same rule as reserve()
+    // (C2-F1): the durable claim is the one presented at call time.
+    const attested = attest === undefined ? undefined : Object.freeze({ ...attest });
     const clock = options.clock ?? Date.now;
-    return this.enqueue(async (): Promise<ReservationCloseRecord> => {
-      const fresh = await this.snapshotAt(clock());
+    return this.enqueue(async (): Promise<ReservationCloseRecord | BudgetCloseRequestRecord> => {
+      const now = clock();
+      const fresh = await this.snapshotAt(now);
       const open = fresh.openReservations.find((r) => r.id === refId);
       if (!open) {
         throw new BudgetLedgerError("bad-ref", `no open reservation ${refId} (already closed, expired, or never existed)`);
+      }
+      if (attested === undefined) {
+        // C2-F6: unattested close = recorded REQUEST only. It changes no
+        // hold, no slot, no wallclock — projection folds close-request as
+        // a pure observation. The caller must re-close with attestation.
+        const request: BudgetCloseRequestRecord = {
+          schema: LEDGER_SCHEMA_ID,
+          id: `b-${randomUUID()}`,
+          ts: 0, // stamped by appendInside from the clock (F15)
+          episodeId: open.episodeId,
+          kind: "close-request",
+          refId,
+          reason,
+        };
+        await this.appendInside(request, clock);
+        return request;
+      }
+      // A8: "released" refunds the attempt slot — the ONLY refund path —
+      // and is admitted only with negative evidence the spawn never
+      // started. An external action that may have started keeps its slot
+      // regardless of the reason string the caller supplies.
+      if (reason === "released" && attested.spawnStarted !== false) {
+        throw new BudgetLedgerError(
+          "attest-required",
+          `released requires negative evidence the spawn never started (attest.spawnStarted === false): a released close refunds the attempt slot (A8) and an ambiguous/started spawn never proves that`,
+        );
       }
       const record: ReservationCloseRecord = {
         schema: LEDGER_SCHEMA_ID,
@@ -1769,6 +2076,7 @@ export class BudgetLedger {
         kind: "res-close",
         refId,
         reason,
+        attest: { ...attested },
       };
       await this.appendInside(record, clock);
       return record;

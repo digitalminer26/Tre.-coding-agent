@@ -161,3 +161,59 @@ only) via the existing `scripts/check-deps.mjs`-style guard pattern.
 Implementation consequence: `docs/11` §14.3's `authority.grantedBy` field
 on `decision-intent` becomes load-bearing (it carries the receipt's grant
 reference) — recorded here so the field's meaning is pinned before P9.
+
+## 7. Contract amendment — as-built surface (fix cycle 2, 2026-11-02)
+
+Adopted with the cycle-2 fixes so §2/§3/§4 are no longer contradicted by
+the implementation (audit-c2 R2). Where this section and §2–§4 disagree,
+THIS section is the pinned contract.
+
+1. **Own file format (amends "no new file format", §2).** The ledger is
+   its own append-only JSONL (`events/budget.jsonl`, schema id
+   `tre-budget/1` — kinds `spend` / `res-open` / `res-close` /
+   `close-request` / `wallclock`), NOT rows in P4's `DecisionJournal`.
+   P4-journal integration is an explicit deferral: the ledger reuses
+   P4's durability *discipline* (queue-serialized appends, fsync before
+   return, torn-tail repair, mid-file fail-closed) with an in-module
+   writer (fleet pattern — no cross-module import edge). The reconcile
+   key is still `actionId` (§14.3); §3's `reserve`/`settle` names ship
+   as `reserve()` / `closeReservation(reason: settled|expired|released)`.
+2. **Ingestion: read-only whole-file reader (amends "P5 JsonlTailer
+   offset-cursor", §2).** Cycle 1 consumes a session JSONL by reading it
+   fully and deduping by lineId on every fold — observation-only
+   (A8 still holds: worker-session bytes are never written or repaired,
+   proven by injection test). An incremental offset-cursor via
+   `tailerFactory` is a declared deferral, not delivered.
+3. **A7, precisely: the fold is a pure function of `(records, now)`.**
+   Rebuilding the same log at the same `now` is byte-identical (Map/Set-
+   aware serializer, sorted iteration); the literal "no clocks" phrasing
+   of §4-A7 means no clock is read *inside* the fold. Live wallclock is
+   therefore an explicit interval semantics (§2's intent): closed
+   supervisor-recorded windows sum; an open reservation contributes
+   elapsed from its ts to `now` (ts=0 is a valid anchor); an explicit
+   `recordWallclock` window takes precedence over the reservation-derived
+   proxy for that attempt — overlapping windows are never double-counted
+   and a terminal close never erases accrued time (C2-F8).
+4. **A9 is partial by declaration.** Delivered: per-`(episode,task,
+   strategyId)` use counters on the snapshot and a typed
+   `strategy-repeat-exceeded` denial. Not delivered (deferred): per-nudge
+   counting and cumulative diagnostic accounting.
+5. **A3 path judgment is LEXICAL unless a resolver is injected.**
+   `EpisodeAuthority.resolveRealPath?(abs)` — when present, every checked
+   path is resolved through symlinks against the REAL root (longest
+   existing prefix; nonexistent leaves appended verbatim) and a resolver
+   failure denies fail-closed (C2-F3). Without it the guarantee is
+   lexical and the executor owns symlink enforcement + a consume-time
+   TOCTOU recheck — a pinned boundary, no longer a silent gap.
+6. **Terminal closes carry evidence (A2/A5 tightened, C2-F6).** A
+   terminal `res-close` requires `attest: {outcome, evidence,
+   spawnStarted?}`; a bare `closeReservation(id, "released")` without
+   attestation persists only a `close-request` marker (observation — the
+   hold stands). Slot refunds for `released` happen ONLY with negative
+   spawn evidence (`spawnStarted: false`); `settled`/`expired` never
+   refund (A8/F3 doctrine unchanged).
+7. **Idempotent redelivery ≠ new permission (C2-F10).** `reserve()`
+   revalidates the policy on every call including the already-recorded
+   branch; a policy that no longer covers the standing reservation
+   rejects `policy-revoked` (observation-only error — the record stays;
+   it is NOT a reservation success).

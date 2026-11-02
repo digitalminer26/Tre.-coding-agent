@@ -1,3 +1,22 @@
+## 2026-11-02 — P8 fix cycle 2: audit-c2 findings C2-F1–F13 closed; suite 1745 / 0 / 14
+
+Cycle-2 audit (`FINDINGS`, gpt-6.1-sol vs `c7a9663`): 13 bugs + 2 recommendations. All 13 bugs closed; both recommendations addressed:
+**C2-F1** receipt binding was still bypassable after the pre-queue comparison: `reserve()` takes a **synchronously frozen snapshot** of the presented request (`Object.freeze`, deep on the checked fields) at call entry — every durable/queue decision uses the snapshot, never the caller-owned object; the snapshot's canonical digest is re-verified against the receipt INSIDE the queue immediately before the write (mutation across awaits changes nothing).
+**C2-F2** `policy.authority.root` is now hashed into the receipt digest — swapping the root between check and reserve is `receipt-mismatch`.
+**C2-F11** the receipt binds the RAW estimate and the mint-time raise decision: rewriting the estimate (even below-floor or absent→present) before reserve is `receipt-mismatch`; the durable `estimateRaised` is the mint decision, never a caller rewrite.
+**C2-F9** `check()`, `ActionReceipt.verify()`, and reserve admission reject non-finite/negative `now`, and expiry arithmetic that overflows (`bad-input`) — NaN/Infinity/MAX_VALUE+TTL no longer mint, and NaN never passes a TTL comparison.
+**C2-F4** projection is order-independent: a `res-close` recorded before its `res-open` still excludes the hold (closes apply wherever they sit — the contract pinned by the §2 reconcile rule).
+**C2-F5** the fold dedups record ids FIRST-WINS before any contribution — a replayed res-open never double-charges an attempt slot or a strategy use (still reported in `duplicateIds`).
+**C2-F7/F5** expiry + policy are re-verified at the FINAL write stamp (inside the queue, after the last disk read): a clock that jumps evil only at the stamp is `receipt-invalid` ("durable write") and writes nothing; monotonic `ts` within the queue.
+**C2-F8** wallclock interval semantics: a terminal close NEVER erases accrued time; explicit supervisor `recordWallclock` windows take precedence over the reservation-derived live interval (no completed/live double count); `ts=0` is a valid live anchor.
+**C2-F6** terminal closes carry evidence: `res-close.attest {outcome, evidence, spawnStarted?}` (schema-validated); a bare `closeReservation(id,'released')` persists only a `close-request` marker — the hold STANDS; slot refunds require negative spawn evidence (`spawnStarted:false`), so evidence-free closes cannot reopen external headroom or attempt slots.
+**C2-F3** authority gate takes an injected `resolveRealPath` (longest-existing-prefix realpath, nonexistent leaves appended, failure denies fail-closed): symlink escape is denied; without it the guarantee is lexical — pinned as docs/12 §7.5, no longer a silent delegation.
+**C2-F10** `reserve()` validates the policy on EVERY call including the idempotent-redelivery branch (NaN caps → `bad-input`), and a policy that no longer covers the standing reservation rejects `policy-revoked` (observation-only — the record stays, per docs/12 §7.7).
+**C2-F12** a terminated trailing blank line is normalized DURABLY at open (rewrite + fsync; `tornTailRepaired=true`) — the whitespace can no longer poison a later honest append.
+**C2-F13** compartment guards rewritten: one specifier extractor for static/side-effect/dynamic/`export[] from`/`require()` including `.js` suffixes and aliases; POSITIVE violation fixtures prove a no-op guard cannot pass (both audit mutations now caught).
+**R1** 17 targeted regressions for every C2 repro (F1–F13 + projection semantics); denial sweep unchanged where new codes are `BudgetLedgerError` codes (typed at API, not gate denials — `attest-required`, `policy-revoked`).
+**R2** docs/12 gains §7 "Contract amendment — as-built surface": own `tre-budget/1` file format, whole-file read-only ingestion (cursor deferred), A7 = pure in (records, now) with interval semantics, A9 partial by declaration, lexical-unless-resolver boundary, evidenced closes, redelivery != permission. HANDOFF cycle-1 "all closed" overclaim is superseded by this entry; P8 acceptance rests on the cycle-3 re-audit of THIS commit.
+
 ## 2026-11-02 — P8 fix cycle 1: independent audit (gpt-6.1-sol) findings F1–F20 closed; suite 1728 / 0 / 14
 
 Independent audit `FINDINGS` verdict against `2a5e1db` (.tre/implement-audit/p8-audit/audit-c1.md: 17 bugs + 2 recommendations) — all closed in this commit:

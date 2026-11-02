@@ -49,6 +49,8 @@ import {
   type GatePolicy,
   type GateRequest,
   type LedgerRecord,
+  type ReservationCloseRecord,
+  type BudgetCloseRequestRecord,
 } from "../src/budget/ledger.js";
 
 async function freshDir(): Promise<string> {
@@ -462,8 +464,8 @@ test("reserve: receipt → durable res-open with the A3 authority trail", async 
   assert.equal(task.reservedUsd, checked.reserve.usd);
 
   // A2: settle it, then the hold is gone
-  const closed = await ledger.closeReservation(rec.id, "settled", { clock: fixedClock(now + 5) });
-  assert.equal(closed.reason, "settled");
+  const closed = await ledger.closeReservation(rec.id, "settled", { outcome: "spawned-and-finished", evidence: "stdout:runs/act-1.log" }, { clock: fixedClock(now + 5) });
+  assert.equal((closed as ReservationCloseRecord).reason, "settled");
   assert.equal(closed.ts, now + 5, "F15: res-close ts from the injected clock (audit F15)");
   const after = await ledger.snapshotAt(now);
   assert.equal((after.compartments.get(compartmentKey({ episodeId: "ep-1", taskId: "t1" })) ?? { reservedUsd: 0 }).reservedUsd, 0);
@@ -478,10 +480,10 @@ test("A2: double-close refused; expired hold NEVER evaporates (A2/F2) — expiry
   const req = requestOf({ taskId: "t1" });
   const checked = check(p, req, await ledger.snapshotAt(now), now);
   const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(now) });
-  await ledger.closeReservation(rec.id, "released", { clock: fixedClock(now + 1) });
-  await assert.rejects(ledger.closeReservation(rec.id, "settled"), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
-  await assert.rejects(ledger.closeReservation("never-existed", "abandoned"), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
-  await assert.rejects(ledger.closeReservation(rec.id, "bogus" as never), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
+  await ledger.closeReservation(rec.id, "released", { outcome: "spawn-failed-unstarted", evidence: "spawn-error:e1", spawnStarted: false }, { clock: fixedClock(now + 1) });
+  await assert.rejects(ledger.closeReservation(rec.id, "settled", undefined), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
+  await assert.rejects(ledger.closeReservation("never-existed", "abandoned", undefined), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
+  await assert.rejects(ledger.closeReservation(rec.id, "bogus" as never, undefined), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
 
   // F2 (audit): past receipt/hold expiry the DURABLE hold remains — it only
   // stops NEW admission (receipt expiry in reserve()); an open reservation
@@ -496,7 +498,7 @@ test("A2: double-close refused; expired hold NEVER evaporates (A2/F2) — expiry
   const blocked = check(p2, requestOf({ actionId: "act-3" }), after2050, 2100);
   assert.ok(denialCodes(blocked).includes("episode-budget-exceeded"), `expired hold still constrains the gate, got ${denialCodes(blocked).join(",") || "allowed"}`);
   // terminal close is the only way out — and it works even past expiry
-  await ledger.closeReservation(rec2.id, "abandoned", { clock: fixedClock(2200) });
+  await ledger.closeReservation(rec2.id, "abandoned", { outcome: "supervisor-abandoned", evidence: "decision-intent:di-77" }, { clock: fixedClock(2200) });
   const cleared = await ledger.snapshotAt(2200);
   assert.ok(!cleared.openReservations.some((r) => r.id === rec2.id));
 });
@@ -579,7 +581,7 @@ test("A6: run reserves the attempt (slot + known-to-gate); released refunds; res
   assert.ok(denialCodes(c4).includes("task-attempts-exhausted"));
 
   // releasing a-2's task slot… close the FIRST reservation released → slot refunds
-  await ledger.closeReservation(r1.id, "released", { clock: fixedClock(now + 1) });
+  await ledger.closeReservation(r1.id, "released", { outcome: "spawn-failed-unstarted", evidence: "spawn-error:e0", spawnStarted: false }, { clock: fixedClock(now + 1) });
   const snap3 = await ledger.snapshotAt(now);
   assert.equal(snap3.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 1, "released run-reservation gives the slot back");
 });
@@ -739,13 +741,48 @@ async function walkTs(dir: string): Promise<string[]> {
   return out.sort();
 }
 
+// C2-F13: one specifier extractor for both guards — static import,
+// side-effect import, dynamic import(), export-from (re-export), and
+// require(). The OLD ingress regex missed every ".js"-suffixed specifier
+// ([a-z]+ before the quote), side-effect imports, and require(); these
+// fixtures pin that a no-op guard cannot pass.
+const MODULE_SPEC_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+|\bexport\s*\[\s*\]\s*from\s*)["']([^"']+)["']/g;
+function specifiersOf(content: string): string[] {
+  return [...content.matchAll(MODULE_SPEC_RE)].map((m) => m[1]!);
+}
+/** True when a specifier addresses the budget compartment, whatever the
+ *  extension/alias shape (relative ../budget/ledger.js, ./budget/x,
+ *  absolute /x/budget/y.ts, bare alias pkg/budget/mod). */
+const touchesBudget = (spec: string): boolean => /(^|\/)budget\//.test(spec);
+
+test("P8 guard C2-F13: the specifier extractor catches every import shape (positive fixtures)", () => {
+  const shapes = [
+    `import { BudgetLedger } from "../budget/ledger.js";`, // static, .js suffix
+    `import { check } from "../budget/ledger";`, // extensionless
+    `export { check } from "../budget/ledger.js";`, // re-export
+    `export * from "./budget/ledger.ts";`, // star re-export
+    `const m = await import("../budget/ledger.js");`, // dynamic import
+    `const m2 = require("../budget/ledger.js");`, // require
+    `import "../budget/ledger.js";`, // side-effect import
+    `const lazy = () => import("@app/budget/ledger.mjs");`, // alias, .mjs
+  ];
+  for (const src of shapes) {
+    const specs = specifiersOf(src);
+    assert.ok(specs.some(touchesBudget), `fixture MISSED by the extractor: ${src}`);
+  }
+  // negative fixtures: unrelated modules must NOT trip
+  for (const src of [`import { x } from "../util/paths.js";`, `const fs = require("node:fs");`, `export { y } from "./journal.js";`]) {
+    assert.ok(!specifiersOf(src).some(touchesBudget), `false positive: ${src}`);
+  }
+});
+
 test("P8 guard: nothing outside src/budget/ imports the ledger module", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/budget" + "/")) continue;
     const content = await readFile(file, "utf-8").catch(() => "");
-    if (/(?:from\s+|import\s*\(\s*)["'][^"']*\/budget\/[a-z]+["']/.test(content)) offenders.push(file);
+    if (specifiersOf(content).some(touchesBudget)) offenders.push(file);
   }
   assert.deepEqual(offenders, [], `the budget authority stays compartmentalized until P9 wires it in: ${offenders.join(", ")}`);
 });
@@ -755,12 +792,295 @@ test("P8 guard: src/budget imports nothing in the repo except node: builtins", a
   assert.ok(files.length >= 1);
   for (const file of files) {
     const content = await readFile(file, "utf-8");
-    const specifiers = [...content.matchAll(/(?:from\s+|import\s*\(\s*)["']([^"']+)["']/g)].map((m) => m[1]!);
+    const specifiers = specifiersOf(content);
     const foreign = specifiers.filter((s) => !s.startsWith("node:"));
     assert.deepEqual(foreign, [], `${file} must import only node: builtins (found: ${foreign.join(", ")})`);
   }
+  // C2-F13 positive fixture: the egress filter must catch a repo import
+  // carrying a .js suffix (the class the old permissive regex missed).
+  const egressProbe = `import { helper } from "../kernel/state.js"; import("node:path"); require("../orchestrator/loop.cjs");`;
+  const probeForeign = specifiersOf(egressProbe).filter((s) => !s.startsWith("node:"));
+  assert.deepEqual(probeForeign, ["../kernel/state.js", "../orchestrator/loop.cjs"], "egress guard must catch .js/.cjs repo imports (C2-F13)");
   const mod = await import("../src/budget/ledger.js");
   assert.equal(typeof mod.BudgetLedger, "function");
   assert.equal(typeof mod.check, "function");
   assert.equal(typeof mod.ActionReceipt, "function");
+});
+
+// ─────────────────── C2 fix regressions (audit cycle 2, R1) ─────────────────
+
+const RES_OPEN_BASE = {
+  schema: LEDGER_SCHEMA_ID, episodeId: "ep-1", kind: "res-open", actionId: "act-x", action: "run",
+  reservedUsd: 0.25, reservedTurns: 1, expiresAt: 5000, grantedBy: "user:x", sideEffect: "none",
+  receiptDigest: "a".repeat(64), estimateRaised: false, taskId: "t1", attemptId: "a1",
+} as const;
+
+test("C2-F4: a res-close recorded BEFORE its res-open still excludes the hold (order-independent closes)", () => {
+  const close = { schema: LEDGER_SCHEMA_ID, id: "c1", ts: 5, episodeId: "ep-1", kind: "res-close", refId: "o1", reason: "expired" };
+  const open = { ...RES_OPEN_BASE, id: "o1", ts: 9 };
+  const snap = projectLedger([close, open] as unknown as LedgerRecord[], 100_000);
+  assert.equal(snap.openReservations.length, 0, "close-before-open must NOT resurrect the hold");
+  const usage = snap.compartments.get(compartmentKey({ episodeId: "ep-1", taskId: "t1" })) ?? { reservedUsd: 0 };
+  assert.equal(usage.reservedUsd, 0, "no USD hold from a closed ref, whatever the file order");
+});
+
+test("C2-F5: replayed res-open folds first-wins — no double attempt slot, no double strategy use", () => {
+  const r1 = { ...RES_OPEN_BASE, id: "dup-o", strategyId: "s-1", ts: 2 };
+  const snap = projectLedger([r1, { ...r1 }] as unknown as LedgerRecord[], 100);
+  assert.deepEqual(snap.duplicateIds, ["dup-o"], "the replay is REPORTED");
+  assert.equal(snap.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 1, "one attempt used, not two");
+  assert.equal(snap.strategyUses.get(JSON.stringify(["ep-1", "t1", "s-1"])), 1, "one strategy use, not two");
+  assert.equal(snap.openReservations.length, 1);
+});
+
+test("C2-F6: unattested close is a recorded REQUEST only — hold stands; attested release requires negative spawn evidence", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf({ taskId: "t1" });
+  const checked = check(p, req, await ledger.snapshotAt(now), now);
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(now) });
+
+  // unattested: writes close-request, changes nothing
+  const reqd = await ledger.closeReservation(rec.id, "released", undefined, { clock: fixedClock(now + 1) });
+  assert.equal(reqd.kind, "close-request", "unattested close never terminates the reservation (C2-F6)");
+  const stillOpen = await ledger.snapshotAt(now + 2);
+  assert.ok(stillOpen.openReservations.some((r) => r.id === rec.id), "the hold STANDS after a bare close request");
+
+  // released WITHOUT spawnStarted===false is refused
+  await assert.rejects(
+    ledger.closeReservation(rec.id, "released", { outcome: "spawn-failed-unstarted", evidence: "log:x" }, { clock: fixedClock(now + 3) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "attest-required",
+  );
+  // malformed attestation refused before I/O
+  await assert.rejects(
+    ledger.closeReservation(rec.id, "settled", { outcome: "  ", evidence: "log:x" }, { clock: fixedClock(now + 4) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+  );
+
+  // attested settled terminates
+  const closed = await ledger.closeReservation(rec.id, "settled", { outcome: "spawned-and-finished", evidence: "stdout:runs/act-1.log" }, { clock: fixedClock(now + 5) });
+  assert.equal(closed.kind, "res-close");
+  const cleared = await ledger.snapshotAt(now + 6);
+  assert.ok(!cleared.openReservations.some((r) => r.id === rec.id));
+});
+
+test("C2-F6 projection: an observed unattested 'released' close removes the hold but NEVER refunds the attempt slot", () => {
+  const open = { ...RES_OPEN_BASE, id: "o-slot", ts: 2 };
+  const bareClose = { schema: LEDGER_SCHEMA_ID, id: "cc1", ts: 3, episodeId: "ep-1", kind: "res-close", refId: "o-slot", reason: "released" };
+  const snap = projectLedger([open, bareClose] as unknown as LedgerRecord[], 100);
+  assert.equal(snap.openReservations.length, 0);
+  assert.equal(snap.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 1, "unattested release never refunds the slot (A8/C2-F6)");
+  const attestClose = { ...bareClose, id: "cc2", attest: { outcome: "spawn-failed-unstarted", evidence: "spawn-error:e1", spawnStarted: false } };
+  const snap2 = projectLedger([open, attestClose] as unknown as LedgerRecord[], 100);
+  assert.equal(snap2.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 0, "evidenced release DOES refund");
+});
+
+test("C2-F6 schema: half-present attest is refused; full attest validates", () => {
+  const base = { schema: LEDGER_SCHEMA_ID, id: "ac1", ts: 1, episodeId: "ep-1", kind: "res-close", refId: "o", reason: "released" };
+  assert.throws(() => validateLedgerRecord({ ...base, attest: { outcome: "x" } }), (e: unknown) => (e as BudgetLedgerError).code === "schema");
+  assert.throws(() => validateLedgerRecord({ ...base, attest: { outcome: "", evidence: "e" } }), (e: unknown) => (e as BudgetLedgerError).code === "schema");
+  assert.throws(() => validateLedgerRecord({ ...base, attest: { outcome: "x", evidence: "e", spawnStarted: "no" } }), (e: unknown) => (e as BudgetLedgerError).code === "schema");
+  validateLedgerRecord({ ...base, attest: { outcome: "spawn-failed-unstarted", evidence: "spawn-error:e1", spawnStarted: false } });
+  validateLedgerRecord({ schema: LEDGER_SCHEMA_ID, id: "cr1", ts: 1, episodeId: "ep-1", kind: "close-request", refId: "o", reason: "settled" });
+});
+
+test("C2-F7: a clock that jumps evil ONLY at the write stamp can no longer persist a ts past expiresAt", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({ reservationTtlMs: 10 }); // expiresAt = 11
+  const req = requestOf();
+  const checked = check(p, req, await ledger.snapshotAt(1), 1);
+  const stamps = [1, 1, 1000]; // preverify, admission, WRITE stamp
+  let i = 0;
+  await assert.rejects(
+    ledger.reserve(p, req, checked.receipt!, { clock: () => stamps[Math.min(i++, stamps.length - 1)]! }),
+    (e: unknown) => (e as BudgetLedgerError).code === "receipt-invalid" && /durable write/.test((e as Error).message),
+  );
+  const after = await ledger.read();
+  assert.equal(after.records.length, 0, "nothing durable was written under the evil stamp");
+});
+
+test("C2-F9: a non-finite or negative `now` never mints an allow; overflow expiry arithmetic is refused", () => {
+  const p = policyOf();
+  assert.throws(() => check(p, requestOf(), EMPTY, NaN), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
+  assert.throws(() => check(p, requestOf(), EMPTY, Infinity), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
+  assert.throws(() => check(p, requestOf(), EMPTY, -5), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
+  // MAX_VALUE + ttl must not mint expiresAt === now (comparison dead) — overflow refused
+  assert.throws(() => check(p, requestOf(), EMPTY, Number.MAX_VALUE), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
+});
+
+test("C2-F9: verify() refuses a non-finite presented time (NaN comparisons never pass)", async () => {
+  const p = policyOf({ reservationTtlMs: 60_000 });
+  const checked = check(p, requestOf(), EMPTY, 1000);
+  assert.ok(checked.allowed);
+  const ok = await checked.receipt!.verify({ action: "run", actionId: "act-1", episodeId: "ep-1" }, NaN);
+  assert.equal(ok.ok, false);
+});
+
+test("C2-F10: idempotent redelivery re-validates the policy — a poisoned cap or a revoked policy is typed, not silent success", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf();
+  const checked = check(p, req, await ledger.snapshotAt(1000), 1000);
+  await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(1000) });
+
+  // poisoned policy (NaN caps) — even the idempotent branch must throw
+  const poisoned = { ...p, caps: { usd: NaN } };
+  await assert.rejects(
+    ledger.reserve(poisoned, req, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+  );
+  // revoked policy (cap below the standing reservation) — typed policy-revoked, observation-only
+  const revoked = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.01 } });
+  await assert.rejects(
+    ledger.reserve(revoked, req, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "policy-revoked",
+  );
+});
+
+test("C2-F11: rewriting the raw estimate (below floor or absent) after check refuses — raise provenance is the mint decision", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({ reservationTtlMs: 60_000 });
+
+  // no estimate at check time → supplying one before reserve is refused
+  const reqNoEst = requestOf({ actionId: "act-r1" });
+  const c1 = check(p, reqNoEst, await ledger.snapshotAt(1000), 1000);
+  assert.ok(c1.allowed);
+  await assert.rejects(
+    ledger.reserve(p, { ...reqNoEst, estimate: { usd: 0.25, turns: 1 } }, c1.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "receipt-mismatch",
+  );
+
+  // .01 → .02 below-floor rewrite refused
+  const reqLow = requestOf({ actionId: "act-r2", estimate: { usd: 0.01 } });
+  const c2 = check(p, reqLow, await ledger.snapshotAt(1000), 1000);
+  await assert.rejects(
+    ledger.reserve(p, { ...reqLow, estimate: { usd: 0.02 } }, c2.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "receipt-mismatch",
+  );
+  const after = await ledger.read();
+  assert.equal(after.records.filter((r) => r.kind === "res-open").length, 0, "neither rewrite wrote a hold");
+});
+
+test("C2-F1: mutation of the caller's request object across awaits changes NOTHING (frozen sync snapshot)", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf({ actionId: "orig-act", taskId: "orig-task", attemptId: "orig-attempt" });
+  const checked = check(p, req, await ledger.snapshotAt(1000), 1000);
+  // the audit's exploit: rebind identity fields the instant reserve() yields
+  queueMicrotask(() => {
+    req.actionId = "new-action";
+    (req as { taskId?: string }).taskId = "unbound-task";
+    (req as { attemptId?: string }).attemptId = "unbound-attempt";
+  });
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(1000) });
+  assert.equal(rec.actionId, "orig-act", "the durable intent names the SNAPSHOT, not the mutated live object");
+  assert.equal(rec.taskId, "orig-task");
+  assert.equal(rec.attemptId, "orig-attempt");
+});
+
+test("C2-F2: swapping policy.authority.root between check and reserve is refused (root is receipt-bound)", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const authA = { paths: ["**"], allowInstalls: false, allowNetwork: false, approvedModels: [] as string[] };
+  const pA = policyOf({ reservationTtlMs: 60_000, authority: { ...authA, root: "/work/a" } });
+  const pB = policyOf({ reservationTtlMs: 60_000, authority: { ...authA, root: "/work/b" } });
+  const req = requestOf({ actionId: "act-root", paths: ["secret"] });
+  const checked = check(pA, req, await ledger.snapshotAt(1000), 1000);
+  assert.ok(checked.allowed, "granted under root A");
+  await assert.rejects(
+    ledger.reserve(pB, req, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "receipt-mismatch",
+  );
+});
+
+test("C2-F3: an injected real-path resolver denies symlink escape; absent resolver = documented lexical-only judgment", async () => {
+  const { symlinkSync, mkdirSync, realpathSync, existsSync } = await import("node:fs");
+  const dir = await freshDir();
+  const mkdirRoot = join(dir, "root");
+  const mkdirOutside = join(dir, "outside");
+  mkdirSync(join(mkdirRoot, "inner"), { recursive: true });
+  mkdirSync(mkdirOutside, { recursive: true });
+  symlinkSync(mkdirOutside, join(mkdirRoot, "link"));
+  // pin the policy root to its REAL path (macOS tmpdir is itself a
+  // symlink; without this every resolve would look like an escape).
+  const root = realpathSync(mkdirRoot);
+  const outside = realpathSync(mkdirOutside);
+  const resolver = (abs: string): string | undefined => {
+    // contract: resolve the LONGEST EXISTING prefix through symlinks,
+    // append the nonexistent remainder verbatim; failure → undefined.
+    try {
+      let cur = abs;
+      const rest: string[] = [];
+      while (!existsSync(cur)) {
+        const parent = cur.slice(0, cur.lastIndexOf("/"));
+        if (parent === "" || parent === cur) return undefined;
+        rest.unshift(cur.slice(parent.length + 1));
+        cur = parent;
+      }
+      const real = realpathSync(cur);
+      return rest.length > 0 ? `${real}/${rest.join("/")}` : real;
+    } catch { return undefined; }
+  };
+  const base = { paths: ["**"], root };
+  // lexical-only: the gate sees root/link/secret — allowed (documented)
+  const lex = check(policyOf({ authority: { ...base } }), requestOf({ paths: ["link/secret"] }), EMPTY, 1000);
+  assert.ok(lex.allowed, "without a resolver the guarantee is lexical (pinned in docs)");
+  // with the resolver: realpath escapes the root → denied
+  const real = check(policyOf({ authority: { ...base, resolveRealPath: resolver } }), requestOf({ paths: ["link/secret"] }), EMPTY, 1000);
+  assert.ok(denialCodes(real).includes("path-not-granted"), "symlink escape denied (C2-F3)");
+  // a nonexistent leaf resolves safely (no throw, stays inside)
+  const leaf = check(policyOf({ authority: { ...base, resolveRealPath: resolver } }), requestOf({ paths: ["inner/nope/deep.txt"] }), EMPTY, 1000);
+  assert.ok(leaf.allowed, "nonexistent leaf under an in-root dir is fine");
+  // resolver failure fails CLOSED
+  const failing = check(policyOf({ authority: { ...base, resolveRealPath: () => undefined } }), requestOf({ paths: ["inner/x.txt"] }), EMPTY, 1000);
+  assert.ok(denialCodes(failing).includes("path-not-granted"), "resolver failure denies (fail closed)");
+});
+
+test("C2-F12: a terminated trailing blank line is normalized DURABLY at open — later appends stay honest", async () => {
+  const dir = await freshDir();
+  const path = join(dir, "budget.jsonl");
+  const ok = { schema: LEDGER_SCHEMA_ID, id: "w1", ts: 1, episodeId: "ep-1", kind: "wallclock", taskId: "t", seconds: 1 };
+  await writeFile(path, JSON.stringify(ok) + "\n\n", "utf8"); // terminated + blank
+  const ledger = await BudgetLedger.open(path);
+  assert.equal(ledger.tornTailRepaired, true, "open normalized the terminated blank tail (C2-F12)");
+  await ledger.recordWallclock({ episodeId: "ep-1", taskId: "t" }, 5, { clock: fixedClock(10) });
+  const after = await ledger.read(); // the audit's poison-after-append: used to throw corrupt
+  assert.equal(after.records.length, 2);
+  const raw = await readFile(path, "utf8");
+  assert.ok(raw.endsWith("\n") && !raw.endsWith("\n\n"), "no blank tail survives");
+});
+
+test("C2-F8: settle does not erase counted downtime; explicit windows are not double-counted with live intervals", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf({ actionId: "act-w", taskId: "t1", attemptId: "a1" });
+  const checked = check(p, req, await ledger.snapshotAt(1000), 1000);
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(1000) });
+  const mid = await ledger.snapshotAt(101_000); // 100s live downtime accrued
+  const key = JSON.stringify(["ep-1", "t1", "a1"]);
+  assert.equal(mid.attemptWallclockS.get(key), 100, "100s accrued while open");
+  await ledger.closeReservation(rec.id, "settled", { outcome: "spawned-and-finished", evidence: "stdout:runs/act-w.log" }, { clock: fixedClock(101_000) });
+  const after = await ledger.snapshotAt(101_000);
+  assert.equal(after.attemptWallclockS.get(key), 100, "the closed [1000,101000] window still counts (C2-F8: no erase at close)");
+  // explicit supervisor window takes precedence — no overlap double count
+  const p2 = policyOf({ reservationTtlMs: 60_000 });
+  const req2 = requestOf({ actionId: "act-w2", taskId: "t2", attemptId: "a2" });
+  const c2 = check(p2, req2, await ledger.snapshotAt(2000), 2000);
+  await ledger.reserve(p2, req2, c2.receipt!, { clock: fixedClock(2000) });
+  await ledger.recordWallclock({ episodeId: "ep-1", taskId: "t2", attemptId: "a2" }, 100, { clock: fixedClock(2000) });
+  const snap2 = await ledger.snapshotAt(102_000);
+  assert.equal(snap2.attemptWallclockS.get(JSON.stringify(["ep-1", "t2", "a2"])), 100, "explicit window owns the attempt's time — no 200s double count (C2-F8)");
+});
+
+test("C2-F8: a ts=0 reservation is a valid interval anchor and contributes elapsed", () => {
+  const open0 = { ...RES_OPEN_BASE, id: "o-zero", ts: 0 };
+  const snap = projectLedger([open0] as unknown as LedgerRecord[], 100);
+  assert.equal(snap.attemptWallclockS.get(JSON.stringify(["ep-1", "t1", "a1"])), 0.1, "epoch 0 anchors elapsed (C2-F8)");
 });
