@@ -21,31 +21,46 @@
  * Decisions pinned by the user (docs/12 §7):
  *  D1 rates: in-module DEFAULT_RATES + per-episode overrides; the rate is
  *     FROZEN onto each spend record at ingest — history never reprices.
- *  D2 reservations: P8 owns estimates. The default is derived from the
- *     episode's own per-attempt caps (worst case a spawn can burn); the
- *     caller may only RAISE, never lower; every raise decision is recorded.
+ *  D2 reservations: P8 owns per-action-class defaults (RESERVE_DEFAULTS,
+ *     exported). The caller may only RAISE an estimate above the class
+ *     default, never lower it; every applied raise is recorded durably on
+ *     the reservation (estimateRaised). A policy cap BELOW the class
+ *     default is a DENIAL (reserve-default-exceeds-cap) — never a silent
+ *     redefinition of the estimate.
  *  D3 capability receipt: opaque handle, WeakMap-backed, digest-bound to
- *     the canonical action spec, expiry-enforced. Scope: run/resume only.
+ *     the canonical request snapshot (every checked authority + budget
+ *     field), expiry-enforced at mint, at verify, and AGAIN inside the
+ *     serialized admission queue before append. Scope: run/resume only.
  *
- * Invariants (docs/12 §5) — each has a named test in the P8 suite:
- *  A1 over-spending is impossible at the gate (check fails loud, receipts
- *     are the only admission ticket, re-checked at reservation).
- *  A2 reservations reconcile (every open reservation closes: settled /
- *     released / expired / abandoned — or reconcile() names it as stale).
- *  A3 grants are durable (authority.grantedBy + sideEffect + receipt
- *     digest are written on the reservation record itself).
- *  A4 check is the only path (reserve admits only a minted receipt that
- *     matches the request; there is no append-a-reservation API).
- *  A5 no execution without a durable trail (spawn happens only against a
- *     durably appended reservation — the runner receives the receipt
- *     after reserve() resolves).
- *  A6 attempt accounting per attempt (run reservations consume attempt
- *     slots; resume never does; a failed-spawn release refunds the slot).
- *  A7 projection determinism (same records → byte-identical snapshot).
- *  A8 reservation release never double-counts (holds released exactly
- *     once; spend counted exactly once per session entry id).
- *  A9 no unpriced path (every spend record carries frozen rates and a
- *     computed cost; fallback-priced records are marked and visible).
+ * Invariants (docs/12 §4 — the pinned meanings; each has named tests):
+ *  A1 budgets span attempts/restarts: durable totals rebuild from the log;
+ *     attempt-start anchors + recorded windows + live elapsed count a
+ *     dead supervisor toward the attempt it spans (no free time).
+ *  A2 reservation honesty: a durable intent keeps charging until an
+ *     evidence-backed terminal close — receipt/hold expiry NEVER evaporates
+ *     an open reservation (it only blocks NEW admission); a release
+ *     happens exactly once; actionId is unique per ledger with defined
+ *     idempotent redelivery (identical spec = no-op success, different
+ *     spec = refused).
+ *  A3 absence ≠ permission: the full EpisodeAuthority denial surface
+ *     (paths/notPaths globs canonicalized against a trusted root incl.
+ *     `..`-traversal and absolute escapes, installs, network, external
+ *     effects, approved models, per-diagnosis maxToolCalls/maxUsd);
+ *     default closed when the authority object is absent. Checked fields
+ *     are bound into the receipt digest and onto the durable record.
+ *  A4 gate bypass structurally impossible: the only reservation path takes
+ *     a minted receipt and re-runs the gate inside the serialized queue.
+ *  A5 I5: no P8 path closes an open action; an open (even expired) action
+ *     stays on the reconcile list until an evidence-backed terminal close.
+ *  A6 unknown cost is NEVER zero: an unpriced model records the NONNUMERIC
+ *     state priced:"unknown" (no costUsd field) and blocks USD admission
+ *     wherever a USD cap exists; turn/time gates still bite.
+ *  A7 projection determinism (same records + same now → identical fold).
+ *  A8 counted exactly once: spend lineIds dedup INSIDE the queue; run
+ *     attempt slots count every durable reservation (open OR settled);
+ *     only a justified 'released' (failed-spawn) close refunds a slot.
+ *  A9 strategy-repeat limit: the Nth same-strategyId reservation denies
+ *     with a typed reason (policy.maxStrategyRepeats).
  *
  * Compartment discipline: node: builtins only — no repo imports (P5
  * pattern). The runner (P7) and the supervisor (P9) receive the receipt
@@ -54,6 +69,7 @@
  */
 import { appendFile, mkdir, open as fsOpen, readFile, stat, truncate } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
+import { isAbsolute, posix } from "node:path/posix";
 
 // ───────────────────────────── shared atoms ─────────────────────────────────
 
@@ -113,9 +129,9 @@ export interface RateEntry {
 }
 
 /** Built-in table: the lab is self-hosted, so the shipped default prices
- *  nothing by name — pricing arrives via episode policy overrides. When a
- *  model matches no entry, `FALLBACK_RATE` applies and the record is
- *  marked priced:"fallback" (A9 — visible, never silent). */
+ *  only the named cloud models. A model that matches NO entry is
+ *  priced:"unknown" — the NONNUMERIC cost state of A6, never a $0 rate
+ *  dressed up as a price (the removed FALLBACK_RATE was the audit bug). */
 export const DEFAULT_RATES: readonly RateEntry[] = Object.freeze([
   { model: "gpt-4o", rate: { input: 2.5, output: 10 } },
   { model: "gpt-4o-mini", rate: { input: 0.15, output: 0.6 } },
@@ -124,11 +140,16 @@ export const DEFAULT_RATES: readonly RateEntry[] = Object.freeze([
   { provider: "openrouter", rate: { input: 1, output: 4 } },
 ]);
 
-/** Applied when no entry matches. Zero prices keep self-hosted labs free
- *  while the marker keeps the exposure visible to audit. */
+/** Applied when no entry matches. RETAINED ONLY as an explicit, opt-in
+ *  operator choice: passing it as a rate override is a deliberate decision
+ *  to price something at zero. The resolver NEVER applies it implicitly —
+ *  an unmatched model is priced:"unknown" (A6: unknown ≠ zero). */
 export const FALLBACK_RATE: Rate = Object.freeze({ input: 0, output: 0 });
 
-/** Match one table (exact model > model prefix > exact provider). Pure. */
+/** Match one table (exact model > model prefix > exact provider). Pure.
+ *  Prefix ties resolve by TABLE ORDER (first matching prefix wins) —
+ *  specificity is order, pinned by test (a broad `foo*` before
+ *  `foo-special*` selects the broad rate: order is the contract). */
 function matchTable(table: readonly RateEntry[], model: string, provider: string): Rate | undefined {
   for (const entry of table) {
     if (entry.model !== undefined && entry.model === model) return entry.rate;
@@ -142,22 +163,27 @@ function matchTable(table: readonly RateEntry[], model: string, provider: string
   return undefined;
 }
 
-/** Resolve the rate AND its provenance (A9 — the priced marker is
- *  derived, never hand-claimed): override > table > fallback. `overrides`
- *  (episode policy, D1) are consulted BEFORE the built-in table. Pure. */
-export function resolveRateSource(model: string, provider: string, overrides?: readonly RateEntry[]): { rate: Rate; priced: SpendPriced } {
+/** Resolve the rate AND its provenance (A6/A9 — the priced marker is
+ *  derived, never hand-claimed): override > table > unknown. `overrides`
+ *  (episode policy, D1) are consulted BEFORE the built-in table. When
+ *  NOTHING matches there is NO rate: the caller must record the NONNUMERIC
+ *  `priced:"unknown"` state (never a numeric fallback — the audit's
+ *  "unknown charged as zero" bug). Pure. */
+export function resolveRateSource(model: string, provider: string, overrides?: readonly RateEntry[]): { rate?: Rate; priced: SpendPriced } {
   if (overrides) {
     const r = matchTable(overrides, model, provider);
     if (r !== undefined) return { rate: r, priced: "override" };
   }
   const t = matchTable(DEFAULT_RATES, model, provider);
   if (t !== undefined) return { rate: t, priced: "table" };
-  return { rate: FALLBACK_RATE, priced: "fallback" };
+  return { priced: "unknown" };
 }
 
-/** Resolve the rate for (model, provider). `overrides` (episode policy,
- *  D1) are consulted BEFORE the built-in table. Pure. */
-export function resolveRate(model: string, provider: string, overrides?: readonly RateEntry[]): Rate {
+/** Resolve the rate for (model, provider); `undefined` when unpriced
+ *  (A6 — the absence is meaningful and must be handled, never coerced
+ *  to a number). `overrides` (episode policy, D1) are consulted BEFORE
+ *  the built-in table. Pure. */
+export function resolveRate(model: string, provider: string, overrides?: readonly RateEntry[]): Rate | undefined {
   return resolveRateSource(model, provider, overrides).rate;
 }
 
@@ -206,21 +232,29 @@ export interface LedgerEnvelope {
   attemptId?: string;
 }
 
-/** A9: rate provenance on every spend record. */
-export type SpendPriced = "table" | "override" | "fallback";
+/** A6/A9 pricing provenance on every spend record. `"unknown"` is the
+ *  NONNUMERIC cost state — such a record carries NO costUsd/rates field
+ *  and blocks USD admission wherever a USD cap exists (unknown ≠ zero,
+ *  unknown ≠ free). An operator who truly means "this model is free"
+ *  declares it with an explicit zero-rate entry in the policy override
+ *  table (provenance "override") — never inferred from a missing price. */
+export type SpendPriced = "table" | "override" | "unknown";
 
 export interface SpendRecord extends LedgerEnvelope {
   kind: "spend";
   /** Dedup key (§2): the session entry id the usage came from. Manual
-   *  spends use their own record id. Re-ingesting the same entry id is a
-   *  silent no-op (A8 — counted exactly once). */
+   *  spends use their own lineId. Re-ingesting the same entry id is a
+   *  silent no-op (A8 — guarded INSIDE the serialized queue). */
   lineId: string;
   model: string;
   provider: string;
   usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-  /** Frozen at ingest (D1): never recomputed, history never reprices. */
-  rates: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-  costUsd: number;
+  /** Frozen at ingest (D1): never recomputed, history never reprices.
+   *  Absent exactly when priced === "unknown" (no rate exists to freeze). */
+  rates?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  /** Absent exactly when priced === "unknown" (A6: the unknown cost is
+   *  the ABSENCE of a number, never the number zero). */
+  costUsd?: number;
   priced: SpendPriced;
   /** True when produced by ingestSession/ingestEntries (vs manual). */
   source: "session" | "manual";
@@ -239,16 +273,29 @@ export interface ReservationOpenRecord extends LedgerEnvelope {
   action: LedgerGatedAction;
   reservedUsd: number;
   reservedTurns: number;
-  /** Epoch ms after which the hold is dead for projection purposes. */
+  /** Epoch ms after which the RECEIPT stops admitting NEW work. It never
+   *  removes the durable hold (A2): an expired-but-open reservation keeps
+   *  charging and stays on the reconcile list until an evidence-backed
+   *  terminal close. */
   expiresAt: number;
   // ── A3 durable authority trail (P9 copies these onto decision-intent) ──
   grantedBy: string;
   sideEffect: "none" | "worktree-local" | "external";
-  /** sha256 hex over the canonical action spec the check was passed for. */
+  /** sha256 hex over the canonical request snapshot the check was passed for. */
   receiptDigest: string;
-  /** D2: was the caller's estimate raised to (or defaulted from) the cap
-   *  floor? Always present so the raise decision is auditable. */
+  /** D2: was the caller's estimate raised to (or defaulted from) the
+   *  P8-owned class default? Always present so the raise is auditable. */
   estimateRaised: boolean;
+  /** §14.3 strategyId (A9 repeat counts). */
+  strategyId?: string;
+  // ── A3: the checked authority surface, durable (mutation-proof audit) ──
+  /** Canonicalized paths the action was granted to touch. */
+  paths?: string[];
+  install?: boolean;
+  network?: boolean;
+  model?: string;
+  /** Diagnostic tool calls the action was granted. */
+  toolCalls?: number;
 }
 
 export const RESERVATION_CLOSE_REASONS = ["settled", "released", "expired", "abandoned"] as const;
@@ -308,9 +355,15 @@ export function validateLedgerRecord(record: unknown): asserts record is LedgerR
       if (!u || !isInt0(u.input) || !isInt0(u.output)) throw new BudgetLedgerError("schema", "spend: usage.input/output invalid");
       if (u.cacheRead !== undefined && !isInt0(u.cacheRead)) throw new BudgetLedgerError("schema", "spend: usage.cacheRead invalid");
       if (u.cacheWrite !== undefined && !isInt0(u.cacheWrite)) throw new BudgetLedgerError("schema", "spend: usage.cacheWrite invalid");
-      if (!isRate(r.rates)) throw new BudgetLedgerError("schema", "spend: frozen rates invalid");
-      if (!isNum(r.costUsd) || (r.costUsd as number) < 0) throw new BudgetLedgerError("schema", "spend: costUsd invalid");
-      if (r.priced !== "table" && r.priced !== "override" && r.priced !== "fallback") throw new BudgetLedgerError("schema", "spend: priced marker invalid");
+      if (r.priced !== "table" && r.priced !== "override" && r.priced !== "unknown") throw new BudgetLedgerError("schema", "spend: priced marker invalid");
+      if (r.priced === "unknown") {
+        // A6: unknown is the ABSENCE of a number — a record claiming
+        // unknown while carrying a cost/rates is a contract lie.
+        if (r.costUsd !== undefined || r.rates !== undefined) throw new BudgetLedgerError("schema", "spend: priced 'unknown' must carry no costUsd/rates (A6)");
+      } else {
+        if (!isRate(r.rates)) throw new BudgetLedgerError("schema", "spend: frozen rates invalid");
+        if (!isNum(r.costUsd) || (r.costUsd as number) < 0) throw new BudgetLedgerError("schema", "spend: costUsd invalid");
+      }
       if (r.source !== "session" && r.source !== "manual") throw new BudgetLedgerError("schema", "spend: source invalid");
       break;
     }
@@ -325,6 +378,13 @@ export function validateLedgerRecord(record: unknown): asserts record is LedgerR
         throw new BudgetLedgerError("schema", "res-open: sideEffect invalid");
       if (!isNonEmptyString(r.receiptDigest) || !/^[0-9a-f]{64}$/.test(r.receiptDigest)) throw new BudgetLedgerError("schema", "res-open: receiptDigest must be sha256 hex");
       if (typeof r.estimateRaised !== "boolean") throw new BudgetLedgerError("schema", "res-open: estimateRaised missing (D2)");
+      if (r.strategyId !== undefined && !isNonEmptyString(r.strategyId)) throw new BudgetLedgerError("schema", "res-open: strategyId invalid");
+      if (r.paths !== undefined && (!Array.isArray(r.paths) || r.paths.some((p) => !isNonEmptyString(p) || !p.startsWith("/"))))
+        throw new BudgetLedgerError("schema", "res-open: paths must be an array of canonical absolute strings (A3)");
+      if (r.install !== undefined && typeof r.install !== "boolean") throw new BudgetLedgerError("schema", "res-open: install must be a boolean");
+      if (r.network !== undefined && typeof r.network !== "boolean") throw new BudgetLedgerError("schema", "res-open: network must be a boolean");
+      if (r.model !== undefined && !isNonEmptyString(r.model)) throw new BudgetLedgerError("schema", "res-open: model invalid");
+      if (r.toolCalls !== undefined && !isInt0(r.toolCalls)) throw new BudgetLedgerError("schema", "res-open: toolCalls invalid");
       break;
     }
     case "res-close": {
@@ -352,10 +412,15 @@ export interface Compartment {
 
 export interface CompartmentUsage {
   consumedUsd: number;
+  /** A6: folded count of priced:"unknown" spend records in this
+   *  compartment. Nonzero + a USD cap = USD admission denied (unknown
+   *  never grants USD headroom — conservative, not free). */
+  unknownSpend: number;
   /** Assistant messages (one per spend record), the turn counter. */
   consumedTurns: number;
-  /** Sum of OPEN, non-expired reservation holds. Expired holds vanish from
-   *  the projection at read-time (stale() still lists them). */
+  /** Sum of OPEN reservation holds (episode AND task AND attempt chain).
+   *  Expiry NEVER removes a hold (A2): only an evidence-backed res-close
+   *  does. */
   reservedUsd: number;
   reservedTurns: number;
   /** run-reservations that consumed an attempt slot (A6). Keyed here, not
@@ -377,16 +442,24 @@ export interface BudgetSnapshot {
   /** Wallclock seconds per (episode, task, attempt) — only records that
    *  name an attempt contribute (feeds perAttempt.wallclockS at the gate). */
   attemptWallclockS: Map<string, number>;
-  /** Open reservations (holds live; may be expired — see stale()). */
+  /** Open reservations — every unclosed hold, expired or not (A2: an
+   *  open reservation never evaporates; expiry only blocks NEW admission). */
   openReservations: ReservationOpenRecord[];
+  /** Every actionId ever reserved → its durable record (first wins).
+   *  The uniqueness / idempotent-redelivery source for reserve(). */
+  actionIds: Map<string, ReservationOpenRecord>;
+  /** Same-strategyId reservation counts per (episode, task, strategyId)
+   *  (A9 repeat limits). */
+  strategyUses: Map<string, number>;
   /** Attempts EVER named by a res-open record (compartment key), regardless
    *  of expiry/close — the durable "run reserved this attempt first"
    *  trail the resume trap reads (A6). */
   reservedAttempts: Set<string>;
   /** Spend line ids already on the ledger (ingest dedup, A8). */
   seenLineIds: Set<string>;
-  /** Spend records whose price came from the fallback (A9 visibility). */
-  fallbackPricedCount: number;
+  /** Spend records in the NONNUMERIC unknown cost state (A6 visibility:
+   *  never silently free — USD admission is conservative around these). */
+  unpricedCount: number;
   /** Duplicate record ids found in the file (never silently merged). */
   duplicateIds: string[];
 }
@@ -413,17 +486,22 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
   const wallclockS = new Map<string, number>();
   const attemptWallclockS = new Map<string, number>();
   const open = new Map<string, ReservationOpenRecord>(); // res-open id, superseded by close
+  const runOpens = new Map<string, ReservationOpenRecord>(); // durable run reservations
+  const closedRefs = new Set<string>(); // first-close-wins (never double-refund)
+  const reasonIsReleasedRef = new Map<string, string>(); // refId → first close reason
+  const actionIds = new Map<string, ReservationOpenRecord>(); // A2 uniqueness source
+  const strategyUses = new Map<string, number>(); // A9 repeat counts
   const reservedAttempts = new Set<string>(); // every attempt ever reserved (A6 trail)
   const seenLineIds = new Set<string>();
   const duplicateIds: string[] = [];
   const ids = new Set<string>();
-  let fallbackPricedCount = 0;
+  let unpricedCount = 0;
 
   const touch = (c: Compartment): CompartmentUsage => {
     const key = compartmentKey(c);
     let usage = compartments.get(key);
     if (!usage) {
-      usage = { consumedUsd: 0, consumedTurns: 0, reservedUsd: 0, reservedTurns: 0 };
+      usage = { consumedUsd: 0, unknownSpend: 0, consumedTurns: 0, reservedUsd: 0, reservedTurns: 0 };
       compartments.set(key, usage);
     }
     return usage;
@@ -443,26 +521,50 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
         if (record.episodeId === undefined) break;
         if (seenLineIds.has(record.lineId)) break; // A8: counted exactly once
         seenLineIds.add(record.lineId);
-        if (record.priced === "fallback") fallbackPricedCount++;
+        const unknownCost = record.priced === "unknown"; // A6: no number exists
+        if (unknownCost) unpricedCount++;
         for (const c of chainOf({ episodeId: record.episodeId, taskId: record.taskId, attemptId: record.attemptId })) {
           const usage = touch(c);
-          usage.consumedUsd += record.costUsd;
+          if (!unknownCost) usage.consumedUsd += record.costUsd ?? 0;
+          if (unknownCost) usage.unknownSpend += 1;
           usage.consumedTurns += 1;
         }
         break;
       }
       case "res-open": {
-        // Holds live on the reservation's OWN compartment (episode, task —
-        // an attempt reservation always names its task, else it could only
-        // be enforced at episode level).
+        // Holds live on the reservation's OWN compartment chain (episode,
+        // task AND attempt — the reservation trail names its task).
         if (record.attemptId !== undefined) {
           reservedAttempts.add(JSON.stringify([record.episodeId, record.taskId ?? null, record.attemptId]));
+        }
+        // A2 actionId uniqueness source (first record wins; reserve()
+        // enforces idempotent redelivery against this inside the queue).
+        if (!actionIds.has(record.actionId)) actionIds.set(record.actionId, record);
+        // A9: strategy repeat counts over durable reservations.
+        if (record.strategyId !== undefined) {
+          const sk = JSON.stringify([record.episodeId, record.taskId ?? null, record.strategyId]);
+          strategyUses.set(sk, (strategyUses.get(sk) ?? 0) + 1);
+        }
+        // A8: a DURABLE run reservation consumes an attempt slot whether
+        // it is open, settled, or closed-expired — an attempt that was
+        // reserved was an attempt used (audit: settled runs must NOT
+        // refund the slot; only a justified 'released' refund below).
+        if (record.action === "run") {
+          const taskKey = JSON.stringify([record.episodeId, record.taskId ?? null]);
+          attemptsUsed.set(taskKey, (attemptsUsed.get(taskKey) ?? 0) + 1);
+          runOpens.set(record.id, record);
         }
         if (open.has(record.id)) break; // duplicate res-open id: first wins (reported above)
         open.set(record.id, record);
         break;
       }
       case "res-close": {
+        if (closedRefs.has(record.refId)) break; // first close wins: never double-refund
+        closedRefs.add(record.refId);
+        // A8: refund ONLY the justified failed-spawn/release case; the
+        // res-open may appear later in the file than its close, so the
+        // refund decision is deferred to the post-pass below.
+        if (!reasonIsReleasedRef.has(record.refId)) reasonIsReleasedRef.set(record.refId, record.reason);
         open.delete(record.refId);
         break;
       }
@@ -478,22 +580,55 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
   }
 
   // Fold live holds AFTER the pass so closes anywhere in the file apply.
+  // A2 (docs/12 §4): an OPEN reservation keeps charging until an
+  // evidence-backed terminal close — receipt/hold expiry NEVER evaporates
+  // a durable hold (expiry only blocks NEW admission in reserve()).
+  // Holds charge the reservation's full compartment chain — episode, task
+  // AND attempt (audit: attempt holds must hit the attempt compartment).
   const openReservations: ReservationOpenRecord[] = [];
   for (const reservation of open.values()) {
-    if (reservation.expiresAt <= now) continue; // expired hold: invisible to the gate
     openReservations.push(reservation);
-    for (const c of chainOf({ episodeId: reservation.episodeId, taskId: reservation.taskId })) {
+    for (const c of chainOf({ episodeId: reservation.episodeId, taskId: reservation.taskId, attemptId: reservation.attemptId })) {
       const usage = touch(c);
       usage.reservedUsd += reservation.reservedUsd;
       usage.reservedTurns += reservation.reservedTurns;
     }
-    if (reservation.action === "run") {
-      const taskKey = JSON.stringify([reservation.episodeId, reservation.taskId ?? null]);
-      attemptsUsed.set(taskKey, (attemptsUsed.get(taskKey) ?? 0) + 1);
-    }
   }
 
-  return { now, compartments, attemptsUsed, wallclockS, attemptWallclockS, openReservations, reservedAttempts, seenLineIds, fallbackPricedCount, duplicateIds };
+  // A1/F17 (docs/12 §2): supervisor downtime counts toward the attempt it
+  // spans. Every OPEN reservation that names an attempt anchors that
+  // attempt; elapsed time from the earliest anchor to `now` is live
+  // wallclock (a dead supervisor buys no free time). Recorded windows
+  // (completed, evidence-backed) sum on top; overlapping open holds on
+  // one attempt dedupe to the earliest anchor. Determinism holds: the
+  // fold is a pure function of (records, now) — A7.
+  const liveStart = new Map<string, number>();
+  for (const reservation of open.values()) {
+    if (reservation.attemptId === undefined || !(reservation.ts > 0)) continue;
+    const key = JSON.stringify([reservation.episodeId, reservation.taskId ?? null, reservation.attemptId]);
+    const prev = liveStart.get(key);
+    if (prev === undefined || reservation.ts < prev) liveStart.set(key, reservation.ts);
+  }
+  for (const [key, startedAt] of liveStart) {
+    const elapsed = Math.max(0, (now - startedAt) / 1000);
+    if (elapsed <= 0) continue;
+    const [, taskId] = JSON.parse(key) as [string, string | null, string];
+    attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + elapsed);
+    if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + elapsed);
+  }
+
+  // A8: refund a run slot ONLY for a justified 'released' (failed-spawn)
+  // close — settled/expired/abandoned keep the slot consumed (audit:
+  // settled runs must never re-open the attempt budget). Deferred here so
+  // close-records BEFORE their res-open in the file still refund (first
+  // close per refId wins; closedRefs guarantees single refund).
+  for (const [refId, run] of runOpens) {
+    if (reasonIsReleasedRef.get(refId) !== "released") continue;
+    const taskKey = JSON.stringify([run.episodeId, run.taskId ?? null]);
+    attemptsUsed.set(taskKey, Math.max(0, (attemptsUsed.get(taskKey) ?? 0) - 1));
+  }
+
+  return { now, compartments, attemptsUsed, wallclockS, attemptWallclockS, openReservations, actionIds, strategyUses, reservedAttempts, seenLineIds, unpricedCount, duplicateIds };
 }
 
 /** Reservations still open at `now` — the reconcile list (A2). Each must
@@ -519,9 +654,35 @@ export interface GatePolicy {
   perAttempt?: { usd?: Cap; turns?: Cap; wallclockS?: Cap };
   /** maxAttemptsPerTask (episode recovery budget, docs/11 §3). */
   maxAttemptsPerTask?: Cap;
+  /** A9 (docs/12 §9): the Nth same-`strategyId` reservation denies with a
+   *  typed reason. Undefined = unlimited (counts stay visible). */
+  maxStrategyRepeats?: Cap;
   /** policy.authority.allowExternalEffects — an "external" action denies
    *  unless this is true (the authority half of the gate). */
   allowExternalEffects: boolean;
+  /** A3 (docs/12 §1/§4, §14.7 EpisodeAuthority): the granted authority
+   *  surface. ABSENT means default-closed on the whole surface — any
+   *  request that declares paths / installs / network / a model /
+   *  diagnostic tool calls denies. A field that is present but not
+   *  granted is denial, never silence. */
+  authority?: {
+    /** Trusted root that request paths are resolved against (A3: `..`
+     *  traversal and absolute escapes are refused against this root). */
+    root?: string;
+    /** Granted path globs (posix-ish; `**` any-depth, `*` one segment).
+     *  Absent/empty = nothing granted. */
+    paths?: readonly string[];
+    /** Denied globs — win over `paths` even when a broader grant matches. */
+    notPaths?: readonly string[];
+    /** Package installs granted. Absent = false. */
+    allowInstalls?: boolean;
+    /** Network access granted. Absent = false. */
+    allowNetwork?: boolean;
+    /** Approved models for swaps. Absent = NO model is approved. */
+    approvedModels?: readonly string[];
+    /** Per-diagnosis caps (docs/12 §1). */
+    diagnostics?: { maxToolCalls?: number; maxUsd?: number };
+  };
   /** D1 override table, consulted before DEFAULT_RATES. */
   rates?: readonly RateEntry[];
   /** Reservation TTL in ms (default RESERVATION_TTL_MS). Per-policy so a
@@ -537,8 +698,22 @@ export interface GateRequest {
   /** Caller's authority as held at ask-time (P9's grant, from graph
    *  policy; "external" additionally requires policy.allowExternalEffects). */
   authority: { grantedBy: string; sideEffect: "none" | "worktree-local" | "external" };
-  /** Caller estimate (D2): may only RAISE above the floor. Absent = floor. */
+  /** Caller estimate (D2): may only RAISE above the class default. */
   estimate?: { usd?: number; turns?: number };
+  // ── the §14.7 authority surface (A3) — every field binds into the ──────
+  // ── receipt digest, so mutation between check and reserve refuses ──────
+  /** File paths the action will touch (canonicalized against authority.root). */
+  paths?: string[];
+  /** Action performs package installs. */
+  install?: boolean;
+  /** Action performs network access. */
+  network?: boolean;
+  /** Model the action will use (for swaps). */
+  model?: string;
+  /** Tool calls a diagnostic action will make (vs diagnostics.maxToolCalls). */
+  toolCalls?: number;
+  /** §14.3 strategyId — repeat counts feed A9. */
+  strategyId?: string;
 }
 
 /** Structured denial (stable codes — P9 renders, tests match codes). */
@@ -554,7 +729,17 @@ export type DenialCode =
   | "attempt-budget-exceeded"
   | "attempt-turns-exceeded"
   | "attempt-wallclock-exceeded"
-  | "estimate-invalid";
+  | "estimate-invalid"
+  // ── A3 authority surface (docs/12 §1/§4) ──
+  | "path-not-granted"            // request path outside granted globs / inside notPaths / escapes root
+  | "install-not-allowed"
+  | "network-not-allowed"
+  | "model-not-approved"
+  | "diagnostic-limit-exceeded"   // toolCalls over authority.diagnostics.maxToolCalls
+  // ── A9 strategy repeats (§9) ──
+  | "strategy-repeat-exceeded"
+  // ── D2: cap BELOW the P8 class default is a denial, never a silent redefinition ──
+  | "reserve-default-exceeds-cap";
 
 export interface Denial {
   code: DenialCode;
@@ -583,19 +768,114 @@ export interface CheckResult {
 
 export const RESERVATION_TTL_MS = 30 * 60 * 1000; // 30 min default hold
 
-/** D2 floor: estimate usd = per-attempt usd cap (what the action can
- *  burn); falls back to the episode usd cap, then to 0 with an explicit
- *  caller estimate required… A spawn with NO usd cap anywhere is uncapped
- *  by policy, so the gate cannot compute a floor; reserve 0 is meaningless
- *  as a hold, so such episodes reserve a sentinel 0.000001? No — reserve
- *  is only meaningful where caps exist. With no caps, reservedUsd must be
- *  > 0 (schema); the floor falls back to FLOOR_WITHOUT_CAPS so the trail
- *  exists, and the gate cannot be violated by an uncapped episode anyway.
- */
-const FLOOR_WITHOUT_CAPS = 0.000001;
+/** D2 (docs/12 §7, settled decision 2): the P8-owned per-action-class
+ *  reservation defaults. The caller may only RAISE an estimate above the
+ *  class default, never lower it below it; a policy cap BELOW the class
+ *  default is a DENIAL (reserve-default-exceeds-cap), never a silent
+ *  redefinition. Exported: the raise semantics are module contract. */
+export const RESERVE_DEFAULTS: Readonly<Partial<Record<LedgerGatedAction, { usd: number; turns: number }>>> = Object.freeze({
+  run: Object.freeze({ usd: 0.25, turns: 1 }),
+  resume: Object.freeze({ usd: 0.05, turns: 1 }),
+});
+
+/** The class default floor for an action. Pure. */
+export function reserveDefault(action: LedgerGatedAction): { usd: number; turns: number } {
+  const d = RESERVE_DEFAULTS[action];
+  return d ? { usd: d.usd, turns: d.turns } : { usd: 0, turns: 1 };
+}
+
+/** A3: canonicalize a request path against the trusted root. Relative
+ *  paths resolve under the root; absolute paths must stay inside it.
+ *  `..` segments are resolved lexically; a path that escapes the root
+ *  canonicalizes to `undefined` (denied — a symlink check is the
+ *  executor's job at act-time; the gate refuses every textual escape).
+ *  Pure, synchronous, no I/O. */
+export function canonicalizePath(p: string, root: string): string | undefined {
+  if (typeof p !== "string" || p === "" || p.includes("\0")) return undefined;
+  const r = posix.normalize(root);
+  const joined = posix.isAbsolute(p) ? posix.normalize(p) : posix.normalize(posix.join(r, p));
+  if (joined === r) return joined;
+  if (!joined.startsWith(r.endsWith("/") ? r : r + "/")) return undefined; // escape
+  return joined;
+}
+
+/** A3: match a canonical absolute path against a granted/denied glob,
+ *  both resolved against the authority root. `**` spans segments,
+ *  `*` matches within one segment. Globs may be relative (resolved
+ *  under root) or absolute. Pure. */
+export function globMatch(glob: string, canonicalPath: string, root: string): boolean {
+  const anchored = posix.isAbsolute(glob) ? posix.normalize(glob) : posix.normalize(posix.join(posix.normalize(root), glob));
+  const re = new RegExp(
+    "^" +
+      anchored
+        .split("/")
+        .map((seg) => seg.replace(/[.+^$${}()|[\]\\]/g, (m) => "\\" + m).replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*"))
+        .filter((s, i) => i === 0 || s !== "")
+        .join("/") +
+      "/?$",
+  );
+  return re.test(canonicalPath);
+}
+
+/** Boundary validation (audit C1-NaN: an invalid cap used to MINT an
+ *  allow receipt with a NaN reservation). Rejects non-finite/negative
+ *  policy values BEFORE any receipt exists. Throws — a malformed policy
+ *  is a caller bug, not a denial. Pure, synchronous. */
+export function validateGatePolicy(policy: GatePolicy): GatePolicy {
+  assertSafeId(policy.episodeId, "policy.episodeId");
+  const num = (v: Cap, what: string) => {
+    if (v !== undefined && (!Number.isFinite(v) || (v as number) < 0))
+      throw new BudgetLedgerError("bad-input", `policy: ${what} must be finite and non-negative (got ${String(v)})`);
+  };
+  const int = (v: Cap, what: string) => {
+    if (v !== undefined && (!Number.isInteger(v) || (v as number) < 0))
+      throw new BudgetLedgerError("bad-input", `policy: ${what} must be a non-negative integer (got ${String(v)})`);
+  };
+  num(policy.caps?.usd, "caps.usd");
+  int(policy.caps?.turns, "caps.turns");
+  num(policy.caps?.wallclockS, "caps.wallclockS");
+  num(policy.perTask?.usd, "perTask.usd");
+  int(policy.perTask?.turns, "perTask.turns");
+  int(policy.perTask?.attempts, "perTask.attempts");
+  num(policy.perAttempt?.usd, "perAttempt.usd");
+  int(policy.perAttempt?.turns, "perAttempt.turns");
+  num(policy.perAttempt?.wallclockS, "perAttempt.wallclockS");
+  int(policy.maxAttemptsPerTask, "maxAttemptsPerTask");
+  int(policy.maxStrategyRepeats, "maxStrategyRepeats");
+  const ttl = policy.reservationTtlMs;
+  if (ttl !== undefined && (!Number.isFinite(ttl) || (ttl as number) <= 0))
+    throw new BudgetLedgerError("bad-input", "policy.reservationTtlMs must be finite > 0");
+  if (policy.rates !== undefined) {
+    if (!Array.isArray(policy.rates)) throw new BudgetLedgerError("bad-input", "policy.rates must be an array");
+    for (const entry of policy.rates) {
+      if (entry === null || typeof entry !== "object") throw new BudgetLedgerError("bad-input", "policy.rates entry must be an object");
+      if (entry.model === undefined && entry.provider === undefined)
+        throw new BudgetLedgerError("bad-input", "policy.rates entry needs model or provider");
+      if (!isRate(entry.rate)) throw new BudgetLedgerError("bad-input", "policy.rates entry rate must be finite non-negative numbers");
+    }
+  }
+  const a = policy.authority;
+  if (a !== undefined) {
+    if (a.root !== undefined && (typeof a.root !== "string" || !isAbsolute(a.root)))
+      throw new BudgetLedgerError("bad-input", "policy.authority.root must be an absolute path");
+    for (const g of [a.paths, a.notPaths, a.approvedModels] as const) {
+      if (g !== undefined && (!Array.isArray(g) || g.some((s) => typeof s !== "string" || s === "")))
+        throw new BudgetLedgerError("bad-input", "policy.authority glob/model lists must be arrays of non-empty strings");
+    }
+    if (a.diagnostics !== undefined) {
+      const m = a.diagnostics.maxToolCalls, mu = a.diagnostics.maxUsd;
+      if (m !== undefined && (!Number.isFinite(m) || m < 0)) throw new BudgetLedgerError("bad-input", "authority.diagnostics.maxToolCalls must be finite non-negative");
+      if (mu !== undefined && (!Number.isFinite(mu) || mu < 0)) throw new BudgetLedgerError("bad-input", "authority.diagnostics.maxUsd must be finite non-negative");
+    }
+  }
+  return policy;
+}
 
 /** Canonical string for the digest: the exact spec the receipt binds.
- *  Deterministic (fixed field order, null for absent). */
+ *  Deterministic (fixed field order, null for absent). Binds EVERY
+ *  checked field (A3): paths, install, network, model, toolCalls,
+ *  strategyId — mutating any of them between check and reserve changes
+ *  the digest and is refused. */
 export function canonicalActionSpec(policy: GatePolicy, request: GateRequest, reserve: { usd: number; turns: number }): string {
   return JSON.stringify([
     policy.episodeId,
@@ -607,6 +887,12 @@ export function canonicalActionSpec(policy: GatePolicy, request: GateRequest, re
     request.authority.sideEffect,
     reserve.usd,
     reserve.turns,
+    request.paths ?? null,
+    request.install ?? null,
+    request.network ?? null,
+    request.model ?? null,
+    request.toolCalls ?? null,
+    request.strategyId ?? null,
   ]);
 }
 
@@ -616,6 +902,10 @@ export function canonicalActionSpec(policy: GatePolicy, request: GateRequest, re
  * same fold, so the three can never diverge.
  */
 export function check(policy: GatePolicy, request: GateRequest, snapshot: BudgetSnapshot, now: number): CheckResult {
+  // Boundary validation (audit C1-F18): a malformed policy (NaN caps etc.)
+  // throws BEFORE any receipt can be minted — an allow built on garbage
+  // input is not a safe allow.
+  validateGatePolicy(policy);
   const denials: Denial[] = [];
   const deny = (code: DenialCode, detail: string, extra?: Partial<Denial>) => denials.push({ code, detail, ...extra });
 
@@ -625,9 +915,11 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
   if (request.authority?.sideEffect === "external" && policy.allowExternalEffects !== true)
     deny("external-not-allowed", "action has sideEffect 'external' but policy.allowExternalEffects is not true");
 
-  // ── D2: effective reservation (caller may only raise) ──
-  const floorUsd = policy.perAttempt?.usd ?? policy.caps.usd ?? FLOOR_WITHOUT_CAPS;
-  const floorTurns = policy.perAttempt?.turns ?? policy.caps.turns ?? 1;
+  // ── D2: effective reservation (P8 class default is the floor; the ──
+  // ── caller may only RAISE, and a cap below the floor is a DENIAL) ──
+  const classDefault = reserveDefault(request.action);
+  const floorUsd = classDefault.usd;
+  const floorTurns = classDefault.turns;
   const wantUsd = request.estimate?.usd;
   const wantTurns = request.estimate?.turns;
   if (wantUsd !== undefined && (!isNum(wantUsd) || wantUsd < 0)) deny("estimate-invalid", "estimate.usd must be a finite non-negative number");
@@ -636,10 +928,65 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
   const reserveTurns = Math.max(wantTurns !== undefined && isInt0(wantTurns) ? wantTurns : 0, floorTurns);
   const estimateRaised = reserveUsd > (wantUsd ?? 0) || reserveTurns > (wantTurns ?? 0);
   const reserve = { usd: reserveUsd, turns: reserveTurns };
+  // A cap BELOW the class default cannot be honoured without silently
+  // redefining the estimate (the audit's F20 bug): deny, never adapt.
+  if (policy.perAttempt?.usd !== undefined && policy.perAttempt.usd < floorUsd)
+    deny("reserve-default-exceeds-cap", `perAttempt.usd cap ${policy.perAttempt.usd} is below the ${request.action} class default ${floorUsd} (D2) — raise the cap or the policy drops the action`, { cap: policy.perAttempt.usd });
+  if (policy.perAttempt?.turns !== undefined && policy.perAttempt.turns < floorTurns)
+    deny("reserve-default-exceeds-cap", `perAttempt.turns cap ${policy.perAttempt.turns} is below the ${request.action} class default ${floorTurns} (D2)`, { cap: policy.perAttempt.turns });
+  if (policy.caps.usd !== undefined && policy.caps.usd < floorUsd)
+    deny("reserve-default-exceeds-cap", `caps.usd ${policy.caps.usd} is below the ${request.action} class default ${floorUsd} (D2)`, { cap: policy.caps.usd });
+  if (policy.caps.turns !== undefined && policy.caps.turns < floorTurns)
+    deny("reserve-default-exceeds-cap", `caps.turns ${policy.caps.turns} is below the ${request.action} class default ${floorTurns} (D2)`, { cap: policy.caps.turns });
+
+  // ── A3: the full EpisodeAuthority denial surface (docs/12 §1/§4) ──
+  // Absence of the authority object = DEFAULT CLOSED on every declared
+  // demand: any request carrying paths/install/network/model/toolCalls
+  // denies. A demand that is present but ungranted is a typed denial.
+  const auth = policy.authority;
+  const root = auth?.root ?? "/";
+  if (request.paths !== undefined && request.paths.length > 0) {
+    if (!auth) {
+      deny("path-not-granted", `authority absent: ${request.paths.length} path(s) requested but nothing is granted (default closed)`);
+    } else {
+      for (const p of request.paths) {
+        const canon = canonicalizePath(p, root);
+        if (canon === undefined) {
+          deny("path-not-granted", `path ${JSON.stringify(p)} escapes the authority root ${JSON.stringify(root)} (traversal/absolute outside root refused)`);
+          continue;
+        }
+        const deniedGlob = (auth.notPaths ?? []).find((g) => globMatch(g, canon, root));
+        if (deniedGlob !== undefined) {
+          deny("path-not-granted", `path ${JSON.stringify(p)} (canonical ${JSON.stringify(canon)}) matches denied glob ${JSON.stringify(deniedGlob)}`);
+          continue;
+        }
+        if (!(auth.paths ?? []).some((g) => globMatch(g, canon, root))) {
+          deny("path-not-granted", `path ${JSON.stringify(p)} (canonical ${JSON.stringify(canon)}) matches no granted glob`);
+        }
+      }
+    }
+  }
+  if (request.install === true && auth?.allowInstalls !== true)
+    deny("install-not-allowed", "action performs package installs but authority.allowInstalls is not true");
+  if (request.network === true && auth?.allowNetwork !== true)
+    deny("network-not-allowed", "action performs network access but authority.allowNetwork is not true");
+  if (request.model !== undefined) {
+    if (!auth || !(auth.approvedModels ?? []).some((m) => m === request.model))
+      deny("model-not-approved", `model ${JSON.stringify(request.model)} is not in authority.approvedModels`);
+  }
+  if (request.toolCalls !== undefined) {
+    const max = auth?.diagnostics?.maxToolCalls;
+    if (!isInt0(request.toolCalls)) deny("diagnostic-limit-exceeded", `toolCalls must be a non-negative integer (got ${String(request.toolCalls)})`);
+    else if (max === undefined || request.toolCalls > max)
+      deny("diagnostic-limit-exceeded", `diagnostic action requests ${request.toolCalls} tool calls, authority allows ${max === undefined ? "none" : max}`);
+    const maxUsd = auth?.diagnostics?.maxUsd;
+    if (maxUsd !== undefined && reserveUsd > maxUsd)
+      deny("diagnostic-limit-exceeded", `diagnostic action reserves ${reserveUsd.toFixed(6)}, authority allows ${maxUsd}`);
+  }
 
   // ── budget half: same compartment roll-ups for every cap class ──
   const usageAt = (c: Compartment): CompartmentUsage =>
-    snapshot.compartments.get(compartmentKey(c)) ?? { consumedUsd: 0, consumedTurns: 0, reservedUsd: 0, reservedTurns: 0 };
+    snapshot.compartments.get(compartmentKey(c)) ?? { consumedUsd: 0, unknownSpend: 0, consumedTurns: 0, reservedUsd: 0, reservedTurns: 0 };
   const episode = usageAt({ episodeId: policy.episodeId });
   const task = request.taskId !== undefined ? usageAt({ episodeId: policy.episodeId, taskId: request.taskId }) : undefined;
   const attempt = request.taskId !== undefined && request.attemptId !== undefined
@@ -647,10 +994,17 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     : undefined;
 
   // consumed + new reservation must fit the cap (docs/12 §3).
+  // A6 (unknown cost): a compartment carrying priced:"unknown" spend has
+  // an UNBOUNDED USD exposure — no number exists for it, so USD admission
+  // anywhere a USD cap exists is CONSERVATIVE: denied, never assumed $0.
   const overUsd = (label: string, usage: CompartmentUsage, cap: Cap, code: DenialCode) => {
     if (cap === undefined) return;
+    if (usage.unknownSpend > 0) {
+      deny(code, `${label}: ${usage.unknownSpend} unpriced (priced:"unknown") record(s) — unknown cost is never zero (A6); USD admission is blocked while any cap exists`, { cap, headroomUsd: 0 });
+      return;
+    }
     const projected = usage.consumedUsd + usage.reservedUsd + reserveUsd;
-    if (projected > cap) deny(code, `${label}: $${projected.toFixed(6)} projected (consumed $${usage.consumedUsd.toFixed(6)} + reserved $${usage.reservedUsd.toFixed(6)} + this $${reserveUsd.toFixed(6)}) exceeds cap $${cap}`, { cap, headroomUsd: Math.max(0, cap - usage.consumedUsd - usage.reservedUsd) });
+    if (projected > cap) deny(code, `${label}: ${projected.toFixed(6)} projected (consumed ${usage.consumedUsd.toFixed(6)} + reserved ${usage.reservedUsd.toFixed(6)} + this ${reserveUsd.toFixed(6)}) exceeds cap ${cap}`, { cap, headroomUsd: Math.max(0, cap - usage.consumedUsd - usage.reservedUsd) });
   };
   const overTurns = (label: string, usage: CompartmentUsage, cap: Cap, code: DenialCode) => {
     if (cap === undefined) return;
@@ -693,6 +1047,13 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     }
   }
 
+  // ── A9 (docs/12 §9): strategy-repeat limit over durable reservations ──
+  if (request.strategyId !== undefined && policy.maxStrategyRepeats !== undefined) {
+    const used = snapshot.strategyUses.get(JSON.stringify([policy.episodeId, request.taskId ?? null, request.strategyId])) ?? 0;
+    if (used + 1 > policy.maxStrategyRepeats)
+      deny("strategy-repeat-exceeded", `strategy ${JSON.stringify(request.strategyId)} already used ${used} time(s), cap ${policy.maxStrategyRepeats} — the next repeat needs a different fingerprint`, { cap: policy.maxStrategyRepeats });
+  }
+
   // ── mint (A4: only path to a receipt) ──
   const ttl = policy.reservationTtlMs !== undefined ? policy.reservationTtlMs : RESERVATION_TTL_MS;
   if (!Number.isFinite(ttl) || ttl <= 0) throw new BudgetLedgerError("bad-input", "policy.reservationTtlMs must be finite > 0");
@@ -705,6 +1066,14 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     digest, episodeId: policy.episodeId, taskId: request.taskId, attemptId: request.attemptId,
     action: request.action, actionId: request.actionId, grantedBy: grantedBy!, sideEffect: request.authority.sideEffect,
     reserveUsd, reserveTurns, expiresAt,
+    // A3/F1: the immutable canonical request snapshot — reserve() compares
+    // against THESE frozen values, never against a live request reference.
+    ...(request.paths !== undefined ? { paths: [...request.paths] } : {}),
+    ...(request.install !== undefined ? { install: request.install } : {}),
+    ...(request.network !== undefined ? { network: request.network } : {}),
+    ...(request.model !== undefined ? { model: request.model } : {}),
+    ...(request.toolCalls !== undefined ? { toolCalls: request.toolCalls } : {}),
+    ...(request.strategyId !== undefined ? { strategyId: request.strategyId } : {}),
   });
   return { allowed: true, denials: [], reserve, estimateRaised, expiresAt, receipt };
 }
@@ -723,6 +1092,13 @@ interface ReceiptInner {
   reserveUsd: number;
   reserveTurns: number;
   expiresAt: number;
+  // ── A3/F1: immutable canonical request snapshot bound at check time ──
+  paths?: string[];
+  install?: boolean;
+  network?: boolean;
+  model?: string;
+  toolCalls?: number;
+  strategyId?: string;
 }
 
 /**
@@ -798,8 +1174,30 @@ function duplicateKeyIn(line: string): string | undefined {
       let closed = false;
       for (; j < n; j++) {
         const c = line[j]!;
-        if (esc) { str += c; esc = false; continue; }
-        if (c === "\\") { str += "\\"; esc = true; continue; }
+        if (esc) {
+          // F13: decode escape sequences so `"\u0073econds"` and
+          // `"seconds"` collapse to the SAME key (JSON's own equivalence)
+          // instead of evading duplicate detection as raw spellings.
+          if (c === "u") {
+            const hex = line.slice(j + 1, j + 5);
+            if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+              // surrogate pairs collapse when adjacent; a lone surrogate is
+              // kept as its code point (JSON.parse still validates).
+              str += String.fromCharCode(parseInt(hex, 16));
+              j += 4;
+            } else {
+              str += "u"; // invalid escape: JSON.parse refuses anyway
+            }
+          } else if (c === "n") str += "\n";
+          else if (c === "t") str += "\t";
+          else if (c === "r") str += "\r";
+          else if (c === "b") str += "\b";
+          else if (c === "f") str += "\f";
+          else str += c; // \" \\ \/ and anything else: the char itself
+          esc = false;
+          continue;
+        }
+        if (c === "\\") { esc = true; continue; }
         if (c === '"') { closed = true; break; }
         str += c;
       }
@@ -863,8 +1261,12 @@ export class BudgetLedger {
   }
 
   /** Read the whole file, validating every line. Throws on mid-file
-   *  corruption (a torn tail is tolerated for open(); see repairTail).
-   *  duplicateIds are reported, not merged. */
+   *  corruption. F12: only an actually UNTERMINATED EOF fragment is
+   *  tolerated as a torn tail (repair may keep or cut it); a file that
+   *  ends with a newline has no tail — a malformed/schema-invalid/
+   *  duplicate-key final record is corruption and refuses, even when it
+   *  is last. (A whitespace-only trailing line is not a record; repair
+   *  cuts it.) duplicateIds are reported, not merged. */
   async read(): Promise<{ records: LedgerRecord[]; duplicateIds: string[] }> {
     let raw: string;
     try {
@@ -876,30 +1278,32 @@ export class BudgetLedger {
     const records: LedgerRecord[] = [];
     const duplicateIds: string[] = [];
     const seen = new Set<string>();
+    const endsNL = raw.endsWith("\n");
     const lines = raw.split("\n");
-    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    if (endsNL) lines.pop();
+    const isTornTail = (i: number, line: string) => i === lines.length - 1 && (!endsNL || line.trim() === "");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
       if (line.trim() === "") {
-        if (i === lines.length - 1) continue; // whitespace-only torn tail (repair will cut it)
+        if (isTornTail(i, line)) continue; // whitespace-only torn/last line (repair will cut it)
         throw new BudgetLedgerError("corrupt", `budget.jsonl: blank line ${i + 1} (records are exactly one JSON object per line)`);
       }
       const duplicated = duplicateKeyIn(line);
       if (duplicated !== undefined) {
-        if (i === lines.length - 1) continue; // ambiguous unterminated tail: repair drops it
+        if (isTornTail(i, line)) continue; // ambiguous UNTERMINATED tail: repair drops it
         throw new BudgetLedgerError("corrupt", `budget.jsonl: line ${i + 1} repeats key ${JSON.stringify(duplicated)} (refusing an ambiguous record)`);
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
       } catch {
-        if (i === lines.length - 1) continue; // torn tail — tolerated, repaired on open
+        if (isTornTail(i, line)) continue; // torn tail — tolerated, repaired on open
         throw new BudgetLedgerError("corrupt", `budget.jsonl: corrupt line ${i + 1} (mid-file corruption)`);
       }
       try {
         validateLedgerRecord(parsed);
       } catch (e) {
-        if (i === lines.length - 1) continue; // torn tail tolerated
+        if (isTornTail(i, line)) continue; // torn tail tolerated
         throw e instanceof BudgetLedgerError ? new BudgetLedgerError("corrupt", `budget.jsonl: invalid line ${i + 1}: ${(e as Error).message}`) : e;
       }
       const record = parsed as LedgerRecord;
@@ -918,7 +1322,11 @@ export class BudgetLedger {
    *   - unterminated parseable+valid tail      → terminate (KEEP the record:
    *     a fsynced append that lost only its newline is not lost money);
    *   - unparseable / schema-invalid / ambiguous duplicate-key tail → cut;
-   *   - terminated file → untouched. */
+   *   - terminated file → untouched.
+   *  F14: every repair mutation is fsynced through the file handle BEFORE
+   *  the promise resolves — a repair that returns without syncing is a
+   *  repair the crash can undo. Repair I/O failure propagates (a ledger
+   *  that cannot repair itself must not pretend otherwise). */
   async repairTail(): Promise<boolean> {
     let st;
     try {
@@ -932,29 +1340,43 @@ export class BudgetLedger {
     if (buf[buf.length - 1] === 0x0a) return false; // terminated — clean
     const lastNL = buf.lastIndexOf(0x0a);
     const tail = buf.subarray(lastNL + 1).toString("utf8");
-    if (tail.trim() === "") {
-      await truncate(this.path, lastNL + 1);
+
+    const cutTo = async (len: number): Promise<true> => {
+      const handle = await fsOpen(this.path, "r+");
+      try {
+        await handle.truncate(len);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       return true;
-    }
+    };
+
+    if (tail.trim() === "") return cutTo(lastNL + 1);
     if (duplicateKeyIn(tail) !== undefined) {
       // Ambiguous record (P4 lesson): cut it rather than terminate into history.
-      await truncate(this.path, lastNL + 1);
-      return true;
+      return cutTo(lastNL + 1);
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(tail);
     } catch {
-      await truncate(this.path, lastNL + 1);
-      return true;
+      return cutTo(lastNL + 1);
     }
     try {
       validateLedgerRecord(parsed);
     } catch {
-      await truncate(this.path, lastNL + 1);
-      return true;
+      return cutTo(lastNL + 1);
     }
-    await appendFile(this.path, "\n");
+    // Terminate the kept record — through a synced handle (F14), so the
+    // newline is durable before open() reports the repair.
+    const handle = await fsOpen(this.path, "a");
+    try {
+      await handle.appendFile("\n", "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     return true;
   }
 
@@ -980,6 +1402,7 @@ export class BudgetLedger {
    *  `seenLineIds` themselves. */
   private async append(record: LedgerRecord, clock: Clock, exclusiveLineId?: string): Promise<void> {
     const stamped: LedgerRecord = { ...record, ts: clock() };
+    Object.assign(record, stamped); // F15: the caller's returned record carries the ledger-assigned ts
     let line: string;
     try {
       line = JSON.stringify(stamped);
@@ -1011,8 +1434,11 @@ export class BudgetLedger {
   }
 
   /** Raw write INSIDE an already-serialized section (reserve/close use
-   *  this from within their enqueue — never call outside one). */
-  private async appendInside(stamped: LedgerRecord): Promise<void> {
+   *  this from within their enqueue — never call outside one).
+   *  F15: ts is stamped HERE, from the injected clock, immediately
+   *  before validation/write — the durable record can never carry 0. */
+  private async appendInside(record: LedgerRecord, clock: Clock): Promise<void> {
+    const stamped: LedgerRecord = { ...record, ts: clock() };
     let line: string;
     try {
       line = JSON.stringify(stamped);
@@ -1035,6 +1461,7 @@ export class BudgetLedger {
       throw e;
     }
     this.seenIds.add(stamped.id);
+    Object.assign(record, stamped); // F15: the returned record carries the ledger-assigned ts
   }
 
   /** The durable records, fresh from disk, folded at `now` (re-reads —
@@ -1094,11 +1521,17 @@ export class BudgetLedger {
           ...(message.usage.cacheRead !== undefined ? { cacheRead: assertInt(message.usage.cacheRead, "usage.cacheRead") } : {}),
           ...(message.usage.cacheWrite !== undefined ? { cacheWrite: assertInt(message.usage.cacheWrite, "usage.cacheWrite") } : {}),
         },
-        rates: { ...rate },
-        costUsd: computeCostUsd(message.usage, rate),
+        rates: rate ? { ...rate } : undefined,
+        costUsd: rate ? computeCostUsd(message.usage, rate) : undefined,
         priced,
         source: "session",
       };
+      // A6: strip the undefined-valued keys (JSON would drop them anyway);
+      // an unknown record carries NO costUsd/rates at all.
+      if (priced === "unknown") {
+        delete (record as Partial<SpendRecord>).rates;
+        delete (record as Partial<SpendRecord>).costUsd;
+      }
       try {
         await this.append(record, clock, entry.id);
       } catch (e) {
@@ -1169,14 +1602,21 @@ export class BudgetLedger {
         ...(spend.usage.cacheRead !== undefined ? { cacheRead: assertInt(spend.usage.cacheRead, "usage.cacheRead") } : {}),
         ...(spend.usage.cacheWrite !== undefined ? { cacheWrite: assertInt(spend.usage.cacheWrite, "usage.cacheWrite") } : {}),
       },
-      rates: { ...rate },
-      costUsd: computeCostUsd(spend.usage, rate),
+      rates: rate ? { ...rate } : undefined,
+      costUsd: rate ? computeCostUsd(spend.usage, rate) : undefined,
       priced: src.priced,
       source: "manual",
       ...(spend.note !== undefined ? { note: String(spend.note) } : {}),
     };
-    await this.append(record, clock);
-    this.seenLineIds.add(spend.lineId);
+    // A6: an unknown manual record carries NO costUsd/rates at all.
+    if (src.priced === "unknown") {
+      delete (record as Partial<SpendRecord>).rates;
+      delete (record as Partial<SpendRecord>).costUsd;
+    }
+    // F16: the once-only guard runs INSIDE the serialized queue (the
+    // pre-check above is only a fast path — two racing calls with the
+    // same lineId now produce exactly one durable record).
+    await this.append(record, clock, spend.lineId);
     return record;
   }
 
@@ -1187,7 +1627,16 @@ export class BudgetLedger {
    * inside the serialized append queue the ledger is RE-READ, the gate
    * RE-RUNS against live state, and the reservation is appended only if
    * the refreshed check still passes. The receipt must match the request
-   * it was minted for (digest-bound spec) and not be expired.
+   * it was minted for (digest-bound spec) and not be expired — expiry is
+   * re-verified INSIDE the queue (audit F5: a clock that turns evil
+   * between call time and admission can no longer slip an expired
+   * receipt past the gate).
+   *
+   * actionId uniqueness is enforced inside the queue (audit F3): an
+   * identical redelivery of a reserved actionId is an idempotent no-op
+   * success returning the existing record; a DIFFERENT spec for a used
+   * actionId is refused — a used identity never authorizes a second
+   * external-effect issue.
    *
    * There is no other way to get a reservation onto this ledger (A4).
    */
@@ -1210,31 +1659,64 @@ export class BudgetLedger {
     if (inner.grantedBy !== request.authority.grantedBy || inner.sideEffect !== request.authority.sideEffect) {
       throw new BudgetLedgerError("receipt-invalid", "reserve: authority differs from the grant the receipt was minted for");
     }
-    // D2 identity: the request must match the spec the check was passed
-    // for. The effective reservation may have been RAISED further by the
-    // caller-side fold, so equality to the original request is not
-    // required — the digest that was BOUND at check time is recomputed
-    // from the presented reservation and must match exactly.
+    // F1: the PRESENTED request must equal the frozen snapshot the receipt
+    // was minted from, field by field. The old code recomputed the digest
+    // from the live request's fields — circular, so a mutated
+    // request.estimate sailed through. Compare primitives, not references.
+    const sameOpt = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    if (
+      !sameOpt(request.paths, inner.paths) ||
+      !sameOpt(request.install, inner.install) ||
+      !sameOpt(request.network, inner.network) ||
+      !sameOpt(request.model, inner.model) ||
+      !sameOpt(request.toolCalls, inner.toolCalls) ||
+      !sameOpt(request.strategyId, inner.strategyId) ||
+      request.attemptId !== inner.attemptId
+    ) {
+      throw new BudgetLedgerError("receipt-mismatch", "reserve: request fields differ from the canonical snapshot the receipt was minted for (A3/F1)");
+    }
+    const presentedDigest = canonicalActionSpec(policy, request, { usd: inner.reserveUsd, turns: inner.reserveTurns });
+    const presentedHash = createHash("sha256").update(presentedDigest, "utf8").digest("hex");
+    if (presentedHash !== inner.digest) {
+      throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec does not match the receipt's digest (check(X)-then-act(Y) refused)");
+    }
     return this.enqueue(async (): Promise<ReservationOpenRecord> => {
+      // ── F5: expiry re-verified INSIDE the serialized queue ──
+      const admissionAt = clock();
+      if (admissionAt >= inner.expiresAt) {
+        throw new BudgetLedgerError("receipt-invalid", `reserve: receipt expired at ${inner.expiresAt} (admission time ${admissionAt}) — re-check with a live clock`);
+      }
+      // ── F3: actionId uniqueness / idempotent redelivery, inside the ──
+      // queue so two racing reserves of the same actionId serialize.
+      const prior = (await this.snapshotAt(admissionAt)).actionIds.get(request.actionId);
+      if (prior !== undefined) {
+        if (
+          prior.action === request.action &&
+          prior.reservedUsd === inner.reserveUsd &&
+          prior.reservedTurns === inner.reserveTurns &&
+          prior.receiptDigest === inner.digest
+        ) {
+          return prior; // idempotent redelivery: same spec, no second record
+        }
+        throw new BudgetLedgerError("action-used", `reserve: actionId ${request.actionId} is already reserved by ${prior.id} (a used action identity never authorizes another issue)`);
+      }
       // ── refresh-first (the queue-serialized recheck) ──
-      const fresh = await this.snapshotAt(clock());
-      const refreshed = check(policy, request, fresh, clock());
+      const fresh = await this.snapshotAt(admissionAt);
+      const refreshed = check(policy, request, fresh, admissionAt);
       if (!refreshed.allowed) {
         throw new BudgetLedgerError("denied", `reserve: refreshed gate denied — ${refreshed.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}`);
       }
       if (!refreshed.receipt) throw new BudgetLedgerError("impossible", "refreshed check allowed without minting a receipt");
-      // The refreshed spec must digest-match the presented receipt: same
-      // action AND same effective reservation (a second caller raising
-      // the estimate in the interim = a different spec = rejection).
-      const presentedDigest = canonicalActionSpec(policy, request, { usd: inner.reserveUsd, turns: inner.reserveTurns });
-      const presentedHash = createHash("sha256").update(presentedDigest, "utf8").digest("hex");
-      if (presentedHash !== inner.digest) {
-        throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec does not match the receipt's digest (check(X)-then-act(Y) refused)");
+      // F1: the refreshed EFFECTIVE reservation must equal the receipt's —
+      // a policy/estimate change between check and reserve that moves the
+      // hold amount is refused, not silently overwritten with old amounts.
+      if (refreshed.reserve.usd !== inner.reserveUsd || refreshed.reserve.turns !== inner.reserveTurns) {
+        throw new BudgetLedgerError("receipt-mismatch", `reserve: refreshed gate would reserve ${refreshed.reserve.usd}/${refreshed.reserve.turns}t but the receipt binds ${inner.reserveUsd}/${inner.reserveTurns}t (spec changed — re-check)`);
       }
       const record: ReservationOpenRecord = {
         schema: LEDGER_SCHEMA_ID,
         id: `b-${randomUUID()}`,
-        ts: 0,
+        ts: 0, // stamped by appendInside from the clock (F15)
         episodeId: policy.episodeId,
         ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
         ...(request.attemptId !== undefined ? { attemptId: request.attemptId } : {}),
@@ -1248,8 +1730,15 @@ export class BudgetLedger {
         sideEffect: inner.sideEffect,
         receiptDigest: inner.digest,
         estimateRaised: refreshed.estimateRaised,
+        // A3 durable authority trail: every checked surface field.
+        ...(inner.strategyId !== undefined ? { strategyId: inner.strategyId } : {}),
+        ...(inner.paths !== undefined ? { paths: inner.paths.map((p) => canonicalizePath(p, policy.authority?.root ?? "/") ?? p) } : {}),
+        ...(inner.install !== undefined ? { install: inner.install } : {}),
+        ...(inner.network !== undefined ? { network: inner.network } : {}),
+        ...(inner.model !== undefined ? { model: inner.model } : {}),
+        ...(inner.toolCalls !== undefined ? { toolCalls: inner.toolCalls } : {}),
       };
-      await this.appendInside(record);
+      await this.appendInside(record, clock);
       return record;
     });
   }
@@ -1275,13 +1764,13 @@ export class BudgetLedger {
       const record: ReservationCloseRecord = {
         schema: LEDGER_SCHEMA_ID,
         id: `b-${randomUUID()}`,
-        ts: 0,
+        ts: 0, // stamped by appendInside from the clock (F15)
         episodeId: open.episodeId,
         kind: "res-close",
         refId,
         reason,
       };
-      await this.appendInside(record);
+      await this.appendInside(record, clock);
       return record;
     });
   }

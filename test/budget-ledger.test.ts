@@ -41,6 +41,7 @@ import {
   computeCostUsd,
   projectLedger,
   resolveRate,
+  resolveRateSource,
   staleReservations,
   validateLedgerRecord,
   type BudgetSnapshot,
@@ -76,13 +77,15 @@ const fixedClock = (t: number) => () => t;
 
 // ───────────────────────────── pricing (D1 / A9) ────────────────────────────
 
-test("pricing: exact model beats prefix beats provider beats fallback", () => {
+test("pricing: exact model beats prefix beats provider; no match is UNKNOWN (A6, never a $0 rate)", () => {
   assert.equal(resolveRate("gpt-4o", "openai"), DEFAULT_RATES.find((e) => e.model === "gpt-4o")!.rate);
   assert.equal(resolveRate("gpt-4o-mini", "openai"), DEFAULT_RATES.find((e) => e.model === "gpt-4o-mini")!.rate);
   assert.equal(resolveRate("claude-sonnet-4-5", "anthropic"), DEFAULT_RATES.find((e) => e.model === "claude-sonnet*")!.rate);
   assert.equal(resolveRate("claude-opus-4", "anthropic"), DEFAULT_RATES.find((e) => e.model === "claude-*")!.rate);
   assert.equal(resolveRate("anything", "openrouter"), DEFAULT_RATES.find((e) => e.provider === "openrouter")!.rate);
-  assert.equal(resolveRate("anything", "local"), FALLBACK_RATE);
+  // A6: an unmatched model resolves to NO rate (the absence is meaningful;
+  // the old implicit FALLBACK_RATE zero was the audit's unknown-as-zero bug).
+  assert.equal(resolveRate("anything", "local"), undefined);
 });
 
 test("pricing: episode overrides win over the built-in table (D1)", () => {
@@ -101,12 +104,16 @@ test("pricing: cache components billed against input-inclusive usage", () => {
   assert.ok(Math.abs(computeCostUsd({ input: 100, output: 0, cacheRead: 500 }, rate) - 100 * 0.5 / 1e6) < 1e-12);
 });
 
-test("A9: zero-price fallback is visible, never silent", () => {
-  const policy = policyOf({ caps: { usd: 1e9 } }); // eslint-disable-line @typescript-eslint/no-unused-vars
-  void policy;
-  const rate = resolveRate("self-hosted-llama", "lab");
-  assert.equal(rate, FALLBACK_RATE);
-  assert.equal(computeCostUsd({ input: 1_000_000, output: 1_000_000 }, rate), 0);
+test("A6/A9: an unmatched model is the NONNUMERIC unknown state — never a silent zero", () => {
+  // The resolver applies NO rate to an unmatched model; FALLBACK_RATE only
+  // exists as an explicit operator opt-in (declared override entry), and
+  // even that is provenance "override", never an inferred price.
+  const src = resolveRateSource("self-hosted-llama", "lab");
+  assert.equal(src.rate, undefined);
+  assert.equal(src.priced, "unknown");
+  const optIn = resolveRateSource("self-hosted-llama", "lab", [{ model: "self-hosted-llama", rate: FALLBACK_RATE }]);
+  assert.equal(optIn.priced, "override");
+  assert.equal(computeCostUsd({ input: 1_000_000, output: 1_000_000 }, optIn.rate!), 0);
 });
 
 // ─────────────────────── schema validation (closed set) ─────────────────────
@@ -168,7 +175,7 @@ test("A5: a poisoned instance refuses further appends (reopen required)", async 
   await chmod(path, 0o644);
   const reopened = await BudgetLedger.open(path);
   const snap = await reopened.snapshotAt(0);
-  assert.equal(snap.fallbackPricedCount, 0);
+  assert.equal(snap.unpricedCount, 0);
   assert.equal((await reopened.read()).records.length, 1); // only m-1 is durable
 });
 
@@ -280,9 +287,11 @@ test("A7: projection is deterministic — same records, identical snapshot", () 
   const b = projectLedger(records, 50);
   assert.equal(JSON.stringify([...a.compartments]), JSON.stringify([...b.compartments]));
   assert.equal(JSON.stringify(a.openReservations), JSON.stringify(b.openReservations));
-  // at/after expiry the hold vanishes from the gate's view
+  // at/after expiry the HOLD REMAINS (A2/F3: an open reservation never
+  // evaporates — expiry only blocks NEW admission), and its durable claim
+  // survives for staleReservations.
   const expired = projectLedger(records, 100);
-  assert.equal(expired.openReservations.length, 0);
+  assert.equal(expired.openReservations.length, 1);
   assert.deepEqual(staleReservations(records, 99).map((r) => r.id), ["r1"]);
 });
 
@@ -290,7 +299,7 @@ test("A8: spend lineIds fold exactly once; compartment chain charges attempt, ta
   const spend = (lineId: string, cost: number, id: string): LedgerRecord => ({
     schema: LEDGER_SCHEMA_ID, id, ts: 1, episodeId: "ep", taskId: "t", attemptId: "a",
     kind: "spend", lineId, model: "m", provider: "p", usage: { input: 1, output: 1 },
-    rates: { input: 0, output: 0 }, costUsd: cost, priced: "fallback", source: "session",
+    rates: { input: 0, output: 0 }, costUsd: cost, priced: "table", source: "session",
   });
   const snap = projectLedger([spend("e-1", 0.4, "s1"), spend("e-1", 0.4, "s2"), spend("e-2", 0.6, "s3")], 0);
   const episode = snap.compartments.get(compartmentKey({ episodeId: "ep" }))!;
@@ -300,7 +309,7 @@ test("A8: spend lineIds fold exactly once; compartment chain charges attempt, ta
   assert.equal(task.consumedUsd, 1.0);
   assert.equal(attempt.consumedUsd, 1.0);
   assert.equal(episode.consumedTurns, 2);
-  assert.equal(snap.fallbackPricedCount, 2);
+  assert.equal(snap.unpricedCount, 0);
 });
 
 // ────────────────────────────── the gate (A1) ───────────────────────────────
@@ -319,7 +328,7 @@ test("A1: every cap class denies with its code", () => {
     model: "m", provider: "p", usage: { input: 1, output: 1 }, rates: { input: 1, output: 1 },
     costUsd: 99.5, priced: "table", source: "session",
   }] as unknown as LedgerRecord[], 0);
-  assert.ok(denialCodes(mk({ caps: { usd: 100 } }, spentEpisode)).includes("episode-budget-exceeded"));
+  assert.ok(denialCodes(mk({ caps: { usd: 99.6 } }, spentEpisode)).includes("episode-budget-exceeded"));
 
   // episode turns
   const turnsSnap = projectLedger(Array.from({ length: 996 }, (_, i) => ({
@@ -327,7 +336,7 @@ test("A1: every cap class denies with its code", () => {
     model: "m", provider: "p", usage: { input: 1, output: 1 }, rates: { input: 0, output: 0 },
     costUsd: 0, priced: "table", source: "session",
   })) as unknown as LedgerRecord[], 0);
-  assert.ok(denialCodes(mk({ caps: { usd: undefined, turns: 1000 } }, turnsSnap)).includes("episode-turns-exceeded"));
+  assert.ok(denialCodes(mk({ caps: { usd: undefined, turns: 996 } }, turnsSnap)).includes("episode-turns-exceeded"));
 
   // episode wallclock
   const clockSnap = projectLedger([{ schema: LEDGER_SCHEMA_ID, id: "w", ts: 1, episodeId: "ep-1", taskId: "t", kind: "wallclock", seconds: 120 }] as unknown as LedgerRecord[], 0);
@@ -366,20 +375,25 @@ test("A1: every cap class denies with its code", () => {
   assert.ok(denialCodes(mk({}, EMPTY, { estimate: { turns: 1.5 } })).includes("estimate-invalid"));
 });
 
-test("D2: reservation floor = attempt cap; caller may raise, never lower; raise is flagged", () => {
+test("D2: reservation floor = class default; caller may raise, never lower; cap below default is a denial", () => {
   const p = policyOf({ perAttempt: { usd: 2, turns: 8 } });
   const noEstimate = check(p, requestOf(), EMPTY, 5);
   assert.equal(noEstimate.allowed, true);
-  assert.deepEqual(noEstimate.reserve, { usd: 2, turns: 8 });
+  assert.deepEqual(noEstimate.reserve, { usd: 0.25, turns: 1 });
   assert.equal(noEstimate.estimateRaised, true, "defaulting up from nothing counts as a raise decision");
 
-  const lower = check(p, requestOf({ estimate: { usd: 0.5, turns: 2 } }), EMPTY, 5);
-  assert.deepEqual(lower.reserve, { usd: 2, turns: 8 }, "a caller lowering below the floor is clamped up");
+  const lower = check(p, requestOf({ estimate: { usd: 0.1, turns: 0 } }), EMPTY, 5);
+  assert.deepEqual(lower.reserve, { usd: 0.25, turns: 1 }, "a caller lowering below the class default is clamped up (raise-only)");
   assert.equal(lower.estimateRaised, true);
 
-  const higher = check(p, requestOf({ estimate: { usd: 3, turns: 8 } }), EMPTY, 5);
-  assert.deepEqual(higher.reserve, { usd: 3, turns: 8 });
+  const higher = check(p, requestOf({ estimate: { usd: 0.5, turns: 3 } }), EMPTY, 5);
+  assert.deepEqual(higher.reserve, { usd: 0.5, turns: 3 });
   assert.equal(higher.estimateRaised, false);
+
+  // D2 (F20 fix): a cap BELOW the class default is a DENIAL — never a
+  // silent redefinition of the estimate.
+  const tiny = check(policyOf({ perAttempt: { usd: 0.1, turns: 1 } }), requestOf(), EMPTY, 5);
+  assert.ok(denialCodes(tiny).includes("reserve-default-exceeds-cap"));
 });
 
 test("A4/D3: the receipt is opaque, spec-bound, expiry-enforced", () => {
@@ -435,6 +449,7 @@ test("reserve: receipt → durable res-open with the A3 authority trail", async 
   assert.ok(checked.allowed);
   const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(now) });
   assert.equal(rec.kind, "res-open");
+  assert.equal(rec.ts, now, "F15: the durable (and returned) ts is the injected clock, never 0");
   assert.equal(rec.grantedBy, AUTH.grantedBy);
   assert.equal(rec.sideEffect, "none");
   assert.match(rec.receiptDigest, /^[0-9a-f]{64}$/);
@@ -449,12 +464,13 @@ test("reserve: receipt → durable res-open with the A3 authority trail", async 
   // A2: settle it, then the hold is gone
   const closed = await ledger.closeReservation(rec.id, "settled", { clock: fixedClock(now + 5) });
   assert.equal(closed.reason, "settled");
+  assert.equal(closed.ts, now + 5, "F15: res-close ts from the injected clock (audit F15)");
   const after = await ledger.snapshotAt(now);
   assert.equal((after.compartments.get(compartmentKey({ episodeId: "ep-1", taskId: "t1" })) ?? { reservedUsd: 0 }).reservedUsd, 0);
   assert.deepEqual(staleReservations((await ledger.read()).records, now), []);
 });
 
-test("A2: double-close is refused; unknown ref refused; expired reservation self-releases from the gate view", async () => {
+test("A2: double-close refused; expired hold NEVER evaporates (A2/F2) — expiry blocks only NEW admission; terminal close required", async () => {
   const dir = await freshDir();
   const ledger = await openLedger(dir);
   const p = policyOf({ reservationTtlMs: 100 });
@@ -467,23 +483,28 @@ test("A2: double-close is refused; unknown ref refused; expired reservation self
   await assert.rejects(ledger.closeReservation("never-existed", "abandoned"), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
   await assert.rejects(ledger.closeReservation(rec.id, "bogus" as never), (e: unknown) => (e as BudgetLedgerError).code === "bad-input");
 
-  // expiry: after TTL the hold stops constraining without any close record
-  const p2 = policyOf({ reservationTtlMs: 50, caps: { usd: 1.5 } });
+  // F2 (audit): past receipt/hold expiry the DURABLE hold remains — it only
+  // stops NEW admission (receipt expiry in reserve()); an open reservation
+  // is removed exclusively by an evidence-backed terminal close.
+  const p2 = policyOf({ reservationTtlMs: 50, caps: { usd: 0.45 } });
   const req2 = requestOf({ actionId: "act-2" });
   const c2 = check(p2, req2, await ledger.snapshotAt(2000), 2000);
   const rec2 = await ledger.reserve(p2, req2, c2.receipt!, { clock: fixedClock(2000) });
-  const liveAt2010 = await ledger.snapshotAt(2010);
-  assert.ok(liveAt2010.openReservations.some((r) => r.id === rec2.id));
   const after2050 = await ledger.snapshotAt(2100);
-  assert.ok(!after2050.openReservations.some((r) => r.id === rec2.id), "expired hold invisible to the gate");
-  // …and closing an expired reservation is refused (nothing to release)
-  await assert.rejects(ledger.closeReservation(rec2.id, "expired"), (e: unknown) => (e as BudgetLedgerError).code === "bad-ref");
+  assert.ok(after2050.openReservations.some((r) => r.id === rec2.id), "expired-but-open hold still charges the caps (F2)");
+  // and it denies NEW admission while it stands: 0.25 hold + 0.25 new floor > 0.5
+  const blocked = check(p2, requestOf({ actionId: "act-3" }), after2050, 2100);
+  assert.ok(denialCodes(blocked).includes("episode-budget-exceeded"), `expired hold still constrains the gate, got ${denialCodes(blocked).join(",") || "allowed"}`);
+  // terminal close is the only way out — and it works even past expiry
+  await ledger.closeReservation(rec2.id, "abandoned", { clock: fixedClock(2200) });
+  const cleared = await ledger.snapshotAt(2200);
+  assert.ok(!cleared.openReservations.some((r) => r.id === rec2.id));
 });
 
 test("A1: the reservation is what makes over-spend impossible — concurrent spawns cannot both fit", async () => {
   const dir = await freshDir();
   const ledger = await openLedger(dir);
-  const p = policyOf({ caps: { usd: 1.5, turns: 100 }, perAttempt: { usd: 1, turns: 1 } });
+  const p = policyOf({ caps: { usd: 0.4, turns: 100 }, perAttempt: { usd: 0.4, turns: 1 } });
   const now = 1000;
   // Two spawns checked against the SAME snapshot both pass check()…
   const snap = await ledger.snapshotAt(now);
@@ -584,7 +605,7 @@ test("ingestSession: only assistant-usage entries ledger; zoo tolerated; idempot
   assert.equal(first.length, 1);
   assert.equal(first[0]!.lineId, "e-2");
   assert.equal(first[0]!.priced, "table");
-  assert.ok(first[0]!.costUsd > 0);
+  assert.ok((first[0]!.costUsd ?? 0) > 0);
 
   // re-ingest: true no-op, even in a second instance over the same file
   const second = await ledger.ingestSession(sessionPath, scope, { clock: fixedClock(5001) });
@@ -608,20 +629,23 @@ test("A9: unpriced ingest path refuses loud (missing model/provider); frozen rat
     ledger.ingestEntries([{ id: "e-y", message: { role: "assistant", model: "", provider: "openai", usage: { input: 1, output: 1 } } }], scope),
     (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
   );
-  // self-hosted model with no table match: fallback-priced but VISIBLE
+  // self-hosted model with no table match: the NONNUMERIC unknown state
+  // (A6) — no costUsd, no rates, counted in unpricedCount, USD admission
+  // blocked while any cap exists (never a silent $0).
   const recs = await ledger.ingestEntries(
     [{ id: "e-z", message: { role: "assistant", model: "llama-lab", provider: "lab", usage: { input: 10, output: 2 } } }],
     scope,
   );
-  assert.equal(recs[0]!.priced, "fallback");
-  assert.equal(recs[0]!.costUsd, 0);
+  assert.equal(recs[0]!.priced, "unknown");
+  assert.equal(recs[0]!.costUsd, undefined);
   const snap = await ledger.snapshotAt(0);
-  assert.equal(snap.fallbackPricedCount, 1);
+  assert.equal(snap.unpricedCount, 1);
 
-  // frozen at ingest (D1): a later override never reprices history
-  const frozen = (await ledger.read()).records[0] as { rates: object; costUsd: number };
-  assert.deepEqual(frozen.rates, { input: 0, output: 0 });
-  assert.equal(frozen.costUsd, 0);
+  // frozen at ingest (D1): a later override never reprices history — the
+  // record durably carries NO rates/cost even after the table gains an entry.
+  const frozen = (await ledger.read()).records[0] as { rates?: unknown; costUsd?: unknown };
+  assert.equal(frozen.rates, undefined);
+  assert.equal(frozen.costUsd, undefined);
 });
 
 test("manual spend: dup lineId refused in-instance and cross-instance; note persisted", async () => {
@@ -674,13 +698,13 @@ test("mutation sweep: every DenialCode is reachable, and allowed is iff denials 
 
   const cases: { want: string; request: GateRequest; policy?: GatePolicy }[] = [
     { want: "episode-budget-exceeded", request: requestOf({ actionId: "x1" }), policy: { ...base } },
-    { want: "episode-turns-exceeded", request: requestOf({ actionId: "x2" }), policy: { ...base, caps: { usd: 1000, turns: 8 } } }, // 3 consumed + 2 reserved + 4 floor > 8
+    { want: "episode-turns-exceeded", request: requestOf({ actionId: "x2" }), policy: { ...base, caps: { usd: 1000, turns: 5 } } }, // 3 consumed + 2 reserved + 1 floor > 5
     { want: "episode-wallclock-exceeded", request: requestOf({ actionId: "x3" }), policy: { ...base, caps: { usd: 1000, turns: 1000, wallclockS: 99 } } },
-    { want: "task-budget-exceeded", request: requestOf({ actionId: "x4", taskId: "tA" }), policy: { ...base, caps: { usd: 1000 } } },
-    { want: "task-turns-exceeded", request: requestOf({ actionId: "x5", taskId: "tA" }), policy: { ...base, caps: { usd: 1000, turns: 1000 }, perTask: { turns: 6 } } },
+    { want: "task-budget-exceeded", request: requestOf({ actionId: "x4", taskId: "tA" }), policy: { ...base, caps: { usd: 1000 }, perTask: { usd: 1.8, turns: 6, attempts: 2 } } }, // 1.2 + 0.5 reserved + 0.25 floor > 1.8
+    { want: "task-turns-exceeded", request: requestOf({ actionId: "x5", taskId: "tA" }), policy: { ...base, caps: { usd: 1000, turns: 1000 }, perTask: { turns: 4 } } }, // 2 consumed + 2 reserved + 1 floor > 4
     { want: "task-attempts-exhausted", request: requestOf({ actionId: "x6", taskId: "tA" }), policy: { ...base, caps: { usd: 1000 }, perTask: { attempts: 1 } } },
     { want: "attempt-budget-exceeded", request: requestOf({ actionId: "x7", taskId: "tA", attemptId: "aA" }), policy: { ...base, caps: { usd: 1000 }, perAttempt: { ...base.perAttempt, usd: 1 } } },
-    { want: "attempt-turns-exceeded", request: requestOf({ actionId: "x8", taskId: "tA", attemptId: "aA" }), policy: { ...base, caps: { usd: 1000 }, perAttempt: { usd: 1000, turns: 4 } } },
+    { want: "attempt-turns-exceeded", request: requestOf({ actionId: "x8", taskId: "tA", attemptId: "aA" }), policy: { ...base, caps: { usd: 1000 }, perAttempt: { usd: 1000, turns: 1 } } }, // 1 consumed + 1 floor > 1
     { want: "attempt-wallclock-exceeded", request: requestOf({ actionId: "x9", taskId: "tA", attemptId: "aA" }), policy: { ...base, caps: { usd: 1000 }, perAttempt: { ...base.perAttempt, wallclockS: 30 } } },
     { want: "external-not-allowed", request: requestOf({ actionId: "x10", authority: { grantedBy: "u", sideEffect: "external" } }), policy: { ...base, caps: { usd: 1000, turns: 1000, wallclockS: 1000 } } },
     { want: "authority-missing", request: requestOf({ actionId: "x11", authority: { grantedBy: "", sideEffect: "none" } }) },
