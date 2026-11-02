@@ -53,6 +53,15 @@ tre.json
 .build.out
 # measurement scratch space for guard audits — never in git.
 .audit-tmp/
+# P7 R4–R8 audit-cycle scratch (adversarial repro harnesses, test/build logs,
+# leaked-fixture cleanup) — repros are cited by path in docs/11 §11.1 but the
+# scripts themselves are workspace scratch, not project history.
+.tre/tmp/
+# Audit verification harness scratch (e.g. p7-audit-verify.ts) — same policy.
+.tre/audit/
+# Raw auditor transcript recovery dumps (KB-scale raw thinking logs; the
+# consolidated reports audit-cycle*-resolutions/-review.md ARE committed).
+.tre/audit-cycle*recovered.md
 
 # P3b audit-cycle raw transcripts (128KB reasoning dumps; prompts + final verdicts live in docs/audits/)
 docs/audits/audit-p3b-c[0-9].txt

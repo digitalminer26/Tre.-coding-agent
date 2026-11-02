@@ -467,7 +467,7 @@ test("F6: a resolved 'failed' outcome is negative evidence — never blocks reco
 test("F3: confirmStopped of an OLD tuple keeps a newer tuple's live claim (generation, not ts, decides ownership)", async (t) => {
   const { root, dir, session } = await fixture();
   // stale tuple a1: spawned ok long ago, pid since dead (machine reboot)
-  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", ts: 1_000_000, pid: 999991 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", ts: 1_000_000, pid: 999991, pgid: 999991, detached: true });
   // newer tuple a2: spawned ok by a supervisor that has since gone away,
   // but whose worker (a real sleep) is STILL alive.
   const runner1 = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(60), probes: { pidAlive: async (p: number) => (p === 999991 ? { running: false, sameUid: false } : undefined) } });
@@ -630,8 +630,12 @@ test("Fg: concurrent AttemptRunner.open() for the same episode yields ONE instan
 
 /** Accurate same-uid liveness probe (kill(pid,0)): running iff ESRCH
  *  is NOT returned. Deterministic where `ps` is blocked/inconclusive. */
-const killProbe = async (p: number): Promise<PidStatus> => {
-  try { process.kill(p, 0); return { running: true, sameUid: true }; } catch { return { running: false, sameUid: true }; }
+// H1-m5 (audit): I3-faithful — ONLY ESRCH is deterministic-negative.
+// Any other kill() error (e.g. EPERM on a foreign-uid process) is
+// INCONCLUSIVE (undefined), matching .tre/audit/p7-audit-verify.ts.
+const killProbe = async (p: number): Promise<PidStatus | undefined> => {
+  try { process.kill(p, 0); return { running: true, sameUid: true }; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH" ? { running: false, sameUid: true } : undefined; }
 };
 
 // C1-F1(a): tuple state selected by generation + append order — a
@@ -678,7 +682,7 @@ test("C1-F2: legacy gen-0 — confirmation of a dead old tuple never supersedes 
   const alivePid = child.pid!;
   child.unref();
   t.after(() => { try { process.kill(-alivePid, "SIGKILL"); } catch { /* gone */ } });
-  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", ts: 1, pid: 999991 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", ts: 1, pid: 999991, pgid: 999991, detached: true });
   await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", ts: 2, pid: alivePid, pgid: alivePid });
   const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
   t.after(() => runner.close(true));
@@ -733,13 +737,13 @@ test("C1-F3: close() refuses during an active AND a queued spawn transaction; su
 // stale failed record + hint clear over the live gen-2 worker.
 test("C1-F4: confirmStopped serializes with resume — stale confirmation cannot clobber a live same-attempt resume or its hint", async (t) => {
   const { root, dir, session } = await fixture();
-  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991, detached: true });
   let spawnCount = 0;
   const countingSpawner = { kind: "c1-f4", spawn: () => { spawnCount += 1; return { command: "/bin/sleep", args: ["60"] }; } };
   // gate the dead-PID probe so the confirmation pauses INSIDE its check
   let releaseProbe!: () => void;
   const gate = new Promise<void>((res) => { releaseProbe = res; });
-  const gatedProbe = async (p: number): Promise<PidStatus> => {
+  const gatedProbe = async (p: number): Promise<PidStatus | undefined> => {
     if (p === 999991) await gate;
     return killProbe(p);
   };
@@ -871,13 +875,23 @@ test("C2-B: unresolved intent without journalled pgid — confirm refuses unless
   );
 
   // Same crash, but the crash WROTE a pid (e.g. a later tool stamped
-  // it) and no pgid: the hypothetical-group check decides. Use a REAL
-  // process that shares its parent group: killing the leader leaves
-  // the group alive (kill(pid,0) would say 'running', but the audit
-  // case is leader-dead/group-uncertain) — so instead use a dead pid
-  // whose ESRCH-group proves the only consistent group story: confirm
+  // it) and no pgid: the hypothetical-group check decides. G3 (P7
+  // audit): the check is only SOUND when the journal evidences the
+  // detached spawn mode (pgid===pid only holds for a detached leader) —
+  // without that evidence confirm REFUSES (the group identity is
+  // unknown: a non-detached leader inherits a foreign group). With
+  // journalled detached:true + a dead leader whose kill(-pid,0) answers
+  // ESRCH, the only consistent group story is no-survivors: confirm
   // proceeds.
   await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: null, pid: 999996 });
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a2", "pid dead but spawn mode never recorded"),
+    (e: RunnerError) => e.code === "ownership-fence" && /detached/.test(e.message),
+    "G3: no detached evidence ⇒ the hypothetical pgid===pid group is unsound — refuse",
+  );
+  // Stamp the spawn mode into the tuple's journal, then confirm: pid
+  // 999996 ESRCH; kill(-999996,0) ESRCH too — no group survives.
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: null, pid: 999996, detached: true });
   const rec = await runner.confirmStopped(task(session), "t1-a2", "pid 999996 ESRCH; kill(-999996,0) ESRCH too — no group survives");
   assert.equal(rec.spawnOutcome, "failed");
   assert.equal(rec.confirmation, true);
@@ -886,7 +900,7 @@ test("C2-B: unresolved intent without journalled pgid — confirm refuses unless
 // C2-D (cycle-2 audit): a NON-detached child shares a FOREIGN group.
 // Its exit disproves only the leader — stop() must report stopped:false
 // (group death is not possessed), never the old stopped:true claim.
-test("C2-D: non-detached stop() reports stopped:false — leader exit is not group death", async (t) => {
+test("C2-D (G1): detached:false violates the group-leader contract — spawn refuses, no legacy survivor in new journals", async (t) => {
   const { root, session } = await fixture();
   const runner = await AttemptRunner.open({
     root, episodeId: "ep-p7",
@@ -894,18 +908,921 @@ test("C2-D: non-detached stop() reports stopped:false — leader exit is not gro
     probes: { pidAlive: killProbe },
   });
   t.after(() => { runner.close(true); });
-  const h = await runner.run(task(session));
-  assert.equal(h.detached, false, "handle reports the actual spawn mode");
-  const res = await runner.stop(h);
-  assert.equal(res.stopped, false, "D: no private group exists to sweep — group death is NOT claimed");
-  assert.equal(res.code, null, "ended by signal");
-  // the ok resolve stamped the mode for the audit trail
-  const recs = (await runner.records()).filter((r) => r.kind === "attempt" && r.spawnOutcome === "ok") as AttemptRecord[];
-  assert.equal(recs[recs.length - 1]!.detached, false, "spawn mode journalled on the ok resolve");
+  // G1: every managed worker MUST lead its own process group so stop()
+  // can sweep the whole tree — the contract is enforced at validateSpawnSpec.
+  await assert.rejects(
+    runner.run(task(session)),
+    (e: RunnerError) => e.code === "spawn-failed" && /detached/.test(e.message),
+    "detached:false is rejected before the process is created",
+  );
+  // the pre-spawn intent resolved `failed` — nothing parks in the journal
+  const recs = (await runner.records()).filter((r) => r.kind === "attempt") as AttemptRecord[];
+  assert.equal(recs.length, 2, "intent + failed resolve");
+  assert.equal(recs[recs.length - 1]!.spawnOutcome, "failed");
+});
+
+// G1 survivor class: a LEGACY journal (pre-contract) whose ok tuple says
+// detached:false with no pgid. The child's waitpid-class exit disproves
+// only the leader — the inherited group may hold forked survivors and no
+// group-death evidence can ever exist. stop() reports the honest verdict;
+// reconcile parks; run() on the same task refuses ACROSS instances.
+test("G1 survivor: legacy non-detached ok tuple keeps ownership after leader exit — reconcile/run/confirm all refuse", async (t) => {
+  const { root, dir, session } = await fixture();
+  const runner = await AttemptRunner.open({
+    root, episodeId: "ep-p7",
+    spawner: { kind: "sleep30", spawn: () => ({ command: "/bin/sleep", args: ["30"] }) },
+    probes: { pidAlive: killProbe },
+  });
+  t.after(() => { runner.close(true); }); // idempotent
+  const h = await runner.run(task(session)); // spawn normally (detached, gen >= 1)
+  const pid = h.pid;
+  await runner.stop(h); // TERM the whole group; sleep dies with it
+  await runner.waitForExit(h);
+  // Release the exclusive journal writer so a second supervisor can open.
+  await runner.close(true);
+  // Rewrite the journal's ok tuple into the LEGACY non-detached shape:
+  // detached:false, pgid stripped — exactly what a pre-contract supervisor
+  // journalled for a child that shared its parent's group.
+  const j = await DecisionJournal.forEpisode(dir);
+  const recs = (await j.read()).records.filter((r) => r.kind === "attempt" && r.attemptId === h.attemptId) as AttemptRecord[];
+  const ok = recs.find((r) => r.spawnOutcome === "ok")!;
+  await j.append({ ...ok, id: newDecisionId(), ts: Date.now(), detached: false, pgid: undefined });
+  // reconcile on the SAME instance still sees the exited child; a FRESH
+  // supervisor (journal-derived classification, reopen-proof) must park
+  // even though the leader probe answers dead.
+  const runner2 = await AttemptRunner.open({
+    root, episodeId: "ep-p7",
+    spawner: exitSpawner(0),
+    probes: { pidAlive: async (p: number) => p === pid ? { running: false, sameUid: true } : undefined },
+  });
+  t.after(() => runner2.close(true));
+  const rec2 = await runner2.reconcile(task(session));
+  assert.equal(rec2.decision.action, "park", "G1: dead leader + survivor-class tuple parks, never 'spawn'");
+  await assert.rejects(
+    runner2.run(task(session)),
+    (e: RunnerError) => e.code === "prior-attempt-unresolved" && /detached:false asserts an inherited foreign group/.test(e.message),
+    "G1: the fence holds across reopen for survivor-class tuples (R5: message quotes the offending record)",
+  );
+  // confirmStopped refuses too: leader death is not group death for a
+  // tuple whose journal says the group was INHERITED.
+  await assert.rejects(
+    runner2.confirmStopped(task(session), h.attemptId, "leader pid ESRCH"),
+    (e: RunnerError) => e.code === "ownership-fence" && /NON-detached/.test(e.message),
+    "G1: no confirmation over a survivor-class tuple",
+  );
+});
+
+// Follow-up audit: durable recovery must distinguish successive process
+// spawns under resume()'s stable attemptId, not just tuple-wide history.
+for (const generated of [false, true]) {
+  test(`G1 survivor cannot be superseded (${generated ? "generation" : "legacy"} ordering)`, async (t) => {
+    const { root, dir, session } = await fixture();
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, detached: false, ...(generated ? { spawnGen: 1 } : {}) });
+    await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, ...(generated ? { spawnGen: 2 } : {}) });
+    const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+    t.after(() => runner.close(true));
+    const rec = await runner.reconcile(task(session));
+    assert.equal(rec.decision.action, "park");
+    assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1" && v.ownership === true));
+    assert.ok(!rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a1"));
+    await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+    await assert.rejects(runner.resume(task(session), "t1-a1"), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+  });
+
+  for (const detached of [undefined, false, true]) {
+    test(`G3 resume uses current mode, not old detached evidence (${generated ? "generation" : "legacy"}, mode=${detached})`, async (t) => {
+      const { root, dir, session } = await fixture();
+      await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true, ...(generated ? { spawnGen: 1 } : {}) });
+      await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: null, pid: 999992, ...(detached === undefined ? {} : { detached }), ...(generated ? { spawnGen: 2 } : {}) });
+      const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+      t.after(() => runner.close(true));
+      if (detached === true) {
+        const rec = await runner.confirmStopped(task(session), "t1-a1", "current detached leader and private group ESRCH");
+        assert.equal(rec.confirmation, true);
+        // H2-6 (haiku cycle 2): the true branch demonstrates the PASS
+        // side of the contract (current detached evidence confirms AND
+        // releases the fence) — assert the release, not just the record.
+        const after = await runner.reconcile(task(session));
+        assert.equal(after.decision.action, "spawn", "confirmation released the tuple — fence open");
+        assert.deepEqual(after.ownership.blocking.map((v) => v.record.attemptId).filter((id) => id === "t1-a1"), [], "a1 no longer blocking");
+      } else {
+        await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "only leader death known"), (e: RunnerError) => e.code === "ownership-fence");
+        assert.equal((await runner.reconcile(task(session))).decision.action, "park");
+      }
+    });
+  }
+
+  test(`G2 historical ok cannot authenticate an unresolved resume (${generated ? "generation" : "legacy"})`, async (t) => {
+    const { root, dir, session } = await fixture();
+    // a1's only successful generation predates a2. Its unobserved
+    // later resume must not borrow that success for a new anchor.
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true, ...(generated ? { spawnGen: 1 } : {}) });
+    await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, ...(generated ? { spawnGen: 2 } : {}) });
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: null, pid: 999994, pgid: 999994, detached: true, ...(generated ? { spawnGen: 4 } : {}) });
+    const runner = await openRunner(root, async (pid) => pid === 999992 ? undefined : { running: false, sameUid: true });
+    t.after(() => runner.close(true));
+    await runner.confirmStopped(task(session), "t1-a1", "current resume group ESRCH, no ok observed");
+    const rec = await runner.reconcile(task(session));
+    assert.equal(rec.decision.action, "park");
+    assert.deepEqual(rec.ownership.blocking.map((v) => v.record.attemptId), ["t1-a2"]);
+    assert.ok(!rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a2"));
+    await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+  });
+
+  test(`G2 confirmed never-ok fresh attempt cannot supersede an inconclusive owner (${generated ? "generation" : "legacy"})`, async (t) => {
+    const { root, dir, session } = await fixture();
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, ...(generated ? { spawnGen: 1 } : {}) });
+    await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: null, pid: 999992, pgid: 999992, ...(generated ? { spawnGen: 2 } : {}) });
+    const runner = await openRunner(root, async (pid) => pid === 999991 ? undefined : { running: false, sameUid: true });
+    t.after(() => runner.close(true));
+    await runner.confirmStopped(task(session), "t1-a2", "group ESRCH; spawn was never observed ok");
+    const rec = await runner.reconcile(task(session));
+    assert.equal(rec.decision.action, "park");
+    assert.deepEqual(rec.ownership.blocking.map((v) => v.record.attemptId), ["t1-a1"]);
+  });
+}
+
+for (const later of ["resume", "confirmation"] as const) {
+  test(`G1 historical survivor survives a later ${later} in the same tuple`, async (t) => {
+    const { root, dir, session } = await fixture();
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, detached: false, spawnGen: 1 });
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: later === "resume" ? "ok" : "failed", pid: 999992, pgid: 999992, detached: true, spawnGen: 2, ...(later === "confirmation" ? { confirmation: true } : {}) });
+    const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+    t.after(() => runner.close(true));
+    assert.equal((await runner.reconcile(task(session))).decision.action, "park");
+    await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+    await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "later detached group gone"), (e: RunnerError) => e.code === "ownership-fence");
+  });
+}
+
+test("G2 legacy success anchor does NOT supersede an inconclusive older tuple (H2-3 strict doctrine)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: null, pid: 999993, pgid: 999993, detached: true });
+  const runner = await openRunner(root, async (pid) => pid === 999992 ? undefined : { running: false, sameUid: true });
+  t.after(() => runner.close(true));
+  await runner.confirmStopped(task(session), "t1-a1", "current unobserved resume group gone");
+  const rec = await runner.reconcile(task(session));
+  // H2-3 (haiku cycle 2): a1's unresolved resume confirms (its group is
+  // journalled + ESRCH), but a2's liveness probe is INCONCLUSIVE —
+  // ordering releases only DETERMINISTICALLY dead tuples. The previous
+  // expectation (a2 superseded by a1's success anchor ⇒ spawn) was the
+  // fail-open the finding names: a silently unproven owner released.
+  assert.equal(rec.decision.action, "park", "inconclusive a2 stays protected — park, never blind-spawn");
+  assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a2"), "the inconclusive a2 remains in blocking");
+  assert.ok(!rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a2"), "a2 is NOT superseded on inconclusive liveness");
+});
+
+test("confirmation refuses foreign-UID running pid evidence", async (t) => {
+  const { root, dir, session } = await fixture();
+  // H3-4 (audit cycle 12): seed with journalled group identity
+  // (detached:true + pgid — 999991 is dead so its private group is
+  // reaped) so the tuple is NOT survivor-class: the refusal below then
+  // provably comes from the foreign-UID probe logic, not from the
+  // unknown-group gate masking it.
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true });
+  const runner = await openRunner(root, probe({ running: true, sameUid: false }));
+  t.after(() => runner.close(true));
+  assert.equal((await runner.reconcile(task(session))).decision.action, "park");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "foreign uid is not negative evidence"), (e: RunnerError) => e.code === "ownership-fence" && /FOREIGN uid/.test(e.message), "must refuse as foreign-uid RUNNING, not as a generic inconclusive");
+});
+
+test("detached pid-only ok record retains its surviving real process group", async (t) => {
+  const { root, dir, session } = await fixture();
+  const marker = join(dir, "descendant.pid");
+  const child = procSpawn("/bin/sh", ["-c", `sleep 30 & echo $! > '${marker}'; exit 0`], { detached: true, stdio: "ignore" });
+  let survivor: number | undefined;
+  let runner: AttemptRunner | undefined;
+  t.after(() => {
+    if (survivor) { try { process.kill(survivor, "SIGKILL"); } catch { /* gone */ } }
+    if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* gone */ } }
+    runner?.close(true);
+  });
+  await new Promise<void>((resolve, reject) => { child.once("exit", () => resolve()); child.once("error", reject); });
+  const { readFile } = await import("node:fs/promises");
+  survivor = Number((await readFile(marker, "utf8")).trim());
+  assert.equal((await killProbe(survivor))?.running, true);
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: child.pid, detached: true });
+  runner = await openRunner(root, killProbe);
+  assert.equal((await runner.reconcile(task(session))).decision.action, "park");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running");
+  await assert.rejects(runner.resume(task(session), "t1-a1"), (e: RunnerError) => e.code === "prior-attempt-running");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "only leader is gone"), (e: RunnerError) => e.code === "ownership-fence");
+});
+
+// H1-M1/M3 (haiku cycle 1): a LIVE historical ok worker recorded under
+// the same tuple as a later dead resume must be DISCOVERED (every tuple
+// pid gets probed, not just latest) and fence run()/confirmStopped().
+test("H1-M1: live historical ok pid hidden behind a later dead resume is discovered and blocks run/confirm", async (t) => {
+  const { root, dir, session } = await fixture();
+  const survivor = procSpawn("/bin/sleep", ["30"], { stdio: "ignore" });
+  const spid = survivor.pid!;
+  t.after(() => { try { process.kill(spid, "SIGKILL"); } catch { /* gone */ } });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: spid });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true, spawnGen: 2 });
+  const runner = await openRunner(root, killProbe);
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "the surviving historical worker is discovered even though the LATEST record's group is reaped");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "latest resume group ESRCH"), (e: RunnerError) => e.code === "ownership-fence", "confirm must resolve EVERY journalled pid — the survivor is running");
+});
+
+// H1-M3 (haiku cycle 1): a historical DETACHED group that still has
+// members while the latest record's own group is reaped — confirmation
+// refuses on the unproven historical group (the cycle-2 guard, live-tested).
+test("H1-M3: historical detached group alive under a reaped latest group refuses confirmation", async (t) => {
+  const { root, dir, session } = await fixture();
+  const grp = procSpawn("/bin/sh", ["-c", "sleep 30 & exit 0"], { detached: true, stdio: "ignore" });
+  const gpid = grp.pid!;
+  t.after(() => { try { process.kill(-gpid, "SIGKILL"); } catch { /* gone */ } });
+  await new Promise<void>((resolve, reject) => { grp.once("exit", () => resolve()); grp.once("error", reject); });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: gpid, pgid: gpid, detached: true });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, spawnGen: 2 });
+  const runner = await openRunner(root, killProbe);
+  t.after(() => runner.close(true));
+  assert.equal((await runner.reconcile(task(session))).decision.action, "park", "analyze sees the historical group's survivors");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "latest group 999992 ESRCH"), (e: RunnerError) => e.code === "ownership-fence" && /historical process group/.test(e.message));
+});
+
+// H2-1 (haiku cycle 2): a resolved-FAILED latest record must not delete
+// a DISCOVERED-LIVE process in the same tuple. The ok record journalled
+// a (since-reaped) pgid different from its still-live pid — so only the
+// PID probe can find the worker. Pre-fix the failed latest exempted the
+// tuple from blocking entirely and run() spawned over the live worker.
+test("H2-1: live historical pid under a later FAILED latest IN THE SAME TUPLE blocks reconcile/run", async (t) => {
+  const { root, dir, session } = await fixture();
+  const survivor = procSpawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+  const spid = survivor.pid!;
+  t.after(() => { try { process.kill(-spid, "SIGKILL"); } catch { /* gone */ } });
+  // gen-1 spawned ok: live pid, private group ALREADY REAPED (999991 is
+  // dead) — the only evidence of the worker is the pid probe.
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: spid, pgid: 999991, detached: true });
+  // gen-2 resume FAILED to spawn: the tuple's LATEST record is failed.
+  // Pre-fix the F6 failed-exemption dropped the whole tuple from
+  // `blocking` even though its own probe said RUNNING — run() spawned
+  // over the live worker.
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2 });
+  const runner = await openRunner(root, killProbe);
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "the live a1 pid is discovered despite the failed a2 latest (F6 exemption is not a delete)");
+  assert.ok(rec.decision.reasons.some((r) => /t1-a1.*RUNNING/.test(r)), `reason cites a1, got ${JSON.stringify(rec.decision.reasons)}`);
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running");
+});
+
+// H2-2 (haiku cycle 2): a RESOLVED ok tuple that journalled a pid but
+// NEITHER pgid NOR detached:true has an unknown spawn mode / unknown
+// group — same fail-closed class as G1: reconcile parks (ownership),
+// run refuses, confirmStopped refuses even with the leader proven dead.
+for (const generated of [false, true]) {
+  test(`H2-2: ok pid-only tuple with no journalled group identity is survivor-class (${generated ? "generation" : "legacy"})`, async (t) => {
+    const { root, dir, session } = await fixture();
+    const survivor = procSpawn("/bin/sleep", ["30"], { stdio: "ignore" });
+    const spid = survivor.pid!;
+    t.after(() => { try { process.kill(spid, "SIGKILL"); } catch { /* gone */ } });
+    await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: spid, ...(generated ? { spawnGen: 1 } : {}) });
+    const runner = await openRunner(root, killProbe);
+    t.after(() => runner.close(true));
+    const rec = await runner.reconcile(task(session));
+    assert.equal(rec.decision.action, "park", "unknown group identity ⇒ unprovable ownership ⇒ park");
+    assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1" && v.ownership === true), "view carries derived ownership:true");
+    await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running", "discovered running while alive");
+    // kill the survivor; the CLASS still refuses confirmation — leader
+    // death cannot disprove an unknown group (manual repair is the only
+    // way out, exactly like G1).
+    process.kill(spid, "SIGKILL");
+    for (let i = 0; i < 100; i++) { try { process.kill(spid, 0); await new Promise((r) => setTimeout(r, 20)); } catch { break; } }
+    await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "leader ESRCH — insufficient for an unknown group"), (e: RunnerError) => e.code === "ownership-fence" && /NO journalled group identity/.test(e.message));
+    assert.equal((await runner.reconcile(task(session))).decision.action, "park", "dead leader does not clear the class");
+  });
+}
+
+// H3-6 (audit cycle 12): H2-1 variant where the historical pid probe is
+// INCONCLUSIVE (returns undefined) instead of RUNNING. The failed latest
+// must not be treated as disproven: the tuple stays blocking (park),
+// run() refuses with the inconclusive wording, and a NEWER generated
+// tuple does NOT release it either — an undeterminable pid is never a
+// deterministic negative, so ordering cannot supersede it (strict F
+// doctrine). The tuple is already resolved (latest = failed), so
+// confirmStopped is not even the exit: it refuses bad-input "already
+// resolved". Release requires the probe to turn deterministically dead.
+test("H3-6: historical pid with INCONCLUSIVE probe under a failed latest parks and refuses on inconclusive wording", async (t) => {
+  const { root, dir, session } = await fixture();
+  const survivor = procSpawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
+  const spid = survivor.pid!;
+  t.after(() => { try { process.kill(-spid, "SIGKILL"); } catch { /* gone */ } });
+  // ok record with a PROVEN group identity (pgid journalled, reaped):
+  // not survivor-class, so the only live question is the pid probe —
+  // which the runner cannot judge (EPERM-class undefined).
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: spid, pgid: 999991 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2 });
+  const inconclusive = async (pid: number): Promise<PidStatus | undefined> => (pid === spid ? undefined : { running: false, sameUid: true });
+  const runner = await openRunner(root, inconclusive);
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "an undeterminable historical pid is UNPROVEN liveness — never 'spawn'");
+  assert.ok(rec.probes.some((p) => p.pid === spid && p.running === undefined), "the inconclusive verdict is recorded in the probe trail");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved" && /inconclusive/.test(e.message), "fence cites the INCONCLUSIVE verdict, not 'RUNNING'");
+  // Strict doctrine: a newer spawned-ok tuple must NOT supersede the
+  // inconclusive a1 view — release requires deterministic negative.
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", spawnGen: 3, pid: 999993, pgid: 999993, detached: true });
+  const rec2 = await runner.reconcile(task(session));
+  assert.equal(rec2.decision.action, "park", "ordering does not supersede an inconclusive view");
+  assert.ok(!rec2.ownership.superseded.some((v) => v.record.attemptId === "t1-a1" && v.probe && v.probe.running === undefined), "no inconclusive-probe view is superseded by ordering");
+});
+
+// H3-7 (audit cycle 12) / H3-R4 (audit review): PURE generation-ordering
+// supersession with NON-survivor-class seeds (both tuples journalled
+// detached:true + pgid, both dead) — the ONLY mechanism in play is
+// generation ordering. The existing G1 "cannot be superseded
+// (generation)" test seeds a1 as survivor-class (detached:false), so its
+// non-supersession passed trivially via the ownership skip regardless of
+// ordering; this test pins the ordering release ITSELF — and per R4 it
+// appends the higher-generation anchor BEFORE the lower-generation
+// record, so the assertion proves release by GENERATION, not by append
+// order: a gen-2 anchor written first must still supersede a gen-1
+// record appended later.
+test("H3-7/R4: generation supersedes despite reversed append order (anchor appended first)", async (t) => {
+  const { root, dir, session } = await fixture();
+  // R4: higher-gen anchor FIRST, lower-gen record second.
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, spawnGen: 2 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true, spawnGen: 1 });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a1"), "gen-1 tuple released by the gen-2 anchor despite the anchor being appended FIRST (generation, not append order)");
+  assert.ok(!rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1"), "superseded tuple is not blocking");
+  assert.ok(!rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a1" && v.ownership === true), "the release is NOT the survivor-ownership path");
+  const h = await runner.run(task(session)); // fence opens: no survivor, ordering released a1
+  await runner.stop(h);
+  await runner.waitForExit(h);
+});
+
+// H3-R1 (audit review): PID laundering across spawn generations. A
+// legacy identifier-less ok claim (gen 1: pid, no pgid, no mode) is
+// survivor-class. A LATER spawn (gen 2) that journals the SAME numeric
+// pid WITH proven group identity is a DIFFERENT process (PID reuse) —
+// scoped per-cohort proof means it can never rehabilitate the gen-1
+// claim. Pre-R1, the tuple-level union laundered it: the gen-2 ok made
+// the pid "proven" and the fence opened. Now the tuple stays
+// survivor-class: ownership, park, run/confirm refuse.
+test("H3-R1: a later-generation proven record cannot launder an earlier identifier-less claim (PID reuse)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, spawnGen: 1 }); // unproven cohort
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, pgid: 999991, detached: true, spawnGen: 2 }); // different cohort
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "R1: cross-gen laundering must NOT open the fence — the gen-1 claim survives into ownership");
+  assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1" && v.ownership === true), "R1: the tuple carries survivor ownership despite the gen-2 proven record");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved", "R1: run refuses onto the laundered tuple");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "later generation dead"), (e: RunnerError) => e.code === "ownership-fence", "R1: confirm refuses — the legacy cohort taint is permanent");
+});
+
+// H3-R1 complement: SAME-cohort enrichment still works — an intent
+// whose pid was journalled mode-unrecorded and whose OWN ok resolve
+// (same spawnGen/legacy cohort) re-records the pid proven is NOT
+// survivor-class (the pre-P8 journal keeps its enrichment semantics).
+test("H3-R1b: same-cohort ok resolve enriches the mode-unrecorded intent (no survivor class)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: null, pid: 999991 }); // legacy intent, mode unrecorded
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", pid: 999991, detached: true }); // same legacy cohort, proven mode
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(!rec.ownership.blocking.some((v) => v.ownership === true), "R1b: same-spawn enrichment — no survivor ownership");
+  assert.equal(rec.decision.action, "spawn", "R1b: dead proven worker — the fence opens");
+});
+
+// H3-R2/F1 (audit cycle R1): the F6 failed-latest exemption must not
+// erase an OBSERVED-OK-without-identifiers claim through the blocking
+// filter. Sequence: a1 ok (no identifiers) -> a1 failed (no
+// identifiers, later gen) -> a2 proven dead ok. Pre-fix, `blocking`
+// consulted only the view's latest record (failed => "process never
+// existed") and dropped a1 — permitting a spawn with zero death
+// evidence for the process the journal positively observed. Now the
+// identifier-less observed-ok keeps a1 blocking.
+test("H3-F1: a failed latest does not exempt an identifier-less observed-ok tuple from blocking", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok" }); // observed, zero identifiers
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2 }); // failed latest, zero identifiers
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, spawnGen: 3 });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1"), "F1: the observed-ok tuple stays BLOCKING despite the failed latest");
+  assert.equal(rec.decision.action, "park", "F1: no spawn decision without death evidence");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved", "F1: run refuses — the observation was never disproven");
 });
 
 // ───────────────────────────── boundary guard ───────────────────────────────
 
+// H3-R2 (audit review): an OBSERVED-OK tuple with NO identifiers (no
+// pid, no pgid, no spawnGen-derived proof) is never released by append
+// ordering alone — the journal positively observed a process and a
+// later anchor says nothing about its death. It stays fenced (park)
+// across reopen; only manual journal repair clears it. (Contrast: a
+// NEVER-OBSERVED-OK intent retains the F1/F2 ordering escape.)
+test("H3-R2: identifier-less observed-ok tuple is never superseded by a later anchor (reopen-stable)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok" }); // legacy ok, zero identifiers
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", pid: 999992, pgid: 999992, detached: true, spawnGen: 2 });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(!rec.ownership.superseded.some((v) => v.record.attemptId === "t1-a1"), "R2: the observed-ok no-identifier tuple is NOT released by the later anchor");
+  assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1"), "it stays in the fence");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved", "run refuses onto the fenced path");
+  await runner.close(true);
+  // Reopen: journal-derived classification, not in-memory state.
+  const runner2 = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner2.close(true));
+  const rec2 = await runner2.reconcile(task(session));
+  assert.ok(!rec2.ownership.superseded.some((v) => v.record.attemptId === "t1-a1"), "R2: still not superseded after reopen");
+  assert.equal(rec2.decision.action, "park", "R2: parks across reopen — append ordering never erases an observation");
+});
+
+// H3-R2/F6 (audit cycle R2): cohort-scoped protection. Inside ONE
+// tuple, a spawn observed ok whose OWN cohort journalled no pid is
+// identified only by records OF THAT COHORT (or an S6 hint row when
+// the tuple journalled no pid at all). Identifiers belonging to a
+// DIFFERENT spawn cohort describe OTHER processes: seeding `g1: ok,
+// no identifiers` then `g2: failed, pid, pgid, detached:true` (P
+// deterministically dead) must NOT launder the g1 observation —
+// pre-fix the tuple-wide probe plus the failed-latest exemption
+// dropped the tuple with zero death evidence for g1.
+test("H3-F6: a newer cohort's identifiers cannot launder an older cohort's observed-ok claim", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 }); // observed, zero identifiers
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2, pid: 999991, pgid: 999991, detached: true }); // dead deterministically
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "F6: the g2 negative says nothing about g1's process — park");
+  assert.ok(rec.ownership.blocking.some((v) => v.record.attemptId === "t1-a1"), "F6: tuple stays blocking via the cohort claim");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved" && /HISTORICAL spawn/.test(e.message), "F7: the diagnostic names the historical observed-ok claim (not the failed latest)");
+  // F7: reconcile's park reason must describe the claim truthfully.
+  assert.match(rec.decision.reasons.join(" "), /HISTORICAL spawn observed ok WITHOUT a journalled pid/, "F7: truthful park reason");
+  assert.doesNotMatch(rec.decision.reasons.join(" "), /spawned ok but NO pid/, "F7: never claims the LATEST spawned ok");
+  // F7: confirmStopped refuses — confirming cannot reach a claim with
+  // no probeable identity.
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "g2 pid ESRCH"), (e: RunnerError) => e.code === "ownership-fence" && /HISTORICAL spawn observed ok WITHOUT a journalled pid/.test(e.message), "F6/F7: refusal names the undisprovable cohort claim");
+});
+
+// F6 companion (same-cohort enrichment pass): the claim is discharged
+// ONLY when the cohort itself gains identity — a journal pid ON THE OK
+// RECORD'S OWN cohort, with proven mode (detached:true), so the tuple
+// is (a) no longer identifier-less and (b) not survivor-class. Then a
+// deterministic negative probe of that pid is real death evidence and
+// the ordering fence opens for the newer tuple.
+test("H3-F6 companion: same-cohort enrichment (pid on the ok record's own cohort) discharges the claim", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, detached: true }); // same-cohort identifier (manual journal repair)
+  await seedAttemptRecord(dir, { attemptId: "t1-a2", sessionPath: session, spawnOutcome: "ok", spawnGen: 2, pid: 999992, pgid: 999992, detached: true });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "spawn", "enriched cohort + deterministic negative — the fence opens");
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a3", "spawn proceeds after enrichment");
+});
+
+
+// ── Audit cycle R3 fixes (F10/F11/F12), cycle R4 ──────────────────────────
+
+// F10: a state.json hint row identifies the tuple's LATEST spawn cohort
+// only — failed generations count. gen1 ok-without-pid + gen2 failed
+// means the hint (gen2's spawn) can NEVER enrich gen1's claim: analyze,
+// confirmStopped, and run() must ALL refuse (no laundering).
+test("R4-F10: hint never back-assigns past a failed generation — the older ok-without-pid cohort stays protected", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(rec.ownership.blocking.some((b) => b.protectedOk !== undefined), "gen-1 ok-without-pid stays protected despite the hint");
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "sweep done; hint pid dead"),
+    (e: RunnerError) => e.code === "ownership-fence" && /HISTORICAL spawn observed ok WITHOUT/.test(e.message),
+    "confirmStopped refuses: the hint is gen-2's identity, not gen-1's",
+  );
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+});
+
+// F11: an explicit pgid IS probeable identity — group death (ESRCH)
+// discharges the observed-ok claim even with no leader pid journalled.
+test("R4-F11: explicit pgid without pid is probeable identity — deterministic group death discharges the ok claim", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pgid: 999991, detached: true });
+  const runner = await AttemptRunner.open({
+    root, episodeId: "ep-p7", spawner: sleepSpawner(),
+    probes: { pidAlive: async () => ({ running: false, sameUid: true }) },
+  });
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(!rec.ownership.blocking.some((b) => b.protectedOk !== undefined), "the pgid cohort is probeable — never an unprobeable-ok claim (F11)");
+  const confirmed = await runner.confirmStopped(task(session), "t1-a1", "pgid 999991 group ESRCH — deterministic group death");
+  assert.equal(confirmed.confirmation, true, "deterministic group death discharges the claim");
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a2", "the fence opens after group death is proven");
+});
+
+// F12: ONE identity-enrichment contract — a hint-only ok tuple where
+// analyze probes the hint (dead) and confirmStopped accepts the SAME
+// identity: reconcile spawn-class, confirm succeeds, and a subsequent
+// run() proceeds (consumers never disagree).
+test("R4-F12: hint-enriched ok tuple — confirm and analyze agree (confirm then run proceeds)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "spawn", "analyze: the hint identity was probed dead — spawn-class");
+  const confirmed = await runner.confirmStopped(task(session), "t1-a1", "full sweep complete; hint identity 999991 ESRCH");
+  assert.equal(confirmed.confirmation, true);
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a2", "post-confirmation run proceeds — no consumer disagreement");
+});
+
+// F12 guard: an UNRESOLVED tuple with a hint-only identity must NEVER
+// confirm — the hint names at most the leader, spawn mode unrecorded.
+test("R4-F12 guard: unresolved intent with hint-only identity still refuses (G3 doctrine holds)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: null });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999995 } },
+  });
+  const runner = await openRunner(root, async (p: number) => p === 999995 ? { running: false, sameUid: true } : undefined);
+  t.after(() => runner.close(true));
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "hint pid dead"),
+    (e: RunnerError) => e.code === "ownership-fence" && /UNRESOLVED with NO journalled identity/.test(e.message),
+  );
+});
+
+
+// F17 (audit cycle R4): deterministic GROUP death is accepted
+// CONSISTENTLY — reconcile AND the spawn fence must both treat a
+// leader-less claim (ok, pgid journalled, NO pid anywhere) with a
+// negative group probe (kill(-pgid,0) ESRCH) as disproven. Direct-run
+// coverage: run() spawns WITHOUT any confirmation round-trip (the R3
+// fence parked here while reconcile spawned — consumer divergence).
+test("R4-F17: group-only death accepted by the spawn fence directly — run() proceeds with pgid-ESRCH and no pid, no confirm needed", async (t) => {
+  const { root, dir, session } = await fixture();
+  // pgid 999991 is a reserved-dead group: kill(-999991,0) ESRCHes
+  // deterministically (same convention as the F11 test).
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pgid: 999991, detached: true });
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: killProbe } });
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "spawn", "analyze: negative group probe discharges the leader-less claim");
+  assert.ok(!rec.ownership.blocking.some((b) => b.protectedOk !== undefined), "an explicit pgid is probeable identity, never an unprobeable-ok claim");
+  // THE DIRECT-RUN REGRESSION: the fence must accept the same evidence
+  // analyze accepted — BEFORE F17 it threw prior-attempt-unresolved
+  // ("no pid was ever recorded") while reconcile said spawn.
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a2", "the fence accepted the group-death evidence: run() spawned without confirmation");
+  await runner.stop(h);
+});
+
+// F15 (audit cycle R4): a historical `confirmation:true` alone is NOT
+// proof the cohort-wide closure contract was satisfied. A journal of
+// [g1 ok/NO-identity, g2 ok/dead-pid, g2 confirmation] (the exact
+// pre-R5 confirmStopped output — it only ever checked the LATEST
+// cohort) must keep the g1 claim protected forever: the confirmation
+// copies gen-2 identity, which says nothing about gen-1's process.
+test("R4-F15: a confirmation copying gen-2 identity cannot launder a gen-1 identifier-less ok claim (no positional laundering)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 }); // the undischarged g1 claim
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 2, pid: 999991, pgid: 999991, detached: true });
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "failed", spawnGen: 2, pid: 999991, pgid: 999991, detached: true, confirmation: true }); // pre-R5-style: copies g2 only
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.ok(rec.ownership.blocking.some((b) => b.protectedOk !== undefined), "the g1 claim survives the g2 confirmation: closure is evidence-carried, not position-carried");
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "confirmation of the g1 cohort"),
+    (e: RunnerError) => e.code === "ownership-fence" && /HISTORICAL spawn observed ok WITHOUT/.test(e.message),
+    "confirmStopped refuses — the g1 cohort has no identity ANY confirmation of it ever probed",
+  );
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved");
+});
+
+// F15 positive half: a confirmation of a hint-identified tuple STAMPS
+// the probed-dead identity onto the confirmation record itself, so the
+// closure survives reopen — a fresh instance reads the journal-carried
+// evidence, not a positional rule.
+test("R4-F15b: confirmation of a hint-identified tuple stamps the probed identity — closure is reopen-stable", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  const confirmed = await runner.confirmStopped(task(session), "t1-a1", "hint identity 999991 probed ESRCH");
+  assert.equal(confirmed.confirmation, true);
+  assert.equal(confirmed.pid, 999991, "the confirmation RECORD carries the identity that was probed dead — not just a positional flag");
+  runner.close(true);
+  // Reopen: a NEW instance must see the journal-stamped closure and
+  // spawn — without the stamp this tuple is identity-less again.
+  const runner2 = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner2.close(true));
+  const after = await runner2.reconcile(task(session));
+  assert.equal(after.decision.action, "spawn", "the stamped identity discharges the claim for every later reader (evidence-carried closure)");
+});
+
+// F16 (audit cycle R4): protection, analyze, and confirmation share the
+// ACTUAL accepted identity set — EVERY hint row matching attemptId +
+// sessionPath across ALL task keys. A live row under another task key
+// must block confirmStopped too (R3 enriched analyze with it but
+// confirmation probed only the own-task row: confirm succeeded while
+// analyze parked and run refused — consumer disagreement).
+test("R4-F16: every accepted hint row is confirmation evidence — a live row under another task key blocks confirm", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7",
+    tasks: {
+      t3: { status: "running", attemptId: "t1-a1", session, pid: 999992 }, // first match — dead
+      t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 }, // own key — dead
+      t2: { status: "running", attemptId: "t1-a1", session, pid: 777777 }, // non-first, non-own matching row — LIVE
+    },
+  });
+  let alivePid = 777777;
+  const runner = await openRunner(root, async (p: number) => ({ running: p === alivePid, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "analyze probes the FULL accepted set — the live t2 row parks");
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "own-row 999991 is dead"),
+    (e: RunnerError) => e.code === "ownership-fence" && /777777/.test(e.message) && /RUNNING/.test(e.message),
+    "confirmation shares the set: the accepted t2 row is alive — refuse (R3 accepted here: the disagreement)",
+  );
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running", "run agrees with analyze AND confirmation");
+  // Agreement under full death: once the whole accepted set is negative, confirm succeeds and run proceeds.
+  alivePid = -1;
+  const confirmed = await runner.confirmStopped(task(session), "t1-a1", "full sweep: BOTH accepted rows (777777, 999991) ESRCH");
+  assert.equal(confirmed.confirmation, true, "all accepted identities negative ⇒ closure");
+  const h = await runner.run(task(session));
+  assert.equal(h.attemptId, "t1-a2", "consumers never disagree: confirm then run proceed together");
+  await runner.stop(h);
+});
+
+// F16 companion: an INCONCLUSIVE accepted-row probe is not acceptance.
+test("R4-F16b: an inconclusive accepted-hint probe refuses confirmation (deterministic negative required for every accepted identity)", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999993 } },
+  });
+  const runner = await openRunner(root, async (p: number) => (p === 999993 ? undefined : { running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "hint row probe inconclusive"),
+    (e: RunnerError) => e.code === "ownership-fence" && /999993/.test(e.message) && /INCONCLUSIVE/.test(e.message),
+  );
+});
+
+// F18 (audit cycle R4): explicit stale-refresh policy — a tuple whose
+// LATEST record is a confirmation is CLOSED; re-writing a pid hint for
+// it would re-create an identity for a proven-dead cohort. The write is
+// REFUSED (warning, state untouched); clearing stays allowed and fresh
+// tuples are unaffected.
+test("R5-1: a refresh queued AFTER a confirmation cannot recreate the hint after the tuple closes", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991, detached: true });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const internals = runner as unknown as { readState: () => Promise<unknown> };
+  const originalReadState = internals.readState.bind(runner);
+  let entered!: () => void;
+  let release!: () => void;
+  const atRead = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let block = true;
+  internals.readState = async function() {
+    if (block) { block = false; entered(); await gate; }
+    return originalReadState();
+  };
+  const confirmation = runner.confirmStopped(task(session), "t1-a1", "journal pid/group 999991 dead");
+  await atRead; // confirmation owns the queue, paused before its state snapshot
+  const refresh = runner.writeStateHint(task(session), "t1-a1", 777777, "running"); // queued behind confirmation
+  release();
+  const confirmed = await confirmation;
+  const warning = await refresh;
+  assert.equal(confirmed.confirmation, true);
+  assert.ok(warning && /CLOSED/.test(warning), "queued refresh re-reads closure after confirmation and refuses");
+  const state = await readEpisodeState(join(dir, "state.json"));
+  assert.equal(state.tasks.t1?.pid, undefined, "confirmation's clear remains final");
+  assert.equal((await runner.reconcile(task(session))).decision.action, "spawn");
+});
+
+// R7-1 (audit): the TRUE refresh-FIRST ordering. A hint refresh that
+// owns the transaction queue BEFORE the confirmation is requested must
+// have its written identity visible to the queued confirmation —
+// confirmation sees the refreshed live row, refuses, and appends no
+// closure. The existing R5-1 test (confirmation queued first) does NOT
+// discriminate this ordering.
+test("R7-1: a refresh queued BEFORE confirmation blocks the confirmation with the refreshed live identity", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991, detached: true });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  // 999991 probes DEAD; 777777 (the refreshed hint) probes LIVE.
+  const runner = await openRunner(root, async (p: number) => ({ running: p === 777777, sameUid: true }));
+  t.after(() => runner.close(true));
+  const internals = runner as unknown as { readState: () => Promise<unknown> };
+  const originalReadState = internals.readState.bind(runner);
+  let entered!: () => void;
+  let release!: () => void;
+  const atRead = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let block = true;
+  internals.readState = async function() {
+    if (block) { block = false; entered(); await gate; }
+    return originalReadState();
+  };
+  const refresh = runner.writeStateHint(task(session), "t1-a1", 777777, "running");
+  await atRead; // the REFRESH owns the queue, paused before its state snapshot
+  const confirmation = runner.confirmStopped(task(session), "t1-a1", "journal pid/group 999991 dead"); // queued behind the refresh
+  release();
+  assert.equal(await refresh, undefined, "the refresh lands first");
+  const stateAfterRefresh = await readEpisodeState(join(dir, "state.json"));
+  assert.equal(stateAfterRefresh.tasks.t1?.pid, 777777, "the live hint is durable before confirmation runs");
+  await assert.rejects(
+    confirmation,
+    (e: RunnerError) => e.code === "ownership-fence" && /777777/.test(e.message),
+    "the queued confirmation sees the refreshed live identity and refuses",
+  );
+  assert.equal((await runner.records()).some((r) => r.kind === "attempt" && (r as AttemptRecord).confirmation === true), false, "no closure appended");
+  assert.equal((await runner.reconcile(task(session))).decision.action, "park", "the refreshed live hint still owns the session");
+});
+
+test("R5-2: accepted cross-task hint inserted during confirmation invalidates the snapshot", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const internals = runner as unknown as { readState: () => Promise<unknown> };
+  const originalReadState = internals.readState.bind(runner);
+  let reads = 0;
+  internals.readState = async function() {
+    reads += 1;
+    if (reads === 2) {
+      await writeEpisodeState(join(dir, "state.json"), {
+        schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: {
+          t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 },
+          t2: { status: "running", attemptId: "t1-a1", session, pid: 777777 },
+        },
+      });
+    }
+    return originalReadState();
+  };
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "initial hint identity was dead"),
+    (e: RunnerError) => e.code === "ownership-fence" && /changed during confirmation/.test(e.message),
+    "confirmation must not close a tuple after the accepted identity set changes",
+  );
+  const latest = (await runner.records()).at(-1) as AttemptRecord;
+  assert.notEqual(latest.confirmation, true, "no confirmation record appended on a changed snapshot");
+});
+
+test("R5-3: journalled pid plus live matching hint blocks analyze, run, and confirmation consistently", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991, detached: true });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 777777 } },
+  });
+  const runner = await openRunner(root, async (p: number) => ({ running: p === 777777, sameUid: true }));
+  t.after(() => runner.close(true));
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "analyze includes matching hint identities despite journalled pid evidence");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running");
+  await assert.rejects(runner.confirmStopped(task(session), "t1-a1", "journal identity dead"), (e: RunnerError) => e.code === "ownership-fence" && /777777.*RUNNING/.test(e.message));
+});
+
+test("R4-F18: writeStateHint refuses a pid refresh over a CLOSED (confirmed) tuple — no identity re-creation", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1 });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t1: { status: "running", attemptId: "t1-a1", session, pid: 999991 } },
+  });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  await runner.confirmStopped(task(session), "t1-a1", "hint identity 999991 ESRCH — tuple closed");
+  // Wedged writer lands late with a NEW pid for the CLOSED cohort:
+  const warn = await runner.writeStateHint(task(session), "t1-a1", 777777, "running");
+  assert.ok(warn && /CLOSED/.test(warn), "pid write over a closed tuple is refused with the F18 policy warning");
+  const st1 = await readEpisodeState(join(dir, "state.json"));
+  assert.ok(st1.tasks.t1?.pid === undefined, "the refused write left the cleared row untouched — no identity re-created");
+  // Clearing (pid=undefined) stays allowed even for a closed tuple:
+  const clearWarn = await runner.writeStateHint(task(session), "t1-a1", undefined, "paused");
+  assert.equal(clearWarn, undefined, "clearing a closed tuple's row is a no-op toward the dead cohort, not enrichment");
+  // Fresh tuples are unaffected: an open tuple accepts its hint.
+  await seedAttemptRecord(dir, { attemptId: "t1-a3", sessionPath: session, spawnOutcome: "ok", spawnGen: 3 });
+  const freshWarn = await runner.writeStateHint(task(session), "t1-a3", 777777, "running");
+  assert.equal(freshWarn, undefined, "an unclosed tuple's hint write proceeds normally");
+});
+
+// F19 (audit cycle R4): witness completeness — every ownership throw
+// cites the OFFENSE RECORD's UUID and ISO timestamp, so an operator
+// can locate exactly the record that owns the fence.
+test("R4-F19: every ownership refusal cites the offense record's UUID and ISO timestamp", async (t) => {
+  const { root, dir, session } = await fixture();
+  // (1) survivor class: pid journalled with NO pgid/detached — mode never recorded.
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 555555, ts: 1735689600000 });
+  const runner = await openRunner(root, probe({ running: false, sameUid: true }));
+  t.after(() => runner.close(true));
+  const recs = await runner.records();
+  const survivor = recs.find((r) => r.kind === "attempt" && (r as AttemptRecord).spawnGen === 1) as AttemptRecord;
+  const iso = new Date(survivor.ts).toISOString();
+  assert.match(iso, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  await assert.rejects(
+    runner.confirmStopped(task(session), "t1-a1", "sweep done"),
+    (e: RunnerError) => e.message.includes(survivor.id) && e.message.includes(iso),
+    "survivor-class refusal quotes the offense record UUID + ISO ts",
+  );
+  await runner.close(true);
+
+  // (2) unprobeable-ok: ok WITHOUT any identity — the fence refusal
+  // (run) and the confirmation refusal both quote the ok record.
+  const { root: root2, dir: dir2, session: session2 } = await fixture();
+  await seedAttemptRecord(dir2, { attemptId: "t1-a1", sessionPath: session2, spawnOutcome: "ok", spawnGen: 1, ts: 1735689600000 });
+  const runner2 = await openRunner(root2, probe({ running: false, sameUid: true }));
+  t.after(() => runner2.close(true));
+  const okRec = (await runner2.records()).find((r) => r.kind === "attempt") as AttemptRecord;
+  const iso2 = new Date(okRec.ts).toISOString();
+  await assert.rejects(
+    runner2.run(task(session2)),
+    (e: RunnerError) => e.code === "prior-attempt-unresolved" && e.message.includes(okRec.id) && e.message.includes(iso2),
+    "spawn-fence ok-without-pid refusal quotes the offense record UUID + ISO ts",
+  );
+  await assert.rejects(
+    runner2.confirmStopped(task(session2), "t1-a1", "sweep done"),
+    (e: RunnerError) => e.code === "ownership-fence" && e.message.includes(okRec.id) && e.message.includes(iso2),
+    "confirmation refusal quotes the same witness",
+  );
+});
+
+// R6-1: an EXITED own child disproves only its own pid. An independent
+// matching hint identity that is live (or inconclusive) still blocks
+// reconcile, the spawn fence, and confirmation alike.
+test("R6-1: own child exited + independent live hint → reconcile parks, run refuses, confirm refuses", async (t) => {
+  const { root, dir, session } = await fixture();
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: async (p: number) => ({ running: p === 777777, sameUid: true }) } });
+  t.after(() => runner.close(true));
+  const h = await runner.run(task(session));
+  await runner.stop(h);
+  assert.equal(await runner.writeStateHint(task(session), h.attemptId, 777777, "running"), undefined, "hint write over an open tuple is accepted");
+  const rec = await runner.reconcile(task(session));
+  assert.equal(rec.decision.action, "park", "independent live hint parks reconcile despite the exited own child");
+  await assert.rejects(runner.confirmStopped(task(session), h.attemptId, "own child stopped"), (e: RunnerError) => e.code === "ownership-fence" && /777777/.test(e.message));
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-running", "the fence agrees with reconcile");
+  void dir;
+});
+
+test("R6-1 companion: exited own child + independent INCONCLUSIVE hint → run refuses (no bypass)", async (t) => {
+  const { root, session } = await fixture();
+  const runner = await AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), probes: { pidAlive: async (p: number) => (p === 666666 ? undefined : { running: false, sameUid: true }) } });
+  t.after(() => runner.close(true));
+  const h = await runner.run(task(session));
+  await runner.stop(h);
+  await runner.writeStateHint(task(session), h.attemptId, 666666, "running");
+  await assert.rejects(runner.run(task(session)), (e: RunnerError) => e.code === "prior-attempt-unresolved" && /666666/.test(e.message));
+});
+
+// R6-2: confirmation of a tuple must name its JOURNAL-BOUND session.
+test("R6-2: confirmStopped against a different session path is refused before any probe or append", async (t) => {
+  const { root, dir, session } = await fixture();
+  await seedAttemptRecord(dir, { attemptId: "t1-a1", sessionPath: session, spawnOutcome: "ok", spawnGen: 1, pid: 999991, pgid: 999991, detached: true });
+  await writeEpisodeState(join(dir, "state.json"), {
+    schema: STATE_SCHEMA_ID, episodeId: "ep-p7", tasks: { t2: { status: "running", attemptId: "t1-a1", session, pid: 777777 } },
+  });
+  const runner = await openRunner(root, async (p: number) => ({ running: p === 777777, sameUid: true }));
+  t.after(() => runner.close(true));
+  const before = (await runner.records()).length;
+  await assert.rejects(
+    runner.confirmStopped(task(session + ".other"), "t1-a1", "wrong path supplied"),
+    (e: RunnerError) => e.code === "bad-input" && /durably bound/.test(e.message),
+  );
+  assert.equal((await runner.records()).length, before, "no confirmation appended");
+  assert.equal((await runner.reconcile(task(session))).decision.action, "park", "the live hint on the bound session still parks");
+});
 
 test("P7 guard: nothing outside src/runner/ imports the attempt runner yet (primitives only)", () => {
   // Same discipline as the P4/P6 guards: the runner is a process-control
