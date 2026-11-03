@@ -1108,3 +1108,38 @@ test("C3-F3: custom semanticMinConfidence gates the negative side too", () => {
   const hi = evaluate({ ...input({ spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }), gates: [], artifacts: [], claims: claims }), semanticMinConfidence: 0.6 });
   assert.equal(hi.verdict, "uncertain", "0.5 < 0.6 custom bar — no finding");
 });
+
+// ── C3 audit fix: the claims-only cap vs. deterministic findings ───────────
+
+test("C3 audit: claims-only spec + UNRELATED current FAIL stays uncertain (cap holds)", () => {
+  // F8: currentFails includes gates the spec never names. C3-F2 had moved
+  // the deterministic-finding branch above the cap, flipping this to
+  // `incomplete` — an unapproved contract change. Pre-C3 answer: uncertain.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [{ gateId: "gate:unrelated", pass: false, at: { ...ID }, evidenceRef: "run:9" }],
+    artifacts: [],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+  assert.ok(!a.reasons.includes("verdict:current-fail"), "unrelated FAIL is not a finding on a claims-only spec");
+});
+
+test("C3 audit: claims-only spec + judge finding on a REQUIRED criterion is still incomplete (C3-F2 preserved)", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [{ gateId: "gate:unrelated", pass: false, at: { ...ID }, evidenceRef: "run:9" }],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "no", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
+});
+
+test("C3 audit: spec WITH required evidence + current FAIL is still incomplete (current-fail unchanged)", () => {
+  const a = evaluate(input({
+    gates: [{ gateId: "gate:tests", pass: false, at: { ...ID }, evidenceRef: "run:42" }],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:current-fail"));
+});

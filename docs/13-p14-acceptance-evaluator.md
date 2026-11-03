@@ -172,30 +172,27 @@ so it never fails the whole input).
 ## 4. Verdict function (normative)
 
 ```text
-bad input                                  → uncertain (bad-input:… recorded)
-judge-declared incomplete (required criterion,   → incomplete (F6; C3-F2:
-  confidence ≥ semanticMinConfidence — C3-F3      also ABOVE the claims-only
-  gates negatives at the bar like positives)      cap — a concrete finding
-                                                  outranks absence of
-                                                  required evidence)
-current FAIL gate/criterion                → incomplete  ┐ CONCRETE negative
-expected artifact observed exists:false    → incomplete  ┘ findings PRECEDE
-    at current  (C2-F1: proven absence is a finding, not an absence   EVERYTHING
-    of evidence — the floor never masks it)                            below
-claims-only spec (F4, C2-F2 scoped: no required check, no expected
-    artifact AND no required deterministic criterion)
-                                           → uncertain cap (F4/EV5 — at most
-                                               uncertain; a required
-                                               deterministic criterion IS an
-                                               evidence requirement, EV7)
-no current non-model evidence (F4)         → uncertain (COMPLETION-eligibility
-                                           floor only — see §9 C2-F1)
-required gate missing/unbound at current   → uncertain   (EV9)
-expected artifact unobserved at current    → uncertain   (EV9)
-required semantic criterion unfunded       → uncertain
+bad input                                       → uncertain (bad-input:… recorded)
+judge-declared incomplete (required criterion,  → incomplete (F6, C3-F2: a
+  confidence ≥ semanticMinConfidence — C3-F3)     concrete finding outranks
+                                                  the claims-only cap)
+claims-only spec (F4, C2-F2 scoped: no required  → uncertain cap (F4/EV5). Sits
+  check, no expected artifact AND no required      BELOW the judge finding and
+  deterministic criterion)                         ABOVE the deterministic
+                                                   findings below (C3 audit fix:
+                                                   an unrelated current FAIL,
+                                                   F8, must not lift this cap)
+current FAIL gate/criterion                     → incomplete  ┐ CONCRETE
+expected artifact observed exists:false at      → incomplete  ┘ deterministic
+    current  (C2-F1)                                             findings
+no current non-model evidence (F4)              → uncertain (COMPLETION-eligibility
+                                                  floor only — see §9 C2-F1)
+required gate missing/unbound at current        → uncertain   (EV9)
+expected artifact unobserved at current         → uncertain   (EV9)
+required semantic criterion unfunded            → uncertain
 positive current blocker(s), nothing failed/missing → blocked
-all green (EV12, incl. floor)              → complete
-default (evidence exhausted without green) → uncertain
+all green (EV12, incl. floor)                   → complete
+default (evidence exhausted without green)      → uncertain
 ```
 
 Precedence is total and evaluated in this order; no rule rewrites an
@@ -334,9 +331,9 @@ the corrected verdicts.
 | id | amendment |
 |----|-----------|
 | C3-F1 | Cycle-2's C2-F4 regression was one-sided: it proved a malformed CURRENT revision with a valid stored one (which `!==` already caught), not the audit's repro of MATCHING malformed revisions on both sides. The test now covers both sides (`0`, `-1`, `1.5`, `undefined` each, stored=current), and fails against the pre-fix source. |
-| C3-F2 | Concrete negative findings now outrank the claims-only CAP, not just the evidence floor (the cycle-2 restructure left the cap as the only absence-of-evidence rule still above the F6 rung). A claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete is `incomplete`/`verdict:criterion-incomplete` — F6's principle is that presence of a finding outranks absence of evidence, and the cap is absence of REQUIRED evidence. Boundaries pinned by tests: POSITIVE claims (verdict `complete`) still cap at `uncertain` (the cap bounds what claims may prove); judged-incomplete on an OPTIONAL criterion keeps the cap (only required criteria are the finding rung). |
+| C3-F2 | A judge-declared `incomplete` on a REQUIRED criterion now outranks the claims-only CAP (not just the evidence floor) (the cycle-2 restructure left the cap as the only absence-of-evidence rule still above the F6 rung). A claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete is `incomplete`/`verdict:criterion-incomplete` — F6's principle is that presence of a finding outranks absence of evidence, and the cap is absence of REQUIRED evidence. Boundaries pinned by tests: POSITIVE claims (verdict `complete`) still cap at `uncertain` (the cap bounds what claims may prove); judged-incomplete on an OPTIONAL criterion keeps the cap (only required criteria are the finding rung). **C3 audit fix:** the first C3-F2 cut moved the WHOLE deterministic-finding branch (current FAIL, artifact exists:false) above the cap too. `currentFails` includes unrelated gates (F8), so a claims-only spec with an unrelated FAIL flipped `uncertain`→`incomplete` — an unapproved contract change, found by audit and reverted: ONLY the judge-finding branch sits above the cap. Pinned by 3 tests (unrelated FAIL stays uncertain; judge finding still incomplete; required-evidence current FAIL unchanged). |
 | C3-F3 | (audit of `9bbb54a`, user-approved) Negatives are now gated at `semanticMinConfidence` like positives: pre-existing code applied ANY judge `incomplete` (confidence 0/absent included) to set the finding rung, while `complete` required confidence ≥ msc — asymmetric bars for symmetric judgments. Harmless while the claims-only cap absorbed negatives; C3-F2 made negatives verdict-setting, exposing the hole (confidence-0 flipped `uncertain`→`incomplete` on a claims-only spec — EV5 violation). Now absent confidence counts as 0 and the finding rung requires ≥ msc. Conservative direction preserved: a below-bar incomplete still NEVER passes the criterion (`row.pass=false`) and is still named in `remainingWork` — it simply is not a finding, falling back to the normal evidence rules. 5 tests incl. custom-bar gating; mutation-checked (ungating fails exactly the gating tests). |
 
-Cycle-3 regressions: `test/acceptance.test.ts` (C3-F2 ×4, C3-F3 ×5; C3-F1 is
-the strengthened C2-F4 test). Suite: 87 acceptance tests; full suite
-**1878 / 1864 pass / 0 fail / 14 skipped**, `npm test` exit 0.
+Cycle-3 regressions: `test/acceptance.test.ts` (C3-F2 ×4 + audit ×3, C3-F3 ×5; C3-F1 is
+the strengthened C2-F4 test). Suite: 90 acceptance tests; full suite
+**1881 / 1867 pass / 0 fail / 14 skipped**, `npm test` exit 0.
