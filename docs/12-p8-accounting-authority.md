@@ -220,16 +220,26 @@ THIS section is the pinned contract.
    hold stands). Slot refunds for `released` happen ONLY with negative
    spawn evidence (`spawnStarted: false`); `settled`/`expired` never
    refund (A8/F3 doctrine unchanged).
-7. **Idempotent redelivery ≠ new permission (C2-F10/C3-F7).** `reserve()`
+7. **Idempotent redelivery ≠ new permission (C2-F10/C6).** `reserve()`
    validates the policy on every call including the already-recorded
-   branch; the recheck is COVERAGE of the standing intent — the gate
-   refolds the journal WITHOUT this action's own res-open, so exactly one
-   instance of the intent is judged. A policy that no longer admits that
-   intent (caps lowered below it, authority flags flipped, strategy limit
-   tightened) rejects `policy-revoked` (observation-only error — the
-   record stays; it is NOT a reservation success), while redelivery under
-   an UNCHANGED policy at its own cap succeeds (no hypothetical second
-   hold/use is ever added).
+   branch; the recheck is COVERAGE of the standing intent, computed by
+   `check(..., { coverage: true })` against the FULL CURRENT snapshot
+   ("coverage mode", defined below): every cap is judged against the
+   ledger as
+   it stands — current consumption, unknown exposure, OTHER standing
+   holds, attempt usage, strategy history and elapsed time — with NO
+   hypothetical hold/slot/strategy use added for the redelivered intent
+   (its own standing is already in the snapshot; an evidenced release
+   contributes zero, a settled intent keeps its slot but not a live
+   hold). A policy that no longer covers the standing ledger (aggregate
+   caps lowered below the live total, authority flags flipped, strategy
+   limit tightened, wallclock accrued past a tightened cap) rejects
+   `policy-revoked` (observation-only error — the record stays; it is
+   NOT a reservation success), while redelivery under an UNCHANGED
+   policy at its own cap succeeds. Historical-prefix rechecks are
+   explicitly rejected as a mechanism: dropping post-admission journal
+   evolution hides real later contributions (audit C6-F1) and replaying
+   pre-intent closes misjudges current lifecycle (audit C6-F2).
 8. **The policy is a call-time snapshot (C3-F1).** `reserve()` deep-copies
    and freezes the presented `GatePolicy` synchronously at entry (the
    injected resolver rides by reference). Every judgment, digest and

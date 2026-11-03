@@ -1374,3 +1374,366 @@ test("C4-F2 boundary: accrued time UNDER the (tightened) cap — redelivery stil
   const again = await ledger.reserve(pRoomy, req, checked.receipt!, { clock: fixedClock(100_000) });
   assert.equal(again.id, first.id, "100 s accrued < 200 s cap — coverage check passes, same record back");
 });
+
+// ─────────────────── C5 fix regressions (audit cycle 5) ────────────────────
+
+test("C5-F1: reserve() validates the ORIGINAL policy before snapshotting — a string authority.paths is bad-input, not an accepted char-array policy", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const granted = policyOf({
+    reservationTtlMs: 60_000,
+    authority: { root: "/work", paths: ["**"] },
+  });
+  // check() mints under a WELL-FORMED granting policy...
+  const mintedReq = { action: "run", actionId: "act-c5f1", authority: AUTH, paths: ["file"] } as GateRequest;
+  const grantRooted: GateRequest = { ...mintedReq, paths: ["/work/file"] };
+  const checked = check(granted, grantRooted, await ledger.snapshotAt(1000), 1000);
+  assert.ok(checked.allowed);
+  // ...then the SAME receipt+request is presented under a policy whose
+  // authority.paths is a STRING. The old snapshot spread the string into
+  // ['*','*'] and accepted /work/file; the boundary must refuse first.
+  const badPolicy = { ...granted, authority: { root: "/work", paths: "**" } } as unknown as GatePolicy;
+  assert.throws(
+    () => check(badPolicy, grantRooted, EMPTY, 1000),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+    "check() rejects a string paths (boundary control)",
+  );
+  await assert.rejects(
+    ledger.reserve(badPolicy, grantRooted, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+    "reserve() validates the original presented policy before shape-dependent copying — string paths is bad-input",
+  );
+  const after = await ledger.read();
+  assert.equal(after.records.filter((r) => r.kind === "res-open").length, 0, "the malformed policy wrote no hold");
+});
+
+test("C5-F1: a non-iterable authority.paths (17) is typed bad-input, never a raw TypeError", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const base = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf({ actionId: "act-c5f1b" });
+  const checked = check(base, req, await ledger.snapshotAt(1000), 1000);
+  const badPolicy = { ...base, authority: { root: "/", paths: 17 } } as unknown as GatePolicy;
+  await assert.rejects(
+    ledger.reserve(badPolicy, req, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => e instanceof BudgetLedgerError && (e as BudgetLedgerError).code === "bad-input",
+    "non-iterable paths throws the boundary BudgetLedgerError, not 'arr is not iterable'",
+  );
+});
+
+test("C5-F1: a NaN cacheRead rate is rejected — the snapshot preserves it for validation instead of deleting it", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const base = policyOf({ reservationTtlMs: 60_000 });
+  const req = requestOf({ actionId: "act-c5f1c" });
+  const checked = check(base, req, await ledger.snapshotAt(1000), 1000);
+  const badPolicy = {
+    ...base,
+    rates: [{ model: "gpt-4o", rate: { input: 1, output: 2, cacheRead: NaN } }],
+  } as unknown as GatePolicy;
+  assert.throws(
+    () => check(badPolicy, req, EMPTY, 1000),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+    "check() rejects the NaN cacheRead (boundary control)",
+  );
+  await assert.rejects(
+    ledger.reserve(badPolicy, req, checked.receipt!, { clock: fixedClock(1000) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "bad-input",
+    "reserve() keeps all defined Rate fields in the snapshot and validates the snapshot too",
+  );
+  const after = await ledger.read();
+  assert.equal(after.records.filter((r) => r.kind === "res-open").length, 0, "the malformed rate wrote no hold");
+});
+
+test("C5-F1: a well-formed cacheRead/cacheWrite rate survives the snapshot and still gates", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const p = policyOf({
+    reservationTtlMs: 60_000,
+    rates: [{ model: "gpt-4o", rate: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.25 } }],
+  });
+  const req = requestOf({ actionId: "act-c5f1d" });
+  const checked = check(p, req, await ledger.snapshotAt(1000), 1000);
+  assert.ok(checked.allowed, "a finite cache rate is a valid policy");
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(1000) });
+  assert.ok(rec.id.startsWith("b-"), "reservation recorded under the preserved-rate policy");
+});
+
+test("C5-F2: released-A/replacement-B/redeliver-A — A's admission-time context still admits A (not hostage to later fills)", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  // perTask.attempts: 1 — at most ONE standing attempt contribution.
+  const p = policyOf({ reservationTtlMs: 60_000, perTask: { attempts: 1 }, caps: { usd: 100, turns: 100 }, perAttempt: { usd: 1, turns: 5 } });
+  const reqA = requestOf({ actionId: "act-A", taskId: "t1", attemptId: "a1" });
+  const cA = check(p, reqA, await ledger.snapshotAt(now), now);
+  assert.ok(cA.allowed);
+  const recA = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now) });
+  // A is closed released with negative-spawn evidence: hold AND slot refund.
+  await ledger.closeReservation(
+    recA.id,
+    "released",
+    { outcome: "spawn-failed-unstarted", evidence: "spawn-error:c5f2", spawnStarted: false },
+    { clock: fixedClock(now + 1) },
+  );
+  const snapReleased = await ledger.snapshotAt(now + 1);
+  assert.equal(snapReleased.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 0, "released A returns its slot to the projection");
+  // B reserves on the same task: actual attemptsUsed is 1, exactly at cap.
+  const reqB = requestOf({ actionId: "act-B", taskId: "t1", attemptId: "a2" });
+  const cB = check(p, reqB, snapReleased, now + 1);
+  assert.ok(cB.allowed, "B is admitted — the released slot is genuinely free");
+  await ledger.reserve(p, reqB, cB.receipt!, { clock: fixedClock(now + 1) });
+  // Redeliver A's ORIGINAL receipt+request under the UNCHANGED policy.
+  // Coverage mode (C6) judges the FULL current snapshot with no
+  // hypothetical second slot: A's release refunded its slot, B fills it
+  // (attempts = 1 = cap), and adding no new slot keeps A covered —
+  // hands back A's record without the C6-F1 prefix exemption.
+  const again = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now + 1) });
+  assert.equal(again.id, recA.id, "redelivered released A returns its own record — no false policy-revoked");
+});
+
+test("C5-F2: a SETTLED reservation keeps its slot — a replacement that would exceed the cap still refuses (closed coverage, not resurrection)", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000, perTask: { attempts: 1 }, caps: { usd: 100, turns: 100 }, perAttempt: { usd: 1, turns: 5 } });
+  const reqA = requestOf({ actionId: "act-SA", taskId: "t1", attemptId: "a1" });
+  const cA = check(p, reqA, await ledger.snapshotAt(now), now);
+  const recA = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now) });
+  await ledger.closeReservation(
+    recA.id,
+    "settled",
+    { outcome: "spawned-and-finished", evidence: "stdout:runs/act-SA.log" },
+    { clock: fixedClock(now + 1) },
+  );
+  const snapSettled = await ledger.snapshotAt(now + 1);
+  assert.equal(snapSettled.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 1, "settled A keeps its slot (A8)");
+  // A replacement B must NOT fit — this is the cap working as intended.
+  const reqB = requestOf({ actionId: "act-SB", taskId: "t1", attemptId: "a2" });
+  const cB = check(p, reqB, snapSettled, now + 1);
+  assert.ok(!cB.allowed && cB.denials.some((d) => d.code === "task-attempts-exhausted"), "settled slot blocks the replacement");
+  // Redelivering A under the SAME policy still succeeds: coverage mode
+  // (C6) judges the full current snapshot and adds no hypothetical
+  // second slot — attempts = 1 = cap, so A stays covered.
+  const again = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now + 1) });
+  assert.equal(again.id, recA.id, "settled A redelivers its own record — coverage, not a second hold");
+});
+
+test("C5-F2: lifecycle coverage preserves real revocation — revoked redelivery of a released reservation still refuses", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 100, turns: 1000 } });
+  const req = requestOf({ actionId: "act-rev", taskId: "t1", attemptId: "a1" });
+  const checked = check(p, req, await ledger.snapshotAt(now), now);
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(now) });
+  await ledger.closeReservation(
+    rec.id,
+    "released",
+    { outcome: "spawn-failed-unstarted", evidence: "spawn-error:c5f2r", spawnStarted: false },
+    { clock: fixedClock(now + 1) },
+  );
+  // Same receipt, but the policy LOWERED the episode USD cap below the
+  // reservation: standing coverage of the intent's own admission
+  // (reserve amount vs cap) denies — later ledger evolution or not. Real
+  // revocation is not a free pass under lifecycle coverage.
+  const revoked = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.01, turns: 1000 } });
+  await assert.rejects(
+    ledger.reserve(revoked, req, checked.receipt!, { clock: fixedClock(now + 1) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "policy-revoked",
+    "a cap lowered below the intent still revokes — lifecycle coverage is not a free pass",
+  );
+});
+
+// ─────────────────── C6 fix regressions (audit cycle 6) ────────────────────
+
+test("C6-F1: redelivery under a TIGHTENED aggregate cap refuses when LATER live holds are essential to the violation", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 10, turns: 1000 } });
+  const reqA = requestOf({ actionId: "act-c6f1-a", taskId: "t1", attemptId: "a1" });
+  const reqB = requestOf({ actionId: "act-c6f1-b", taskId: "t2", attemptId: "a2" });
+  const cA = check(p, reqA, await ledger.snapshotAt(now), now);
+  assert.ok(cA.allowed);
+  const recA = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now) });
+  const cB = check(p, reqB, await ledger.snapshotAt(now), now);
+  assert.ok(cB.allowed);
+  await ledger.reserve(p, reqB, cB.receipt!, { clock: fixedClock(now) });
+  // Two LIVE holds: $0.25 + $0.25 = $0.50 reserved. Tighten the episode
+  // cap to $0.40 — the standing ledger is no longer covered, but the
+  // VIOLATION depends on B: A alone is $0.25 <= $0.40. The historical-
+  // prefix recheck sliced B away entirely and redelivered A successfully;
+  // coverage against the full snapshot sees the $0.50 and refuses.
+  const pTight = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.4, turns: 1000 } });
+  await assert.rejects(
+    ledger.reserve(pTight, reqA, cA.receipt!, { clock: fixedClock(now + 1) }),
+    (e: unknown) => (e as BudgetLedgerError).code === "policy-revoked",
+    "later live holds are part of current coverage — a tightened aggregate cap they violate must revoke",
+  );
+  // Observation-only: both durable records stand.
+  const after = await ledger.read();
+  assert.ok(after.records.some((r) => r.kind === "res-open" && r.id === recA.id), "A's record untouched");
+  assert.equal(after.records.filter((r) => r.kind === "res-close").length, 0, "revocation wrote no close");
+  // Control: the same redelivery under the UNCHANGED cap still succeeds.
+  const again = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now + 1) });
+  assert.equal(again.id, recA.id, "unchanged policy at $10 cap covers $0.50 standing — same record back");
+});
+
+test("C6-F2: a release of an EARLIER hold appended after A's admission refunds — redelivery covers the live total, not the resurrected one", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 10, turns: 1000 } });
+  // X first, then A (the prefix slice would drop a close of X appended after A's res-open).
+  const reqX = requestOf({ actionId: "act-c6f2-x", taskId: "tx", attemptId: "ax" });
+  const reqA = requestOf({ actionId: "act-c6f2-a", taskId: "ta", attemptId: "aa" });
+  const cX = check(p, reqX, await ledger.snapshotAt(now), now);
+  const recX = await ledger.reserve(p, reqX, cX.receipt!, { clock: fixedClock(now) });
+  const cA = check(p, reqA, await ledger.snapshotAt(now), now);
+  const recA = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now) });
+  // Release X with negative-spawn evidence AFTER both admissions.
+  await ledger.closeReservation(
+    recX.id,
+    "released",
+    { outcome: "spawn-failed-unstarted", evidence: "spawn-error:c6f2", spawnStarted: false },
+    { clock: fixedClock(now + 1) },
+  );
+  const snap = await ledger.snapshotAt(now + 1);
+  const liveReserved = snap.compartments.get(compartmentKey({ episodeId: "ep-1" }))?.reservedUsd ?? 0;
+  assert.ok(Math.abs(liveReserved - 0.25) < 1e-9, `live reserved is exactly A's $0.25 after X's evidenced release (got ${liveReserved})`);
+  // Tighten to $0.50: current coverage is $0.25 <= $0.50 — redelivery
+  // SUCCEEDS. The prefix replay resurrected X's released $0.75 and
+  // threw policy-revoked on a projected $1.00.
+  const pTight = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.5, turns: 1000 } });
+  const again = await ledger.reserve(pTight, reqA, cA.receipt!, { clock: fixedClock(now + 1) });
+  assert.equal(again.id, recA.id, "released X contributes $0 — A's real standing coverage passes the tightened cap");
+});
+
+test("C6-F2: a SETTLED intent's closed estimate contributes nothing to live coverage — redelivery under a cap below the estimate succeeds", async () => {
+  const dir = await freshDir();
+  const ledger = await openLedger(dir);
+  const now = 1000;
+  const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 10, turns: 1000 } });
+  const req = requestOf({ actionId: "act-c6f2s", taskId: "t1", attemptId: "a1", estimate: { usd: 1, turns: 2 } });
+  const checked = check(p, req, await ledger.snapshotAt(now), now);
+  assert.ok(checked.allowed);
+  const rec = await ledger.reserve(p, req, checked.receipt!, { clock: fixedClock(now) });
+  // Settle with terminal evidence, no spend recorded: the live hold is GONE.
+  await ledger.closeReservation(
+    rec.id,
+    "settled",
+    { outcome: "spawned-and-finished", evidence: "stdout:runs/act-c6f2s.log" },
+    { clock: fixedClock(now + 1) },
+  );
+  const snap = await ledger.snapshotAt(now + 1);
+  assert.equal(snap.compartments.get(compartmentKey({ episodeId: "ep-1" }))?.reservedUsd ?? 0, 0, "settled intent holds nothing live");
+  // Tighten to $0.50 — ABOVE the run default but BELOW the settled $1
+  // estimate. Live coverage is $0, so redelivery succeeds; the prefix
+  // hypothetical always restored the original $1 estimate and refused.
+  // Attempt usage stays charged (A8): with perTask.attempts unset here,
+  // the slot fact cannot mask this — a separate assertion pins it.
+  assert.equal(snap.attemptsUsed.get(JSON.stringify(["ep-1", "t1"])), 1, "settled keeps its attempt slot (A8) — history stays charged");
+  const pTight = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.5, turns: 1000 } });
+  const again = await ledger.reserve(pTight, req, checked.receipt!, { clock: fixedClock(now + 1) });
+  assert.equal(again.id, rec.id, "an evidenced close removes the live estimate — coverage judges the standing ledger, not history");
+});
+
+test("C6: check({coverage:true}) is observation — it never mints a receipt and adds no second hold", () => {
+  const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.25, turns: 1000 } });
+  const req = requestOf({ actionId: "act-c6cov" });
+  // Empty snapshot: a fresh admission at the cap fits exactly...
+  const admit = check(p, req, EMPTY, 1000);
+  assert.ok(admit.allowed && admit.receipt !== undefined, "normal mode mints the receipt (control)");
+  // ...while the same coverage call reports allowed but hands out NO
+  // receipt — a coverage verdict is never an admission ticket (A4).
+  const cov = check(p, req, EMPTY, 1000, { coverage: true });
+  assert.ok(cov.allowed, "coverage of a standing $0.25 intent at a $0.25 cap");
+  assert.equal(cov.receipt, undefined, "coverage mode never mints (the receipt is the only admission ticket)");
+  // Coverage of a ledger ALREADY beyond a tightened cap denies even
+  // though no hypothetical hold is added.
+  const beyond: BudgetSnapshot = {
+    ...EMPTY,
+    compartments: new Map(EMPTY.compartments).set(compartmentKey({ episodeId: "ep-1" }), { consumedUsd: 0, unknownSpend: 0, consumedTurns: 0, reservedUsd: 0.5, reservedTurns: 2 }),
+  };
+  const covDeny = check(p, req, beyond, 1000, { coverage: true });
+  assert.ok(!covDeny.allowed && covDeny.denials.some((d) => d.code === "episode-budget-exceeded"), "standing $0.50 over a $0.25 cap denies in coverage mode");
+});
+
+test("C6: coverage mode adds no hypothetical attempt slot or strategy repeat", () => {
+  const p = policyOf({
+    reservationTtlMs: 60_000,
+    caps: { usd: 100, turns: 1000 },
+    perTask: { attempts: 1 },
+    maxStrategyRepeats: 1,
+  });
+  const req = requestOf({ actionId: "act-c6slot", taskId: "t1", attemptId: "a1", strategyId: "s1" });
+  const snap: BudgetSnapshot = {
+    ...EMPTY,
+    attemptsUsed: new Map([[JSON.stringify(["ep-1", "t1"]), 1]]),
+    strategyUses: new Map([[JSON.stringify(["ep-1", "t1", "s1"]), 1]]),
+    reservedAttempts: new Set([JSON.stringify(["ep-1", "t1", "a1"])]),
+  };
+  // Fresh admission at the caps would add the hypothetical second use —
+  // both checks deny.
+  const fresh = check(p, req, snap, 1000);
+  assert.ok(!fresh.allowed && fresh.denials.some((d) => d.code === "task-attempts-exhausted"), "fresh admission at a full attempt cap denies (control)");
+  assert.ok(fresh.denials.some((d) => d.code === "strategy-repeat-exceeded"), "fresh admission at a full strategy cap denies (control)");
+  // Coverage judges the recorded facts only — the standing intent IS
+  // the one slot / the one use, so it is covered.
+  const cov = check(p, req, snap, 1000, { coverage: true });
+  assert.ok(cov.allowed, "coverage adds no second slot and no second strategy repeat");
+});
+
+test("C5-F3: terminated blank suffix with malformed UTF-8 inside a valid JSON record repairs CLEAN (raw byte cut)", async () => {
+  const dir = await freshDir();
+  const path = join(dir, "budget.jsonl");
+  const ok = { schema: LEDGER_SCHEMA_ID, id: "w-c5", ts: 1, episodeId: "ep-1", kind: "wallclock", taskId: "t", seconds: 1, note: "extra-field-tolerated" };
+  // The record is VALID (extra fields allowed; the 0xff becomes U+FFFD
+  // inside the JSON string and parses) but its raw bytes carry malformed
+  // UTF-8. The old cut re-encoded the kept line (1 raw byte → 3 bytes)
+  // and overshot by 2, leaving newlines behind.
+  const rawLine = Buffer.from(JSON.stringify(ok), "utf8");
+  // Insert the poison byte INSIDE the JSON string value (extra fields
+  // are explicitly permitted): raw 0xff decodes as U+FFFD and the line
+  // still parses — the OLD cut re-encoded 1 raw byte as 3 and overshot.
+  const keyPos = rawLine.indexOf(Buffer.from("extra-field-tolerated"));
+  assert.ok(keyPos > 0, "test setup: marker present");
+  const poisonAt = keyPos + 3; // inside the string value's bytes
+  const poisoned = Buffer.concat([rawLine.subarray(0, poisonAt), Buffer.from([0xff]), rawLine.subarray(poisonAt)]);
+  assert.ok(typeof JSON.parse(poisoned.toString("utf8")).note === "string", "poisoned record still parses (setup control)");
+  await writeFile(path, Buffer.concat([poisoned, Buffer.from("\n\n\n", "utf8")]));
+  const ledger = await BudgetLedger.open(path);
+  assert.equal(ledger.tornTailRepaired, true, "the terminated blank tail is repaired at open");
+  await ledger.recordWallclock({ episodeId: "ep-1", taskId: "t" }, 5, { clock: fixedClock(10) });
+  const reopened = await BudgetLedger.open(path);
+  const after = await reopened.read();
+  assert.equal(after.records.length, 2, "repair+append+reopen stays clean — no corruption left behind");
+  assert.equal(reopened.tornTailRepaired, false, "second open is clean (nothing left to repair)");
+  const raw = await readFile(path, "utf8");
+  assert.ok(raw.endsWith("\n") && !raw.endsWith("\n\n"), "no blank suffix survives the cycle");
+});
+
+test("C5-F3: terminated single-blank suffix with malformed UTF-8 repairs byte-exact (no overshoot)", async () => {
+  const dir = await freshDir();
+  const path = join(dir, "budget.jsonl");
+  const ok = { schema: LEDGER_SCHEMA_ID, id: "w-c5b", ts: 1, episodeId: "ep-1", kind: "wallclock", taskId: "t", seconds: 1 };
+  const line = Buffer.from(JSON.stringify(ok), "utf8");
+  // Poison INSIDE the JSON string: a 0xff byte mid-value decodes to
+  // U+FFFD and still parses (isNonEmptyString checks decoded length,
+  // and JSON.parse accepts the replacement char).
+  const quoteAt = line.indexOf(Buffer.from('"w-c5b"'));
+  assert.ok(quoteAt > 0, "test setup: id present");
+  const poisonAt = quoteAt + 3; // inside the id string value
+  const poisoned = Buffer.concat([line.subarray(0, poisonAt), Buffer.from([0xff]), line.subarray(poisonAt)]);
+  await writeFile(path, Buffer.concat([poisoned, Buffer.from("\n\n", "utf8")]));
+  const ledger = await BudgetLedger.open(path);
+  assert.equal(ledger.tornTailRepaired, true);
+  // Byte-exact: file is exactly the poisoned line + its own newline.
+  const expected = Buffer.concat([poisoned, Buffer.from("\n", "utf8")]);
+  const actual = await readFile(path);
+  assert.ok(actual.equals(expected), `cut is byte-exact (got ${actual.length} bytes, want ${expected.length})`);
+  await ledger.recordWallclock({ episodeId: "ep-1", taskId: "t" }, 5, { clock: fixedClock(10) });
+  const reopened = await BudgetLedger.open(path);
+  assert.equal((await reopened.read()).records.length, 2, "append after a byte-exact cut stays clean");
+});

@@ -59,6 +59,9 @@ tre.json
 .tre/tmp/
 # Audit verification harness scratch (e.g. p7-audit-verify.ts) — same policy.
 .tre/audit/
+# Auditor-cycle scratch (probe scripts, gate/build logs, tmp fixtures) —
+# cited by path in audit reports, never project history. Same policy.
+scratch/
 # Raw auditor transcript recovery dumps (KB-scale raw thinking logs; the
 # consolidated reports audit-cycle*-resolutions/-review.md ARE committed).
 .tre/audit-cycle*recovered.md

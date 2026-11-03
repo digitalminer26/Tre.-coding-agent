@@ -942,33 +942,56 @@ export function globMatch(glob: string, canonicalPath: string, root: string): bo
   return re.test(canonicalPath);
 }
 
-/** C3-F1 (audit finding 1): deep-copy + freeze the policy at call time.
+/** C5-F1 (audit finding 1): deep-copy + freeze the policy at call time.
  *  Manual copy over the KNOWN shape (structuredClone would throw on the
  *  injected resolver function): every level is copied then frozen, so
  *  no alias to the caller's object survives — EXCEPT the resolver, a
  *  host-owned function carried by reference (its results still flow
  *  through the fail-closed path checks). The caller's object is never
  *  frozen, so updating the policy for the NEXT call still works.
- *  Pure, synchronous. */
+ *  STRICT shape (C5-F1): the snapshot preserves every field
+ *  validateGatePolicy judges and throws a BudgetLedgerError bad-input
+ *  on anything malformed — never normalizing garbage into shape.
+ *  Spreading `[...arr]` over a non-iterable used to throw raw
+ *  TypeErrors ('arr is not iterable') and a string `paths` silently
+ *  became a char array; a NaN cacheRead vanished before validation.
+ *  Now the boundary rejects the ORIGINAL shape first (see reserve),
+ *  and the snapshot re-validates defensively. Pure, synchronous. */
 function snapshotPolicy(policy: GatePolicy): GatePolicy {
+  const bad = (what: string): never => {
+    throw new BudgetLedgerError("bad-input", `policy: ${what} has an invalid shape for snapshotting`);
+  };
   const copyCaps = <T extends object | undefined>(caps: T): T | undefined => {
     if (caps === undefined) return undefined;
+    if (typeof caps !== "object" || caps === null || Array.isArray(caps)) bad("caps/perTask/perAttempt must be objects");
     const c: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(caps)) if (v !== undefined) c[k] = v;
     return Object.freeze(c) as T;
   };
-  const copyStrs = (arr: readonly string[] | undefined): readonly string[] | undefined =>
-    arr === undefined ? undefined : Object.freeze([...arr]);
+  const copyStrs = (arr: readonly string[] | undefined, what: string): readonly string[] | undefined => {
+    if (arr === undefined) return undefined;
+    // C5-F1: reject the ORIGINAL shape — a string here used to spread
+    // into chars (['*','*'] hiding a boundary violation), a
+    // non-iterable threw a raw TypeError.
+    if (!Array.isArray(arr)) bad(`authority.${what} must be an array of non-empty strings`);
+    const out: string[] = [];
+    for (const s of arr) {
+      if (typeof s !== "string" || s === "") bad(`authority.${what} must be an array of non-empty strings`);
+      out.push(s);
+    }
+    return Object.freeze(out);
+  };
   let authority: GatePolicy["authority"];
   if (policy.authority !== undefined) {
     const a = policy.authority;
+    if (typeof a !== "object" || a === null || Array.isArray(a)) bad("authority must be an object");
     authority = Object.freeze({
       ...(a.root !== undefined ? { root: a.root } : {}),
-      ...(copyStrs(a.paths) !== undefined ? { paths: copyStrs(a.paths) } : {}),
-      ...(copyStrs(a.notPaths) !== undefined ? { notPaths: copyStrs(a.notPaths) } : {}),
+      ...(copyStrs(a.paths, "paths") !== undefined ? { paths: copyStrs(a.paths, "paths") } : {}),
+      ...(copyStrs(a.notPaths, "notPaths") !== undefined ? { notPaths: copyStrs(a.notPaths, "notPaths") } : {}),
       ...(a.allowInstalls !== undefined ? { allowInstalls: a.allowInstalls } : {}),
       ...(a.allowNetwork !== undefined ? { allowNetwork: a.allowNetwork } : {}),
-      ...(copyStrs(a.approvedModels) !== undefined ? { approvedModels: copyStrs(a.approvedModels) } : {}),
+      ...(copyStrs(a.approvedModels, "approvedModels") !== undefined ? { approvedModels: copyStrs(a.approvedModels, "approvedModels") } : {}),
       ...(a.diagnostics !== undefined
         ? {
             diagnostics: Object.freeze({
@@ -983,15 +1006,38 @@ function snapshotPolicy(policy: GatePolicy): GatePolicy {
   const rates: GatePolicy["rates"] | undefined =
     policy.rates === undefined
       ? undefined
-      : Object.freeze(
-          policy.rates.map((r) =>
-            Object.freeze({
-              ...(r.provider !== undefined ? { provider: r.provider } : {}),
-              ...(r.model !== undefined ? { model: r.model } : {}),
-              rate: Object.freeze({ input: r.rate.input, output: r.rate.output }),
+      : (() => {
+          // C5-F1: the snapshot preserves EVERY defined Rate field.
+          // Copying only input/output silently deleted cacheRead/
+          // cacheWrite before validateGatePolicy could judge them —
+          // a NaN cacheRead became valid by deletion. Malformed
+          // entries throw here; validateGatePolicy judges values.
+          if (!Array.isArray(policy.rates)) bad("rates must be an array");
+          return Object.freeze(
+            (policy.rates as unknown[]).map((re) => {
+              if (re === null || typeof re !== "object" || Array.isArray(re)) bad("rates entry must be an object");
+              const r = re as Record<string, unknown>;
+              if (r.rate === null || typeof r.rate !== "object" || Array.isArray(r.rate)) bad("rates entry rate must be an object");
+              const rate = r.rate as Record<string, unknown>;
+              if (typeof r.provider !== "string" && r.provider !== undefined) bad("rates entry provider must be a string when present");
+              if (typeof r.model !== "string" && r.model !== undefined) bad("rates entry model must be a string when present");
+              if (typeof rate.input !== "number" && rate.input !== undefined) bad("rates entry rate.input must be a number when present");
+              if (typeof rate.output !== "number" && rate.output !== undefined) bad("rates entry rate.output must be a number when present");
+              if (typeof rate.cacheRead !== "number" && rate.cacheRead !== undefined) bad("rates entry rate.cacheRead must be a number when present");
+              if (typeof rate.cacheWrite !== "number" && rate.cacheWrite !== undefined) bad("rates entry rate.cacheWrite must be a number when present");
+              return Object.freeze({
+                ...(typeof r.provider === "string" ? { provider: r.provider } : {}),
+                ...(typeof r.model === "string" ? { model: r.model } : {}),
+                rate: Object.freeze({
+                  input: rate.input as number,
+                  output: rate.output as number,
+                  ...(typeof rate.cacheRead === "number" ? { cacheRead: rate.cacheRead } : {}),
+                  ...(typeof rate.cacheWrite === "number" ? { cacheWrite: rate.cacheWrite } : {}),
+                }),
+              });
             }),
-          ),
-        );
+          );
+        })();
   const pol: GatePolicy = {
     episodeId: policy.episodeId,
     caps: Object.assign({}, copyCaps(policy.caps) ?? {}) as GatePolicy["caps"],
@@ -1102,8 +1148,22 @@ export function canonicalActionSpec(policy: GatePolicy, request: GateRequest, re
  * THE GATE (A1). Pure function of policy + request + snapshot at `now`.
  * Every check — live, refresh-at-reserve, or a test replay — runs the
  * same fold, so the three can never diverge.
+ *
+ * Coverage mode (C6, docs/12 §7 item 7): `options.coverage === true` asks a
+ * DIFFERENT question — "does the CURRENT policy still cover the ledger as
+ * it stands, including this intent?" — instead of "admit a NEW
+ * reservation". Every ceiling is judged against the FULL current snapshot
+ * with NO additional hypothetical hold/slot/strategy use added: the
+ * intent already occupies its place in the snapshot (its live hold, its
+ * attempt slot, its strategy use are already counted there — and a
+ * released intent contributes zero because the fold already refunded
+ * it). Authority-lifetime denials (grant, external, D2 cap-below-floor,
+ * the A3 surface, the A6 resume fact, elapsed wallclock past a
+ * tightened cap) are identical in both modes. A coverage verdict NEVER
+ * mints a receipt — it is observation, not permission.
  */
-export function check(policy: GatePolicy, request: GateRequest, snapshot: BudgetSnapshot, now: number): CheckResult {
+export function check(policy: GatePolicy, request: GateRequest, snapshot: BudgetSnapshot, now: number, options: { coverage?: boolean } = {}): CheckResult {
+  const coverage = options.coverage === true;
   // Boundary validation (audit C1-F18): a malformed policy (NaN caps etc.)
   // throws BEFORE any receipt can be minted — an allow built on garbage
   // input is not a safe allow.
@@ -1224,19 +1284,22 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
   // A6 (unknown cost): a compartment carrying priced:"unknown" spend has
   // an UNBOUNDED USD exposure — no number exists for it, so USD admission
   // anywhere a USD cap exists is CONSERVATIVE: denied, never assumed $0.
+  // Coverage mode (C6): the intent is ALREADY in the snapshot (its live
+  // hold, refunded-if-released by the fold), so NO hypothetical second
+  // hold is added — the projection judges the ledger as it stands.
   const overUsd = (label: string, usage: CompartmentUsage, cap: Cap, code: DenialCode) => {
     if (cap === undefined) return;
     if (usage.unknownSpend > 0) {
       deny(code, `${label}: ${usage.unknownSpend} unpriced (priced:"unknown") record(s) — unknown cost is never zero (A6); USD admission is blocked while any cap exists`, { cap, headroomUsd: 0 });
       return;
     }
-    const projected = usage.consumedUsd + usage.reservedUsd + reserveUsd;
-    if (projected > cap) deny(code, `${label}: ${projected.toFixed(6)} projected (consumed ${usage.consumedUsd.toFixed(6)} + reserved ${usage.reservedUsd.toFixed(6)} + this ${reserveUsd.toFixed(6)}) exceeds cap ${cap}`, { cap, headroomUsd: Math.max(0, cap - usage.consumedUsd - usage.reservedUsd) });
+    const projected = usage.consumedUsd + usage.reservedUsd + (coverage ? 0 : reserveUsd);
+    if (projected > cap) deny(code, `${label}: ${projected.toFixed(6)} projected (consumed ${usage.consumedUsd.toFixed(6)} + reserved ${usage.reservedUsd.toFixed(6)}${coverage ? "" : ` + this ${reserveUsd.toFixed(6)}`}) exceeds cap ${cap}`, { cap, headroomUsd: Math.max(0, cap - usage.consumedUsd - usage.reservedUsd) });
   };
   const overTurns = (label: string, usage: CompartmentUsage, cap: Cap, code: DenialCode) => {
     if (cap === undefined) return;
-    const projected = usage.consumedTurns + usage.reservedTurns + reserveTurns;
-    if (projected > cap) deny(code, `${label}: ${projected} projected turns (consumed ${usage.consumedTurns} + reserved ${usage.reservedTurns} + this ${reserveTurns}) exceeds cap ${cap}`, { cap });
+    const projected = usage.consumedTurns + usage.reservedTurns + (coverage ? 0 : reserveTurns);
+    if (projected > cap) deny(code, `${label}: ${projected} projected turns (consumed ${usage.consumedTurns} + reserved ${usage.reservedTurns}${coverage ? "" : ` + this ${reserveTurns}`}) exceeds cap ${cap}`, { cap });
   };
 
   overUsd("episode", episode, policy.caps.usd, "episode-budget-exceeded");
@@ -1250,7 +1313,10 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     overTurns(`task ${request.taskId}`, task, policy.perTask?.turns, "task-turns-exceeded");
     const attempts = snapshot.attemptsUsed.get(JSON.stringify([policy.episodeId, request.taskId])) ?? 0;
     const max = policy.perTask?.attempts ?? policy.maxAttemptsPerTask;
-    if (max !== undefined && attempts + (request.action === "run" ? 1 : 0) > max) {
+    // Coverage mode (C6): the intent's OWN run slot is already counted in
+    // the snapshot (A8 keeps reserved attempts forever) — no hypothetical
+    // second slot is added.
+    if (max !== undefined && attempts + (coverage || request.action !== "run" ? 0 : 1) > max) {
       deny("task-attempts-exhausted", `task ${request.taskId}: ${attempts} attempt slots used, cap ${max}`, { cap: max }); // A6: run only
     }
   }
@@ -1277,7 +1343,9 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
   // ── A9 (docs/12 §9): strategy-repeat limit over durable reservations ──
   if (request.strategyId !== undefined && policy.maxStrategyRepeats !== undefined) {
     const used = snapshot.strategyUses.get(JSON.stringify([policy.episodeId, request.taskId ?? null, request.strategyId])) ?? 0;
-    if (used + 1 > policy.maxStrategyRepeats)
+    // Coverage mode (C6): the intent's own res-open is already counted in
+    // strategyUses — judge the recorded uses, add no hypothetical repeat.
+    if ((coverage ? used : used + 1) > policy.maxStrategyRepeats)
       deny("strategy-repeat-exceeded", `strategy ${JSON.stringify(request.strategyId)} already used ${used} time(s), cap ${policy.maxStrategyRepeats} — the next repeat needs a different fingerprint`, { cap: policy.maxStrategyRepeats });
   }
 
@@ -1295,6 +1363,11 @@ export function check(policy: GatePolicy, request: GateRequest, snapshot: Budget
     throw new BudgetLedgerError("bad-input", `check: expiry ${String(expiresAt)} must be finite and strictly after now (${String(now)})`);
   if (denials.length > 0) {
     return { allowed: false, denials, reserve, estimateRaised, expiresAt };
+  }
+  // Coverage mode never mints: a coverage verdict is observation of an
+  // intent already on the ledger, not permission for a new one (C6).
+  if (coverage) {
+    return { allowed: true, denials: [], reserve, estimateRaised, expiresAt };
   }
   const digest = createHash("sha256").update(canonicalActionSpec(policy, request, reserve), "utf8").digest("hex");
   const receipt = mintReceipt({
@@ -1614,13 +1687,38 @@ export class BudgetLedger {
       // that blank mid-file corruption (the F9 poison class narrowed to
       // whitespace). Normalize it durably — cut the blanks through a
       // synced handle — before any write is admitted.
-      const text = buf.toString("utf8");
-      const lines = text.split("\n");
-      lines.pop(); // drops the trailing "" (file ends with \n)
-      let last = lines.length - 1;
-      while (last >= 0 && lines[last]!.trim() === "") last--;
-      if (last === lines.length - 1) return false; // terminated, no blank tail — clean
-      const cutLen = Buffer.byteLength(lines.slice(0, last + 1).join("\n") + (last >= 0 ? "\n" : ""), "utf8");
+      // C5-F3: the cut offset MUST come from raw byte positions, never
+      // from re-encoding decoded text. buf.toString("utf8") maps each
+      // invalid byte to a 3-byte U+FFFD, so Buffer.byteLength of the
+      // re-joined lines OVERSHOOTS the true offset whenever a kept line
+      // holds malformed UTF-8 (one raw 0xff becomes three bytes and the
+      // truncate leaves stray newlines behind — poison for later
+      // appends). Walk raw newline byte positions instead: the cut is
+      // exactly past the last non-blank line's own 0x0a (or 0 for an
+      // all-blank file). No decoding, no re-measurement.
+      const nlPos: number[] = []; // byte offsets of every 0x0a in buf
+      for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) nlPos.push(i);
+      // The final newline is the file's own terminator; every line
+      // before it is buf[prevNL+1..nextNL-1]. Scan back to the last line
+      // whose RAW bytes are not JS-blank: decode ONLY that candidate
+      // line for the blank test (decoding a slice never moves the
+      // cut — the offset stays the raw newline position).
+      // C5-F3: all-blank or empty-of-records files (nlPos.length < 2)
+      // carry nothing to keep — cut to 0 directly.
+      let last = nlPos.length - 1; // line index of the last content candidate
+      while (last >= 0) {
+        // Line L spans buf[nl(L-1)+1 .. nl(L)-1]: the slice BETWEEN the
+        // newline that ends line L-1 and the newline that ends line L.
+        // (The kept line in "rec\n\n" is buf[0..firstNL-1]; the trailing
+        // "\n" slice is covered by JS trim, so including the line's own
+        // 0x0a in the test slice would misclassify every line as blank.)
+        const start = last > 0 ? nlPos[last - 1]! + 1 : 0;
+        const end = nlPos[last]!;
+        if (buf.subarray(start, end).toString("utf8").trim() !== "") break;
+        last--;
+      }
+      if (last === nlPos.length - 1) return false; // terminated, no blank tail — clean
+      const cutLen = last >= 0 ? nlPos[last]! + 1 : 0;
       const normHandle = await fsOpen(this.path, "r+");
       try {
         await normHandle.truncate(cutLen);
@@ -2022,13 +2120,21 @@ export class BudgetLedger {
     // call is inert. The admission contract is the policy as presented
     // at call time; revoking a policy affects later calls, not one
     // already in flight.
+    // C5-F1 (audit finding 5.1): validate the ORIGINAL presented policy
+    // SYNCHRONOUSLY before shape-dependent copying — validateGatePolicy
+    // throws bad-input on malformed shapes (a string paths, a
+    // non-object authority, a NaN rate). The snapshot below then PRESERVES
+    // every defined Rate field and re-validates, so even a caller that
+    // reaches snapshotPolicy with a hand-built object cannot normalize
+    // garbage into an accepted policy.
+    validateGatePolicy(policy);
     const pol: GatePolicy = snapshotPolicy(policy);
+    validateGatePolicy(pol);
     const clock = options.clock ?? Date.now;
     // C2-F10: policy validation runs on EVERY public policy-consuming
     // call — including idempotent redelivery (the old code returned the
     // prior record before any policy check, so a policy poisoned to
     // NaN caps after the first reserve still returned "success").
-    validateGatePolicy(pol);
     // Consume-side checks that don't depend on ledger state (fail before
     // any I/O — a forged handle never touches the disk path).
     const inner = receiptInner(receipt);
@@ -2098,38 +2204,47 @@ export class BudgetLedger {
           // C2-F10: idempotent redelivery is ALREADY RECORDED — do not
           // execute — never fresh permission. The refreshed policy is
           // re-checked before handing back the old record, but as
-          // COVERAGE of the standing intent, never as a NEW reservation
-          // (C3-F7 audit finding 7): running check() against the live
-          // snapshot adds a hypothetical SECOND hold/use on top of the
-          // recorded one, so an UNCHANGED valid policy at its own cap
-          // falsely reported policy-revoked. The recheck refolds the
-          // journal WITHOUT this action's own res-open record: the gate
-          // judges exactly one instance of the intent (its caps, attempt
-          // slot, strategy use, authority surface), so real revocation
-          // (flipped allow-flags, a cap lowered below the intent, a
-          // tightened strategy limit) still refuses, while redelivery
-          // under an unchanged policy succeeds. Callers that ACT on a
-          // successful reserve() must dedupe by actionId — this branch
-          // proves a past intent, it authorizes nothing.
-          // C4-F2 (audit c4 finding 2): removing this action's res-open
-          // also removed the wallclock INTERVAL its hold accrued — but
-          // elapsed time is durable reality, not the record's own
-          // intent. Redelivering after the attempt already accrued past
-          // a TIGHTENED wallclock cap used to pass on the refolded
-          // snapshot. The refold judges the intent's live economics
-          // (holds, slots, strategy uses) without its own record; the
-          // wallclock maps are ELAPSED FACTS and come from the full
-          // snapshot, so a cap tightened below the accrued time revokes.
-          const { records: journalNow } = await this.read();
-          const withoutPrior = journalNow.filter((r) => !(r.kind === "res-open" && r.actionId === req.actionId));
-          const redeliverySnap = projectLedger(withoutPrior, admissionAt);
-          redeliverySnap.wallclockS = fullSnap.wallclockS;
-          redeliverySnap.attemptWallclockS = fullSnap.attemptWallclockS;
-          const redelivery = check(pol, req, redeliverySnap, admissionAt);
+          // COVERAGE of the standing intent, never as a NEW reservation:
+          // check() runs in coverage mode (C6, docs/12 §7 item 7) so no
+          // hypothetical second hold/slot/strategy use is added on top
+          // of the recorded one — an UNCHANGED valid policy at its own
+          // cap redelivers cleanly, while real revocation (flipped
+          // allow-flags, a cap tightened below the LIVE standing, a
+          // tightened strategy limit) still refuses. Callers that ACT
+          // on a successful reserve() must dedupe by actionId — this
+          // branch proves a past intent, it authorizes nothing.
+          // C4-F2 (audit c4 finding 2): elapsed time is durable reality,
+          // not the record's own intent — redelivery after the attempt
+          // accrued past a TIGHTENED wallclock cap must revoke; the
+          // wallclock maps are ELAPSED FACTS from the full snapshot.
+          // C5-F2 (audit c5 finding 2) / C6-F1+F2 (audit c6 findings
+          // 1+2): the revocation question is "does the CURRENT policy
+          // still COVER the ledger as it stands, this intent included?"
+          // — answered by check() in COVERAGE mode against the FULL
+          // current snapshot. The earlier attempts were wrong in
+          // opposite directions: the whole-journal refold without this
+          // record re-added a hypothetical second hold (C3-F7) and
+          // charged a released intent's estimate as if live; the
+          // historical-prefix slice (records strictly before this
+          // intent's res-open) dropped every LATER standing contribution
+          // (C6-F1: a tightened aggregate cap the later live holds
+          // violate passed redelivery) and mishandled closes of earlier
+          // reservations (C6-F2: a released earlier hold was
+          // resurrected; a settled intent kept charging its stale
+          // estimate). The full snapshot is lifecycle-correct by
+          // construction: the fold refunds evidenced releases, keeps
+          // settled/expired/abandoned attempt slots (A8), preserves
+          // strategy history and elapsed intervals. Coverage mode adds
+          // NO hypothetical hold, slot or strategy use — the intent's
+          // own standing is already in the snapshot (or zero, if
+          // evidenced-closed) — so a released A redelivers against its
+          // real $0 standing, while a cap tightened below the sum of
+          // LIVE holds revokes.
+          const redelivery = check(pol, req, fullSnap, admissionAt, { coverage: true });
           if (!redelivery.allowed) {
             throw new BudgetLedgerError(
               "policy-revoked",
-              `reserve: actionId ${req.actionId} was recorded earlier, but the CURRENT policy no longer admits that intent (${redelivery.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}) — redelivery is observation-only under a revoked policy (C2-F10/C3-F7)`,
+              `reserve: actionId ${req.actionId} was recorded earlier, but the CURRENT policy no longer covers that intent against the live ledger (${redelivery.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}) — redelivery is observation-only under a revoked policy (C2-F10/C6)`,
             );
           }
           return prior; // idempotent redelivery: same spec, no second record
