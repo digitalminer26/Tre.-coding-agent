@@ -513,7 +513,15 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
           // indistinguishable from a deterministic pass.
         } else if (cl.verdict === "incomplete") {
           row.pass = false; // a judge's "incomplete" is respected, never waived upward
-          judgedIncomplete.add(c.id);
+          // C3-F3 (audit follow-up): a negative judgment is a verdict-
+          // SETTING finding only at >= msc — the SAME epistemic bar the
+          // positive (`complete`) branch requires. Below the bar the
+          // criterion stays unfunded (never passes — conservative
+          // direction unchanged) and the input falls back to the normal
+          // evidence rules; confidence 0/absent must not flip a verdict
+          // (EV5) while confidence 0.95 can — asymmetric bars for
+          // symmetric judgments was the audit finding.
+          if ((typeof cl.confidence === "number" ? cl.confidence : 0) >= msc) judgedIncomplete.add(c.id);
           row.evidenceRef = cl.evidenceRefs?.[0];
         }
       }

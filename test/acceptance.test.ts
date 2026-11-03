@@ -1047,3 +1047,64 @@ test("C3-F2: claims-only + judge incomplete + positive blocker → incomplete (f
   assert.equal(a.verdict, "incomplete");
   assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
 });
+
+// ── cycle-3 follow-up (C3-F3): negative judgments gated at msc like positive ─
+
+test("C3-F3: judge incomplete BELOW msc does not set a verdict (claims-only keeps the cap)", () => {
+  // The audit repro: confidence 0 (or any below-bar value) must not flip
+  // a claims-only spec to incomplete — symmetric with the positive side,
+  // where complete below msc funds nothing.
+  for (const conf of [0, 0.3, 0.69] as const) {
+    const a = evaluate(input({
+      spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+      gates: [],
+      artifacts: [],
+      claims: [{ source: "model-judgment", judge: "j", claim: "meh", verdict: "incomplete", confidence: conf, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+    }));
+    assert.equal(a.verdict, "uncertain", `incomplete at conf=${conf} is below the bar — no finding`);
+    assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+  }
+});
+
+test("C3-F3: judge incomplete AT/ABOVE msc still sets the finding (no over-correction)", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.7, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
+});
+
+test("C3-F3: absent confidence on an incomplete claim is treated as 0 — never a finding", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "meh", verdict: "incomplete", criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C3-F3: below-bar incomplete never passes the criterion and stays in remainingWork", () => {
+  // Conservative direction unchanged: a below-bar negative does NOT
+  // launder the criterion into funded/complete — it simply is not a
+  // finding. Evidence-bearing spec, no funding claim → unfunded.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }] }),
+    claims: [{ source: "model-judgment", judge: "j", claim: "meh", verdict: "incomplete", confidence: 0.2, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.remainingWork.includes("criterion:crit:readability"), "unfunded required criterion is named work");
+  assert.ok(!a.reasons.includes("verdict:criterion-incomplete"), "below-bar negative is not a finding");
+});
+
+test("C3-F3: custom semanticMinConfidence gates the negative side too", () => {
+  const claims = [{ source: "model-judgment" as const, judge: "j", claim: "meh", verdict: "incomplete" as const, confidence: 0.5, criteriaIds: ["crit:readability"], at: { sha: SHA } }];
+  const lo = evaluate({ ...input({ spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }), gates: [], artifacts: [], claims: claims }), semanticMinConfidence: 0.4 });
+  assert.equal(lo.verdict, "incomplete", "0.5 >= 0.4 custom bar — finding stands");
+  const hi = evaluate({ ...input({ spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }), gates: [], artifacts: [], claims: claims }), semanticMinConfidence: 0.6 });
+  assert.equal(hi.verdict, "uncertain", "0.5 < 0.6 custom bar — no finding");
+});
