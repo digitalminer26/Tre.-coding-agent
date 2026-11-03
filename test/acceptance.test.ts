@@ -955,6 +955,11 @@ test("C2-F4: isStale treats malformed revisions as stale (never 'false' from gar
   for (const rev of [0, -1, 1.5, undefined] as const) {
     assert.equal(isStale(good, { taskRevision: rev as never, artifact: { sha: SHA } }), true, `current revision ${String(rev)} is garbage → stale`);
   }
+  // Audit repro (efd1866): MATCHING malformed revisions on both sides used
+  // to return false ("not stale") because `!==` held. Must be stale.
+  for (const rev of [0, -1, 1.5, undefined] as const) {
+    assert.equal(isStale({ ...good, taskRevision: rev as never }, { taskRevision: rev as never, artifact: { sha: SHA } }), true, `matching malformed revision ${String(rev)} → stale`);
+  }
 });
 
 test("C2-F1/F2 ladder order: finding > floor > missing evidence (all three rungs, one input each)", () => {
