@@ -406,11 +406,19 @@ export function validateLedgerRecord(record: unknown): asserts record is LedgerR
       if (!isNonEmptyString(r.refId)) throw new BudgetLedgerError("schema", "res-close: refId invalid");
       if (!(RESERVATION_CLOSE_REASONS as readonly string[]).includes(r.reason as string))
         throw new BudgetLedgerError("schema", `res-close: reason must be one of ${RESERVATION_CLOSE_REASONS.join("|")}`);
-      // C2-F6: an attested close must carry a REAL attestation — a
-      // half-present one (outcome without evidence etc.) is a schema lie.
-      // An absent attest is legal only for observed/legacy records:
-      // closeReservation() never WRITES an unattested res-close.
-      if (r.attest !== undefined) {
+      // C2-F6 / C3-F4: a TERMINAL res-close must carry a REAL attestation
+      // — a half-present one (outcome without evidence etc.) is a schema
+      // lie, and a wholly absent one is no longer exempted as
+      // "observed/legacy" (audit c3 finding 4: evidence-free terminal
+      // records stayed schema-valid and erased holds on rebuild,
+      // contradicting the evidence-only contract). closeReservation()
+      // never writes an unattested res-close (it writes close-request),
+      // so requiring attest closes the rebuild hole; an attest-less close
+      // that slips past the validator (hand-edited file reading an older
+      // byte stream) is ALSO ignored by the fold (defense in depth).
+      if (r.attest === undefined)
+        throw new BudgetLedgerError("schema", "res-close: terminal closes require attest {outcome, evidence} (C3-F4) — use kind 'close-request' for an unattested claim");
+      {
         const a = r.attest as Record<string, unknown>;
         if (typeof r.attest !== "object" || r.attest === null || Array.isArray(r.attest))
           throw new BudgetLedgerError("schema", "res-close: attest must be an object");
@@ -534,6 +542,11 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
   const seenLineIds = new Set<string>();
   const duplicateIds: string[] = [];
   const ids = new Set<string>();
+  // C3-F3: attempt keys with an EXPLICIT supervisor wallclock window,
+  // collected ONLY from accepted (first-wins) records in this fold — a
+  // duplicate-ID wallclock skipped below must never mark an attempt as
+  // explicitly-timed and suppress its reservation-derived elapsed.
+  const explicitWindowKeys = new Set<string>();
   let unpricedCount = 0;
 
   const touch = (c: Compartment): CompartmentUsage => {
@@ -607,6 +620,11 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
         break;
       }
       case "res-close": {
+        // C3-F4 defense in depth: a terminal close WITHOUT attestation
+        // is refused by the validator; if one reaches the fold anyway
+        // (older byte streams), it is a bare claim — it removes NOTHING.
+        // (An unattested claim belongs in kind 'close-request'.)
+        if (record.attest === undefined) break;
         if (closedRefs.has(record.refId)) break; // first close wins: never double-refund
         closedRefs.add(record.refId);
         // A8: refund ONLY the justified failed-spawn/release case; the
@@ -629,6 +647,7 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
         if (record.taskId !== undefined && record.attemptId !== undefined) {
           const ak = JSON.stringify([record.episodeId, record.taskId, record.attemptId]);
           attemptWallclockS.set(ak, (attemptWallclockS.get(ak) ?? 0) + record.seconds);
+          explicitWindowKeys.add(ak); // C3-F3: accepted-only source
         }
         break;
       }
@@ -651,27 +670,20 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
     }
   }
 
-  // A1/F17 + C2-F8 (docs/12 §2): supervisor downtime counts toward the
+  // ── A1/F17 + C2-F8 (docs/12 §2): supervisor downtime counts toward the
   // attempt it spans — and the time it counted is NOT erased at close.
   // Every reservation that names an attempt contributes a wallclock
-  // interval [open.ts, close_ts or now] (C2-F8: closing used to zero the
-  // elapsed live window, so a short-lived reservation paid nothing for
-  // the downtime it represented, and a re-reservation of the same attempt
-  // double-counted the same span). Overlapping open intervals on one
-  // attempt take the max; closed [start,end] windows sum on top — the
-  // fold stays a pure function of (records, now): A7.
-  // C2-F8 precedence: an attempt that has an EXPLICIT recordWallclock
-  // window is judged by the supervisor's own accounting; reservation-
-  // derived intervals are a downtime PROXY only for attempts with no
-  // explicit window (killing the audit's explicit-100s + live-100s = 200s
-  // double count).
-  const explicitWindowKeys = new Set<string>();
-  for (const record of records) {
-    if (record.kind === "wallclock" && record.taskId !== undefined && record.attemptId !== undefined)
-      explicitWindowKeys.add(JSON.stringify([record.episodeId, record.taskId, record.attemptId]));
-  }
-  const closedWindows = new Map<string, number>(); // sum of closed intervals per attempt key
-  const liveStart = new Map<string, number>(); // earliest still-open anchor
+  // interval [open.ts, close_ts or now]. C3-F2 (audit c3 finding 2): the
+  // fold is the UNION of those intervals per attempt — run + resume on
+  // one attempt no longer sum the closed interval on top of the live one
+  // (190s for a 100s span), and two overlapping closed windows count once.
+  // The fold stays a pure function of (records, now): A7.
+  // C2-F8 precedence: an attempt with an EXPLICIT recordWallclock window
+  // (accepted records only, C3-F3) is judged by the supervisor's own
+  // accounting; reservation-derived intervals are a downtime PROXY only
+  // for attempts with no explicit window.
+  type Interval = [number, number]; // [start, end] ms, end >= start
+  const intervals = new Map<string, Interval[]>();
   for (const reservation of allReservations.values()) {
     // C2: epoch 0 is a VALID start anchor (audit: a ts=0 reservation
     // must contribute elapsed, not be silently skipped).
@@ -679,26 +691,35 @@ export function projectLedger(records: readonly LedgerRecord[], now: number): Bu
     const key = JSON.stringify([reservation.episodeId, reservation.taskId ?? null, reservation.attemptId]);
     if (explicitWindowKeys.has(key)) continue; // supervisor window owns this attempt's time
     const closeTs = closeTsRef.get(reservation.id);
-    if (closeTs === undefined) {
-      const prev = liveStart.get(key);
-      if (prev === undefined || reservation.ts < prev) liveStart.set(key, reservation.ts);
-    } else {
-      const dur = Math.max(0, (closeTs - reservation.ts) / 1000);
-      closedWindows.set(key, (closedWindows.get(key) ?? 0) + dur);
+    const end = closeTs === undefined ? now : closeTs;
+    // A close BEFORE its open (clock backwards) or a now BEFORE the open
+    // contributes nothing — a negative interval never subtracts time.
+    if (!Number.isFinite(end) || end < reservation.ts) continue;
+    const list = intervals.get(key);
+    if (list) list.push([reservation.ts, end]);
+    else intervals.set(key, [[reservation.ts, end]]);
+  }
+  for (const [key, list] of intervals) {
+    list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let covered = 0;
+    let runStart = list[0]![0];
+    let runEnd = list[0]![1];
+    for (let i = 1; i < list.length; i++) {
+      const [s, e] = list[i]!;
+      if (s <= runEnd) {
+        if (e > runEnd) runEnd = e;
+      } else {
+        covered += runEnd - runStart;
+        runStart = s;
+        runEnd = e;
+      }
     }
-  }
-  for (const [key, startedAt] of liveStart) {
-    const elapsed = Math.max(0, (now - startedAt) / 1000);
-    if (elapsed <= 0) continue;
+    covered += runEnd - runStart;
+    const seconds = covered / 1000;
+    if (seconds <= 0) continue;
     const [, taskId] = JSON.parse(key) as [string, string | null, string];
-    attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + elapsed);
-    if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + elapsed);
-  }
-  for (const [key, dur] of closedWindows) {
-    if (dur <= 0) continue;
-    const [, taskId] = JSON.parse(key) as [string, string | null, string];
-    attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + dur);
-    if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + dur);
+    attemptWallclockS.set(key, (attemptWallclockS.get(key) ?? 0) + seconds);
+    if (taskId !== null) wallclockS.set(taskId, (wallclockS.get(taskId) ?? 0) + seconds);
   }
 
   // A8: refund a run slot ONLY for a justified 'released' (failed-spawn)
@@ -919,6 +940,72 @@ export function globMatch(glob: string, canonicalPath: string, root: string): bo
       "/?$",
   );
   return re.test(canonicalPath);
+}
+
+/** C3-F1 (audit finding 1): deep-copy + freeze the policy at call time.
+ *  Manual copy over the KNOWN shape (structuredClone would throw on the
+ *  injected resolver function): every level is copied then frozen, so
+ *  no alias to the caller's object survives — EXCEPT the resolver, a
+ *  host-owned function carried by reference (its results still flow
+ *  through the fail-closed path checks). The caller's object is never
+ *  frozen, so updating the policy for the NEXT call still works.
+ *  Pure, synchronous. */
+function snapshotPolicy(policy: GatePolicy): GatePolicy {
+  const copyCaps = <T extends object | undefined>(caps: T): T | undefined => {
+    if (caps === undefined) return undefined;
+    const c: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(caps)) if (v !== undefined) c[k] = v;
+    return Object.freeze(c) as T;
+  };
+  const copyStrs = (arr: readonly string[] | undefined): readonly string[] | undefined =>
+    arr === undefined ? undefined : Object.freeze([...arr]);
+  let authority: GatePolicy["authority"];
+  if (policy.authority !== undefined) {
+    const a = policy.authority;
+    authority = Object.freeze({
+      ...(a.root !== undefined ? { root: a.root } : {}),
+      ...(copyStrs(a.paths) !== undefined ? { paths: copyStrs(a.paths) } : {}),
+      ...(copyStrs(a.notPaths) !== undefined ? { notPaths: copyStrs(a.notPaths) } : {}),
+      ...(a.allowInstalls !== undefined ? { allowInstalls: a.allowInstalls } : {}),
+      ...(a.allowNetwork !== undefined ? { allowNetwork: a.allowNetwork } : {}),
+      ...(copyStrs(a.approvedModels) !== undefined ? { approvedModels: copyStrs(a.approvedModels) } : {}),
+      ...(a.diagnostics !== undefined
+        ? {
+            diagnostics: Object.freeze({
+              ...(a.diagnostics.maxToolCalls !== undefined ? { maxToolCalls: a.diagnostics.maxToolCalls } : {}),
+              ...(a.diagnostics.maxUsd !== undefined ? { maxUsd: a.diagnostics.maxUsd } : {}),
+            }),
+          }
+        : {}),
+      ...(a.resolveRealPath !== undefined ? { resolveRealPath: a.resolveRealPath } : {}),
+    }) as GatePolicy["authority"];
+  }
+  const rates: GatePolicy["rates"] | undefined =
+    policy.rates === undefined
+      ? undefined
+      : Object.freeze(
+          policy.rates.map((r) =>
+            Object.freeze({
+              ...(r.provider !== undefined ? { provider: r.provider } : {}),
+              ...(r.model !== undefined ? { model: r.model } : {}),
+              rate: Object.freeze({ input: r.rate.input, output: r.rate.output }),
+            }),
+          ),
+        );
+  const pol: GatePolicy = {
+    episodeId: policy.episodeId,
+    caps: Object.assign({}, copyCaps(policy.caps) ?? {}) as GatePolicy["caps"],
+    ...(copyCaps(policy.perTask) !== undefined ? { perTask: copyCaps(policy.perTask)! } : {}),
+    ...(copyCaps(policy.perAttempt) !== undefined ? { perAttempt: copyCaps(policy.perAttempt)! } : {}),
+    ...(policy.maxAttemptsPerTask !== undefined ? { maxAttemptsPerTask: policy.maxAttemptsPerTask } : {}),
+    ...(policy.maxStrategyRepeats !== undefined ? { maxStrategyRepeats: policy.maxStrategyRepeats } : {}),
+    allowExternalEffects: policy.allowExternalEffects,
+    ...(authority !== undefined ? { authority } : {}),
+    ...(rates !== undefined ? { rates } : {}),
+    ...(policy.reservationTtlMs !== undefined ? { reservationTtlMs: policy.reservationTtlMs } : {}),
+  };
+  Object.freeze(pol.caps);
+  return Object.freeze(pol);
 }
 
 /** Boundary validation (audit C1-NaN: an invalid cap used to MINT an
@@ -1285,9 +1372,13 @@ export class ActionReceipt {
     if (inner.episodeId !== spec.episodeId) return { ok: false, reason: `receipt is bound to episode '${inner.episodeId}'` };
     if (inner.taskId !== spec.taskId) return { ok: false, reason: `receipt is bound to task ${JSON.stringify(inner.taskId ?? null)}` };
     const at = now ?? Date.now();
-    // C2-F9: a NaN `at` makes `at >= expiresAt` false — comparisons with
-    // NaN FAIL OPEN, so a garbage verify-clock used to pass. Not anymore.
+    // C2-F9 / C3-F5: a NaN `at` makes `at >= expiresAt` false —
+    // comparisons with NaN FAIL OPEN. And a negative clock is not a
+    // moment: check()/reserve admission refuse negative now, so the
+    // standalone verifier handed to spawn consumers must refuse it too
+    // (audit c3: verify(correctSpec, -1) used to pass).
     if (!Number.isFinite(at)) return { ok: false, reason: `verify clock is not finite (${String(at)})` };
+    if (at < 0) return { ok: false, reason: `verify clock is negative (${String(at)})` };
     if (at >= inner.expiresAt) return { ok: false, reason: `receipt expired at ${inner.expiresAt} (now ${at})` };
     return { ok: true };
   }
@@ -1446,29 +1537,44 @@ export class BudgetLedger {
     const endsNL = raw.endsWith("\n");
     const lines = raw.split("\n");
     if (endsNL) lines.pop();
-    const isTornTail = (i: number, line: string) => i === lines.length - 1 && (!endsNL || line.trim() === "");
+    // C3-F6 (audit finding 6): the ENTIRE whitespace-only EOF suffix is
+    // repair territory, not mid-file corruption. "rec\n\n\n" and
+    // "rec\n\n \t\n" used to throw on the FIRST trailing blank —
+    // before repairTail could normalize the suffix it advertises. Scan
+    // back to the first line of the trailing blank run; every blank at
+    // or after it is tolerated here and cut durably by repairTail.
+    // A blank BEFORE the last real record stays fail-closed corruption.
+    let eofSuffixStart = lines.length;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i]!.trim() !== "") {
+        eofSuffixStart = i + 1;
+        break;
+      }
+      eofSuffixStart = i;
+    }
+    const isTornTail = (i: number) => i >= eofSuffixStart || (!endsNL && i === lines.length - 1);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!;
       if (line.trim() === "") {
-        if (isTornTail(i, line)) continue; // whitespace-only torn/last line (repair will cut it)
+        if (isTornTail(i)) continue; // whitespace-only torn/last line (repair will cut it)
         throw new BudgetLedgerError("corrupt", `budget.jsonl: blank line ${i + 1} (records are exactly one JSON object per line)`);
       }
       const duplicated = duplicateKeyIn(line);
       if (duplicated !== undefined) {
-        if (isTornTail(i, line)) continue; // ambiguous UNTERMINATED tail: repair drops it
+        if (isTornTail(i)) continue; // ambiguous UNTERMINATED tail: repair drops it
         throw new BudgetLedgerError("corrupt", `budget.jsonl: line ${i + 1} repeats key ${JSON.stringify(duplicated)} (refusing an ambiguous record)`);
       }
       let parsed: unknown;
       try {
         parsed = JSON.parse(line);
       } catch {
-        if (isTornTail(i, line)) continue; // torn tail — tolerated, repaired on open
+        if (isTornTail(i)) continue; // torn tail — tolerated, repaired on open
         throw new BudgetLedgerError("corrupt", `budget.jsonl: corrupt line ${i + 1} (mid-file corruption)`);
       }
       try {
         validateLedgerRecord(parsed);
       } catch (e) {
-        if (isTornTail(i, line)) continue; // torn tail tolerated
+        if (isTornTail(i)) continue; // torn tail tolerated
         throw e instanceof BudgetLedgerError ? new BudgetLedgerError("corrupt", `budget.jsonl: invalid line ${i + 1}: ${(e as Error).message}`) : e;
       }
       const record = parsed as LedgerRecord;
@@ -1538,7 +1644,61 @@ export class BudgetLedger {
       return true;
     };
 
-    if (tail.trim() === "") return cutTo(lastNL + 1);
+    if (tail.trim() === "") {
+      // C4-F1: the ENTIRE EOF whitespace suffix must go, not just the
+      // fragment after the final newline. Cutting only to lastNL+1 left
+      // blank lines behind that "repaired" the file into a corrupt:blank
+      // state on the next open (and let appends plant records after
+      // them). Byte-wise backward scan — decoding the whole buffer and
+      // re-measuring would corrupt the cut when a mid-file line holds
+      // invalid UTF-8 (each bad byte would re-encode to a 3-byte
+      // U+FFFD). The set matches JS trim() (walkLines' blank test).
+      const isTrimWS = (c: number): boolean =>
+        c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d ||
+        c === 0x20 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+        c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f ||
+        c === 0x3000 || c === 0xfeff;
+      let end = buf.length;
+      while (end > 0) {
+        const b = buf[end - 1] as number;
+        if (b < 0x80) {
+          if (isTrimWS(b)) { end--; continue; }
+          break;
+        }
+        if ((b & 0xc0) === 0x80) {
+          // Tail byte of a multi-byte sequence: find its start, decode
+          // exactly one code point, keep trimming only if it is trim
+          // whitespace. Invalid/partial sequences end the scan (a
+          // non-WS byte is not trimmable — same verdict as trim()).
+          let s = end - 1;
+          while (s > 0 && ((buf[s] as number) & 0xc0) === 0x80) s--;
+          const ch = buf.subarray(s, end).toString("utf8");
+          const cp = ch.length === 1 ? ch.codePointAt(0) : undefined;
+          if (cp === undefined || !isTrimWS(cp)) break;
+          end = s;
+          continue;
+        }
+        break; // ASCII non-WS already handled; a lead byte here is malformed
+      }
+      // A no-newline all-whitespace file lands here with end=0 (a
+      // no-newline file with content has a non-empty trim → other
+      // branches). When content survives, end points just past the last
+      // NON-WS byte — the record's own terminator is the FIRST newline
+      // at or after end (the branch guarantees every byte after the last
+      // newline is trim whitespace, so one exists no later than lastNL).
+      // Cut there: blank lines and the unterminated suffix go, the last
+      // real record keeps its terminator (a bare `rec` would fuse with
+      // the next honest append). Note the terminator is NOT buf[end]:
+      // when the record's line carried trailing spaces before its
+      // newline ("{...} \n \t"), buf[end] is one of those spaces —
+      // keeping only end+1 bytes would drop the newline and leave the
+      // survivor unterminated (the exact append-fusion class this repair
+      // exists to kill).
+      if (end === 0) return cutTo(0);
+      let term = end;
+      while (term < buf.length && buf[term] !== 0x0a) term++;
+      return cutTo(term + 1);
+    }
     if (duplicateKeyIn(tail) !== undefined) {
       // Ambiguous record (P4 lesson): cut it rather than terminate into history.
       return cutTo(lastNL + 1);
@@ -1849,18 +2009,32 @@ export class BudgetLedger {
     Object.freeze(req.authority);
     if (req.estimate !== undefined) Object.freeze(req.estimate);
     if (req.paths !== undefined) Object.freeze(req.paths);
+    // C3-F1 (audit finding 1): the POLICY is trusted input exactly like
+    // the request — snapshot it SYNCHRONOUSLY at call time and freeze
+    // the copy. Before this, the in-queue digest passed against the
+    // call-time policy while the refreshed gate and the DURABLE record
+    // (episodeId, path canonicalization root) read the LIVE object, so
+    // a microtask fired by an injected clock could flip episodeId,
+    // authority.root and allowExternalEffects between the digest check
+    // and the write, persisting a redirected intent under the original
+    // receipt digest. Now every judgment and every durable field below
+    // comes from THIS snapshot: policy mutation after the reserve()
+    // call is inert. The admission contract is the policy as presented
+    // at call time; revoking a policy affects later calls, not one
+    // already in flight.
+    const pol: GatePolicy = snapshotPolicy(policy);
     const clock = options.clock ?? Date.now;
     // C2-F10: policy validation runs on EVERY public policy-consuming
     // call — including idempotent redelivery (the old code returned the
     // prior record before any policy check, so a policy poisoned to
     // NaN caps after the first reserve still returned "success").
-    validateGatePolicy(policy);
+    validateGatePolicy(pol);
     // Consume-side checks that don't depend on ledger state (fail before
     // any I/O — a forged handle never touches the disk path).
     const inner = receiptInner(receipt);
     const now = clock();
     const specOk = await Promise.resolve(receipt.verify(
-      { action: req.action, actionId: req.actionId, episodeId: policy.episodeId, taskId: req.taskId },
+      { action: req.action, actionId: req.actionId, episodeId: pol.episodeId, taskId: req.taskId },
       now,
     ));
     if (!specOk.ok) throw new BudgetLedgerError("receipt-invalid", `reserve: ${specOk.reason}`);
@@ -1886,9 +2060,9 @@ export class BudgetLedger {
     }
     // C2-F2: the authority root the caller presents at reserve must be the
     // root the receipt was granted under (also inside the digest).
-    if ((policy.authority?.root ?? "/") !== inner.policyRoot)
+    if ((pol.authority?.root ?? "/") !== inner.policyRoot)
       throw new BudgetLedgerError("receipt-mismatch", "reserve: policy.authority.root differs from the receipt's granted root (A3/C2-F2)");
-    const presentedDigest = canonicalActionSpec(policy, req, { usd: inner.reserveUsd, turns: inner.reserveTurns });
+    const presentedDigest = canonicalActionSpec(pol, req, { usd: inner.reserveUsd, turns: inner.reserveTurns });
     const presentedHash = createHash("sha256").update(presentedDigest, "utf8").digest("hex");
     if (presentedHash !== inner.digest) {
       throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec does not match the receipt's digest (check(X)-then-act(Y) refused)");
@@ -1906,13 +2080,14 @@ export class BudgetLedger {
       // the queue — the policy object may have been mutated since call
       // time (root/episode are digest-bound); nothing re-reads the live
       // request object. ──
-      const queueDigest = createHash("sha256").update(canonicalActionSpec(policy, req, { usd: inner.reserveUsd, turns: inner.reserveTurns }), "utf8").digest("hex");
+      const queueDigest = createHash("sha256").update(canonicalActionSpec(pol, req, { usd: inner.reserveUsd, turns: inner.reserveTurns }), "utf8").digest("hex");
       if (queueDigest !== inner.digest) {
         throw new BudgetLedgerError("receipt-mismatch", "reserve: action spec (or digest-bound policy surface) changed between call and admission — refused (A4/C2-F1)");
       }
       // ── F3: actionId uniqueness / idempotent redelivery, inside the ──
       // queue so two racing reserves of the same actionId serialize.
-      const prior = (await this.snapshotAt(admissionAt)).actionIds.get(req.actionId);
+      const fullSnap = await this.snapshotAt(admissionAt);
+      const prior = fullSnap.actionIds.get(req.actionId);
       if (prior !== undefined) {
         if (
           prior.action === req.action &&
@@ -1922,17 +2097,39 @@ export class BudgetLedger {
         ) {
           // C2-F10: idempotent redelivery is ALREADY RECORDED — do not
           // execute — never fresh permission. The refreshed policy is
-          // re-checked before handing back the old record: authority
-          // revocation (e.g. allowExternalEffects flipped false) since
-          // the first reserve turns the redelivery into a typed
-          // policy-revoked error instead of a silent success. Callers
-          // that ACT on a successful reserve() must dedupe by actionId
-          // — this branch proves a past intent, it authorizes nothing.
-          const redelivery = check(policy, req, await this.snapshotAt(admissionAt), admissionAt);
+          // re-checked before handing back the old record, but as
+          // COVERAGE of the standing intent, never as a NEW reservation
+          // (C3-F7 audit finding 7): running check() against the live
+          // snapshot adds a hypothetical SECOND hold/use on top of the
+          // recorded one, so an UNCHANGED valid policy at its own cap
+          // falsely reported policy-revoked. The recheck refolds the
+          // journal WITHOUT this action's own res-open record: the gate
+          // judges exactly one instance of the intent (its caps, attempt
+          // slot, strategy use, authority surface), so real revocation
+          // (flipped allow-flags, a cap lowered below the intent, a
+          // tightened strategy limit) still refuses, while redelivery
+          // under an unchanged policy succeeds. Callers that ACT on a
+          // successful reserve() must dedupe by actionId — this branch
+          // proves a past intent, it authorizes nothing.
+          // C4-F2 (audit c4 finding 2): removing this action's res-open
+          // also removed the wallclock INTERVAL its hold accrued — but
+          // elapsed time is durable reality, not the record's own
+          // intent. Redelivering after the attempt already accrued past
+          // a TIGHTENED wallclock cap used to pass on the refolded
+          // snapshot. The refold judges the intent's live economics
+          // (holds, slots, strategy uses) without its own record; the
+          // wallclock maps are ELAPSED FACTS and come from the full
+          // snapshot, so a cap tightened below the accrued time revokes.
+          const { records: journalNow } = await this.read();
+          const withoutPrior = journalNow.filter((r) => !(r.kind === "res-open" && r.actionId === req.actionId));
+          const redeliverySnap = projectLedger(withoutPrior, admissionAt);
+          redeliverySnap.wallclockS = fullSnap.wallclockS;
+          redeliverySnap.attemptWallclockS = fullSnap.attemptWallclockS;
+          const redelivery = check(pol, req, redeliverySnap, admissionAt);
           if (!redelivery.allowed) {
             throw new BudgetLedgerError(
               "policy-revoked",
-              `reserve: actionId ${req.actionId} was recorded earlier, but the CURRENT policy denies it (${redelivery.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}) — redelivery is observation-only under a revoked policy (C2-F10)`,
+              `reserve: actionId ${req.actionId} was recorded earlier, but the CURRENT policy no longer admits that intent (${redelivery.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}) — redelivery is observation-only under a revoked policy (C2-F10/C3-F7)`,
             );
           }
           return prior; // idempotent redelivery: same spec, no second record
@@ -1941,7 +2138,7 @@ export class BudgetLedger {
       }
       // ── refresh-first (the queue-serialized recheck) ──
       const fresh = await this.snapshotAt(admissionAt);
-      const refreshed = check(policy, req, fresh, admissionAt);
+      const refreshed = check(pol, req, fresh, admissionAt);
       if (!refreshed.allowed) {
         throw new BudgetLedgerError("denied", `reserve: refreshed gate denied — ${refreshed.denials.map((d) => `${d.code}: ${d.detail}`).join("; ")}`);
       }
@@ -1956,7 +2153,7 @@ export class BudgetLedger {
         schema: LEDGER_SCHEMA_ID,
         id: `b-${randomUUID()}`,
         ts: 0, // stamped by appendInside from the clock (F15)
-        episodeId: policy.episodeId,
+        episodeId: pol.episodeId,
         ...(req.taskId !== undefined ? { taskId: req.taskId } : {}),
         ...(req.attemptId !== undefined ? { attemptId: req.attemptId } : {}),
         kind: "res-open",
@@ -1973,17 +2170,26 @@ export class BudgetLedger {
         estimateRaised: inner.estimateRaised,
         // A3 durable authority trail: every checked surface field.
         ...(inner.strategyId !== undefined ? { strategyId: inner.strategyId } : {}),
-        ...(inner.paths !== undefined ? { paths: inner.paths.map((p) => canonicalizePath(p, policy.authority?.root ?? "/") ?? p) } : {}),
+        ...(inner.paths !== undefined ? { paths: inner.paths.map((p) => canonicalizePath(p, pol.authority?.root ?? "/") ?? p) } : {}),
         ...(inner.install !== undefined ? { install: inner.install } : {}),
         ...(inner.network !== undefined ? { network: inner.network } : {}),
         ...(inner.model !== undefined ? { model: inner.model } : {}),
         ...(inner.toolCalls !== undefined ? { toolCalls: inner.toolCalls } : {}),
       };
-      // ── C2-F7: FINAL admission boundary. The write stamp is sampled
-      // FIRST and expiry is re-verified against it, so the durable intent
-      // can never carry a ts past its own expiresAt (the old flow wrote
-      // with a later clock sample and never rechecked). One accepted
-      // timestamp governs both the check and the record. ──
+      // ── C2-F7 + C3-F8 (audit finding 8, pinned contract): the write
+      // stamp is sampled FIRST and expiry is re-verified against it, so
+      // the durable intent never carries a ts past its own expiresAt.
+      // WHAT THIS IS: a SAMPLED LOGICAL ADMISSION boundary — the moment
+      // the ledger commits the record within the serialized queue. It
+      // is NOT durable-completion time (the fsync may land later; a
+      // scheduler can delay the append past expiry AFTER this sample)
+      // and NOT act time (the executor must re-verify the receipt at
+      // spawn). It does NOT enforce monotonic ts: a backward clock
+      // sample is recorded as-is (records stay append-only; consumers
+      // must not assume ts ordering). Consumers that need act-time
+      // freshness re-verify the receipt with a live clock before the
+      // spawn — the receipt TTL window between admission and act is
+      // the deployment's exposure, owned by the executor. ──
       const writeAt = clock();
       if (!Number.isFinite(writeAt) || writeAt < 0)
         throw new BudgetLedgerError("receipt-invalid", `reserve: write clock is not a finite non-negative epoch ms (${String(writeAt)})`);

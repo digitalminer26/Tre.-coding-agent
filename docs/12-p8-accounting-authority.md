@@ -188,12 +188,15 @@ THIS section is the pinned contract.
    Rebuilding the same log at the same `now` is byte-identical (Map/Set-
    aware serializer, sorted iteration); the literal "no clocks" phrasing
    of §4-A7 means no clock is read *inside* the fold. Live wallclock is
-   therefore an explicit interval semantics (§2's intent): closed
-   supervisor-recorded windows sum; an open reservation contributes
-   elapsed from its ts to `now` (ts=0 is a valid anchor); an explicit
-   `recordWallclock` window takes precedence over the reservation-derived
-   proxy for that attempt — overlapping windows are never double-counted
-   and a terminal close never erases accrued time (C2-F8).
+   therefore an explicit interval semantics (§2's intent): the per-attempt
+   time is the UNION of its reservation intervals — closed windows and the
+   live [ts, now] window overlap once, never summed (C3-F2); an open
+   reservation contributes elapsed from its ts to `now` (ts=0 is a valid
+   anchor); an explicit `recordWallclock` window takes precedence over the
+   reservation-derived proxy for that attempt, and only windows from
+   ACCEPTED (first-wins) records mark an attempt explicitly-timed (C3-F3)
+   — overlapping windows are never double-counted and a terminal close
+   never erases accrued time (C2-F8).
 4. **A9 is partial by declaration.** Delivered: per-`(episode,task,
    strategyId)` use counters on the snapshot and a typed
    `strategy-repeat-exceeded` denial. Not delivered (deferred): per-nudge
@@ -205,15 +208,44 @@ THIS section is the pinned contract.
    failure denies fail-closed (C2-F3). Without it the guarantee is
    lexical and the executor owns symlink enforcement + a consume-time
    TOCTOU recheck — a pinned boundary, no longer a silent gap.
-6. **Terminal closes carry evidence (A2/A5 tightened, C2-F6).** A
+6. **Terminal closes carry evidence (A2/A5 tightened, C2-F6/C3-F4).** A
    terminal `res-close` requires `attest: {outcome, evidence,
-   spawnStarted?}`; a bare `closeReservation(id, "released")` without
+   spawnStarted?}` — enforced by the SCHEMA now, not just by the API: an
+   attest-less terminal record is schema-invalid, so a hand-edited or
+   legacy file carrying one fails CLOSED at open (`corrupt`) instead of
+   silently erasing the hold on rebuild, and the fold independently
+   ignores bare terminals (defense in depth); a bare
+   `closeReservation(id, "released")` without
    attestation persists only a `close-request` marker (observation — the
    hold stands). Slot refunds for `released` happen ONLY with negative
    spawn evidence (`spawnStarted: false`); `settled`/`expired` never
    refund (A8/F3 doctrine unchanged).
-7. **Idempotent redelivery ≠ new permission (C2-F10).** `reserve()`
-   revalidates the policy on every call including the already-recorded
-   branch; a policy that no longer covers the standing reservation
-   rejects `policy-revoked` (observation-only error — the record stays;
-   it is NOT a reservation success).
+7. **Idempotent redelivery ≠ new permission (C2-F10/C3-F7).** `reserve()`
+   validates the policy on every call including the already-recorded
+   branch; the recheck is COVERAGE of the standing intent — the gate
+   refolds the journal WITHOUT this action's own res-open, so exactly one
+   instance of the intent is judged. A policy that no longer admits that
+   intent (caps lowered below it, authority flags flipped, strategy limit
+   tightened) rejects `policy-revoked` (observation-only error — the
+   record stays; it is NOT a reservation success), while redelivery under
+   an UNCHANGED policy at its own cap succeeds (no hypothetical second
+   hold/use is ever added).
+8. **The policy is a call-time snapshot (C3-F1).** `reserve()` deep-copies
+   and freezes the presented `GatePolicy` synchronously at entry (the
+   injected resolver rides by reference). Every judgment, digest and
+   durable field below uses that snapshot: mutating the caller's policy
+   object after the call began — episodeId, authority.root, any flag —
+   changes nothing. Revoking a policy governs LATER calls; it cannot
+   retroactively redirect or poison one already in flight, and it cannot
+   be bypassed by a mid-call mutation either — admission is exactly the
+   policy as presented.
+9. **The write stamp is a sampled logical admission boundary (C3-F8
+   correction).** Inside the queue, the ts is sampled before the write and
+   expiry re-verified against it, so no durable record carries a ts past
+   its own expiresAt. That is ALL this guarantees: it is NOT
+   durable-completion time (a delayed fsync can land after expiry), NOT
+   act time (the executor re-verifies the receipt with a live clock
+   before spawn — the TTL window between admission and act is executor
+   ownership), and it does NOT enforce monotonic `ts` (a backward clock
+   sample is recorded as-is; consumers must not order by ts). Earlier
+   drafts claimed "monotonic ts"/"FINAL write stamp" — withdrawn.
