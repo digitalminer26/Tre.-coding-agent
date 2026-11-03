@@ -1459,7 +1459,7 @@ test("C5-F1: a well-formed cacheRead/cacheWrite rate survives the snapshot and s
   assert.ok(rec.id.startsWith("b-"), "reservation recorded under the preserved-rate policy");
 });
 
-test("C5-F2: released-A/replacement-B/redeliver-A — A's admission-time context still admits A (not hostage to later fills)", async () => {
+test("C5-F2: released-A/replacement-B/redeliver-A — A's live standing still admits under the tightened cap (not hostage to later fills)", async () => {
   const dir = await freshDir();
   const ledger = await openLedger(dir);
   const now = 1000;
@@ -1533,10 +1533,10 @@ test("C5-F2: lifecycle coverage preserves real revocation — revoked redelivery
     { outcome: "spawn-failed-unstarted", evidence: "spawn-error:c5f2r", spawnStarted: false },
     { clock: fixedClock(now + 1) },
   );
-  // Same receipt, but the policy LOWERED the episode USD cap below the
-  // reservation: standing coverage of the intent's own admission
-  // (reserve amount vs cap) denies — later ledger evolution or not. Real
-  // revocation is not a free pass under lifecycle coverage.
+  // Same receipt, but the policy LOWERED the episode USD cap to $0.01 —
+  // below the class floor ($0.25), so NOTHING can admit under it, released
+  // intent or not: the coverage call runs the shared floor/authority checks
+  // and denies. Real revocation is not a free pass under lifecycle coverage.
   const revoked = policyOf({ reservationTtlMs: 60_000, caps: { usd: 0.01, turns: 1000 } });
   await assert.rejects(
     ledger.reserve(revoked, req, checked.receipt!, { clock: fixedClock(now + 1) }),
@@ -1585,11 +1585,15 @@ test("C6-F2: a release of an EARLIER hold appended after A's admission refunds �
   const ledger = await openLedger(dir);
   const now = 1000;
   const p = policyOf({ reservationTtlMs: 60_000, caps: { usd: 10, turns: 1000 } });
-  // X first, then A (the prefix slice would drop a close of X appended after A's res-open).
-  const reqX = requestOf({ actionId: "act-c6f2-x", taskId: "tx", attemptId: "ax" });
+  // X first ($0.75 — the exact audit-c6 killer estimate: with X at the
+  // $0.25 default, even the broken prefix replay's resurrected X+A fits a
+  // $0.50 cap and the mutant passes), then A (the prefix slice would drop a
+  // close of X appended after A's res-open).
+  const reqX = requestOf({ actionId: "act-c6f2-x", taskId: "tx", attemptId: "ax", estimate: { usd: 0.75 } });
   const reqA = requestOf({ actionId: "act-c6f2-a", taskId: "ta", attemptId: "aa" });
   const cX = check(p, reqX, await ledger.snapshotAt(now), now);
   const recX = await ledger.reserve(p, reqX, cX.receipt!, { clock: fixedClock(now) });
+  assert.equal(recX.reservedUsd, 0.75, "X's reservation records the raised $0.75 estimate");
   const cA = check(p, reqA, await ledger.snapshotAt(now), now);
   const recA = await ledger.reserve(p, reqA, cA.receipt!, { clock: fixedClock(now) });
   // Release X with negative-spawn evidence AFTER both admissions.
