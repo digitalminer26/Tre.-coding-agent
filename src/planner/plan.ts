@@ -298,6 +298,14 @@ type Ctx = {
   diagnosis: SanitizedDiagnosis | undefined;
   ambiguous: boolean;
   ownershipProvable: boolean;
+  /** C4-F4: true when the input EXPLICITLY states ownership is not
+   *  provable — the property is present and not exactly `true` (a
+   *  corrupt annotation is a stated non-proof, §12(27) hygiene). §1/I1:
+   *  false ⇒ NEVER SPAWN: every spawn-class candidate (backoff-retry,
+   *  evidence-nudge-resume, model-swap, task-rewrite) is ineligible and
+   *  an all-blocked chain bottoms out park-class. ABSENT is unknown
+   *  (not a stated denial) and does not disable the ladder. */
+  ownershipUnprovable: boolean;
   authority: {
     paths: string[]; notPaths: string[];
     /** C2: false when the required `paths`/`notPaths` lists are absent,
@@ -335,8 +343,14 @@ const isStr = (v: unknown): v is string => typeof v === 'string';
 const onlyStrs = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
-  for (let i = 0; i < v.length; i++) {
-    const e = v[i];
+  // C4-F2/F3: length read ONCE (a shrinking element getter cannot truncate
+  // the extent mid-iteration) and every index must be an OWN property
+  // (prototype-inherited strings are never copied as evidence/grants).
+  const n = v.length;
+  if (!Number.isInteger(n) || n < 0) return [];
+  for (let i = 0; i < n; i++) {
+    if (!Object.prototype.hasOwnProperty.call(v, i)) continue;
+    const e = (v as unknown[])[i];
     if (typeof e === 'string') out.push(e);
   }
   return out;
@@ -396,16 +410,27 @@ const capOf = (o: object, k: string, dflt: number): number =>
  * validation read and a copy read (validate-then-re-read TOCTOU) cannot
  * smuggle a non-string past it. Returns undefined (reject-the-whole-
  * record) on any non-string element or on a getter throw; never filters.
+ * C4-F2: the length is captured ONCE (a plain snapshot when well-formed;
+ * a hostile length getter throws ⇒ reject) and the loop re-verifies it —
+ * a shrinking element getter can no longer truncate the extent mid-
+ * iteration. C4-F3: every index must be an OWN PROPERTY of the array —
+ * prototype-inherited strings are never copied as grants/authority, and
+ * an accessor element is not a validated string (one property descriptor
+ * per element, so a hostile element `valueOf`/getter never fires).
  */
 const copyStrs = (v: unknown): string[] | undefined => {
   if (!Array.isArray(v)) return undefined;
   const out: string[] = [];
   try {
-    for (let i = 0; i < v.length; i++) {
-      const e = v[i];
-      if (typeof e !== 'string') return undefined;
-      out.push(e);
+    const n = v.length;
+    if (!Number.isInteger(n) || n < 0) return undefined;
+    for (let i = 0; i < n; i++) {
+      const d = Object.getOwnPropertyDescriptor(v, i);
+      if (d === undefined) return undefined;          // hole or non-index element
+      if (!('value' in d) || typeof d.value !== 'string') return undefined;
+      out.push(d.value);
     }
+    if (v.length !== n) return undefined;             // extent changed mid-copy
   } catch {
     return undefined;
   }
@@ -478,8 +503,13 @@ function sanitize(raw: PlannerInput): Ctx {
   const taskRevSnap = snapshot(rawObj as object, 'taskRevision');
   const rev = num(taskRevSnap.value);
   const revOk = rev !== undefined && Number.isInteger(rev) && rev >= 1;
+  // C4-F1: `worker.state` is read ONCE — the enum check and the value that
+  // later drives the whole ladder come from the same single read, so a
+  // getter alternating 'quantum'→'thinking' cannot pass validation as a
+  // real state and then deliver a different one to decide().
   const w = ownObj(rawObj, 'worker');
-  const stateOk = w !== undefined && PLANNER_WORKER_STATES.includes(own(w, 'state') as PlannerWorkerState);
+  const stateSnap = w !== undefined ? snapshot(w, 'state') : { present: false, value: undefined };
+  const stateOk = stateSnap.present && (PLANNER_WORKER_STATES as readonly string[]).includes(stateSnap.value as string);
   const bad = (taskIdOk && revOk && stateOk) ? null : ['identity'];
 
   let note: string | undefined;
@@ -532,27 +562,51 @@ function sanitize(raw: PlannerInput): Ctx {
   let diagnosis: SanitizedDiagnosis | undefined;
   const d = ownObj(rawObj, 'diagnosis');
   if (d !== undefined) {
-    if ((PLANNER_CAUSE_CLASSES as readonly string[]).includes(own(d, 'causeClass') as string)) {
-      const conf = num(own(d, 'confidence'));
+    // C4-F1: every diagnosis field is read ONCE — the causeClass that
+    // passes the enum check is the causeClass used for construction (a
+    // getter alternating 'bogus'→'task-defect' can no longer hand the
+    // planner repair authority it never validated), and confidence is
+    // the same single read the confidence bar later consumes.
+    const ccSnap = snapshot(d, 'causeClass');
+    if ((PLANNER_CAUSE_CLASSES as readonly string[]).includes(ccSnap.value as string)) {
+      const conf = num(snapshot(d, 'confidence').value);
       // F8/C3: index-based copy — caller-owned array methods are never
       // invoked in this frame. C3-F1: each element must be a PLAIN
       // record; class instances / polluted prototypes are dropped.
+      // C4-F1/F3: the array is snapshotted once; each element's fields
+      // are read once via own-property access.
       const pas: SanitizedDiagnosis['proposedActions'] = [];
-      const rawPas = own(d, 'proposedActions');
+      const rawPas = snapshot(d, 'proposedActions').value;
+      let extentOk = true;
       if (Array.isArray(rawPas)) {
-        for (let i = 0; i < rawPas.length; i++) {
+        const pn = Number.isInteger(rawPas.length) && rawPas.length >= 0 ? rawPas.length : 0;
+        for (let i = 0; i < pn; i++) {
+          if (!Object.prototype.hasOwnProperty.call(rawPas, i)) continue;
           const pa = rawPas[i];
-          if (isPlainObj(pa) && isStr(own(pa, 'action'))) {
-            pas.push({ rung: num(own(pa, 'rung')) ?? 0, action: own(pa, 'action') as string, strategyId: isStr(own(pa, 'strategyId')) ? (own(pa, 'strategyId') as string) : undefined });
+          if (isPlainObj(pa)) {
+            const paAction = snapshot(pa, 'action');
+            if (paAction.present && isStr(paAction.value)) {
+              const paRung = num(snapshot(pa, 'rung').value);
+              const paSid = snapshot(pa, 'strategyId').value;
+              pas.push({ rung: paRung ?? 0, action: paAction.value as string, strategyId: isStr(paSid) ? paSid : undefined });
+            }
           }
         }
+        // C4-F2: a mid-iteration length change (shrink getter) vetoes the
+        // whole diagnosis — partial advice read across two extents is
+        // malformed evidence, not a contract record.
+        extentOk = rawPas.length === pn;
       }
-      diagnosis = {
-        causeClass: own(d, 'causeClass') as PlannerCauseClass,
-        confidence: conf === undefined ? 0 : Math.min(1, conf),
-        proposedActions: pas,
-        evidenceRefs: onlyStrs(own(d, 'evidenceRefs')),
-      };
+      if (extentOk) {
+        diagnosis = {
+          causeClass: ccSnap.value as PlannerCauseClass,
+          confidence: conf === undefined ? 0 : Math.min(1, conf),
+          proposedActions: pas,
+          evidenceRefs: onlyStrs(snapshot(d, 'evidenceRefs').value),
+        };
+      } else {
+        note = note ?? 'diagnosis:invalid';
+      }
     } else {
       note = note ?? 'diagnosis:invalid';
     }
@@ -562,12 +616,18 @@ function sanitize(raw: PlannerInput): Ctx {
   let lastOutcome: Ctx['lastOutcome'];
   const lo = ownObj(rawObj, 'lastOutcome');
   if (lo !== undefined) {
-    const loProgress = own(lo, 'progress');
-    if (isStr(own(lo, 'action')) && isStr(own(lo, 'strategyId')) && progressVals.includes(loProgress as string)) {
+    // C4-F1: every outcome field is read ONCE — the value validated is
+    // the value constructed (a getter alternating a bad enum to a valid
+    // one cannot forge a recorded steer outcome).
+    const loAction = snapshot(lo, 'action');
+    const loStrategy = snapshot(lo, 'strategyId');
+    const loProgress = snapshot(lo, 'progress');
+    if (loAction.present && isStr(loAction.value) && loStrategy.present && isStr(loStrategy.value)
+      && loProgress.present && (progressVals as readonly string[]).includes(loProgress.value as string)) {
       lastOutcome = {
-        action: own(lo, 'action') as string, strategyId: own(lo, 'strategyId') as string,
-        progress: loProgress as 'none' | 'uptake' | 'task-relevant',
-        progressEvidence: onlyStrs(own(lo, 'progressEvidence')),
+        action: loAction.value as string, strategyId: loStrategy.value as string,
+        progress: loProgress.value as 'none' | 'uptake' | 'task-relevant',
+        progressEvidence: onlyStrs(snapshot(lo, 'progressEvidence').value),
       };
     } else {
       note = note ?? 'outcome:invalid';
@@ -647,16 +707,36 @@ function sanitize(raw: PlannerInput): Ctx {
       }
     : undefined;
 
+  // C4-F4/C4-F1: ONE property read of `ownershipProvable` feeds both
+  // derived flags — the value that decides is the value read (no
+  // double-get TOCTOU): present-and-`true` ⇒ provable; present-and-
+  // not-`true` ⇒ STATED unprovable; absent ⇒ unknown (no spawn gate).
+  // A THROWING getter is a hostile annotation: present but unknowable
+  // ⇒ stated unprovable (fail-closed — an owner that obscures whether
+  // it owns the worktree may not spawn).
+  const ownPresent = Object.prototype.hasOwnProperty.call(rawObj as object, 'ownershipProvable');
+  let ownTrue = false;
+  let ownThrew = false;
+  try {
+    ownTrue = (rawObj as unknown as { ownershipProvable?: unknown }).ownershipProvable === true;
+  } catch {
+    ownThrew = true;
+  }
+
   return {
     bad,
     note,
-    state: (stateOk ? own(w!, 'state') : 'unknown') as PlannerWorkerState,
+    // C4-F1: the SAME snapshot read decides and supplies the state.
+    state: (stateOk ? stateSnap.value : 'unknown') as PlannerWorkerState,
     sameGuardFires: numMaxed(own(w ?? {}, 'sameGuardFires')),
     lastOutcome,
     assessment,
     diagnosis,
     ambiguous: ambiguousLatch(rawObj as object, 'ambiguousExternalEffect'),
-    ownershipProvable: flag(own(rawObj, 'ownershipProvable'), false),
+    // C4-F4: see `ownPresent`/`ownTrue` above — the two flags are the
+    // two halves of one read (absent ⇒ provable:false, unprovable:false).
+    ownershipProvable: ownPresent && ownTrue,
+    ownershipUnprovable: ownPresent && (ownThrew || !ownTrue),
     authority: {
       paths: pathsOk ? (pathsCopy as string[]) : [],
       notPaths: notPathsOk ? (notPathsCopy as string[]) : [],
@@ -709,13 +789,22 @@ function elNudge(c: Ctx): Elig {
 }
 
 function elResume(c: Ctx): Elig {
+  // C4-F4/I1: resuming means spawning worker execution — with ownership
+  // stated unprovable the parent may never spawn (§9.1 park-rather-than-
+  // spawn); the candidate is vetoed, not silently skipped.
+  if (c.ownershipUnprovable) return elNo('ownership:unprovable', STRATEGY_TEMPLATES['evidence-nudge-resume']);
   // §9/§6 + §12(10): the second same-guard fire prohibits ANY further
   // steer — nudge and evidence-nudge-resume alike.
   if (c.sameGuardFires >= 2) return elNo('guard:recurrence', STRATEGY_TEMPLATES['evidence-nudge-resume']);
   return stratOk(c, STRATEGY_TEMPLATES['evidence-nudge-resume']);
 }
 
-const elRetry = (c: Ctx): Elig => stratOk(c, STRATEGY_TEMPLATES['backoff-retry']);
+const elRetry = (c: Ctx): Elig => {
+  // C4-F4/I1: a retry is a spawn — never recommended when the parent
+  // cannot prove it owns the worker/worktree.
+  if (c.ownershipUnprovable) return elNo('ownership:unprovable', STRATEGY_TEMPLATES['backoff-retry']);
+  return stratOk(c, STRATEGY_TEMPLATES['backoff-retry']);
+};
 
 function elInvestigate(c: Ctx): Elig {
   if (!c.authority.diagnostics) return elNo('diagnostics:ungranted', STRATEGY_TEMPLATES['investigate']);
@@ -736,6 +825,9 @@ function swapCandidates(c: Ctx): string[] {
 }
 
 function elSwap(c: Ctx): Elig {
+  // C4-F4/I1: a swap SPAWNS a replacement worker — never recommended
+  // when ownership is stated unprovable; the veto keeps it visible.
+  if (c.ownershipUnprovable) return elNo('ownership:unprovable', undefined as string | undefined);
   if (c.authority.models.length === 0) return elNo('swap:no-pool');
   const candidates = swapCandidates(c);
   if (candidates.length === 0) return elNo('swap:no-target');
@@ -747,6 +839,9 @@ function elSwap(c: Ctx): Elig {
 }
 
 function elRewrite(c: Ctx): Elig {
+  // C4-F4/I1: a rewrite re-dispatches (spawns) the task — never
+  // recommended with ownership stated unprovable.
+  if (c.ownershipUnprovable) return elNo('ownership:unprovable', STRATEGY_TEMPLATES['task-rewrite']);
   // §7: the rewrite fingerprint must be UNUSED (stricter than §4 default)
   // AND it still passes the §4 repeat rule — F7: task-rewrite is not
   // exempt, so maxStrategyRepeats=0 vetoes even an unused fingerprint.
@@ -869,6 +964,21 @@ function chainPick(c: Ctx, steps: Step[]): { chosen: { action: PlannerSupervisor
   return { chosen: undefined, vetoed };
 }
 
+/** C4-F5: merge a previous chain's vetoed candidates with the current
+ *  chain's — deduped by action (the earlier veto wins, preserving the
+ *  first reason a candidate was refused) and order-stable. */
+function mergeVetoed(carry: PlanAlternative[], current: PlanAlternative[]): PlanAlternative[] {
+  if (carry.length === 0) return current;
+  const out: PlanAlternative[] = [];
+  const seen = new Set<string>();
+  for (const v of [...carry, ...current]) {
+    if (seen.has(v.action)) continue;
+    seen.add(v.action);
+    out.push(v);
+  }
+  return out;
+}
+
 const escalationSeed = (rationale: string[], vetoed: PlanAlternative[], extra?: Partial<Seed>): Seed => ({
   decision: 'escalate',
   action: 'escalate',
@@ -879,15 +989,31 @@ const escalationSeed = (rationale: string[], vetoed: PlanAlternative[], extra?: 
 });
 
 /** Chain-or-escalate: §4 — when every supported intervention is
- *  repeat-vetoed (or gated out), the answer is escalate. */
-function chainSeed(base: string[], steps: Step[]): (c: Ctx) => Seed {
+ *  repeat-vetoed (or gated out), the answer is escalate.
+ *  C4-F5: `carry` threads the vetoed candidates of a PREVIOUS chain into
+ *  this chain's alternatives (both on the chosen and the escalation
+ *  path), so a candidate vetoed while walking a fallback chain never
+ *  disappears from the plan — it stays visible with its veto.
+ *  C4-F4: when any carried/collected veto is `ownership:unprovable` and
+ *  the whole chain is blocked, the bottom line is park-class (§1/I1:
+ *  false ⇒ never spawn) — `park` while the worker is live (mirroring the
+ *  L2/L4 park branches), plain escalate once it is ended. */
+function chainSeed(base: string[], steps: Step[], carry: PlanAlternative[] = []): (c: Ctx) => Seed {
   return (c) => {
     const { chosen, vetoed } = chainPick(c, steps);
+    const all = mergeVetoed(carry, vetoed);
     if (!chosen) {
-      const allRepeat = vetoed.length > 0 && vetoed.every((v) => v.veto.startsWith('repeat:'));
+      const allRepeat = all.length > 0 && all.every((v) => v.veto.startsWith('repeat:'));
+      if (all.some((v) => v.veto === 'ownership:unprovable')) {
+        return escalationSeed(
+          [...base, 'park:ownership'],
+          all,
+          isLive(c.state) ? { action: 'park', strategyId: STRATEGY_TEMPLATES['park'] } : undefined,
+        );
+      }
       return escalationSeed(
-        [...base, ...(allRepeat ? ['repeat-limit'] : vetoed.map((v) => `veto:${v.veto}`))],
-        vetoed,
+        [...base, ...(allRepeat ? ['repeat-limit'] : all.map((v) => `veto:${v.veto}`))],
+        all,
       );
     }
     if (chosen.action === 'model-swap') base = [...base, 'swap:pool'];
@@ -896,7 +1022,7 @@ function chainSeed(base: string[], steps: Step[]): (c: Ctx) => Seed {
       action: chosen.action,
       strategyId: chosen.strategyId,
       rationale: base,
-      alternatives: vetoed,
+      alternatives: all,
       ...(chosen.model !== undefined ? { model: chosen.model } : {}),
     };
   };
@@ -1033,7 +1159,10 @@ function decide(c: Ctx): Seed {
         remainingWork: [...rw],
       };
     }
-    return chainSeed([...base, ...picked.vetoed.map((v) => `veto:${v.veto}`)], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
+    // C4-F5: the resume veto travels INTO the fallback chain — it stays
+    // visible in `alternatives` instead of degrading to a bare rationale
+    // code when the next chain picks a later member.
+    return chainSeed(base, [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE], picked.vetoed)(c);
   }
 
   // L8 — loop facts on a live worker (§6). Recurrence is checked first:
@@ -1111,7 +1240,13 @@ function causeRule(c: Ctx): Seed {
         };
       }
       const denials = gate.denials.map((x) => (x.startsWith('repeat') ? x : `authority:denied:${x}`));
-      return chainSeed([cause, ...denials], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
+      // C4-F5: the refused repair stays VISIBLE as a vetoed alternative
+      // through the fallback chain, not just as a rationale code.
+      const carry: PlanAlternative[] = [{
+        decision: 'repair', action: 'repair', strategyId: STRATEGY_TEMPLATES['repair'],
+        veto: denials[0] ?? 'authority:denied',
+      }];
+      return chainSeed([cause, ...denials], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE], carry)(c);
     }
     case 'environment-blocker':
       if (d.confidence >= CONFIDENCE_BAR) {

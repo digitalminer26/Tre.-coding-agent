@@ -655,6 +655,179 @@ test("C3-F7: warned branches carry the correct failed-steer rationale code", () 
     JSON.stringify(r3.rationale));
 });
 
+// ───────────── cycle-4 audit regressions (docs/14 §12 amendments 34–38) ────
+
+// C4-F1: `worker.state` is read ONCE — the enum check and the value that
+// drives the whole ladder come from the same single read, so a getter
+// alternating between two VALID states cannot pass validation as one
+// state and classify the plan as another.
+test("C4-F1: alternating worker.state getter cannot split validation from classification", () => {
+  const w: Record<string, unknown> = { warnCount: 0, sameGuardFires: 0, toolCallsThisAttempt: 3 };
+  let reads = 0;
+  Object.defineProperty(w, "state", {
+    enumerable: true,
+    get() { reads++; return reads % 2 === 1 ? "await-approval" : "thinking"; },
+  });
+  const rec = planRecovery(base({ worker: w as unknown as PlannerInput["worker"] }));
+  // The value that PASSED the enum check ('await-approval', read 1) must
+  // also be the value the ladder classifies ⇒ L1 escalate, never the
+  // second-read 'thinking' hold.
+  assert.equal(rec.action, "escalate", JSON.stringify(rec.rationale));
+});
+
+// C4-F1: a diagnosis causeClass that alternates between two valid cause
+// classes must classify with the value that passed validation — the
+// planner may not hand repair the check for a causeClass it read as
+// 'task-defect' but CONSTRUCTS as something else.
+test("C4-F1: alternating causeClass getter constructs with the validated value", () => {
+  const d: Record<string, unknown> = { confidence: 0.85, evidenceRefs: [] };
+  let reads = 0;
+  Object.defineProperty(d, "causeClass", {
+    enumerable: true,
+    get() { reads++; return reads % 2 === 1 ? "task-defect" : "approval-boundary"; },
+  });
+  const rec = planRecovery(base({
+    diagnosis: d as unknown as PlannerInput["diagnosis"],
+    repairTarget: { paths: ["src/a.ts"], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false },
+  }));
+  // Validated (read 1) as task-defect with an authorized target ⇒ repair.
+  // A second read inside construction would classify 'approval-boundary'
+  // and fall through to investigate instead.
+  assert.equal(rec.action, "repair", JSON.stringify(rec.rationale));
+});
+
+// C4-F1: lastOutcome.progress is read ONCE — an alternating
+// task-relevant→none getter cannot validate as a healthy steer record
+// and then deliver a failed-steer classification.
+test("C4-F1: alternating lastOutcome.progress cannot forge a failed steer", () => {
+  const lo: Record<string, unknown> = { action: "nudge", strategyId: "nudge:progress:v1" };
+  let reads = 0;
+  Object.defineProperty(lo, "progress", {
+    enumerable: true,
+    get() { reads++; return reads % 2 === 1 ? "task-relevant" : "none"; },
+  });
+  const rec = planRecovery(base({
+    worker: W({ state: "tool" }),
+    lastOutcome: lo as unknown as PlannerInput["lastOutcome"],
+    authority: AUTH({ diagnostics: undefined }),
+    facts: FACTS({ nudgesUsed: 1 }),
+  }));
+  // Single read: recorded 'task-relevant' ⇒ progress reset ⇒ hold (§6).
+  // TOCTOU would classify the second read 'none' ⇒ loop-breaker chain.
+  assert.equal(rec.action, "hold", JSON.stringify(rec.rationale));
+});
+
+// C4-F2: copyStrs captures the array extent ONCE and re-verifies it — a
+// Proxy whose length trap changes between the capture and the final
+// check rejects the WHOLE record (partial advice read across two extents
+// is malformed evidence, never a validated grant).
+test("C4-F2: a changing array extent rejects the whole copied record", () => {
+  let lenCalls = 0;
+  const paths = new Proxy(["src/a.ts", "src/b.ts"], {
+    get(t, k, r) {
+      if (k === "length") { lenCalls++; return lenCalls === 1 ? 2 : 3; }
+      return Reflect.get(t, k, r);
+    },
+  });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85 },
+    repairTarget: { paths, touchesOutsideAuthority: false, externalEffect: false, installNeeded: false } as unknown as PlannerInput["repairTarget"],
+  }));
+  assert.notEqual(rec.action, "repair", "an extent-shifting array must not partially validate");
+  assert.ok(rec.rationale.includes("authority:denied:paths"), JSON.stringify(rec.rationale));
+});
+
+// C4-F3: onlyStrs copies ONLY own-index elements — prototype-inherited
+// strings are never copied as evidence/refs (nor into the model pools).
+test("C4-F3: prototype-inherited array elements are never copied", () => {
+  const ev: string[] = ["ev-real"];
+  Object.setPrototypeOf(ev, { 1: "ev-inherited" });
+  const rec = planRecovery(base({
+    lastOutcome: {
+      action: "nudge", strategyId: "nudge:progress:v1",
+      progress: "task-relevant", progressEvidence: ev,
+    } as unknown as PlannerInput["lastOutcome"],
+    worker: W({ state: "tool" }),
+    facts: FACTS({ nudgesUsed: 1 }),
+  }));
+  assert.ok(!rec.evidenceRefs.includes("ev-inherited"),
+    `inherited ref leaked: ${JSON.stringify(rec.evidenceRefs)}`);
+  assert.ok(rec.evidenceRefs.includes("ev-real"), JSON.stringify(rec.evidenceRefs));
+});
+
+// C4-F4: `ownershipProvable: false` (explicitly stated) disables EVERY
+// spawn-class candidate — the veto names the ownership rule, the
+// candidate stays visible, and the chain continues to park-class or a
+// non-spawn member. ABSENT ownershipProvable does not gate (fixtures),
+// explicit `true` does not gate (gf-transient-ambiguous-i5).
+test("C4-F4: stated-unprovable vetoes backoff-retry, chain continues to investigate", () => {
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "transient-endpoint", confidence: 0.9 },
+    ownershipProvable: false,
+  }));
+  assert.equal(rec.action, "investigate", JSON.stringify(rec.rationale));
+  assert.ok(rec.alternatives.some((a) => a.action === "backoff-retry" && a.veto === "ownership:unprovable"),
+    JSON.stringify(rec.alternatives));
+});
+
+test("C4-F4: stated-unprovable vetoes resume, swap, and rewrite alike", () => {
+  // incomplete on an ended worker: resume is spawn-class and the
+  // fallback chain's swap/rewrite members are too. With diagnostics
+  // ungranted every member is vetoed ⇒ park-class bottom line.
+  const rec = planRecovery(base({
+    acceptance: acc("incomplete", ["more work"]),
+    ownershipProvable: false,
+    authority: AUTH({ diagnostics: undefined }),
+  }));
+  assert.equal(rec.action, "escalate", "an ENDED worker bottoms out escalate, not park");
+  assert.ok(rec.rationale.includes("park:ownership"), JSON.stringify(rec.rationale));
+  for (const vetoed of ["evidence-nudge-resume", "model-swap", "task-rewrite"]) {
+    assert.ok(rec.alternatives.some((a) => a.action === vetoed && a.veto === "ownership:unprovable"),
+      `${vetoed} must stay visible vetoed: ${JSON.stringify(rec.alternatives)}`);
+  }
+});
+
+test("C4-F4: all-spawn-blocked on a LIVE worker bottoms out at park", () => {
+  // state:tool (live) with a failed steer ⇒ chain [investigate, swap,
+  // rewrite]; diagnostics off ⇒ every member vetoed, three of the
+  // ladder's own members by ownership ⇒ park (I1: never spawn).
+  const rec = planRecovery(base({
+    worker: W({ state: "tool" }),
+    lastOutcome: { action: "nudge", strategyId: "nudge:progress:v1", progress: "none", progressEvidence: [] },
+    ownershipProvable: false,
+    authority: AUTH({ diagnostics: undefined }),
+    facts: FACTS({ nudgesUsed: 1 }),
+  }));
+  assert.equal(rec.action, "park", JSON.stringify(rec.rationale));
+  assert.ok(rec.rationale.includes("park:ownership"), JSON.stringify(rec.rationale));
+});
+
+// C4-F5: a candidate vetoed while walking a fallback chain stays
+// VISIBLE in `alternatives` through the next chain — it never degrades
+// to a bare rationale code and disappears from the plan.
+test("C4-F5: a repeat-vetoed resume stays visible through the fallback chain", () => {
+  const rec = planRecovery(base({
+    acceptance: acc("incomplete", ["finish the exports"]),
+    facts: FACTS({ strategyUses: { "resume:evidence:v1": 2 } as unknown as PlannerInput["facts"]["strategyUses"] }),
+  }));
+  // Resume is saturated ⇒ fallback chain answers investigate…
+  assert.equal(rec.action, "investigate", JSON.stringify(rec.rationale));
+  // …and the saturated resume is STILL listed, with its veto (C4-F5:
+  // before cycle 4 it vanished from the plan entirely).
+  assert.ok(rec.alternatives.some((a) => a.action === "evidence-nudge-resume" && a.veto === "repeat:resume:evidence:v1"),
+    JSON.stringify(rec.alternatives));
+});
+
+test("C4-F5: a denied repair stays visible as a vetoed alternative through the fallback chain", () => {
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85 },
+    repairTarget: { paths: ["/etc/hosts"], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false },
+  }));
+  assert.notEqual(rec.action, "repair");
+  assert.ok(rec.alternatives.some((a) => a.action === "repair" && a.veto.startsWith("authority:denied")),
+    JSON.stringify(rec.alternatives));
+});
+
 // ───────────────────────── §6 loop-breaker, §3 caps, §7 pool, §5 gate ───────
 
 test("§6: task-relevant progress resets the loop expectation (hold)", () => {

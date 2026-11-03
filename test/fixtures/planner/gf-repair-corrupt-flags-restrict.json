@@ -67,6 +67,14 @@
     "forbidActions": [
       "kill",
       "merge"
+    ],
+    "alternativesInclude": [
+      {
+        "decision": "repair",
+        "action": "repair",
+        "strategyId": "repair:task-local:v1",
+        "veto": "authority:denied:external"
+      }
     ]
   }
 }

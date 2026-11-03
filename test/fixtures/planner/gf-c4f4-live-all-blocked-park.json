@@ -1,0 +1,82 @@
+{
+  "name": "gf-c4f4-live-all-blocked-park",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "tool",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "lastOutcome": {
+      "action": "nudge",
+      "strategyId": "nudge:progress:v1",
+      "progress": "none",
+      "progressEvidence": []
+    },
+    "ownershipProvable": false,
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ]
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 1,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "escalate",
+    "action": "park",
+    "strategyId": "park:v1",
+    "rationaleIncludes": [
+      "steer-no-uptake",
+      "park:ownership"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ],
+    "alternativesInclude": [
+      {
+        "decision": "investigate",
+        "action": "investigate",
+        "strategyId": "investigate:bounded:v1",
+        "veto": "diagnostics:ungranted"
+      },
+      {
+        "decision": "change-approach",
+        "action": "model-swap",
+        "strategyId": "",
+        "veto": "ownership:unprovable"
+      },
+      {
+        "decision": "change-approach",
+        "action": "task-rewrite",
+        "strategyId": "rewrite:task:v1",
+        "veto": "ownership:unprovable"
+      }
+    ]
+  }
+}

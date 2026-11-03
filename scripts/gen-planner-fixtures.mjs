@@ -82,6 +82,12 @@ const cases = {
   'gf-c3f7-warned-steer-no-uptake': { ...TASK, worker: W({ state: 'warned' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
   'gf-c3f7-warned-uptake-not-progress': { ...TASK, worker: W({ state: 'warned' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'uptake' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
   'gf-c3f7-recurrence-names-failed-steer': { ...TASK, worker: W({ state: 'warned', sameGuardFires: 2 }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
+  // Cycle-4 audit regressions (docs/14 §12 amendments 34–38) — the
+  // JSON-serializable cases; TOCTOU getter shapes (C4-F1/F2) are pinned
+  // by named unit tests C4-F1..F2 in test/planner.test.ts.
+  'gf-c4f4-transient-unprovable-investigate': { ...TASK, worker: W(), diagnosis: { causeClass: 'transient-endpoint', confidence: 0.9 }, ownershipProvable: false, authority: AUTH(), facts: FACTS() },
+  'gf-c4f4-live-all-blocked-park': { ...TASK, worker: W({ state: 'tool' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none', progressEvidence: [] }, ownershipProvable: false, authority: AUTH({ diagnostics: undefined }), facts: FACTS({ nudgesUsed: 1 }) },
+  'gf-c4f5-resume-veto-visible': { ...TASK, worker: W(), acceptance: acc('incomplete', ['finish the exports']), facts: FACTS({ strategyUses: { 'resume:evidence:v1': 2 } }) },
 };
 
 for (const [name, inputRaw] of Object.entries(cases)) {

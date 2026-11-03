@@ -1,0 +1,74 @@
+{
+  "name": "gf-c4f5-resume-veto-visible",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "stopped",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "acceptance": {
+      "live": true,
+      "assessment": {
+        "verdict": "incomplete",
+        "remainingWork": [
+          "finish the exports"
+        ],
+        "reasons": [],
+        "taskId": "task-1",
+        "taskRevision": 1
+      }
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {
+        "resume:evidence:v1": 2
+      },
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "change-approach",
+    "action": "task-rewrite",
+    "strategyId": "rewrite:task:v1",
+    "rationaleIncludes": [
+      "resume:evidence"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ],
+    "alternativesInclude": [
+      {
+        "decision": "continue",
+        "action": "evidence-nudge-resume",
+        "strategyId": "resume:evidence:v1",
+        "veto": "repeat:resume:evidence:v1"
+      },
+      {
+        "decision": "investigate",
+        "action": "investigate",
+        "strategyId": "investigate:bounded:v1",
+        "veto": "diagnostics:ungranted"
+      },
+      {
+        "decision": "change-approach",
+        "action": "model-swap",
+        "strategyId": "",
+        "veto": "swap:no-pool"
+      }
+    ]
+  }
+}

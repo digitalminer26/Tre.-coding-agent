@@ -615,3 +615,56 @@ all accepted, fixed with regressions gf-* / named tests):
     carries the recorded code, not a fixed `uptake-not-progress`;
     the recurrence branch names a simultaneously-applicable failed
     steer alongside `guard:recurrence`).
+
+Cycle-4 audit amendments (2026-11; findings C4-F1–C4-F5 — all
+accepted, fixed with regressions gf-c4f*/named tests):
+
+34. **Snapshot-once everywhere (§ hostile inputs, C4-F1).** Every
+    decision-driving field is read exactly ONE time and the value
+    that passed validation is the value constructed: `worker.state`
+    (the enum check and the ladder-driving state share one snapshot,
+    so an alternating valid↔valid getter cannot split validation
+    from classification), `diagnosis.causeClass`/`confidence`/
+    `proposedActions` elements (a getter alternating
+    `'task-defect'`→another valid class cannot hand repair authority
+    for a cause that was never checked), and `lastOutcome.action`/
+    `strategyId`/`progress` (an alternating
+    `task-relevant`→`none` getter cannot validate as a healthy
+    steer record and then deliver a failed-steer classification).
+    This closes the remaining validate-then-re-read TOCTOU surface
+    amendment 29 opened.
+35. **Array extent is captured once and re-verified (C4-F2).**
+    `copyStrs`/`onlyStrs` and the `proposedActions` loop read the
+    array `length` ONCE (a hostile length getter that throws ⇒
+    reject) and re-verify the extent after copying: any change
+    between capture and final check rejects the WHOLE record —
+    partial advice/authority read across two extents is malformed
+    evidence, never a validated grant. A shrinking element getter
+    can no longer truncate the copy mid-iteration.
+36. **Array elements must be own properties (C4-F3).** Every copied
+    array element must be an OWN data property of the array at its
+    index (`getOwnPropertyDescriptor`/`hasOwnProperty` per index):
+    prototype-inherited strings are never copied into evidence
+    refs, grants, or pools, and an accessor element is never
+    invoked as a "string" — one descriptor read per element, so a
+    hostile element getter never fires twice.
+37. **Stated-unprovable ownership disables the spawn ladder (§1/I1,
+    C4-F4).** `ownershipProvable` PRESENT-and-not-`true` (incl. a
+    corrupt value, present-`undefined`, or a throwing getter —
+    fail-closed) is a STATED non-proof of ownership: every
+    spawn-class candidate (backoff-retry, evidence-nudge-resume,
+    model-swap, task-rewrite) is INELIGIBLE with veto
+    `ownership:unprovable` (visible, never silently skipped), and an
+    all-blocked chain bottoms out park-class — `park` while the
+    worker is live, plain escalate once ended. ABSENT
+    `ownershipProvable` is unknown (not a stated denial) and does
+    NOT gate the ladder.
+38. **Vetoed candidates stay visible through fallback chains
+    (C4-F5).** When a chain's head candidate is vetoed and the plan
+    falls through to the next chain, the veto travels with it
+    (`chainSeed(…, carry)` + `mergeVetoed`, deduped by action,
+    first-veto wins): a repeat-vetoed resume on the L7 fallback, or
+    an authority-denied repair on the task-defect fallback, remains
+    listed in `alternatives` with its veto instead of degrading to
+    a bare rationale code. A candidate the planner considered is
+    never erased from the plan.
