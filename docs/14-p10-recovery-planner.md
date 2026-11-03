@@ -565,3 +565,53 @@ all accepted, fixed with regressions gf-* / named tests):
 26. **Nudge ceiling is binding (C2-F8).** Per docs/11 §9 a task gets
     at most 2 rung-1 nudges: a LOOSER policy `maxNudgesPerTask` is
     clamped to 2; a stricter value still wins.
+27. **Nested records must be plain records (C3-F1).** Every container
+    read (`worker`, `acceptance`, `assessment`, `diagnosis`,
+    `lastOutcome`, `authority`, `diagnostics`, `recoveryBudget`,
+    `facts`, `repairTarget`, and each `proposedActions` element) is
+    now a PLAIN record — non-null object, not an array, prototype
+    `Object.prototype` or `null`. A class instance or
+    polluted-prototype container is read as ABSENT (§ hostile
+    records), so a crafted prototype chain can never pose as a
+    record whose fields are then trusted.
+28. **Authority lists are copied, never retained (C3-F2).**
+    `paths`/`notPaths` are copied by index at sanitize time
+    (`copyStrs`: one read per element, reject on any non-string or
+    getter throw) and the caller's array object is never stored in
+    `Ctx` — containment checks run against the module-owned copies,
+    so a poisoned `.some`/iterator on the caller's list bypasses
+    neither the allow list nor the deny list.
+29. **Snapshot-once, reject-not-filter (C3-F3).** Assessment fields
+    (and the input identity fields) are read exactly once via a
+    snapshot (`hasOwnProperty` + one guarded read); required arrays
+    are validated AND copied in a single pass. A getter that
+    alternates values between a validation read and a use read
+    (validate-then-re-read) can neither smuggle a non-string past
+    the check nor filter a malformed `remainingWork`/`reasons` into
+    a passing `complete` assessment — any corrupt element REJECTS
+    the whole assessment (`assessment:invalid`).
+30. **Ledger reads every own key (C3-F4).** The strategy-use ledger
+    is enumerated with `getOwnPropertyNames` (own, string-keyed —
+    including NON-ENUMERABLE properties), not `Object.entries`: a
+    hidden non-enumerable own count can no longer mask a saturated
+    fingerprint and reopen an exhausted strategy.
+31. **Corrupt repair-target element disqualifies repair (C3-F5).**
+    `repairTarget.paths` is copied with the reject-not-filter
+    single-pass reader: any non-string element (or getter throw)
+    makes the WHOLE target unusable — repair is denied
+    (`authority:denied:paths`), the planner never repairs a
+    "valid subset" of a corrupt target list (§5(2) provenance).
+32. **Safety flags are presence-aware (C3-F6).** `restrictFlag` and
+    `ambiguousLatch` take (object, key) and test presence with
+    `hasOwnProperty`: an own property whose value is `undefined` is
+    PRESENT-and-corrupt — the restriction/latch ENGAGES, a damaged
+    safety annotation may never clear itself by losing its value.
+    Only a truly absent property or explicit `false` clears.
+33. **Failed-steer code is computed once, everywhere (C3-F7).**
+    `steerFailCode()` derives the rationale code from the recorded
+    progress (`none` ⇒ `steer-no-uptake`, `uptake` ⇒
+    `uptake-not-progress`) and every branch that routes a failed
+    steer appends it — both warned branches included (plain warned
+    carries the recorded code, not a fixed `uptake-not-progress`;
+    the recurrence branch names a simultaneously-applicable failed
+    steer alongside `guard:recurrence`).

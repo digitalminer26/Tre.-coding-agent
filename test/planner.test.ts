@@ -514,6 +514,147 @@ test("C2-F8: maxNudgesPerTask above the binding ceiling of 2 is clamped", () => 
   assert.notEqual(strict.action, "nudge");
 });
 
+// ───────────────────── cycle-3 audit regressions (docs/14 §12 am. 27–33) ───
+
+// C3-F1: nested records must be PLAIN records — a class instance (or any
+// polluted-prototype container) is read as absent, never as a record whose
+// own fields are trusted.
+test("C3-F1: non-plain nested records (class instances) are not trusted records", () => {
+  class WorkerRecord {
+    state = "tool"; warnCount = 0; sameGuardFires = 0; toolCallsThisAttempt = 0;
+  }
+  const rec = planRecovery(base({ worker: new WorkerRecord() as unknown as PlannerInput["worker"] }));
+  assert.equal(rec.action, "escalate");
+  assert.ok(rec.rationale.includes("bad-input"), JSON.stringify(rec.rationale));
+
+  // diagnostics grant as a class instance: not a grant ⇒ investigate denied.
+  class DiagGrant { maxToolCalls = 10; maxUsd = 1; }
+  const inv = planRecovery(base({
+    acceptance: acc("uncertain"),
+    authority: AUTH({ diagnostics: new DiagGrant() as unknown as PlannerInput["authority"]["diagnostics"] }),
+  }));
+  assert.notEqual(inv.action, "investigate");
+  assert.ok(inv.alternatives.some((a) => a.action === "investigate" && a.veto === "diagnostics:ungranted"));
+
+  // proposedActions element as a class instance: dropped, never advice.
+  class AdviceRow { action = "model-swap"; rung = 3; }
+  const adv = planRecovery(base({
+    diagnosis: { causeClass: "unknown", confidence: 0.5, proposedActions: [new AdviceRow()] as unknown as NonNullable<PlannerInput["diagnosis"]>["proposedActions"] },
+  }));
+  assert.ok(!adv.alternatives.some((a) => a.action === "model-swap"), "class-instance advice row must be dropped");
+});
+
+// C3-F2: the caller's paths/notPaths arrays are NEVER retained by reference
+// — containment runs on index-copies, so a poisoned `.some` bypasses
+// neither the allow list nor the deny list.
+test("C3-F2: poisoned .some on authority arrays bypasses neither allow nor deny", () => {
+  const allow: unknown[] = ["src/**"];
+  Object.defineProperty(allow, "some", { value: () => true, enumerable: false });
+  const deny: unknown[] = ["src/private/**"];
+  Object.defineProperty(deny, "some", { value: () => false, enumerable: false });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85 },
+    repairTarget: { paths: ["src/private/key.ts"], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false },
+    authority: { paths: allow, notPaths: deny, allowInstalls: false, allowNetwork: false, allowExternalEffects: false, models: [], diagnostics: { maxToolCalls: 10, maxUsd: 1 } } as unknown as PlannerInput["authority"],
+  }));
+  assert.notEqual(rec.action, "repair", "a poisoned .some may not smuggle a denied path into repair");
+  assert.ok(rec.rationale.includes("authority:denied:paths"), JSON.stringify(rec.rationale));
+});
+
+// C3-F3: fields are read ONCE and required arrays are validated AND copied
+// in one pass — a getter alternating values between the validation read
+// and the copy read (validate-then-reread) cannot filter a corrupt
+// remainingWork into a passing `complete` assessment.
+test("C3-F3: alternating-getter assessment cannot be filtered into finish", () => {
+  const a: Record<string, unknown> = {
+    verdict: "complete", taskId: "task-1", taskRevision: 1, reasons: [],
+  };
+  let reads = 0;
+  Object.defineProperty(a, "remainingWork", {
+    enumerable: true,
+    get() { reads++; return reads % 2 === 1 ? [123] : ["real work"]; },
+  });
+  const rec = planRecovery(base({
+    acceptance: { live: true, assessment: a } as unknown as PlannerInput["acceptance"],
+  }));
+  assert.notEqual(rec.decision, "finish", "a TOCTOU-filtered assessment must never reach finish");
+  assert.ok(rec.rationale.includes("assessment:invalid"), JSON.stringify(rec.rationale));
+});
+
+// C3-F4: the strategy-use ledger reads EVERY own key — a NON-ENUMERABLE
+// own count cannot hide a saturated fingerprint from the repeat veto.
+test("C3-F4: non-enumerable own ledger counts still saturate the repeat veto", () => {
+  const uses: Record<string, number> = {};
+  Object.defineProperty(uses, "investigate:bounded:v1", { value: 2, enumerable: false });
+  const rec = planRecovery(base({
+    acceptance: acc("uncertain"),
+    facts: FACTS({ strategyUses: uses as unknown as PlannerInput["facts"]["strategyUses"] }),
+  }));
+  assert.equal(rec.action, "escalate");
+  assert.ok(rec.alternatives.some((a) => a.action === "investigate" && a.veto === "repeat:investigate:bounded:v1"),
+    JSON.stringify(rec.alternatives));
+});
+
+// C3-F5: a corrupt element in repairTarget.paths disqualifies repair —
+// the planner cannot prove every implicated path is inside authority, so
+// it never repairs the "valid subset" of a corrupt target list.
+test("C3-F5: corrupt repairTarget.paths element disqualifies repair (no filtering)", () => {
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85 },
+    repairTarget: { paths: ["src/a.ts", 42], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false } as unknown as PlannerInput["repairTarget"],
+  }));
+  assert.notEqual(rec.action, "repair", "a corrupt target list must not repair its valid subset");
+  assert.ok(rec.rationale.includes("authority:denied:paths"), JSON.stringify(rec.rationale));
+});
+
+// C3-F6: restriction flags are PRESENCE-aware — an own property with the
+// value undefined is present-and-corrupt and engages the restriction;
+// a damaged safety annotation may never clear itself.
+test("C3-F6: present-undefined safety flags engage (latch / deny), never clear", () => {
+  // I5 latch: own `ambiguousExternalEffect: undefined` latches ⇒ park.
+  const input = base({ worker: W({ state: "tool" }) }) as unknown as Record<string, unknown>;
+  Object.defineProperty(input, "ambiguousExternalEffect", { value: undefined, enumerable: true });
+  const rec = planRecovery(input as unknown as PlannerInput);
+  assert.equal(rec.action, "park");
+  assert.ok(rec.rationale.includes("i5:ambiguous-external-effect"), JSON.stringify(rec.rationale));
+
+  // repairTarget: own `touchesOutsideAuthority: undefined` engages the
+  // external restriction ⇒ repair denied even with clean paths.
+  const rt: Record<string, unknown> = { paths: ["src/a.ts"], externalEffect: false, installNeeded: false };
+  Object.defineProperty(rt, "touchesOutsideAuthority", { value: undefined, enumerable: true });
+  const denied = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85 },
+    repairTarget: rt as unknown as PlannerInput["repairTarget"],
+  }));
+  assert.notEqual(denied.action, "repair");
+  assert.ok(denied.rationale.includes("authority:denied:external"), JSON.stringify(denied.rationale));
+});
+
+// C3-F7: every branch that routes a failed steer names the code derived
+// ONCE from the recorded progress — `none` ⇒ steer-no-uptake,
+// `uptake` ⇒ uptake-not-progress — including both warned branches.
+test("C3-F7: warned branches carry the correct failed-steer rationale code", () => {
+  const none = { action: "nudge", strategyId: "nudge:progress:v1", progress: "none" } as const as PlannerInput["lastOutcome"];
+  const uptake = { action: "nudge", strategyId: "nudge:progress:v1", progress: "uptake" } as const as PlannerInput["lastOutcome"];
+  const plainWarned = (lastOutcome: PlannerInput["lastOutcome"]) => planRecovery(base({
+    worker: W({ state: "warned" }), lastOutcome,
+    authority: AUTH({ diagnostics: undefined, models: [] }),
+  }));
+  const r1 = plainWarned(none);
+  assert.ok(r1.rationale.includes("steer-no-uptake"), JSON.stringify(r1.rationale));
+  assert.ok(!r1.rationale.includes("uptake-not-progress"), "recorded `none` must not be labeled uptake");
+  const r2 = plainWarned(uptake);
+  assert.ok(r2.rationale.includes("uptake-not-progress"), JSON.stringify(r2.rationale));
+  assert.ok(!r2.rationale.includes("steer-no-uptake"), JSON.stringify(r2.rationale));
+  // recurrence branch names a simultaneously-applicable failed steer too.
+  const r3 = planRecovery(base({
+    worker: W({ state: "warned", sameGuardFires: 2 }), lastOutcome: none,
+    authority: AUTH({ diagnostics: undefined, models: [] }),
+  }));
+  assert.ok(r3.rationale.includes("guard:recurrence") && r3.rationale.includes("steer-no-uptake"),
+    JSON.stringify(r3.rationale));
+});
+
 // ───────────────────────── §6 loop-breaker, §3 caps, §7 pool, §5 gate ───────
 
 test("§6: task-relevant progress resets the loop expectation (hold)", () => {

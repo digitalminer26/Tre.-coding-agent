@@ -347,12 +347,14 @@ const num = (v: unknown): number | undefined =>
 const numMaxed = (v: unknown): number => num(v) ?? MAXED;
 const flag = (v: unknown, dflt: boolean): boolean => typeof v === 'boolean' ? v : dflt;
 /**
- * F4/C5: RESTRICTION flags fail closed the other way than grants — absent
- * ⇒ false, explicit false ⇒ false, but present-and-corrupt ("yes", 1,
- * null) ⇒ TRUE: a damaged safety annotation may never clear itself.
- * A corrupt restriction is NEVER coerced away.
+ * F4/C5/C3-F6: RESTRICTION flags fail closed the other way than grants —
+ * ABSENT ⇒ false, explicit false ⇒ false, but PRESENT-with-any-other-value
+ * ("yes", 1, null, or even `undefined`) ⇒ TRUE: a damaged safety annotation
+ * may never clear itself (§12(14)/§12(27)). Presence is tracked via
+ * hasOwnProperty — a present-`undefined` own property is PRESENT, not absent.
  */
-const restrictFlag = (v: unknown): boolean => v !== undefined && v !== false;
+const restrictFlag = (o: object, k: string): boolean =>
+  Object.prototype.hasOwnProperty.call(o, k) && (o as Record<string, unknown>)[k] !== false;
 /**
  * F5: grants exist only as validated OWN properties — an inherited
  * (prototype-polluted) `diagnostics` / `models` / `allow*` is never an
@@ -360,11 +362,24 @@ const restrictFlag = (v: unknown): boolean => v !== undefined && v !== false;
  */
 const own = (o: object, k: string): unknown =>
   Object.prototype.hasOwnProperty.call(o, k) ? (o as Record<string, unknown>)[k] : undefined;
+/**
+ * C3-F1: PLAIN-RECORD test — non-null object, not an array, and
+ * prototype-plain (`Object.prototype` or null). A class instance or a
+ * polluted-prototype container is not a record: nothing is read through
+ * a prototype chain (§12(20)).
+ */
+const isPlainObj = (v: unknown): v is Record<string, unknown> => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
 /** C2: own-property container read: an inherited container object is
- *  treated as ABSENT (returns undefined), never as a grant/ledger. */
+ *  treated as ABSENT (returns undefined), never as a grant/ledger.
+ *  C3-F1: the container must also be a PLAIN record — arrays, class
+ *  instances, and polluted-prototype objects are read as absent. */
 const ownObj = (o: object, k: string): Record<string, unknown> | undefined => {
   const v = own(o, k);
-  return v !== undefined && typeof v === 'object' ? v as Record<string, unknown> : undefined;
+  return isPlainObj(v) ? v : undefined;
 };
 /**
  * F6/C2: budget caps — ABSENT (no own property) means default (or no cap);
@@ -375,12 +390,39 @@ const ownObj = (o: object, k: string): Record<string, unknown> | undefined => {
 const capOf = (o: object, k: string, dflt: number): number =>
   Object.prototype.hasOwnProperty.call(o, k) ? (num((o as Record<string, unknown>)[k]) ?? 0) : dflt;
 /**
- * C1/C2: all-string check by INDEX — never calls a caller-owned `.every`
- * (a poisoned `every` made `[123]` pass an Array.isArray + every check).
+ * C1/C3: all-string check + copy by INDEX in one pass, ONE read per
+ * element — never calls a caller-owned `.every` (a poisoned `every` made
+ * `[123]` pass), and a getter that alternates values between a separate
+ * validation read and a copy read (validate-then-re-read TOCTOU) cannot
+ * smuggle a non-string past it. Returns undefined (reject-the-whole-
+ * record) on any non-string element or on a getter throw; never filters.
  */
-const allStrs = (v: unknown[]): boolean => {
-  for (let i = 0; i < v.length; i++) if (typeof v[i] !== 'string') return false;
-  return true;
+const copyStrs = (v: unknown): string[] | undefined => {
+  if (!Array.isArray(v)) return undefined;
+  const out: string[] = [];
+  try {
+    for (let i = 0; i < v.length; i++) {
+      const e = v[i];
+      if (typeof e !== 'string') return undefined;
+      out.push(e);
+    }
+  } catch {
+    return undefined;
+  }
+  return out;
+};
+/**
+ * C3-F3: snapshot a property ONCE (hasOwnProperty then one read, inside
+ * a try) — validation and construction both consume the SNAPSHOT, never
+ * a fresh caller read. Hostile getters yield undefined.
+ */
+const snapshot = (o: object, k: string): { present: boolean; value: unknown } => {
+  if (!Object.prototype.hasOwnProperty.call(o, k)) return { present: false, value: undefined };
+  try {
+    return { present: true, value: (o as Record<string, unknown>)[k] };
+  } catch {
+    return { present: false, value: undefined };
+  }
 };
 /**
  * C6/C2: own-property-only table lookup — `STRATEGY_TEMPLATES["constructor"]`
@@ -415,11 +457,13 @@ const isLive = (s: PlannerWorkerState): boolean =>
 const isEnded = (s: PlannerWorkerState): boolean => s === 'stopped' || s === 'dead';
 
 /**
- * Fail-closed boolean for the I5 latch: a CORRUPTED (present, non-boolean)
- * ambiguous flag latches — a damaged safety interlock may never clear
- * itself. Absent means "no latch fact recorded" (false).
+ * Fail-closed boolean for the I5 latch (C3-F6): PRESENT with any value
+ * other than explicit false — including `undefined` — latches; a damaged
+ * safety interlock may never clear itself (§12(8)/§12(27)). Only a truly
+ * ABSENT property or explicit false means "no latch fact recorded".
  */
-const ambiguousLatch = (v: unknown): boolean => v !== undefined && v !== false;
+const ambiguousLatch = (o: object, k: string): boolean =>
+  Object.prototype.hasOwnProperty.call(o, k) && (o as Record<string, unknown>)[k] !== false;
 
 function sanitize(raw: PlannerInput): Ctx {
   // C2: EVERY load-bearing container is read as an OWN property of its
@@ -427,8 +471,12 @@ function sanitize(raw: PlannerInput): Ctx {
   // ledgers, or a healthy assessment through the prototype chain (§12(20)).
   const rawObj = raw && typeof raw === 'object' ? raw : ({} as PlannerInput);
   // Identity fields are load-bearing (§1): unusable ⇒ bottom rung later.
-  const taskIdOk = isStr(own(rawObj, 'taskId')) && (rawObj.taskId as string).length > 0;
-  const rev = num(own(rawObj, 'taskRevision'));
+  // C3-F3: read ONCE (snapshot) — the value compared below and the value
+  // used for the assessment identity match are the same single read.
+  const taskIdSnap = snapshot(rawObj as object, 'taskId');
+  const taskIdOk = isStr(taskIdSnap.value) && (taskIdSnap.value as string).length > 0;
+  const taskRevSnap = snapshot(rawObj as object, 'taskRevision');
+  const rev = num(taskRevSnap.value);
   const revOk = rev !== undefined && Number.isInteger(rev) && rev >= 1;
   const w = ownObj(rawObj, 'worker');
   const stateOk = w !== undefined && PLANNER_WORKER_STATES.includes(own(w, 'state') as PlannerWorkerState);
@@ -440,27 +488,41 @@ function sanitize(raw: PlannerInput): Ctx {
   // COMPLETE assessment survives; anything else is ignored ENTIRELY
   // (PC4 — dead evidence is not partially trusted; F3 — a projection
   // missing required fields is not a contract assessment).
-  // C1: required arrays are validated by INDEX (allStrs) — a poisoned
-  // caller-owned `.every` can no longer pass `[123]` through.
+  // C1: required arrays validated by INDEX — a poisoned caller-owned
+  // `.every` can no longer pass `[123]` through.
+  // C3-F3: every field is read ONCE (snapshot) and each required array
+  // is validated AND copied in one pass (copyStrs) — a per-read getter
+  // cannot alternate values between validation and use, and a malformed
+  // array REJECTS the whole assessment instead of being filtered.
   let assessment: SanitizedAssessment | undefined;
   const acc = ownObj(rawObj, 'acceptance');
   if (acc !== undefined) {
     const a = ownObj(acc, 'assessment');
     if (own(acc, 'live') !== true) {
       note = 'assessment:dead';
-    } else if (
-      a !== undefined
-      && (PLANNER_VERDICTS as readonly string[]).includes(own(a, 'verdict') as string)
-      && own(a, 'taskId') === rawObj.taskId && own(a, 'taskRevision') === rawObj.taskRevision
-      && Array.isArray(own(a, 'remainingWork')) && allStrs(own(a, 'remainingWork') as unknown[])
-      && Array.isArray(own(a, 'reasons')) && allStrs(own(a, 'reasons') as unknown[])
-    ) {
-      assessment = {
-        verdict: own(a, 'verdict') as PlannerVerdict,
-        remainingWork: onlyStrs(own(a, 'remainingWork')),
-        taskId: own(a, 'taskId') as string,
-        taskRevision: own(a, 'taskRevision') as number,
-      };
+    } else if (a !== undefined) {
+      const vSnap = snapshot(a, 'verdict');
+      const idSnap = snapshot(a, 'taskId');
+      const revSnap = snapshot(a, 'taskRevision');
+      const rwSnap = snapshot(a, 'remainingWork');
+      const rsSnap = snapshot(a, 'reasons');
+      const rw = copyStrs(rwSnap.value);
+      const rs = copyStrs(rsSnap.value);
+      if (
+        (PLANNER_VERDICTS as readonly string[]).includes(vSnap.value as string)
+        && idSnap.present && idSnap.value === taskIdSnap.value
+        && revSnap.present && revSnap.value === taskRevSnap.value
+        && rw !== undefined && rs !== undefined
+      ) {
+        assessment = {
+          verdict: vSnap.value as PlannerVerdict,
+          remainingWork: rw,
+          taskId: idSnap.value as string,
+          taskRevision: revSnap.value as number,
+        };
+      } else {
+        note = 'assessment:invalid';
+      }
     } else {
       note = 'assessment:invalid';
     }
@@ -473,15 +535,15 @@ function sanitize(raw: PlannerInput): Ctx {
     if ((PLANNER_CAUSE_CLASSES as readonly string[]).includes(own(d, 'causeClass') as string)) {
       const conf = num(own(d, 'confidence'));
       // F8/C3: index-based copy — caller-owned array methods are never
-      // invoked in this frame.
+      // invoked in this frame. C3-F1: each element must be a PLAIN
+      // record; class instances / polluted prototypes are dropped.
       const pas: SanitizedDiagnosis['proposedActions'] = [];
       const rawPas = own(d, 'proposedActions');
       if (Array.isArray(rawPas)) {
         for (let i = 0; i < rawPas.length; i++) {
           const pa = rawPas[i];
-          if (pa !== undefined && pa !== null && typeof pa === 'object' && isStr(own(pa as object, 'action'))) {
-            const paO = pa as Record<string, unknown>;
-            pas.push({ rung: num(own(paO, 'rung')) ?? 0, action: own(paO, 'action') as string, strategyId: isStr(own(paO, 'strategyId')) ? (own(paO, 'strategyId') as string) : undefined });
+          if (isPlainObj(pa) && isStr(own(pa, 'action'))) {
+            pas.push({ rung: num(own(pa, 'rung')) ?? 0, action: own(pa, 'action') as string, strategyId: isStr(own(pa, 'strategyId')) ? (own(pa, 'strategyId') as string) : undefined });
           }
         }
       }
@@ -512,19 +574,24 @@ function sanitize(raw: PlannerInput): Ctx {
     }
   }
 
-  // F5/C2: the authority CONTAINER itself must be an own property, and
-  // `paths`/`notPaths` must be own, present, all-string arrays: a corrupt
-  // or missing required grant/deny list fails the gate closed rather than
-  // erasing into an empty allow/deny set (§12(22)).
+  // F5/C2: the authority CONTAINER itself must be an own, PLAIN record,
+  // and `paths`/`notPaths` must be own, present, all-string arrays: a
+  // corrupt or missing required grant/deny list fails the gate closed
+  // rather than erasing into an empty allow/deny set (§12(22)).
+  // C3-F2: the lists are COPY-BY-INDEX (copyStrs, one read per element) —
+  // the caller's array object is never retained in Ctx and no method of
+  // it is ever invoked, so a poisoned `.some` cannot bypass containment
+  // (§12(18)).
   const auth = ownObj(rawObj, 'authority') ?? ({} as PlannerInput['authority']);
   const authOwn = (k: string): unknown => own(auth, k);
-  const pathsRaw = authOwn('paths');
-  const notPathsRaw = authOwn('notPaths');
-  const pathsOk = Array.isArray(pathsRaw) && allStrs(pathsRaw);
-  const notPathsOk = Array.isArray(notPathsRaw) && allStrs(notPathsRaw);
+  const pathsCopy = copyStrs(authOwn('paths'));
+  const notPathsCopy = copyStrs(authOwn('notPaths'));
+  const pathsOk = pathsCopy !== undefined;
+  const notPathsOk = notPathsCopy !== undefined;
   const dRaw = authOwn('diagnostics');
-  const diagGrant = dRaw && typeof dRaw === 'object'
-    ? { maxToolCalls: num(own(dRaw as object, 'maxToolCalls')) ?? 0, maxUsd: num(own(dRaw as object, 'maxUsd')) ?? 0 }
+  // C3-F1: the diagnostics grant must itself be a plain record.
+  const diagGrant = isPlainObj(dRaw)
+    ? { maxToolCalls: num(own(dRaw, 'maxToolCalls')) ?? 0, maxUsd: num(own(dRaw, 'maxUsd')) ?? 0 }
     : undefined;
 
   // F6/C2: absent caps ⇒ default; a PRESENT own property with any invalid
@@ -545,31 +612,38 @@ function sanitize(raw: PlannerInput): Ctx {
   // (missing, null, non-object, array, or not an own property) means the
   // planner cannot prove any strategy is unused ⇒ every fingerprint is
   // treated as MAXED (fail closed toward the repeat veto), never as zero.
+  // Plainness matters too: inherited counts would otherwise be invisible
+  // to the ledger read and silently read as "unused".
   const suRaw = own(f, 'strategyUses');
-  // Plainness matters too: `Object.create({ 'investigate:bounded:v1': 2 })`
-  // is an object whose counts are INHERITED — Object.entries would drop
-  // them and silently read as "unused". A usable ledger must have
-  // Object.prototype/null as prototype so entries() is the whole truth.
-  const suProtoOk = suRaw !== undefined && typeof suRaw === 'object' && !Array.isArray(suRaw)
-    && (Object.getPrototypeOf(suRaw) === Object.prototype || Object.getPrototypeOf(suRaw) === null);
-  const ledgerBroken = !suProtoOk;
+  const ledgerBroken = !isPlainObj(suRaw);
   const uses = new Map<string, number>();
-  if (!ledgerBroken && suRaw) {
-    for (const [k, v] of Object.entries(suRaw as Record<string, unknown>)) {
+  if (!ledgerBroken) {
+    // C3-F4: read EVERY OWN key — `Object.entries` skips NON-ENUMERABLE
+    // own properties, so a hidden saturated count would reopen an
+    // exhausted fingerprint. getOwnPropertyNames sees them all (§4).
+    const ledger = suRaw as Record<string, unknown>;
+    for (const k of Object.getOwnPropertyNames(ledger)) {
       // malformed per-template counts fail closed toward the veto.
-      uses.set(k, num(v) ?? MAXED);
+      uses.set(k, num(ledger[k]) ?? MAXED);
     }
   }
 
+  // C3-F5: the repair-target list must be non-empty and ENTIRELY
+  // string-valued — a corrupt element makes repair INELIGIBLE (the
+  // planner cannot prove every implicated path is inside authority),
+  // rather than disappearing into the valid subset (§5(2)). copyStrs
+  // also snapshots the array once: no validate-then-re-read TOCTOU.
   const rt = ownObj(rawObj, 'repairTarget');
-  const repairTarget = rt !== undefined && Array.isArray(rt.paths)
+  const rtPaths = rt !== undefined ? copyStrs(own(rt, 'paths')) : undefined;
+  const repairTarget = rt !== undefined && rtPaths !== undefined && rtPaths.length > 0
     ? {
-        paths: onlyStrs(rt.paths),
-        // F4: restriction flags fail closed — corrupt ⇒ the restriction
-        // engages (true), never coerced to false.
-        touchesOutsideAuthority: restrictFlag(rt.touchesOutsideAuthority),
-        externalEffect: restrictFlag(rt.externalEffect),
-        installNeeded: restrictFlag(rt.installNeeded),
+        paths: rtPaths,
+        // F4/C3-F6: restriction flags fail closed by PRESENCE — an own
+        // property with any value other than false (incl. undefined)
+        // engages the restriction; only absent or explicit false clears.
+        touchesOutsideAuthority: restrictFlag(rt, 'touchesOutsideAuthority'),
+        externalEffect: restrictFlag(rt, 'externalEffect'),
+        installNeeded: restrictFlag(rt, 'installNeeded'),
       }
     : undefined;
 
@@ -581,11 +655,11 @@ function sanitize(raw: PlannerInput): Ctx {
     lastOutcome,
     assessment,
     diagnosis,
-    ambiguous: ambiguousLatch(own(rawObj, 'ambiguousExternalEffect')),
+    ambiguous: ambiguousLatch(rawObj as object, 'ambiguousExternalEffect'),
     ownershipProvable: flag(own(rawObj, 'ownershipProvable'), false),
     authority: {
-      paths: pathsOk ? (pathsRaw as string[]) : [],
-      notPaths: notPathsOk ? (notPathsRaw as string[]) : [],
+      paths: pathsOk ? (pathsCopy as string[]) : [],
+      notPaths: notPathsOk ? (notPathsCopy as string[]) : [],
       grantOk: pathsOk && notPathsOk,
       allowInstalls: flag(authOwn('allowInstalls'), false),
       allowExternalEffects: flag(authOwn('allowExternalEffects'), false),
@@ -739,6 +813,16 @@ function steerWithoutProgress(c: Ctx): boolean {
   if (!lo) return false;
   if (lo.action !== 'nudge' && lo.action !== 'evidence-nudge-resume') return false;
   return lo.progress !== 'task-relevant';
+}
+
+/**
+ * C3-F7: the rationale code for a failed steer is derived ONCE from the
+ * RECORDED progress (§12(4): recorded `none` ⇒ `steer-no-uptake`,
+ * recorded `uptake` ⇒ `uptake-not-progress`) and must appear on EVERY
+ * branch that routes a failed steer — both warned branches included.
+ */
+function steerFailCode(c: Ctx): string {
+  return c.lastOutcome?.progress === 'uptake' ? 'uptake-not-progress' : 'steer-no-uptake';
 }
 
 type Seed = {
@@ -955,10 +1039,13 @@ function decide(c: Ctx): Seed {
   // L8 — loop facts on a live worker (§6). Recurrence is checked first:
   // the second same-guard fire across respawns prohibits nudging.
   if (c.state === 'warned' && c.sameGuardFires >= 2) {
-    return chainSeed(['state:warned', 'guard:recurrence'], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
+    // C3-F7: a simultaneously-applicable failed steer must be named
+    // even on the recurrence branch (§12(4)).
+    return chainSeed(steerWithoutProgress(c) ? ['state:warned', 'guard:recurrence', steerFailCode(c)] : ['state:warned', 'guard:recurrence'], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
   }
   if (c.state === 'warned') {
-    return chainSeed(steerWithoutProgress(c) ? ['state:warned', 'uptake-not-progress'] : ['state:warned'],
+    // C3-F7: the code follows the RECORDED progress, not a fixed label.
+    return chainSeed(steerWithoutProgress(c) ? ['state:warned', steerFailCode(c)] : ['state:warned'],
       [STEP_NUDGE, STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
   }
   // F1/C1: the failed-steer branch applies to ANY state that reached here
@@ -967,8 +1054,7 @@ function decide(c: Ctx): Seed {
   // holds no live-only actions (investigate/swap/rewrite all work on an
   // ended worker).
   if (steerWithoutProgress(c)) {
-    const code = c.lastOutcome?.progress === 'uptake' ? 'uptake-not-progress' : 'steer-no-uptake';
-    return chainSeed([code], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
+    return chainSeed([steerFailCode(c)], [STEP_INVESTIGATE, STEP_SWAP, STEP_REWRITE])(c);
   }
 
   // L9 — live & healthy and nothing above fired: the `hold` sentinel

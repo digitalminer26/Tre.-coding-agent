@@ -1,0 +1,76 @@
+{
+  "name": "gf-c3f7-warned-steer-no-uptake",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "warned",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "lastOutcome": {
+      "action": "nudge",
+      "strategyId": "nudge:progress:v1",
+      "progress": "none"
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": []
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "change-approach",
+    "action": "task-rewrite",
+    "strategyId": "rewrite:task:v1",
+    "rationaleIncludes": [
+      "state:warned",
+      "steer-no-uptake"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ],
+    "alternativesInclude": [
+      {
+        "decision": "continue",
+        "action": "nudge",
+        "strategyId": "nudge:progress:v1",
+        "veto": "uptake-not-progress"
+      },
+      {
+        "decision": "investigate",
+        "action": "investigate",
+        "strategyId": "investigate:bounded:v1",
+        "veto": "diagnostics:ungranted"
+      },
+      {
+        "decision": "change-approach",
+        "action": "model-swap",
+        "strategyId": "",
+        "veto": "swap:no-pool"
+      }
+    ]
+  }
+}

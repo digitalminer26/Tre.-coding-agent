@@ -73,6 +73,15 @@ const cases = {
   'gf-c6-prototype-named-advice': { ...TASK, worker: W(), diagnosis: { causeClass: 'unknown', confidence: 0.5, proposedActions: [{ rung: 2, action: 'constructor' }, { rung: 2, action: '__proto__' }], evidenceRefs: ['ev-diag-11'] }, authority: AUTH(), facts: FACTS() },
   'gf-c7-refs-cannot-upgrade-failed-steer': { ...TASK, worker: W({ state: 'stopped' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none', progressEvidence: ['ev-unverified'] }, authority: AUTH(), facts: FACTS({ nudgesUsed: 1 }) },
   'gf-c8-nudge-ceiling-binding': { ...TASK, worker: W({ state: 'warned', sameGuardFires: 1 }), recoveryBudget: { maxNudgesPerTask: 99 }, authority: AUTH(), facts: FACTS({ nudgesUsed: 2 }) },
+  // Cycle-3 audit regressions (docs/14 §12 amendments 27–33) — the
+  // JSON-serializable cases; adversarial shapes (defineProperty, class
+  // instances, alternating getters) are pinned by named unit tests
+  // C3-F1..F7 in test/planner.test.ts instead.
+  'gf-c3f1-array-assessment-rejected': { ...TASK, worker: W({ state: 'stopped' }), acceptance: { live: true, assessment: [] }, authority: AUTH(), facts: FACTS() },
+  'gf-c3f5-corrupt-repair-paths-denied': { ...TASK, worker: W(), diagnosis: { causeClass: 'task-defect', confidence: 0.85 }, repairTarget: { paths: ['src/a.ts', 42], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false }, authority: AUTH(), facts: FACTS() },
+  'gf-c3f7-warned-steer-no-uptake': { ...TASK, worker: W({ state: 'warned' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
+  'gf-c3f7-warned-uptake-not-progress': { ...TASK, worker: W({ state: 'warned' }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'uptake' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
+  'gf-c3f7-recurrence-names-failed-steer': { ...TASK, worker: W({ state: 'warned', sameGuardFires: 2 }), lastOutcome: { action: 'nudge', strategyId: 'nudge:progress:v1', progress: 'none' }, authority: AUTH({ diagnostics: undefined, models: [] }), facts: FACTS() },
 };
 
 for (const [name, inputRaw] of Object.entries(cases)) {

@@ -1,0 +1,72 @@
+{
+  "name": "gf-c3f5-corrupt-repair-paths-denied",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "stopped",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "diagnosis": {
+      "causeClass": "task-defect",
+      "confidence": 0.85
+    },
+    "repairTarget": {
+      "paths": [
+        "src/a.ts",
+        42
+      ],
+      "touchesOutsideAuthority": false,
+      "externalEffect": false,
+      "installNeeded": false
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "diagnostics": {
+        "maxToolCalls": 10,
+        "maxUsd": 1
+      }
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "investigate",
+    "action": "investigate",
+    "strategyId": "investigate:bounded:v1",
+    "rationaleIncludes": [
+      "cause:task-defect",
+      "authority:denied:paths"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ]
+  }
+}
