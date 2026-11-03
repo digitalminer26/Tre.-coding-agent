@@ -162,6 +162,7 @@ const bool: Shape = { type: "boolean" };
 const num: Shape = { type: "number", minimum: 0 };
 const count: Shape = { type: "integer", minimum: 0 };
 const revision: Shape = { type: "integer", minimum: 1 };
+const boolTrue: Shape = { type: "boolean", enum: [true] }; // P14: criteria[].advisory is literal true
 const strings: Shape = { type: "array", items: str };
 const choice = (...values: string[]): Shape => ({ type: "string", enum: values });
 const obj = (properties: Record<string, Shape>, required: string[] = []): Shape => ({ type: "object", properties, required });
@@ -319,6 +320,9 @@ export interface AcceptanceCriterion {
   pass: boolean;
   evidenceRef?: string;
   checkedAtSha?: string;
+  /** P14 amendment (docs/13 EV6): pass funded ONLY by a model judgment —
+   *  never set on a deterministic criterion (AC8). */
+  advisory?: true;
 }
 
 export interface AcceptanceRecord extends RecordEnvelope {
@@ -329,6 +333,12 @@ export interface AcceptanceRecord extends RecordEnvelope {
   remainingWork?: string[];
   invalidatedBy?: string | null;
   modelAdvisory?: { judge: string; quote: string; confidence: number } | null;
+  /** P14 amendment (docs/13): evidence seen but NOT at the record's
+   *  artifact identity — ignored for the verdict, kept for visibility. */
+  staleEvidenceRefs?: string[];
+  /** P14 amendment (docs/13 §1): the artifact identity the verdict binds
+   *  to — the staleness anchor for stored assessments. */
+  artifact?: { sha: string; dirty?: boolean; dirtyDigest?: string };
 }
 
 export interface DiagnosisRecord extends RecordEnvelope {
@@ -426,9 +436,13 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
   }, ["actionId", "acked", "progress"]),
   acceptance: recordShape({ kind: choice("acceptance"), taskRevision: revision,
     verdict: choice("complete", "incomplete", "blocked", "uncertain"),
-    criteria: { type: "array", items: obj({ id, pass: bool, evidenceRef: id, checkedAtSha: id }, ["id", "pass"]) },
+    criteria: { type: "array", items: obj({ id, pass: bool, evidenceRef: id, checkedAtSha: id,
+      advisory: boolTrue, // P14 amendment (docs/13): literal true only
+    }, ["id", "pass"]) },
     remainingWork: strings, invalidatedBy: nullable(id),
     modelAdvisory: nullable(obj({ judge: id, quote: str, confidence: num }, ["judge", "quote", "confidence"])),
+    staleEvidenceRefs: strings, // P14 amendment (docs/13)
+    artifact: nullable(obj({ sha: id, dirty: bool, dirtyDigest: id }, ["sha"])), // P14 amendment (docs/13 §1)
   }, ["verdict", "criteria"]),
   diagnosis: recordShape({ kind: choice("diagnosis"), attemptId: id,
     causeClass: choice("transient-endpoint", "premature-stop", "task-defect", "environment-blocker", "approval-boundary", "unknown"),

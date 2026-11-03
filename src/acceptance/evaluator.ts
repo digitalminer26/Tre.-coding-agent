@@ -81,6 +81,9 @@ export interface ClaimEvidence {
   confidence?: number;
   criteriaIds?: string[]; // semantic criteria this judgment names (EV6)
   evidenceRefs?: string[];
+  at?: ArtifactIdentity; // F3: identity the judgment was MADE at — a claim
+  // funds/fails a criterion ONLY at its own identity; a claim without `at`
+  // is unbound advice and funds nothing.
 }
 
 export type BlockerKind =
@@ -136,6 +139,16 @@ export const DEFAULT_SEMANTIC_MIN_CONFIDENCE = 0.7;
 
 // ───────────────────────── artifact identity (§1) ────────────────────────────
 
+function validIdentity(a: ArtifactIdentity | undefined | null): a is ArtifactIdentity {
+  return (
+    !!a &&
+    typeof a === "object" &&
+    typeof a.sha === "string" &&
+    (a.dirty === undefined || typeof a.dirty === "boolean") &&
+    (a.dirtyDigest === undefined || typeof a.dirtyDigest === "string")
+  );
+}
+
 /**
  * sameArtifact: equal iff same sha AND (both dirty with equal
  * dirtyDigest, or neither dirty). A dirty tree is a DIFFERENT artifact
@@ -147,6 +160,12 @@ export const DEFAULT_SEMANTIC_MIN_CONFIDENCE = 0.7;
  * reading: undefined digests on dirty trees are NOT assumed equal).
  */
 export function sameArtifact(a: ArtifactIdentity, b: ArtifactIdentity): boolean {
+  // F7: an empty sha is not an identity (docs/13 §1) — a malformed
+  // identity never equals anything, including another malformed one.
+  if (
+    !validIdentity(a) || !validIdentity(b) ||
+    a.sha.length === 0 || b.sha.length === 0
+  ) return false;
   if (a.sha !== b.sha) return false;
   const da = a.dirty === true;
   const db = b.dirty === true;
@@ -267,10 +286,18 @@ function validateInput(input: EvaluateInput, current: ArtifactIdentity): string[
     if (typeof a.evidenceRef !== "string" || a.evidenceRef.length === 0 || a.evidenceRef.includes("\0")) {
       bad.push(`bad-input:artifact '${a.path}' evidenceRef`);
     }
-    // EV4: exists:true REQUIRES a digest — that is an unverified claim
-    // without one, and claims are advice.
+    // EV4 (+F1): exists:true REQUIRES a non-empty string digest; a
+    // PRESENT exists that is not a boolean is malformed (unknown is only
+    // for ABSENT exists — a wrong-typed value is garbage, not silence);
+    // a present digest that is not a non-empty string is malformed too.
     if (a.exists === true && (typeof a.digest !== "string" || a.digest.length === 0)) {
       bad.push(`bad-input:artifact '${a.path}' exists:true without digest (EV4)`);
+    }
+    if (a.exists !== undefined && typeof a.exists !== "boolean") {
+      bad.push(`bad-input:artifact '${a.path}' exists not a boolean`);
+    }
+    if (a.digest !== undefined && (typeof a.digest !== "string" || a.digest.length === 0)) {
+      bad.push(`bad-input:artifact '${a.path}' digest not a non-empty string`);
     }
     if (a.at !== undefined && (!validIdentity(a.at) || a.at.sha.length === 0)) {
       bad.push(`bad-input:artifact '${a.path}' identity`);
@@ -309,16 +336,6 @@ export const BLOCKER_KINDS: readonly BlockerKind[] = [
   "budget-exhausted",
   "other",
 ];
-
-function validIdentity(a: ArtifactIdentity | undefined | null): a is ArtifactIdentity {
-  return (
-    !!a &&
-    typeof a === "object" &&
-    typeof a.sha === "string" &&
-    (a.dirty === undefined || typeof a.dirty === "boolean") &&
-    (a.dirtyDigest === undefined || typeof a.dirtyDigest === "string")
-  );
-}
 
 // ───────────────────────── evaluate (§3–§5) ─────────────────────────────────
 
@@ -371,24 +388,52 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   }
 
   const bad = validateInput(inp, current);
-  if (!Array.isArray(input.claims)) bad.push("bad-input:claims not an array"); // checked on RAW input (inp is normalized)
+  // F2: all four evidence arrays are validated on the RAW input — a
+  // non-array never collapses to "empty" (that would manufacture proof
+  // of no blockers / no evidence).
+  if (!Array.isArray(input.gates)) bad.push("bad-input:gates not an array");
+  if (!Array.isArray(input.artifacts)) bad.push("bad-input:artifacts not an array");
+  if (!Array.isArray(input.claims)) bad.push("bad-input:claims not an array");
+  if (!Array.isArray(input.blockers)) bad.push("bad-input:blockers not an array");
   for (const b of bad) if (!reasons.includes(b)) reasons.push(b);
 
   // Malformed claims are dropped on the local copies (advice shape
   // defects never fail the whole input — advice is never load-bearing).
+  // F5: every field the OUTPUT consumes is part of claim shape — a claim
+  // with a malformed judge/evidenceRefs is dropped (its garbage must not
+  // be emitted into a durable record).
   const claims: ClaimEvidence[] = [];
   for (const c of inp.claims ?? []) {
     const ok =
-      c && (c.source === "worker-self-report" || c.source === "model-judgment") &&
+      !!c && (c.source === "worker-self-report" || c.source === "model-judgment") &&
       typeof c.claim === "string" && c.claim.length > 0 &&
       (c.confidence === undefined || (typeof c.confidence === "number" && Number.isFinite(c.confidence) && c.confidence >= 0 && c.confidence <= 1)) &&
       (c.verdict === undefined || c.verdict === "complete" || c.verdict === "incomplete" || c.verdict === "blocked") &&
-      (c.criteriaIds === undefined || (Array.isArray(c.criteriaIds) && c.criteriaIds.every((x) => typeof x === "string")));
+      (c.criteriaIds === undefined || (Array.isArray(c.criteriaIds) && c.criteriaIds.every((x) => typeof x === "string"))) &&
+      (c.judge === undefined || typeof c.judge === "string") &&
+      (c.evidenceRefs === undefined || (Array.isArray(c.evidenceRefs) && c.evidenceRefs.every((x) => typeof x === "string" && x.length > 0))) &&
+      // F3: `at`, when present, must be a WELL-FORMED identity — a claim
+      // with a garbage identity is unbound (funds nothing), not "current".
+      (c.at === undefined || (validIdentity(c.at) && c.at.sha.length > 0));
     if (ok) claims.push(c);
     else reasons.push("dropped-claim:malformed-advice-ignored");
   }
 
   // ── current-identity views (EV1) ──────────────────────────────────────
+  // F3: claims bind to their own identity — only claims made AT the
+  // current artifact fund or fail criteria. Unbound (no `at`) and stale
+  // claims are advice about a DIFFERENT artifact: they surface in
+  // modelAdvisory only if they are the latest judgment (advice is never
+  // load-bearing) but fund/flip nothing, and their evidenceRefs are
+  // listed as stale.
+  const currentClaims = claims.filter(
+    (c) => c.source === "model-judgment" && c.at !== undefined && validIdentity(c.at) && sameArtifact(c.at, current),
+  );
+  for (const c of claims) {
+    if (c.at === undefined || !sameArtifact(c.at, current)) {
+      for (const r of c.evidenceRefs ?? []) if (r) staleRefs.push(r);
+    }
+  }
   const currentGate = new Map<string, GateResult>();
   for (const g of inp.gates) {
     if (!g) continue;
@@ -408,8 +453,10 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   for (const b of inp.blockers) if (b && !currentBlockers.includes(b) && typeof b.evidenceRef === "string" && b.evidenceRef) staleRefs.push(b.evidenceRef);
   // claim evidenceRefs are advice pointers (unverified); not evidence-owned
 
-  // model advisory: latest model-judgment claim (input order = newest
-  // last, documented contract)
+  // model advisory: latest model-judgment claim among ALL claims
+  // (including stale/unbound — advice is never load-bearing, so showing
+  // a stale judgment here is honest visibility, not evidence). Input
+  // order = newest last, documented contract.
   let advisory: AcceptanceAssessment["modelAdvisory"] = null;
   for (const c of claims) {
     if (c.source === "model-judgment") {
@@ -446,8 +493,9 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
         row.checkedAtSha = g.at.sha;
       }
     } else {
-      // EV6: funded by a current model-judgment naming the criterion
-      for (const cl of claims) {
+      // EV6 (+F3): funded by a model-judgment made AT the current
+      // identity, naming the criterion
+      for (const cl of currentClaims) {
         if (cl.source !== "model-judgment") continue;
         const named = Array.isArray(cl.criteriaIds) && cl.criteriaIds.includes(c.id);
         if (!named) continue;
@@ -490,24 +538,37 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   // required semantic criterion the judge explicitly called incomplete IS
   // a current negative finding: it blocks `complete`, it is not `blocked`.
 
-  // ── expected artifacts (EV4) ──────────────────────────────────────────
+  // ── expected artifacts (EV4, F1 strictness) ───────────────────────────
+  // Satisfied ONLY by the exact shape exists===true + non-empty digest at
+  // current. exists:false → proven missing (incomplete). exists ABSENT or
+  // non-boolean → UNKNOWN observation (uncertain, EV9 — never inferred).
   const missingArtifacts: string[] = [];
   const unobservedArtifacts: string[] = [];
   for (const p of spec.artifacts) {
     if (typeof p !== "string") continue; // bad-input already recorded
     const ev = currentArt.get(p);
     if (!ev) unobservedArtifacts.push(p);
-    else if (ev.exists === false) missingArtifacts.push(p);
-    // exists===true+digest was validated (EV4) ⇒ satisfied
+    else if (ev.exists === true) {
+      // EV4: the digest is the exists-true proof; malformed shape was
+      // bad-input'd in validateInput, but judge defensively here too —
+      // a truthy-but-wrong digest type never satisfies.
+      if (typeof ev.digest !== "string" || ev.digest.length === 0) unobservedArtifacts.push(p);
+    } else if (ev.exists === false) {
+      missingArtifacts.push(p);
+    } else {
+      // exists undefined / wrong type (already bad-input'd if wrong type)
+      unobservedArtifacts.push(p);
+    }
   }
 
-  // ── §4 total precedence ───────────────────────────────────────────────
-  // Order (docs/13 §4): bad input > current FAIL (incomplete) > artifact
-  // unsatisfied (exists:false → incomplete; unobserved → uncertain) >
-  // required gate missing (uncertain) > semantic unfunded (uncertain) >
-  // positive current blockers (blocked) > all green (complete) > default
-  // uncertain. Missing-evidence rules outrank blocked; blocked never
-  // outranks a concrete finding.
+  // ── §4 total precedence (F4/F6 amendments — docs/13 §8) ───────────────
+  // Order: bad input > claims-only cap (F4) > current FAIL > judge-declared
+  // incomplete (F6: a CONCRETE finding, same rung as a current FAIL) >
+  // artifact exists:false > artifact unobserved > required gate missing >
+  // criterion unfunded > blockers (blocked) > all green (complete) >
+  // default uncertain. Missing-evidence rules outrank blocked; a concrete
+  // negative FINDING (FAIL or judge-incomplete) outranks missing evidence
+  // — absence of evidence never outranks presence of a finding.
   const badInput = bad.some((m) => m.startsWith("bad-input:"));
   const currentFails: string[] = [];
   const judgeIncomplete: string[] = [];
@@ -515,13 +576,39 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   for (const r of rows) {
     if (r.pass) continue;
     if (r.kind === "deterministic" && currentGate.has(r.id)) continue; // already in currentFails
-    if (r.required && judgedIncomplete.has(r.id)) judgeIncomplete.push(r.id); // EV6: respected, work — not a verdict-flipping FAIL
+    if (r.required && judgedIncomplete.has(r.id)) judgeIncomplete.push(r.id); // F6: concrete finding
   }
+  // F4: the AC1 floor — complete requires ≥1 current NON-MODEL evidence
+  // (a current gate result or a satisfied artifact observation). A
+  // claims-only spec (no required checks, no expected artifacts) can
+  // never rise above uncertain: judgment alone is not proof.
+  const hasRequiredEvidenceShape = spec.requiredChecks.length > 0 || spec.artifacts.length > 0;
+  const hasCurrentNonModelEvidence =
+    currentGate.size > 0 ||
+    [...currentArt.values()].some((ev) => ev.exists === true && typeof ev.digest === "string" && ev.digest.length > 0);
 
   let verdict: AcceptanceVerdict;
   if (badInput) {
     verdict = "uncertain";
     reasons.push("verdict:bad-input");
+  } else if (!hasRequiredEvidenceShape) {
+    // F4: a spec demanding NO deterministic evidence is malformed by
+    // construction — the caller must provide gates or artifacts.
+    reasons.push("verdict:claims-only-spec");
+    verdict = "uncertain";
+  } else if (judgeIncomplete.length > 0) {
+    // F6: a judge explicitly calling a required semantic criterion
+    // incomplete is a concrete negative finding — it outranks the
+    // missing-evidence rules below (they describe ABSENCE of evidence,
+    // this is PRESENCE of a finding) and can never be outranked by
+    // blocked. It sits above the F4 floor too: with zero evidence at
+    // current AND an explicit negative finding, the finding is still
+    // the answer (the work is what the judge named, not "unknown").
+    reasons.push("verdict:criterion-incomplete");
+    verdict = "incomplete";
+  } else if (!hasCurrentNonModelEvidence) {
+    reasons.push("verdict:no-current-non-model-evidence");
+    verdict = "uncertain";
   } else if (currentFails.length > 0 || missingArtifacts.length > 0) {
     if (currentFails.length > 0) reasons.push("verdict:current-fail");
     if (missingArtifacts.length > 0) reasons.push("verdict:artifact-missing");
@@ -532,12 +619,6 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
     if (missingChecks.length > 0) reasons.push("verdict:check-missing");
     if (unobservedArtifacts.length > 0) reasons.push("verdict:artifact-unobserved");
     verdict = "uncertain";
-  } else if (judgeIncomplete.length > 0) {
-    // A judge explicitly calling a required semantic criterion incomplete:
-    // the deterministic path is green but the judgment says work remains —
-    // concrete finding (work-to-do), and blocked can never outrank it.
-    reasons.push("verdict:criterion-incomplete");
-    verdict = "incomplete";
   } else {
     // EV12 conjunction checks FIRST (spec §4 order): every required
     // criterion must pass before a blocker may say `blocked` —
@@ -561,6 +642,14 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   // remainingWork: every unmet required item + non-required misses (ordered
   // deterministic-first so a safe resume sees concrete work first)
   const remaining = new Set<string>();
+  if (verdict === "uncertain" && (reasons.includes("verdict:claims-only-spec") || reasons.includes("verdict:no-current-non-model-evidence"))) {
+    // F4: name the missing evidence shape so the resume knows what to gather
+    if (!hasRequiredEvidenceShape) {
+      remaining.add("evidence:spec-requires-at-least-one-check-or-artifact");
+    } else {
+      remaining.add("evidence:no-current-gate-or-artifact-observation");
+    }
+  }
   for (const gid of missingChecks) remaining.add(`check:${gid}`);
   for (const gid of failedCurrent) remaining.add(`check:${gid}`);
   for (const r of rows) if (!r.pass) remaining.add(`criterion:${r.id}`);
@@ -600,7 +689,11 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
  * via the S5 invalidatedBy field; P14 does not write journals).
  */
 export function isStale(stored: AcceptanceAssessment, current: { taskRevision: number; artifact: ArtifactIdentity }): boolean {
-  if (typeof stored?.artifact?.sha !== "string") return true; // malformed stored = not live
+  // F7: a malformed stored assessment (or one bound to a non-identity —
+  // empty sha is not an identity, §1) is never live; the current
+  // identity must be well-formed too.
+  if (!validIdentity(stored?.artifact) || stored.artifact.sha.length === 0) return true;
+  if (!validIdentity(current?.artifact) || current.artifact.sha.length === 0) return true;
   if (stored.taskRevision !== current.taskRevision) return true;
   return !sameArtifact(stored.artifact, current.artifact);
 }
@@ -626,7 +719,10 @@ export interface AcceptanceRecordFields {
  * writing, the supervisor owns envelope fields (id/ts/episodeId).
  */
 export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFields {
-  if (!VERDICTS.includes(a.verdict)) throw new Error(`toAcceptanceRecord: bad verdict '${String(a.verdict)}'`);
+  // F5: validate the COMPLETE record shape — a corrupted assessment
+  // object cannot become a durable record. Throws TypeError (§7.4
+  // contract) on any malformed field; P4 validation is the second fence.
+  assertAssessment(a);
   const rec: AcceptanceRecordFields = {
     kind: "acceptance",
     verdict: a.verdict,
@@ -644,4 +740,31 @@ export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFie
   if (a.staleEvidenceRefs.length > 0) rec.staleEvidenceRefs = a.staleEvidenceRefs;
   if (a.artifact.sha.length > 0) rec.artifact = a.artifact;
   return rec;
+}
+
+/** F5: full-shape validation of an AcceptanceAssessment (throws TypeError).
+ *  Mirrors the §14.3 + P14-amendment wire shape field by field. */
+function assertAssessment(a: AcceptanceAssessment): void {
+  const fail = (what: string): never => { throw new TypeError(`toAcceptanceRecord: bad ${what}`); };
+  if (!a || typeof a !== "object") fail("assessment (not an object)");
+  if (!VERDICTS.includes(a.verdict)) fail(`verdict '${String(a.verdict)}'`);
+  if (typeof a.taskId !== "string" || a.taskId.length === 0) fail("taskId");
+  if (!Number.isInteger(a.taskRevision) || a.taskRevision < 1) fail("taskRevision");
+  if (!Array.isArray(a.criteria)) fail("criteria (not an array)");
+  for (const c of a.criteria) {
+    if (!c || typeof c !== "object") fail("criterion (not an object)");
+    if (typeof c.id !== "string" || c.id.length === 0) fail(`criterion id '${String(c.id)}'`);
+    if (typeof c.pass !== "boolean") fail(`criterion '${c.id}' pass`);
+    if (c.advisory !== undefined && c.advisory !== true) fail(`criterion '${c.id}' advisory`);
+    if (c.evidenceRef !== undefined && (typeof c.evidenceRef !== "string" || c.evidenceRef.length === 0)) fail(`criterion '${c.id}' evidenceRef`);
+    if (c.checkedAtSha !== undefined && (typeof c.checkedAtSha !== "string" || c.checkedAtSha.length === 0)) fail(`criterion '${c.id}' checkedAtSha`);
+    // AC8: an advisory row carries no checkedAtSha — a model judgment is
+    // not an artifact check.
+    if (c.advisory === true && c.checkedAtSha !== undefined) fail(`criterion '${c.id}' advisory with checkedAtSha`);
+  }
+  if (!Array.isArray(a.remainingWork) || !a.remainingWork.every((w) => typeof w === "string" && w.length > 0)) fail("remainingWork");
+  if (!Array.isArray(a.staleEvidenceRefs) || !a.staleEvidenceRefs.every((r) => typeof r === "string" && r.length > 0)) fail("staleEvidenceRefs");
+  if (!a.artifact || typeof a.artifact !== "object" || typeof a.artifact.sha !== "string" || (a.artifact.dirty !== undefined && typeof a.artifact.dirty !== "boolean") || (a.artifact.dirtyDigest !== undefined && typeof a.artifact.dirtyDigest !== "string")) fail("artifact");
+  if (a.modelAdvisory !== null && (typeof a.modelAdvisory !== "object" || typeof a.modelAdvisory.judge !== "string" || typeof a.modelAdvisory.quote !== "string" || typeof a.modelAdvisory.confidence !== "number" || !Number.isFinite(a.modelAdvisory.confidence))) fail("modelAdvisory");
+  if (!Array.isArray(a.reasons) || !a.reasons.every((r) => typeof r === "string" && r.length > 0)) fail("reasons");
 }

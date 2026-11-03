@@ -697,7 +697,7 @@ export interface JsonSchema {
   properties?: Record<string, JsonSchema>;
   items?: JsonSchema;
   required?: string[];
-  enum?: (string | number)[];
+  enum?: (string | number | boolean)[];
   [key: string]: unknown;
 }
 

@@ -35,6 +35,7 @@ import {
   toAcceptanceRecord,
 } from "../src/acceptance/evaluator.js";
 import type { AcceptanceAssessment, EvaluateInput } from "../src/acceptance/evaluator.js";
+import { EpisodeSchemaError } from "../src/episode/journal.js";
 
 // ───────────────────────────────── fixtures ──────────────────────────────────
 
@@ -72,6 +73,7 @@ function input(over: Partial<EvaluateInput> = {}): EvaluateInput {
         confidence: 0.9,
         criteriaIds: ["crit:readability"],
         evidenceRefs: ["span:7"],
+        at: { sha: SHA }, // F3: funding claims bind to the artifact identity
       },
     ],
     blockers: [],
@@ -110,8 +112,59 @@ test("AC1/EV5: worker self-report 'complete' with zero evidence → uncertain, n
     }),
   );
   assert.equal(a.verdict, "uncertain");
-  assert.ok(a.reasons.includes("verdict:check-missing"));
-  assert.ok(a.reasons.includes("verdict:artifact-unobserved"));
+  assert.ok(
+    a.reasons.includes("verdict:no-current-non-model-evidence") ||
+      (a.reasons.includes("verdict:check-missing") && a.reasons.includes("verdict:artifact-unobserved")),
+    "F4 ladder: with zero current evidence the no-non-model-evidence floor fires (check/artifact detail then unreachable)",
+  );
+});
+
+test("F4 (audit): claims-only spec caps at uncertain — complete needs >=1 current non-model evidence", () => {
+  // spec whose ONLY requirement is a semantic criterion
+  const a = evaluate(
+    input({
+      spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+      gates: [],
+      artifacts: [],
+    }),
+  );
+  assert.equal(a.verdict, "uncertain", "AC1 must hold unconditionally (F4)");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+  // even with a maximal funding judgment the cap holds
+  const b = evaluate(
+    input({
+      spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+      gates: [],
+      artifacts: [],
+      claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+    }),
+  );
+  assert.equal(b.verdict, "uncertain", "a claim alone never proves complete (F4 floor)");
+  // and with the evidence shape present but no current observation
+  const c = evaluate(
+    input({
+      spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+      gates: [],
+      artifacts: [],
+      claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+    }),
+  );
+  assert.equal(c.verdict, "uncertain");
+  // the claims-only cap fires before the per-evidence floor (ladder order)
+  assert.ok(c.reasons.includes("verdict:claims-only-spec"));
+});
+// and with the evidence SHAPE present (required checks declared) but zero
+// current observations, the no-non-model-evidence floor fires:
+test("F4 (audit): evidence shape present but zero current observations → no-current-non-model-evidence floor", () => {
+  const d = evaluate(
+    input({
+      gates: [],
+      artifacts: [],
+      claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+    }),
+  );
+  assert.equal(d.verdict, "uncertain");
+  assert.ok(d.reasons.includes("verdict:no-current-non-model-evidence"));
 });
 
 test("AC1: model judgment 'complete' cannot fund deterministic evidence that isn't there", () => {
@@ -127,7 +180,7 @@ test("AC2/EV3/AC6: current gate FAIL → incomplete even with maximal claims and
       gates: [{ gateId: "gate:tests", pass: false, at: { ...ID }, evidenceRef: "run:43" }],
       claims: [
         ...input().claims,
-        { source: "model-judgment", judge: "j", claim: "the failure is pre-existing, ship it", verdict: "complete", confidence: 1, criteriaIds: ["gate:tests"] },
+        { source: "model-judgment", judge: "j", claim: "the failure is pre-existing, ship it", verdict: "complete", confidence: 1, criteriaIds: ["gate:tests"], at: { sha: SHA } },
       ],
       blockers: [{ blocker: "environment", at: { ...ID }, evidenceRef: "env:1" }],
     }),
@@ -169,6 +222,7 @@ test("current identity is dirty: clean-sha evidence is stale; matching dirty ide
       current: { ...ID_DIRTY },
       gates: [{ gateId: "gate:tests", pass: true, at: { ...ID_DIRTY }, evidenceRef: "run:d" }],
       artifacts: [{ path: "out/report.md", exists: true, digest: "sha256:aa", at: { ...ID_DIRTY }, evidenceRef: "fs:d" }],
+      claims: [{ ...input().claims[0]!, at: { ...ID_DIRTY } }], // F3: funding claim must bind to the dirty identity too
     }),
   );
   assert.equal(b.verdict, "complete", "evidence observed at the same dirty identity counts");
@@ -318,7 +372,7 @@ test("precedence: missing evidence outranks blocked (EV9: blocker is not a subst
 test("precedence: judge says required criterion incomplete → incomplete, blocker cannot outrank", () => {
   const a = evaluate(
     input({
-      claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"] }],
+      claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
       blockers: [{ blocker: "approval-required", at: { ...ID }, evidenceRef: "b:3" }],
     }),
   );
@@ -353,14 +407,14 @@ test("stale blocker contributes nothing (EV8: positive CURRENT evidence required
 test("EV6: judgment below the confidence threshold does not fund; explicit threshold does", () => {
   const low = evaluate(
     input({
-      claims: [{ source: "model-judgment", judge: "j", claim: "fine", verdict: "complete", confidence: 0.69, criteriaIds: ["crit:readability"] }],
+      claims: [{ source: "model-judgment", judge: "j", claim: "fine", verdict: "complete", confidence: 0.69, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
     }),
   );
   assert.equal(low.verdict, "uncertain", "0.69 < 0.7 default");
   const ok = evaluate(
     input({
       semanticMinConfidence: 0.5,
-      claims: [{ source: "model-judgment", judge: "j", claim: "fine", verdict: "complete", confidence: 0.69, criteriaIds: ["crit:readability"] }],
+      claims: [{ source: "model-judgment", judge: "j", claim: "fine", verdict: "complete", confidence: 0.69, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
     }),
   );
   assert.equal(ok.verdict, "complete");
@@ -368,17 +422,17 @@ test("EV6: judgment below the confidence threshold does not fund; explicit thres
 
 test("EV6: a claim naming a DIFFERENT criterion does not fund; self-report never funds", () => {
   const wrong = evaluate(
-    input({ claims: [{ source: "model-judgment", judge: "j", claim: "x", verdict: "complete", confidence: 1, criteriaIds: ["crit:other"] }] }),
+    input({ claims: [{ source: "model-judgment", judge: "j", claim: "x", verdict: "complete", confidence: 1, criteriaIds: ["crit:other"], at: { sha: SHA } }] }),
   );
   assert.equal(wrong.verdict, "uncertain");
   const self = evaluate(
-    input({ claims: [{ source: "worker-self-report", judge: "w", claim: "x", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"] }] }),
+    input({ claims: [{ source: "worker-self-report", judge: "w", claim: "x", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }] }),
   );
   assert.equal(self.verdict, "uncertain", "EV5: self-report never funds a criterion");
 });
 
 test("EV6: missing confidence counts as 0 (no implicit funding)", () => {
-  const a = evaluate(input({ claims: [{ source: "model-judgment", judge: "j", claim: "x", verdict: "complete", criteriaIds: ["crit:readability"] }] }));
+  const a = evaluate(input({ claims: [{ source: "model-judgment", judge: "j", claim: "x", verdict: "complete", criteriaIds: ["crit:readability"], at: { sha: SHA } }] }));
   assert.equal(a.verdict, "uncertain");
 });
 
@@ -387,7 +441,7 @@ test("modelAdvisory: latest model-judgment wins (order = newest last)", () => {
     input({
       claims: [
         { source: "model-judgment", judge: "old", claim: "first", verdict: "incomplete", confidence: 0.9 },
-        { source: "model-judgment", judge: "new", claim: "second", verdict: "complete", confidence: 0.99, criteriaIds: ["crit:readability"] },
+        { source: "model-judgment", judge: "new", claim: "second", verdict: "complete", confidence: 0.99, criteriaIds: ["crit:readability"], at: { sha: SHA } },
       ],
     }),
   );
@@ -398,8 +452,8 @@ test("modelAdvisory: latest model-judgment wins (order = newest last)", () => {
 test("R2: funding claims are last-write-wins — a later complete supersedes an earlier incomplete", () => {
   const a = evaluate(input({
     claims: [
-      { source: "model-judgment", judge: "j", claim: "no", verdict: "incomplete", confidence: 0.9, criteriaIds: ["crit:readability"] },
-      { source: "model-judgment", judge: "j", claim: "ok", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"] },
+      { source: "model-judgment", judge: "j", claim: "no", verdict: "incomplete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } },
+      { source: "model-judgment", judge: "j", claim: "ok", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } },
     ],
   }));
   assert.equal(a.verdict, "complete"); // newest judgment wins, matching modelAdvisory order contract
@@ -408,7 +462,7 @@ test("R2: funding claims are last-write-wins — a later complete supersedes an 
 
 test("modelAdvisory is null with no claims; incomplete-advisory still surfaces", () => {
   assert.equal(evaluate(input({ claims: [] })).modelAdvisory, null);
-  const adv = evaluate(input({ claims: [{ source: "model-judgment", judge: "j", claim: "not done", verdict: "incomplete", confidence: 0.8 }] }));
+  const adv = evaluate(input({ claims: [{ source: "model-judgment", judge: "j", claim: "not done", verdict: "incomplete", confidence: 0.8, at: { sha: SHA } }] }));
   assert.deepEqual(adv.modelAdvisory, { judge: "j", quote: "not done", confidence: 0.8 });
 });
 
@@ -483,7 +537,7 @@ test("malformed claims drop individually and are reported; good claims still wor
       claims: [
         { source: "model-judgment", judge: "j", claim: "x", verdict: "sideways" as never, confidence: 0.9 }, // bad verdict → dropped
         { source: "alien" as never, claim: "x" }, // bad source → dropped
-        { source: "model-judgment", judge: "g", claim: "ok", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"] }, // good
+        { source: "model-judgment", judge: "g", claim: "ok", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } }, // good
       ],
     }),
   );
@@ -577,5 +631,170 @@ test("AC9 guard: src/acceptance imports nothing in the repo at all (pure functio
   const mod = await import("../src/acceptance/evaluator.js");
   for (const fn of ["evaluate", "isStale", "sameArtifact", "toAcceptanceRecord"]) {
     assert.equal(typeof (mod as Record<string, unknown>)[fn], "function", `${fn} exported`);
+  }
+});
+
+// ───────────────── F1–F7 audit-fix regressions (independent review) ──────────
+
+test("F1: artifact evidence with exists ABSENT is UNKNOWN → uncertain, never satisfied", () => {
+  const a = evaluate(input({ artifacts: [{ path: "out/report.md", at: { ...ID }, evidenceRef: "fs:u" }] }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:artifact-unobserved"));
+  // wrong-typed exists is garbage → bad-input, still not satisfied
+  const b = evaluate(input({ artifacts: [{ path: "out/report.md", exists: "yes" as never, at: { ...ID }, evidenceRef: "fs:y" }] }));
+  assert.equal(b.verdict, "uncertain");
+  assert.ok(b.reasons.includes("bad-input:artifact 'out/report.md' exists not a boolean"));
+  // wrong-typed digest is bad-input
+  const c = evaluate(input({ artifacts: [{ path: "out/report.md", exists: true, digest: 7 as never, at: { ...ID }, evidenceRef: "fs:d" }] }));
+  assert.equal(c.verdict, "uncertain");
+  assert.ok(c.reasons.includes("bad-input:artifact 'out/report.md' digest not a non-empty string"));
+  // empty digest with exists:true → bad-input (EV4), never satisfied
+  const d = evaluate(input({ artifacts: [{ path: "out/report.md", exists: true, digest: "", at: { ...ID }, evidenceRef: "fs:e" }] }));
+  assert.equal(d.verdict, "uncertain");
+});
+
+test("F2: every malformed evidence array is bad-input — never silently empty", () => {
+  for (const [field, val] of [["gates", "x"], ["artifacts", 5], ["claims", {}], ["blockers", null]] as const) {
+    const a = evaluate(input({ [field]: val } as never));
+    assert.equal(a.verdict, "uncertain", `${field}`);
+    assert.ok(a.reasons.includes(`bad-input:${field} not an array`), `${field} reason`);
+  }
+  // the audit's killer: broken blockers must NOT become proof of no blockers
+  const b = evaluate(input({ blockers: "nope" as never }));
+  assert.notEqual(b.verdict, "complete");
+});
+
+test("F3: a claim WITHOUT `at` funds nothing (unbound advice)", () => {
+  const a = evaluate(input({ claims: [{ source: "model-judgment", judge: "j", claim: "ok", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"] }] }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:criterion-unfunded"));
+});
+
+test("F3: a claim at a STALE identity funds nothing; its refs surface as stale", () => {
+  const a = evaluate(input({
+    claims: [{ source: "model-judgment", judge: "j", claim: "old review", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA2 }, evidenceRefs: ["old-review"] }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.staleEvidenceRefs.includes("old-review"));
+  // the audit's killer repro: new sha + refreshed gate + OLD claim → uncertain
+  const b = evaluate(input({ current: { sha: SHA2 }, gates: [{ gateId: "gate:tests", pass: true, at: { sha: SHA2 }, evidenceRef: "new-gate" }], artifacts: [{ path: "out/report.md", exists: true, digest: "d", at: { sha: SHA2 }, evidenceRef: "new-fs" }] }));
+  assert.equal(b.verdict, "uncertain", "the stale claim must not fund the new artifact's judgment");
+});
+
+test("F3: a claim AT the current identity still funds (positive control)", () => {
+  const a = evaluate(input());
+  assert.equal(a.verdict, "complete");
+});
+
+test("F4: claims-only spec caps at uncertain even with a confidence-1 judgment", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:only", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:only"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+  assert.ok(a.remainingWork.includes("evidence:spec-requires-at-least-one-check-or-artifact"));
+});
+
+test("F6: judge-declared incomplete outranks MISSING gate/artifact evidence (concrete finding)", () => {
+  const a = evaluate(input({
+    gates: [], // required gate missing (missing evidence)
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "incomplete", "presence of a finding outranks absence of evidence (F6)");
+  assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
+});
+
+test("F7: empty-sha stored artifact is never live (isStale true both directions)", () => {
+  const a = evaluate(input());
+  assert.equal(isStale({ ...a, artifact: { sha: "" } }, { taskRevision: 1, artifact: { sha: "" } }), true);
+  assert.equal(isStale(a, { taskRevision: 1, artifact: { sha: "" } }), true);
+  assert.equal(isStale({ ...a, artifact: { sha: "" } }, { taskRevision: 1, artifact: { ...ID } }), true);
+});
+
+test("F5: malformed claim OUTPUT fields (judge/evidenceRefs) are dropped as advice", () => {
+  const a = evaluate(input({
+    claims: [
+      { source: "model-judgment", judge: 23 as never, claim: "x", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } },
+      { source: "model-judgment", judge: "j", claim: "y", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA }, evidenceRefs: [{}] as never },
+    ],
+  }));
+  assert.equal(a.verdict, "uncertain", "both funding claims dropped → criterion unfunded");
+  assert.ok(a.reasons.includes("dropped-claim:malformed-advice-ignored"));
+  assert.equal(a.modelAdvisory, null, "no garbage emitted into the record");
+});
+
+test("F5: toAcceptanceRecord validates the COMPLETE shape — corrupted assessments throw TypeError", () => {
+  const good = evaluate(input());
+  const bads: [string, Record<string, unknown>][] = [
+    ["criteria id number", { criteria: [{ id: 17, pass: "yes" }] }],
+    ["criterion pass string", { criteria: [{ id: "g", pass: "yes" }] }],
+    ["taskRevision negative", { taskRevision: -5 }],
+    ["advisory with checkedAtSha (AC8)", { criteria: [{ id: "g", pass: true, advisory: true, checkedAtSha: SHA }] }],
+    ["remainingWork non-strings", { remainingWork: [42] }],
+    ["staleEvidenceRefs non-strings", { staleEvidenceRefs: [42] }],
+    ["artifact bad sha", { artifact: { sha: 123 } }],
+    ["modelAdvisory bad judge", { modelAdvisory: { judge: 1, quote: "x", confidence: 0.9 } }],
+    ["verdict corrupt", { verdict: "ship-it" }],
+  ];
+  for (const [name, patch] of bads) {
+    assert.throws(() => toAcceptanceRecord({ ...good, ...patch } as never), TypeError, name);
+  }
+});
+
+// ───────────────── F5: P4 round-trip (the two-fence contract) ────────────────
+
+test("F5: evaluate → toAcceptanceRecord → P4 validateSupervisorRecord round-trips (plain + amended fields)", async () => {
+  const { validateSupervisorRecord } = await import("../src/episode/journal.js");
+  const a = evaluate(input());
+  const rec = { schema: "tre-supervisor/1" as const, id: "d-1", ts: 1, episodeId: "ep", taskId: "task-001", ...toAcceptanceRecord(a) };
+  validateSupervisorRecord(rec); // must not throw
+  // amended fields: advisory + staleEvidenceRefs + artifact
+  const b = evaluate(input({
+    gates: [...input().gates, { gateId: "gate:extra", pass: true, at: { sha: SHA2 }, evidenceRef: "oldg" }],
+    claims: [{ ...input().claims[0]!, evidenceRefs: ["span:7"] }],
+  }));
+  const rec2 = { schema: "tre-supervisor/1" as const, id: "d-2", ts: 1, episodeId: "ep", ...toAcceptanceRecord(b) };
+  validateSupervisorRecord(rec2);
+  assert.ok(rec2.staleEvidenceRefs!.includes("oldg"));
+  assert.deepEqual(rec2.artifact, ID);
+  assert.ok(rec2.criteria.some((c) => c.advisory === true));
+});
+
+test("F5: P4 journal REJECTS malformed amended-field shapes (schema extension)", async () => {
+  const { validateSupervisorRecord } = await import("../src/episode/journal.js");
+  const env = { schema: "tre-supervisor/1" as const, id: "d-3", ts: 1, episodeId: "e", kind: "acceptance" as const, verdict: "complete" as const, criteria: [] };
+  for (const [name, patch] of [
+    ["staleEvidenceRefs with a number", { staleEvidenceRefs: [42] }],
+    ["advisory not literal true", { criteria: [{ id: "s", pass: true, advisory: "yes" as never }] }],
+    ["artifact non-string sha", { artifact: { sha: 123 } }],
+    ["artifact missing sha", { artifact: { dirty: true } }],
+    ["artifact dirtyDigest empty", { artifact: { sha: "x", dirtyDigest: "" } }],
+  ] as const) {
+    assert.throws(() => validateSupervisorRecord({ ...env, ...patch } as never), EpisodeSchemaError, name);
+  }
+  // pre-amendment record (no new fields) stays valid — additive amendment
+  validateSupervisorRecord({ ...env });
+});
+
+test("AC9 guard positive fixtures: the extractor catches every import shape touching acceptance", () => {
+  const shapes = [
+    `import { evaluate } from "../acceptance/evaluator.js";`,
+    `import { isStale } from "../acceptance/evaluator";`,
+    `export { sameArtifact } from "../acceptance/evaluator.js";`,
+    `export * from "./acceptance/evaluator.ts";`,
+    `const m = await import("../acceptance/evaluator.js");`,
+    `const m2 = require("../acceptance/evaluator.js");`,
+    `import "../acceptance/evaluator.js";`,
+    `const lazy = () => import("@app/acceptance/evaluator.mjs");`,
+  ];
+  for (const src of shapes) {
+    assert.ok(specifiersOf(src).some(touchesAcceptance), `fixture MISSED by the extractor: ${src}`);
+  }
+  for (const src of [`import { x } from "../util/paths.js";`, `const fs = require("node:fs");`, `export { y } from "./journal.js";`]) {
+    assert.ok(!specifiersOf(src).some(touchesAcceptance), `false positive: ${src}`);
   }
 });
