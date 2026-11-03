@@ -1143,3 +1143,100 @@ test("C3 audit: spec WITH required evidence + current FAIL is still incomplete (
   assert.equal(a.verdict, "incomplete");
   assert.ok(a.reasons.includes("verdict:current-fail"));
 });
+
+// ── cycle-4 (cross-model audit): docs-drift pins + converter hygiene ────────
+// Findings F-4..F-8 of `.tre/delegation/p14-xmodel-audit/` (two independent
+// model families); the fixes are docs-only except F-8 (converter hardening).
+
+test("F-4 (EV2 pin): duplicate same-value current PASS is accepted, counted once — not bad-input", () => {
+  const g = { gateId: "gate:tests", pass: true, at: { ...ID }, evidenceRef: "run:42" };
+  const a = evaluate(input({ gates: [g, { ...g }] }));
+  assert.equal(a.verdict, "complete");
+  assert.ok(!a.reasons.some((r) => r.startsWith("bad-input")), "duplicate PASS must not be a malformation");
+});
+
+test("F-4 (EV2 pin): duplicate current gate with CONTRADICTING pass is bad-input (unchanged)", () => {
+  const a = evaluate(input({
+    gates: [
+      { gateId: "gate:tests", pass: true, at: { ...ID }, evidenceRef: "run:42" },
+      { gateId: "gate:tests", pass: false, at: { ...ID }, evidenceRef: "run:43" },
+    ],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.some((r) => r.startsWith("bad-input:contradictory gate")));
+});
+
+test("F-5 (C2-F3 pin): empty dirtyDigest into evaluate() is bad-input on the evaluator side, not just the journal", () => {
+  const dirtyEmpty = { sha: SHA, dirty: true, dirtyDigest: "" };
+  const cur = evaluate(input({ current: { ...dirtyEmpty } }));
+  assert.equal(cur.verdict, "uncertain");
+  assert.ok(cur.reasons.includes("bad-input:current identity"));
+  const gate = evaluate(input({
+    gates: [{ gateId: "gate:tests", pass: true, at: { ...dirtyEmpty }, evidenceRef: "run:9" }],
+  }));
+  assert.equal(gate.verdict, "uncertain");
+  assert.ok(gate.reasons.some((r) => r.startsWith("bad-input:gate 'gate:tests' identity")));
+  // Identity helpers: an empty digest is no digest — two such trees are
+  // NOT the same artifact (fail-closed), and a live-shaped identity
+  // never equals an empty-digest one.
+  assert.equal(sameArtifact(dirtyEmpty, { sha: SHA, dirty: true, dirtyDigest: "" }), false);
+  assert.equal(sameArtifact(dirtyEmpty, { sha: SHA, dirty: true, dirtyDigest: "d1" }), false);
+  assert.equal(sameArtifact(dirtyEmpty, { sha: SHA }), false);
+  // isStale: an assessment stored with an empty dirtyDigest is never live.
+  const stored: AcceptanceAssessment = {
+    taskId: "task-001", taskRevision: 1, verdict: "complete", criteria: [],
+    remainingWork: [], staleEvidenceRefs: [], artifact: { ...dirtyEmpty },
+    modelAdvisory: null, reasons: [],
+  };
+  assert.equal(isStale(stored, { taskRevision: 1, artifact: { ...ID } }), true);
+});
+
+test("F-7 (EV6 ordering pin): sub-bar negative REVOKES an earlier at-bar funding; reverse order funds — both deterministic", () => {
+  const mk = (v: "complete" | "incomplete", conf: number) => ({
+    source: "model-judgment" as const, judge: "j", claim: `say ${v}`, verdict: v,
+    confidence: conf, criteriaIds: ["crit:readability"], evidenceRefs: ["span:1"], at: { sha: SHA },
+  });
+  // positive(.9) then negative(.3): the negative revokes the pass (never
+  // passes below the bar) → criterion unfunded → uncertain.
+  const revoke = evaluate(input({ claims: [mk("complete", 0.9), mk("incomplete", 0.3)] }));
+  assert.equal(revoke.verdict, "uncertain");
+  const r1 = revoke.criteria.find((c) => c.id === "crit:readability")!;
+  assert.equal(r1.pass, false);
+  assert.ok(revoke.remainingWork.includes("criterion:crit:readability"));
+  // reverse order: the at-bar positive is last-write-wins → funds.
+  const supersede = evaluate(input({ claims: [mk("incomplete", 0.3), mk("complete", 0.9)] }));
+  assert.equal(supersede.verdict, "complete");
+  assert.equal(supersede.criteria.find((c) => c.id === "crit:readability")!.pass, true);
+});
+
+test("F-8: caller extra identity keys are dropped from the assessment AND the durable record; record never aliases the assessment", () => {
+  const cur = { sha: SHA, extra: "caller-field" } as typeof ID & { extra: string };
+  const a = evaluate(input({ current: cur }));
+  assert.deepEqual(Object.keys(a.artifact).sort(), ["sha"]);
+  assert.equal(a.artifact.sha, SHA);
+  const rec = toAcceptanceRecord(a);
+  assert.ok(rec.artifact);
+  assert.deepEqual(Object.keys(rec.artifact).sort(), ["sha"]);
+  // no aliasing (§7.4 F-8 amendment)
+  assert.notEqual(rec.artifact, a.artifact);
+  assert.notEqual(rec.modelAdvisory, a.modelAdvisory);
+  rec.artifact!.sha = "mutated";
+  (rec.modelAdvisory as { quote: string }).quote = "mutated";
+  assert.notEqual(a.artifact.sha, "mutated");
+  assert.notEqual(a.modelAdvisory!.quote, "mutated");
+});
+
+test("F-8: dirty identity survives the converter with its declared shape only", () => {
+  const a = evaluate(input({
+    current: { ...ID_DIRTY, junk: 1 } as typeof ID_DIRTY & { junk: number },
+    gates: [{ gateId: "gate:tests", pass: true, at: { ...ID_DIRTY }, evidenceRef: "run:7" }],
+    artifacts: [{ path: "out/report.md", exists: true, digest: "sha256:aa", at: { ...ID_DIRTY }, evidenceRef: "fs:1" }],
+    claims: [{ source: "model-judgment", judge: "j", claim: "ok", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], evidenceRefs: ["s:1"], at: { ...ID_DIRTY } }],
+  }));
+  assert.equal(a.verdict, "complete");
+  const rec = toAcceptanceRecord(a);
+  assert.deepEqual(rec.artifact, { sha: SHA, dirty: true, dirtyDigest: "d1" });
+  validateSupervisorRecord({
+    schema: "tre-supervisor/1", id: "rec-1", ts: 1, episodeId: "ep-1", ...rec,
+  } as unknown as Parameters<typeof validateSupervisorRecord>[0]);
+});

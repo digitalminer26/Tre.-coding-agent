@@ -1,6 +1,27 @@
+## 2026-11-03 — P14 cross-model audit: PASS with docs/tests remediation; acceptance CLOSED
+
+The acceptance-blocking cross-model round (promised by C2-F5) ran: two
+auditor workers on independent model families (adversarial probes vs dist +
+contract-vs-code traceability), read-only vs HEAD `64d3db9`; artifacts
+`.tre/delegation/p14-xmodel-audit/`. Auditor A: PASS — 8192-combo
+independent-model differential on the §4 precedence ladder, 0 mismatches,
+plus ~120 identity/claim/converter/P4-parity probes. Auditor B: 5 Major +
+4 Minor findings — every one a doc/record/test gap, none in verdict logic:
+docs/13 header+§8 wording (F-1), this file's 87 count (F-2, fixed above),
+EV1 `staleGates` phantom field (F-3), §2 "unique gate ids" vs EV2 (F-4),
+missing evaluator-side C2-F3 regression (F-5), advisory wording drift (F-6),
+unstated claim-ordering rule (F-7), converter aliasing/extra-key pass-through
++ dead branch (F-8, the only CODE change), roadmap row (F-9). All nine
+dispositioned; docs/13 §11 is the record. 6 new tests (F-4 dup-PASS +
+contradiction pins, F-5 identity-digest regression, F-7 both claim orders,
+F-8 key-drop/clone ×2). Suite: 96 acceptance, full **1887 / 1873 pass /
+0 fail / 14 skipped**, `npm test` exit 0. **P14 acceptance CLOSED** —
+docs/11 roadmap row P14 is done; next phase per docs/11 §11.1 is P9/M1
+supervisor composition.
+
 ## 2026-11-03 — P14 cycle-3 follow-ups: C3-F1 test strengthened, C3-F2 findings outrank the claims-only cap
 
-Third review round (same-session lens): the C2-F4 regression was one-sided — it never tested the audit's repro (MATCHING malformed taskRevisions on both sides); now covered, and it fails against the pre-fix source. Contract change (user-approved): **C3-F2** — concrete negative findings now outrank the claims-only CAP as well as the evidence floor: a claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete lands `incomplete`/`verdict:criterion-incomplete` (docs/13 §10; §4 ladder re-drawn). Boundaries: positive claims still cap at uncertain; judged-incomplete on an OPTIONAL criterion keeps the cap. 4 new tests. **C3-F3** (audit of `9bbb54a`, user-approved): the C3-F2 change exposed an asymmetric confidence bar — ANY judge `incomplete` (confidence 0 included) set the finding rung while `complete` required ≥ `semanticMinConfidence`; now negatives are held to the same bar (absent = 0), below-bar negatives still never pass the criterion or leave remainingWork but set no verdict. EV5 carries both exceptions in contract text; 5 more tests (mutation-checked). Suite: 87 acceptance, **1881 / 1867 pass / 0 fail / 14 skipped**. Open: the cross-model independent audit round still has not happened — P14 roadmap acceptance stays open until it runs.
+Third review round (same-session lens): the C2-F4 regression was one-sided — it never tested the audit's repro (MATCHING malformed taskRevisions on both sides); now covered, and it fails against the pre-fix source. Contract change (user-approved): **C3-F2** — concrete negative findings now outrank the claims-only CAP as well as the evidence floor: a claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete lands `incomplete`/`verdict:criterion-incomplete` (docs/13 §10; §4 ladder re-drawn). Boundaries: positive claims still cap at uncertain; judged-incomplete on an OPTIONAL criterion keeps the cap. 4 new tests. **C3-F3** (audit of `9bbb54a`, user-approved): the C3-F2 change exposed an asymmetric confidence bar — ANY judge `incomplete` (confidence 0 included) set the finding rung while `complete` required ≥ `semanticMinConfidence`; now negatives are held to the same bar (absent = 0), below-bar negatives still never pass the criterion or leave remainingWork but set no verdict. EV5 carries both exceptions in contract text; 5 more tests (mutation-checked). Suite: 90 acceptance, **1881 / 1867 pass / 0 fail / 14 skipped** (count corrected post-hoc per cross-model audit F-2). Open: the cross-model independent audit round still has not happened — P14 roadmap acceptance stays open until it runs.
 
 ## 2026-11-03 — P14 cycle-2 fix round: audit findings C2-F1–F5 closed; suite 1869 / 0 / 14
 

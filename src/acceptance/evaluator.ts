@@ -154,6 +154,18 @@ function validIdentity(a: ArtifactIdentity | undefined | null): a is ArtifactIde
   );
 }
 
+/** F-8 (cross-model audit): project an identity to its DECLARED shape.
+ *  Caller-side extra keys must not ride along into the assessment output
+ *  or (worse) the durable record — the P4 journal's artifact object
+ *  schema is not closed, so a pass-through `{...current}` would persist
+ *  arbitrary caller fields. Declared keys only: sha, dirty?, dirtyDigest?. */
+function identityOnly(a: ArtifactIdentity): ArtifactIdentity {
+  const out: ArtifactIdentity = { sha: a.sha };
+  if (a.dirty !== undefined) out.dirty = a.dirty;
+  if (a.dirtyDigest !== undefined) out.dirtyDigest = a.dirtyDigest;
+  return out;
+}
+
 /**
  * sameArtifact: equal iff same sha AND (both dirty with equal
  * dirtyDigest, or neither dirty). A dirty tree is a DIFFERENT artifact
@@ -386,7 +398,7 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
       criteria: [],
       remainingWork: [],
       staleEvidenceRefs: [],
-      artifact: validIdentity(current) ? { ...current } : { sha: "" },
+      artifact: validIdentity(current) ? identityOnly(current) : { sha: "" },
       modelAdvisory: null,
       reasons,
     };
@@ -710,7 +722,7 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
     }),
     remainingWork: [...remaining],
     staleEvidenceRefs: [...new Set(staleRefs)],
-    artifact: { ...current },
+    artifact: identityOnly(current),
     modelAdvisory: advisory,
     reasons: [...new Set(reasons)],
   };
@@ -780,12 +792,17 @@ export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFie
       if (c.advisory) out.advisory = true;
       return out;
     }),
-    modelAdvisory: a.modelAdvisory,
+    modelAdvisory: a.modelAdvisory ? { ...a.modelAdvisory } : null,
   };
   if (a.taskRevision !== undefined) rec.taskRevision = a.taskRevision;
   if (a.remainingWork.length > 0) rec.remainingWork = a.remainingWork;
   if (a.staleEvidenceRefs.length > 0) rec.staleEvidenceRefs = a.staleEvidenceRefs;
-  if (a.artifact.sha.length > 0) rec.artifact = a.artifact;
+  // F-8 (cross-model audit): the old `if (sha.length > 0)` guard was dead
+  // code (assertAssessment throws on an empty/non-identity artifact
+  // first). Copy the DECLARED identity shape only (extra caller keys are
+  // dropped — the journal's artifact schema is not closed) and clone, so
+  // the record never aliases the assessment's objects.
+  rec.artifact = identityOnly(a.artifact);
   return rec;
 }
 

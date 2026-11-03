@@ -1,9 +1,11 @@
 # P14 — Acceptance Evaluator (contract & as-built surface)
 
 > Status: CONTRACT + audit amendments (drafted 2026-11-03, implemented
-> 2026-11-03, amended 2026-11-03 after an independent review found F1–F7 —
-> see §8; re-amended 2026-11-03 after a second review round found C2-F1–F5
-> — see §9, which is NORMATIVE over §4/§8 where they differ).
+> 2026-11-03, amended 2026-11-03 after a same-session review found F1–F7 —
+> see §8 (corrected per C2-F5: that round was same-session, not
+> independent); re-amended 2026-11-03 after a second review round found
+> C2-F1–F5 — see §9, which is NORMATIVE over §4/§8 where they differ;
+> §11 records the cross-model audit round).
 > Module: `src/acceptance/evaluator.ts`. Consumed by P10 (planner) and P9/M1
 > composition; produces the S5 `kind:"acceptance"` record (§14.3).
 > Parent plan: docs/11 §11.1 P14 row, §9.1 "Acceptance" paragraph,
@@ -141,9 +143,10 @@ judgment.
 
 Malformed input fails **closed** as `uncertain` with reason
 `bad-input:<what>` — an evaluator that cannot parse its evidence never
-invents a verdict. Non-negative finite `now`, unique gate ids *among
-current-identity results*, non-empty ids/refs — all validated before
-judgment. **F2 amendment:** ALL four evidence arrays (`gates`,
+invents a verdict. Non-negative finite `now`, non-contradictory gate ids (a PASS and a FAIL
+for the same id among current-identity results — see EV2; duplicate
+same-value results are accepted and counted once, not a malformation),
+non-empty ids/refs — all validated before judgment. **F2 amendment:** ALL four evidence arrays (`gates`,
 `artifacts`, `claims`, `blockers`) must be arrays — a non-array value is
 `bad-input`, never silently treated as empty (a broken blocker list must
 not become proof that no blockers exist). **F5 amendment:** every claim
@@ -156,12 +159,12 @@ so it never fails the whole input).
 
 | id | rule |
 |----|------|
-| EV1 | **A gate result binds to exactly one artifact identity.** Only results whose `at` equals `current` count toward the verdict. Results at other identities are reported as `staleGates` and never pass or fail the current judgment. |
+| EV1 | **A gate result binds to exactly one artifact identity.** Only results whose `at` equals `current` count toward the verdict. Results at other identities are reported in `staleEvidenceRefs` (§5) and never pass or fail the current judgment. |
 | EV2 | **Required check coverage is per gate id.** A required check passes iff a *current* PASS result exists for it. Two PASSes are not stronger than one; a current PASS plus a current FAIL is CONTRADICTORY → `bad-input` (the caller must reconcile its own gate runs). |
 | EV3 | **A failed current gate makes the task `incomplete`, never `blocked`.** A gate failure is work-to-do evidence; `blocked` requires positive blocker evidence (§4). |
 | EV4 | **Artifact criteria:** an expected artifact is satisfied iff observed `exists:true` with a non-empty `digest` observed AT `current`. `exists:true` without a digest is an unsupported observation → `bad-input` (it is exactly the shape of an unverified claim). **F1 amendment:** `exists` ABSENT (or a non-boolean value) is an UNKNOWN observation, never a satisfied one — unknown → `uncertain` (EV9); a malformed `digest` type is `bad-input`. Only the exact shape `(exists === true, non-empty string digest)` satisfies. |
-| EV5 | **Claims are advice.** `worker-self-report` and `model-judgment` NEVER set or flip a verdict. They attach to `modelAdvisory` (latest per source) and may attach *to semantic criteria outcomes* only (EV6). A claim of "complete" with missing deterministic evidence yields at most `uncertain`. **F4 amendment (the AC1 floor):** a spec with NO required checks and NO expected artifacts yields at most `uncertain` from claims alone — `complete` requires at least one piece of current non-model evidence (a current gate result or a satisfied artifact observation). A spec whose only requirements are semantic is malformed *by construction* → the caller must provide deterministic evidence or the verdict is capped at `uncertain`. **C2-F2 scope correction:** a required DETERMINISTIC criterion is itself an evidence requirement (EV7 binds criterion ids to gate ids — repeating them in `requiredChecks` is redundant), so "claims-only" means no required check, no expected artifact AND no required deterministic criterion; such specs take the normal evidence rules (a current PASS funds, a current FAIL is `incomplete`). **C3-F2 exception:** the cap bounds what claims may PROVE (`complete`), not what they may FIND — a judge-declared `incomplete` on a REQUIRED criterion is a concrete negative finding and yields `incomplete` even in a claims-only spec (§10). **C3-F3 bar:** that finding power is held to the SAME epistemic bar as the positive side — judge-declared `incomplete` sets the finding rung only at confidence ≥ `semanticMinConfidence` (absent confidence counts as 0); below the bar the criterion stays unfunded (never passes) and no verdict is set from the claim. |
-| EV6 | **Semantic criteria** pass only by a current model-judgment claim (source `model-judgment`, `verdict:"complete"`, confidence ≥ the caller-supplied `semanticMinConfidence` [default 0.7]) naming the criterion — carried as ADVISORY: `pass:true`, `advisory:true`, evidence = the claim ref. Semantic FAILS from a claim are respected (a judge saying "incomplete" counts as remaining work, never waived upward). **F3 amendment:** "current" binds the CLAIM too — a claim may fund or fail a criterion only if `claim.at` equals the current artifact identity (`sameArtifact`); claims without `at`, or at a stale identity, are UNBOUND advice: reported in `staleEvidenceRefs` (when they carry refs), surfaced in `modelAdvisory` only if the advisory quote itself is harmless (advisory is never load-bearing), and they fund/flip NOTHING. |
+| EV5 | **Claims are advice.** `worker-self-report` and `model-judgment` NEVER set or flip a verdict. They attach to `modelAdvisory` (the LAST `model-judgment` claim in input order — input order is newest-last — regardless of identity binding, since advisory is visibility, not evidence) and may attach *to semantic criteria outcomes* only (EV6). A claim of "complete" with missing deterministic evidence yields at most `uncertain`. **F4 amendment (the AC1 floor):** a spec with NO required checks and NO expected artifacts yields at most `uncertain` from claims alone — `complete` requires at least one piece of current non-model evidence (a current gate result or a satisfied artifact observation). A spec whose only requirements are semantic is malformed *by construction* → the caller must provide deterministic evidence or the verdict is capped at `uncertain`. **C2-F2 scope correction:** a required DETERMINISTIC criterion is itself an evidence requirement (EV7 binds criterion ids to gate ids — repeating them in `requiredChecks` is redundant), so "claims-only" means no required check, no expected artifact AND no required deterministic criterion; such specs take the normal evidence rules (a current PASS funds, a current FAIL is `incomplete`). **C3-F2 exception:** the cap bounds what claims may PROVE (`complete`), not what they may FIND — a judge-declared `incomplete` on a REQUIRED criterion is a concrete negative finding and yields `incomplete` even in a claims-only spec (§10). **C3-F3 bar:** that finding power is held to the SAME epistemic bar as the positive side — judge-declared `incomplete` sets the finding rung only at confidence ≥ `semanticMinConfidence` (absent confidence counts as 0); below the bar the criterion stays unfunded (never passes) and no verdict is set from the claim. |
+| EV6 | **Semantic criteria** pass only by a current model-judgment claim (source `model-judgment`, `verdict:"complete"`, confidence ≥ the caller-supplied `semanticMinConfidence` [default 0.7]) naming the criterion — carried as ADVISORY: `pass:true`, `advisory:true`, evidence = the claim ref. Semantic FAILS from a claim are respected (a judge saying "incomplete" counts as remaining work, never waived upward). **F3 amendment:** "current" binds the CLAIM too — a claim may fund or fail a criterion only if `claim.at` equals the current artifact identity (`sameArtifact`); claims without `at`, or at a stale identity, are UNBOUND advice: reported in `staleEvidenceRefs` (when they carry refs) and still eligible for `modelAdvisory` display (advisory is visibility only — never load-bearing, never evidence), and they fund/flip NOTHING. **Ordering rule (last-write-wins):** semantic funding is determined by the LAST `model-judgment` claim naming the criterion in input order (newest last) — a later claim replaces the criterion's earlier outcome, including a below-bar negative that REVOKES an earlier funding (it never PASSES the criterion below the bar) and including an at/above-bar positive that supersedes an earlier negative. |
 | EV7 | **Deterministic criteria** pass only by a current PASS gate result (the criterion `id` IS the gate id). No model output can produce a deterministic pass. Expected artifacts are judged separately (EV4), never as criteria. |
 | EV8 | **Blockers require positive, current evidence.** A `blocked` verdict additionally requires the required-evidence path be *unresolvable by more work evidence* — blockers never rescue a failed current gate (EV3 wins; the failed gate is reported, the stale blocker is listed and ignored for verdict). |
 | EV9 | **Unknown is the floor, not a weapon.** Absence of evidence at the current identity is `uncertain` — NEVER inferred failure ("no evidence" ≠ "failed"), and never success. This mirrors §13.4's `unknown`-never-`crashed` discipline: silence is not evidence. |
@@ -276,7 +279,17 @@ P14 does not write journals.
    it validates the COMPLETE record against the §14.3 + P14-amendment
    shape and THROWS `TypeError` on any malformed field (a corrupted
    assessment object cannot become a durable record); it does NOT
-   append (the P4 journal owns writing). **F5 amendment:** the P4
+   append (the P4 journal owns writing). **F-8 amendment (cross-model
+   audit):** the converter copies only the DECLARED identity shape
+   (`sha`, `dirty?`, `dirtyDigest?` — extra caller keys are dropped,
+   because the journal's artifact object schema is not closed) and
+   clones `artifact`/`modelAdvisory` (the record never aliases the
+   assessment's objects). Note for composition layers: an assessment
+   carrying `verdict:bad-input` may itself be unconvertible (e.g. an
+   empty artifact sha) — that is the designed fail-closed split:
+   `evaluate()` reports the damage (never throws, AC5), and a
+   supervisor must branch on `bad-input` reasons rather than
+   attempting conversion unconditionally. **F5 amendment:** the P4
    journal schema (§14.3) knows the amended optional fields
    (`criteria[].advisory`, `staleEvidenceRefs`, `artifact`) and
    validates their shapes; pre-amendment records stay valid (additive
@@ -285,9 +298,11 @@ P14 does not write journals.
    the claim is dropped as advice, never emitted.
 
 
-## 8. Audit amendments (2026-11-03 — independent review F1–F7)
+## 8. Audit amendments (2026-11-03 — same-session review F1–F7)
 
-The independent review (`.tre/audit-p14-review.md`) found seven defects in
+The same-session review (`.tre/audit-p14-review.md`; corrected per C2-F5 —
+it was a same-session read-only review, not an independent cross-model one)
+found seven defects in
 the first implementation; all are closed in code + tests, and this section
 is the contract record of what changed:
 
@@ -337,3 +352,40 @@ the corrected verdicts.
 Cycle-3 regressions: `test/acceptance.test.ts` (C3-F2 ×4 + audit ×3, C3-F3 ×5; C3-F1 is
 the strengthened C2-F4 test). Suite: 90 acceptance tests; full suite
 **1881 / 1867 pass / 0 fail / 14 skipped**, `npm test` exit 0.
+
+## 11. Cross-model audit round (2026-11-03 — two independent models, HEAD `64d3db9`)
+
+Process: two auditor workers on **different model families** (adversarial
+probe hunter + contract-vs-code traceability), read-only against HEAD and
+the freshly-built `dist/`, artifacts under
+`.tre/delegation/p14-xmodel-audit/`. This round is the audit named as
+acceptance-blocking by C2-F5 ("Audit acceptance remains OPEN pending a
+cross-model review round").
+
+- **Auditor A (adversarial): PASS.** An 8192-combo independent-model
+  differential over the §4 precedence ladder (verdict AND firing-branch,
+  branch-exclusivity) produced 0 mismatches; ~120 targeted identity /
+  claim / converter / P4-parity probes (incl. every malformed value class
+  named in §2/§8/§9/§10 and a scenario-differential against the real P4
+  `validateSupervisorRecord`) found no contract violation. Its three
+  informational notes are folded into §7.4 (converter/bad-input split)
+  and EV6 (last-write-wins).
+- **Auditor B (traceability): FINDINGS — 5 Major + 4 Minor**, all against
+  docs/records/tests, none breaking verdict logic. Disposition (this
+  commit): F-1 doc wording corrected (§header/§8 now say same-session,
+  matching C2-F5); F-2 HANDOFF count 87→90; F-3 EV1 `staleGates` →
+  `staleEvidenceRefs`; F-4 §2 "unique gate ids" rewritten to what the
+  code + EV2 do (contradictions are bad-input, duplicate same-value
+  results count once) + new pinning test; F-5 new named C2-F3 regression
+  on the evaluator side (empty `dirtyDigest` into `evaluate`/`sameArtifact`
+  /`isStale`); F-6 EV5/EV6 advisory wording now matches the code (last
+  model-judgment claim, identity-independent display, visibility-only);
+  F-7 EV6 ordering rule stated (last-write-wins incl. sub-bar revoke) +
+  both orders pinned by test; F-8 converter hardened (declared identity
+  shape only, cloned objects, dead branch removed) + documented,
+  regression test added; F-9 docs/11 roadmap row updated with this round.
+
+Verdict after remediation: the audit found **no defect in the verdict
+logic itself** — every finding was documentation drift, a missing test,
+or converter hygiene. With all nine dispositioned, P14 acceptance is
+CLOSED (docs/11 roadmap row: done).
