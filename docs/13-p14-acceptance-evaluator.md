@@ -173,18 +173,21 @@ so it never fails the whole input).
 
 ```text
 bad input                                  → uncertain (bad-input:… recorded)
+judge-declared incomplete (required criterion)   → incomplete (F6; C3-F2:
+                                                    also ABOVE the claims-only
+                                                    cap — a concrete finding
+                                                    outranks absence of
+                                                    required evidence)
+current FAIL gate/criterion                → incomplete  ┐ CONCRETE negative
+expected artifact observed exists:false    → incomplete  ┘ findings PRECEDE
+    at current  (C2-F1: proven absence is a finding, not an absence   EVERYTHING
+    of evidence — the floor never masks it)                            below
 claims-only spec (F4, C2-F2 scoped: no required check, no expected
     artifact AND no required deterministic criterion)
                                            → uncertain cap (F4/EV5 — at most
                                                uncertain; a required
                                                deterministic criterion IS an
                                                evidence requirement, EV7)
-judge-declared incomplete (required criterion)   → incomplete (F6: a CONCRETE
-                                                    finding — never blocked)
-current FAIL gate/criterion                → incomplete  ┐ CONCRETE negative
-expected artifact observed exists:false    → incomplete  ┘ findings PRECEDE
-    at current  (C2-F1: proven absence is a finding, not an absence          the floor
-    of evidence — the floor never masks it)
 no current non-model evidence (F4)         → uncertain (COMPLETION-eligibility
                                            floor only — see §9 C2-F1)
 required gate missing/unbound at current   → uncertain   (EV9)
@@ -298,12 +301,13 @@ is the contract record of what changed:
 | F3 | Claims bind to `claim.at`: a claim funds/fails a criterion ONLY at its own artifact identity; unbound claims (no `at`) fund nothing. Unbound claims are reported as stale advice (refs listed in `staleEvidenceRefs`). |
 | F4 | The AC1 floor is unconditional: a claims-only spec (no required check, no expected artifact — *scoped by C2-F2: a required deterministic criterion counts as evidence shape too*) caps at `uncertain`; `complete` requires ≥1 current non-model evidence. |
 | F5 | Full output validation: claim fields consumed by the output are validated (dropped-claim on malformation); `toAcceptanceRecord` validates the COMPLETE record shape (throws `TypeError`); the P4 schema validates the amended fields; P4 TS types declare them. |
-| F6 | Judge-declared incomplete on a required criterion is a CONCRETE finding at the same rung as a current FAIL: it outranks missing-evidence rules (which are about ABSENCE of evidence, not presence of a negative finding). `incomplete` wins. |
+| F6 | Judge-declared incomplete on a required criterion is a CONCRETE finding at the same rung as a current FAIL: it outranks missing-evidence rules (which are about ABSENCE of evidence, not presence of a negative finding) — and, per C3-F2, the claims-only cap too. `incomplete` wins. |
 | F7 | `isStale`/`sameArtifact` treat a malformed stored artifact (empty sha) as never-live; identity validation precedes the liveness decision. |
 
 Precedence after F6 was superseded by the cycle-2 restructure (§9/C2-F1 —
-concrete negative findings moved ABOVE the evidence floor); the live total
-order is the ladder in §4 as amended by §9.
+concrete negative findings moved ABOVE the evidence floor) and by the
+follow-up C3-F2 (§10 — findings moved above the claims-only cap too); the
+live total order is the ladder in §4 as amended by §9–§10.
 
 ## 9. Cycle-2 audit amendments (2026-11-03 — second review round C2-F1–C2-F5)
 
@@ -323,5 +327,15 @@ Five findings; all closed in code + tests. This section is normative over
 Cycle-2 regressions: `test/acceptance.test.ts` §"cycle-2 audit regressions"
 (C2-F1 ×2, C2-F2 ×3, C2-F3 ×3 incl. the durable round-trip, C2-F4 ×1,
 ladder-order ×1). All four audit repros re-run against rebuilt dist land on
-the corrected verdicts. Suite: 78 acceptance tests; full suite
-**1869 / 1855 pass / 0 fail / 14 skipped**, `npm test` exit 0.
+the corrected verdicts.
+
+## 10. Cycle-3 follow-ups (2026-11-03 — third review round)
+
+| id | amendment |
+|----|-----------|
+| C3-F1 | Cycle-2's C2-F4 regression was one-sided: it proved a malformed CURRENT revision with a valid stored one (which `!==` already caught), not the audit's repro of MATCHING malformed revisions on both sides. The test now covers both sides (`0`, `-1`, `1.5`, `undefined` each, stored=current), and fails against the pre-fix source. |
+| C3-F2 | Concrete negative findings now outrank the claims-only CAP, not just the evidence floor (the cycle-2 restructure left the cap as the only absence-of-evidence rule still above the F6 rung). A claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete is `incomplete`/`verdict:criterion-incomplete` — F6's principle is that presence of a finding outranks absence of evidence, and the cap is absence of REQUIRED evidence. Boundaries pinned by tests: POSITIVE claims (verdict `complete`) still cap at `uncertain` (the cap bounds what claims may prove); judged-incomplete on an OPTIONAL criterion keeps the cap (only required criteria are the finding rung). |
+
+Cycle-3 regressions: `test/acceptance.test.ts` (C3-F2 ×4; C3-F1 is the
+strengthened C2-F4 test). Suite: 82 acceptance tests; full suite
+**1873 / 1859 pass / 0 fail / 14 skipped**, `npm test` exit 0.

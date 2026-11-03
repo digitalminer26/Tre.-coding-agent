@@ -566,21 +566,31 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
     }
   }
 
-  // ── §4 total precedence (F4/F6 + cycle-2 C2-F1/C2-F2 amendments) ──────
-  // Order: bad input > claims-only SPEC cap (F4, C2-F2: a spec with no
-  // required check, no expected artifact AND no required DETERMINISTIC
-  // criterion demands no evidence at all) > CONCRETE negative findings
-  // (current FAIL, judge-declared incomplete (F6), proven-missing artifact
-  // exists:false (C2-F1)) > the evidence floor (complete-eligibility only
-  // — never outranks a finding) > missing-evidence rules (unobserved
-  // artifact / missing required check) > criterion unfunded > blockers
-  // (blocked) > all green (complete) > default uncertain.
+  // ── §4 total precedence (F4/F6 + cycle-2 C2-F1/C2-F2 + C3-F2) ─────────
+  // Order: bad input > CONCRETE negative findings (judge-declared
+  // incomplete (F6, C3-F2: above the claims-only cap too), current FAIL,
+  // proven-missing artifact exists:false (C2-F1)) > claims-only SPEC cap
+  // (F4, C2-F2: a spec with no required check, no expected artifact AND
+  // no required DETERMINISTIC criterion demands no evidence at all) >
+  // the evidence floor (complete-eligibility only — never outranks a
+  // finding) > missing-evidence rules (unobserved artifact / missing
+  // required check) > criterion unfunded > blockers (blocked) > all
+  // green (complete) > default uncertain.
   // C2-F1: an OBSERVED exists:false is a concrete negative finding, not
   // an absence of evidence — the evidence floor never masks it.
   // C2-F2: a required deterministic criterion IS an evidence requirement
   // (EV7 binds criterion ids to gate ids; no requiredChecks repetition
   // needed) — such a spec is not "claims-only", and its current FAIL is
   // incomplete, not uncertain.
+  // C3-F2: the same principle extended to the claims-only CAP: F6 says a
+  // CONCRETE finding outranks ABSENCE of evidence — the cap is absence of
+  // required evidence, so a judge naming a required criterion incomplete
+  // outranks it too (a claims-only spec with an explicit negative finding
+  // is `incomplete`, not `uncertain`).
+  // F4/C3-F2: judge-declared incomplete is a CONCRETE finding and now sits
+  // ABOVE the claims-only cap (F6 outranks ABSENCE of evidence; the cap IS
+  // absence of required evidence), so this loop must run before the cap
+  // is consulted.
   const badInput = bad.some((m) => m.startsWith("bad-input:"));
   const currentFails: string[] = [];
   const judgeIncomplete: string[] = [];
@@ -606,29 +616,24 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
   if (badInput) {
     verdict = "uncertain";
     reasons.push("verdict:bad-input");
+  } else if (judgeIncomplete.length > 0 || currentFails.length > 0 || missingArtifacts.length > 0) {
+    // C2-F1/C2-F2/C3-F2: ALL concrete negative findings sit above the
+    // claims-only cap and the evidence floor (both are rules about
+    // COMPLETION ELIGIBILITY — absence of evidence, required or current,
+    // never outranks the presence of a finding). A judge explicitly
+    // calling a required criterion incomplete is a finding even in a
+    // claims-only spec; a proven-missing artifact (observed exists:false
+    // at current) or a current gate FAIL is non-model evidence of a
+    // finding. None of these can be outranked by blocked.
+    if (judgeIncomplete.length > 0) reasons.push("verdict:criterion-incomplete");
+    if (currentFails.length > 0) reasons.push("verdict:current-fail");
+    if (missingArtifacts.length > 0) reasons.push("verdict:artifact-missing");
+    verdict = "incomplete";
   } else if (!hasRequiredEvidenceShape) {
     // F4: a spec demanding NO deterministic evidence is malformed by
     // construction — the caller must provide gates or artifacts.
     reasons.push("verdict:claims-only-spec");
     verdict = "uncertain";
-  } else if (judgeIncomplete.length > 0) {
-    // F6: a judge explicitly calling a required semantic criterion
-    // incomplete is a concrete negative finding — it outranks the
-    // missing-evidence rules below (they describe ABSENCE of evidence,
-    // this is PRESENCE of a finding) and can never be outranked by
-    // blocked. It sits above the F4 floor too: with zero evidence at
-    // current AND an explicit negative finding, the finding is still
-    // the answer (the work is what the judge named, not "unknown").
-    reasons.push("verdict:criterion-incomplete");
-    verdict = "incomplete";
-  } else if (currentFails.length > 0 || missingArtifacts.length > 0) {
-    // C2-F1/C2-F2: concrete negative findings PRECEDE the evidence floor.
-    // A proven-missing artifact (observed exists:false at current) or a
-    // current gate FAIL is itself non-model evidence of a finding; the
-    // floor is a rule about COMPLETION ELIGIBILITY, never about findings.
-    if (currentFails.length > 0) reasons.push("verdict:current-fail");
-    if (missingArtifacts.length > 0) reasons.push("verdict:artifact-missing");
-    verdict = "incomplete";
   } else if (!hasCurrentNonModelEvidence) {
     // F4 floor: eligible branches all need evidence; with zero current
     // non-model observations nothing can be complete.

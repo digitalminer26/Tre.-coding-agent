@@ -1,3 +1,7 @@
+## 2026-11-03 — P14 cycle-3 follow-ups: C3-F1 test strengthened, C3-F2 findings outrank the claims-only cap
+
+Third review round (same-session lens): the C2-F4 regression was one-sided — it never tested the audit's repro (MATCHING malformed taskRevisions on both sides); now covered, and it fails against the pre-fix source. Contract change (user-approved): **C3-F2** — concrete negative findings now outrank the claims-only CAP as well as the evidence floor: a claims-only spec whose judge explicitly calls a REQUIRED criterion incomplete lands `incomplete`/`verdict:criterion-incomplete` (docs/13 §10; §4 ladder re-drawn). Boundaries: positive claims still cap at uncertain; judged-incomplete on an OPTIONAL criterion keeps the cap. 4 new tests; suite: **1873 / 1859 pass / 0 fail / 14 skipped** (82 acceptance tests). Open: the cross-model independent audit round still has not happened — P14 roadmap acceptance stays open until it runs.
+
 ## 2026-11-03 — P14 cycle-2 fix round: audit findings C2-F1–F5 closed; suite 1869 / 0 / 14
 
 A second read-only review round of `efd1866` (`.tre/audit-p14-cycle2.md` — same-session lens, not cross-model) found five defects in the F1–F7 closure. All five closed (record: docs/13 §9; docs/11 ledger row appended):

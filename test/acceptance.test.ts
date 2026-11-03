@@ -990,3 +990,60 @@ test("C2-F1/F2 ladder order: finding > floor > missing evidence (all three rungs
   assert.ok(unknownOnly.reasons.includes("verdict:check-missing") || unknownOnly.reasons.includes("verdict:no-current-non-model-evidence"));
   void floorOnly;
 });
+
+// ── cycle-3 amendment (C3-F2): findings outrank the claims-only CAP ────────
+
+test("C3-F2: judge-declared incomplete on a required criterion outranks the claims-only cap", () => {
+  // C2-F1 moved concrete findings above the evidence FLOOR; the same
+  // principle (F6: presence of a finding outranks absence of evidence)
+  // applies to the claims-only CAP — the cap is absence of REQUIRED
+  // evidence. A claims-only spec with an explicit negative finding is
+  // `incomplete`, not `uncertain`.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "incomplete", "a concrete finding outranks the cap (C3-F2)");
+  assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
+  assert.ok(!a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C3-F2 boundary: the cap still holds when the only claims are POSITIVE (complete)", () => {
+  // The cap bounds what claims may PROVE, not what they may FIND.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C3-F2 boundary: judged incomplete on an OPTIONAL criterion in a claims-only spec keeps the cap", () => {
+  // F6's finding rung is about REQUIRED criteria; an optional criterion
+  // demands nothing, so its negative judgment is remainingWork, not a
+  // finding that outranks the cap.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:nice", kind: "semantic", required: false }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "meh", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:nice"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C3-F2: claims-only + judge incomplete + positive blocker → incomplete (finding beats both cap and blocked)", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "crit:readability", kind: "semantic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readability lacking", verdict: "incomplete", confidence: 0.95, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+    blockers: [{ blocker: "environment", at: { ...ID }, evidenceRef: "b:9" }],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:criterion-incomplete"));
+});
