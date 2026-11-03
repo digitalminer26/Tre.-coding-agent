@@ -1,0 +1,69 @@
+{
+  "name": "gf-investigate-cap-tools-escalate",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "warned",
+      "warnCount": 0,
+      "sameGuardFires": 2,
+      "toolCallsThisAttempt": 3
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "diagnostics": {
+        "maxToolCalls": 10,
+        "maxUsd": 1
+      }
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 1,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 10,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "change-approach",
+    "action": "model-swap",
+    "strategyId": "swap:model:beta:v1",
+    "rationaleIncludes": [
+      "state:warned",
+      "guard:recurrence",
+      "swap:pool"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ],
+    "model": "beta",
+    "alternativesInclude": [
+      {
+        "decision": "investigate",
+        "action": "investigate",
+        "strategyId": "investigate:bounded:v1",
+        "veto": "diagnostics:tools"
+      }
+    ]
+  }
+}

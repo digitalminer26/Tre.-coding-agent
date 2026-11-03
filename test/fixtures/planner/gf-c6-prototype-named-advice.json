@@ -1,0 +1,89 @@
+{
+  "name": "gf-c6-prototype-named-advice",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "stopped",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "diagnosis": {
+      "causeClass": "unknown",
+      "confidence": 0.5,
+      "proposedActions": [
+        {
+          "rung": 2,
+          "action": "constructor"
+        },
+        {
+          "rung": 2,
+          "action": "__proto__"
+        }
+      ],
+      "evidenceRefs": [
+        "ev-diag-11"
+      ]
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "diagnostics": {
+        "maxToolCalls": 10,
+        "maxUsd": 1
+      }
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "investigate",
+    "action": "investigate",
+    "strategyId": "investigate:bounded:v1",
+    "rationaleIncludes": [
+      "cause:unknown"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ],
+    "alternativesInclude": [
+      {
+        "decision": "escalate",
+        "action": "escalate",
+        "strategyId": "",
+        "veto": "advice-not-authority"
+      },
+      {
+        "decision": "escalate",
+        "action": "escalate",
+        "strategyId": "",
+        "veto": "advice-not-authority"
+      }
+    ]
+  }
+}

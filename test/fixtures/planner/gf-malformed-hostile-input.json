@@ -1,0 +1,76 @@
+{
+  "name": "gf-malformed-hostile-input",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "stopped",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "acceptance": {
+      "live": true,
+      "assessment": {
+        "verdict": "complete",
+        "remainingWork": "not-an-array",
+        "reasons": null,
+        "taskId": "WRONG",
+        "taskRevision": 99
+      }
+    },
+    "diagnosis": {
+      "causeClass": "not-a-real-cause"
+    },
+    "facts": {
+      "attemptsUsed": -5,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "diagnostics": {
+        "maxToolCalls": 10,
+        "maxUsd": 1
+      }
+    },
+    "ownershipProvable": false,
+    "__hostileGetters": [
+      "recoveryBudget",
+      "repairTarget"
+    ]
+  },
+  "expected": {
+    "decision": "escalate",
+    "action": "escalate",
+    "strategyId": "escalate:v1",
+    "rationaleIncludes": [
+      "bad-input"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ]
+  }
+}

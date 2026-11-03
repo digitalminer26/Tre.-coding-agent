@@ -1,0 +1,68 @@
+{
+  "name": "gf-finish-complete",
+  "input": {
+    "taskId": "task-1",
+    "taskRevision": 1,
+    "now": 1000,
+    "worker": {
+      "state": "stopped",
+      "warnCount": 0,
+      "sameGuardFires": 0,
+      "toolCallsThisAttempt": 3
+    },
+    "acceptance": {
+      "live": true,
+      "assessment": {
+        "verdict": "complete",
+        "remainingWork": [],
+        "reasons": [],
+        "taskId": "task-1",
+        "taskRevision": 1
+      }
+    },
+    "authority": {
+      "paths": [
+        "src/**"
+      ],
+      "notPaths": [],
+      "allowInstalls": false,
+      "allowNetwork": false,
+      "allowExternalEffects": false,
+      "models": [
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "diagnostics": {
+        "maxToolCalls": 10,
+        "maxUsd": 1
+      }
+    },
+    "facts": {
+      "attemptsUsed": 1,
+      "nudgesUsed": 0,
+      "steerGuardResets": 0,
+      "strategyUses": {},
+      "recoveryUsdUsed": 0,
+      "recoveryTurnsUsed": 0,
+      "diagnosticToolCallsUsed": 0,
+      "diagnosticUsdUsed": 0,
+      "otherApprovedModels": [
+        "beta",
+        "gamma"
+      ]
+    }
+  },
+  "expected": {
+    "decision": "finish",
+    "action": "accept-finish",
+    "strategyId": "accept:finish:v1",
+    "rationaleIncludes": [
+      "verdict:complete"
+    ],
+    "forbidActions": [
+      "kill",
+      "merge"
+    ]
+  }
+}
