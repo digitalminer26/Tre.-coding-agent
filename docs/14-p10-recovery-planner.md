@@ -641,6 +641,8 @@ accepted, fixed with regressions gf-c4f*/named tests):
     partial advice/authority read across two extents is malformed
     evidence, never a validated grant. A shrinking element getter
     can no longer truncate the copy mid-iteration.
+    **[C5-F1/F2: OVERCLAIMED at cycle 4 — delivered only in
+    `copyStrs`; corrected in amendments 39–40.]**
 36. **Array elements must be own properties (C4-F3).** Every copied
     array element must be an OWN data property of the array at its
     index (`getOwnPropertyDescriptor`/`hasOwnProperty` per index):
@@ -668,3 +670,36 @@ accepted, fixed with regressions gf-c4f*/named tests):
     listed in `alternatives` with its veto instead of degrading to
     a bare rationale code. A candidate the planner considered is
     never erased from the plan.
+
+Cycle-5 audit amendments (GPT Sol, 2026-11-03; findings C5-F1–C5-F5
+— all accepted, fixed with named regressions; amendments 35/36/38
+were OVERCLAIMS of cycle 4 — corrected here and re-delivered in code):
+
+39. **Descriptor-only copying EVERYWHERE, not just copyStrs (C5-F1).**
+    Cycle 4 delivered own-descriptor + extent re-verification only in
+    `copyStrs`; `onlyStrs` (evidence refs, outcome refs, BOTH model
+    pools) still validated with `hasOwnProperty` and then INVOKED the
+    getter — a shrink-on-read accessor produced a partial model grant
+    that authorized model-swap. Now `onlyStrs` matches `copyStrs`:
+    length captured in ONE try-guarded observation (throwing trap ⇒
+    empty), each element copied from an own DATA descriptor (an own
+    accessor's getter is NEVER invoked — superseding the cycle-1
+    F8/C1 expectation that element getters throw inside the boundary
+    and bottom out at `bad-input`), and the extent is RE-VERIFIED
+    after the copy (any change ⇒ reject the WHOLE list).
+40. **proposedActions extent captured in ONE observation (C5-F2).**
+    The old validation ternary read `rawPas.length` three times: a
+    Proxy returning 2 then 0 iterated nothing, re-verified 0===0, and
+    retained an actionable diagnosis with silently-dropped advice.
+    Length is now captured once (guarded; unobservable ⇒ the
+    diagnosis is rejected, never treated as empty), elements are read
+    via own DATA descriptors (accessor advice rows never invoked),
+    and the final check compares against the CAPTURED extent.
+41. **Advice alternatives merge, not append (C5-F3); ownership read
+    is own-gated (C5-F4).** L6 appends advice alternatives through
+    `mergeVetoed` (first veto wins) — a rule-vetoed repair is listed
+    once with its concrete `authority:denied:*` veto, never a second
+    time with `advice-not-authority`. `ownershipProvable` is read
+    ONLY when it is an OWN property: an inherited accessor is never
+    invoked (a prototype chain may not pose as a stated ownership
+    annotation; absent-own ⇒ unknown, no spawn gate).

@@ -343,15 +343,29 @@ const isStr = (v: unknown): v is string => typeof v === 'string';
 const onlyStrs = (v: unknown): string[] => {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
-  // C4-F2/F3: length read ONCE (a shrinking element getter cannot truncate
-  // the extent mid-iteration) and every index must be an OWN property
-  // (prototype-inherited strings are never copied as evidence/grants).
-  const n = v.length;
-  if (!Number.isInteger(n) || n < 0) return [];
-  for (let i = 0; i < n; i++) {
-    if (!Object.prototype.hasOwnProperty.call(v, i)) continue;
-    const e = (v as unknown[])[i];
-    if (typeof e === 'string') out.push(e);
+  // C4-F2/F3 + C5-F1: length captured ONCE in ONE observation (a hostile
+  // length getter fires once), each element must be an OWN DATA property
+  // (a descriptor with `value` — an own accessor's getter is NEVER
+  // invoked), non-string/non-own ⇒ dropped, and the extent is RE-VERIFIED
+  // after the copy: any change (shrink-on-read getter) rejects the WHOLE
+  // list — a partial grant is malformed evidence, never a usable subset.
+  let n: unknown;
+  try {
+    n = v.length;
+  } catch {
+    return [];
+  }
+  if (!Number.isInteger(n) || (n as number) < 0) return [];
+  const len = n as number;
+  try {
+    for (let i = 0; i < len; i++) {
+      const d = Object.getOwnPropertyDescriptor(v, i);
+      if (d === undefined || !('value' in d) || typeof d.value !== 'string') continue;
+      out.push(d.value);
+    }
+    if (v.length !== len) return [];
+  } catch {
+    return [];
   }
   return out;
 };
@@ -579,10 +593,25 @@ function sanitize(raw: PlannerInput): Ctx {
       const rawPas = snapshot(d, 'proposedActions').value;
       let extentOk = true;
       if (Array.isArray(rawPas)) {
-        const pn = Number.isInteger(rawPas.length) && rawPas.length >= 0 ? rawPas.length : 0;
+        // C5-F2: length captured in ONE observation (the old ternary read
+        // it three times — a Proxy flipping 2⇒0 validated a nonempty
+        // advice array as empty); a throwing/invalid length ⇒ 0 elements
+        // and the extent check below still re-verifies against `pn`.
+        let pn = 0;
+        let pnOk = true;
+        try {
+          const raw = (rawPas as unknown[]).length;
+          pnOk = Number.isInteger(raw) && raw >= 0;
+          pn = pnOk ? (raw as number) : 0;
+        } catch {
+          pnOk = false;
+        }
         for (let i = 0; i < pn; i++) {
-          if (!Object.prototype.hasOwnProperty.call(rawPas, i)) continue;
-          const pa = rawPas[i];
+          // C5-F2/F3: own DATA descriptor per element — an own accessor's
+          // getter is never invoked, an inherited index is never read.
+          const dEl = Object.getOwnPropertyDescriptor(rawPas, i);
+          if (dEl === undefined || !('value' in dEl)) continue;
+          const pa = dEl.value;
           if (isPlainObj(pa)) {
             const paAction = snapshot(pa, 'action');
             if (paAction.present && isStr(paAction.value)) {
@@ -592,10 +621,16 @@ function sanitize(raw: PlannerInput): Ctx {
             }
           }
         }
-        // C4-F2: a mid-iteration length change (shrink getter) vetoes the
-        // whole diagnosis — partial advice read across two extents is
-        // malformed evidence, not a contract record.
-        extentOk = rawPas.length === pn;
+        // C4-F2/C5-F2: extent re-verified after the copy; a length that
+        // could not be observed once, changed mid-copy, or never matched
+        // the captured extent vetoes the whole diagnosis — partial advice
+        // read across two extents is malformed evidence, not a contract
+        // record.
+        try {
+          extentOk = pnOk && (rawPas as unknown[]).length === pn;
+        } catch {
+          extentOk = false;
+        }
       }
       if (extentOk) {
         diagnosis = {
@@ -717,10 +752,15 @@ function sanitize(raw: PlannerInput): Ctx {
   const ownPresent = Object.prototype.hasOwnProperty.call(rawObj as object, 'ownershipProvable');
   let ownTrue = false;
   let ownThrew = false;
-  try {
-    ownTrue = (rawObj as unknown as { ownershipProvable?: unknown }).ownershipProvable === true;
-  } catch {
-    ownThrew = true;
+  // C5-F4: the property is read ONLY when it is an own property — an
+  // inherited `ownershipProvable` accessor (prototype hygiene, §12(16))
+  // is never invoked; absent ⇒ unknown, both derived flags stay false.
+  if (ownPresent) {
+    try {
+      ownTrue = (rawObj as unknown as { ownershipProvable?: unknown }).ownershipProvable === true;
+    } catch {
+      ownThrew = true;
+    }
   }
 
   return {
@@ -1142,7 +1182,11 @@ function decide(c: Ctx): Seed {
   // cause is not yet evidence-complete — I3 — fall through to L8–L10).
   if (c.diagnosis && isEnded(c.state)) {
     const seed = causeRule(c);
-    seed.alternatives = [...seed.alternatives, ...adviceAlternatives(c, seed.action)];
+    // C5-F3: advice alternatives MERGE with the rule's own vetoed
+    // candidates (dedup by action, first veto wins) — a candidate the
+    // rule already refused with a concrete veto (e.g. an authority
+    // denial) is never duplicated with a second, conflicting veto.
+    seed.alternatives = mergeVetoed(seed.alternatives, adviceAlternatives(c, seed.action));
     return seed;
   }
 

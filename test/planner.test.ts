@@ -151,14 +151,11 @@ test("PC1: never throws on hostile inputs", () => {
     { taskId: "t", taskRevision: NaN, worker: { state: "quantum" } },
     { taskId: "t", taskRevision: -1, worker: { state: "dead" }, facts: { attemptsUsed: "many" } },
     (() => { const o: Record<string, unknown> = { ...base() }; Object.defineProperty(o, "acceptance", { get() { throw new Error("boom"); } }); return o; })(),
-    // F8/C1: hostile element getters throw inside the boundary ⇒ bottom-out.
-    (() => {
-      const o: Record<string, unknown> = { ...base() };
-      const refs = ["ev-1"];
-      Object.defineProperty(refs, 1, { get() { throw new Error("boom-getter"); } });
-      o.diagnosis = { causeClass: "premature-stop", confidence: 0.9, evidenceRefs: refs };
-      return o;
-    })(),
+    // F8/C1: a hostile container getter throws inside the boundary ⇒ bottom-out.
+    // (C5-F1 amended the ELEMENT-getter case: element accessors are never
+    // invoked at all — pinned by "F8/C1+C5-F1: hostile element getter is
+    // never invoked" below, which replaced the old invoked-then-throws
+    // bottom-out expectation.)
   ];
   for (const h of hostile) {
     let rec: PlanRecommendation;
@@ -737,11 +734,15 @@ test("C4-F2: a changing array extent rejects the whole copied record", () => {
   assert.ok(rec.rationale.includes("authority:denied:paths"), JSON.stringify(rec.rationale));
 });
 
-// C4-F3: onlyStrs copies ONLY own-index elements — prototype-inherited
-// strings are never copied as evidence/refs (nor into the model pools).
+// C4-F3/C5-F5: onlyStrs copies ONLY own DATA-property elements — an
+// inherited string at an index INSIDE the captured extent is never
+// copied as evidence/refs (the original test placed the inherited index
+// outside the extent, where it was never visited — a test that passed
+// without the own check).
 test("C4-F3: prototype-inherited array elements are never copied", () => {
   const ev: string[] = ["ev-real"];
-  Object.setPrototypeOf(ev, { 1: "ev-inherited" });
+  ev.length = 2; // index 1 is a HOLE inside the extent...
+  Object.setPrototypeOf(ev, { 1: "ev-inherited" }); // ...filled only by the prototype
   const rec = planRecovery(base({
     lastOutcome: {
       action: "nudge", strategyId: "nudge:progress:v1",
@@ -826,6 +827,168 @@ test("C4-F5: a denied repair stays visible as a vetoed alternative through the f
   assert.notEqual(rec.action, "repair");
   assert.ok(rec.alternatives.some((a) => a.action === "repair" && a.veto.startsWith("authority:denied")),
     JSON.stringify(rec.alternatives));
+});
+
+// ───────────── cycle-5 audit regressions (docs/14 §12 amendments 39–41) ────
+
+// C5-F1: onlyStrs must reject a SHRINK-ON-READ grant outright (the
+// cycle-4 reader skipped the vanished index and accepted the partial
+// list); the auditor's repro: an index-0 accessor that truncates the
+// array during the copy.
+test("C5-F1: shrink-on-read model grant rejects the WHOLE pool (no partial grant)", () => {
+  const models: string[] = ["beta", "gamma"];
+  Object.defineProperty(models, "0", {
+    configurable: true,
+    get() { models.length = 1; return "beta"; },
+  });
+  const rec = planRecovery(base({
+    worker: W({ state: "warned", sameGuardFires: 2 }),
+    authority: AUTH({ diagnostics: undefined, models: models as unknown as string[] }),
+    facts: FACTS({ nudgesUsed: 1, otherApprovedModels: ["beta"] }),
+  }));
+  assert.notEqual(rec.action, "model-swap",
+    "a partial (extent-shrunk) model grant must never authorize a swap");
+  assert.ok(rec.alternatives.some((a) => a.action === "model-swap" && a.veto === "swap:no-target"),
+    JSON.stringify(rec.alternatives));
+});
+
+// C5-F1: an OWN ACCESSOR element's getter is never invoked — only data
+// descriptors are copyable (the cycle-4 reader validated with
+// hasOwnProperty and then invoked the getter).
+test("C5-F1: own accessor element is never invoked (only data descriptors copy)", () => {
+  let invokes = 0;
+  const models = ["alpha", "beta"];
+  Object.defineProperty(models, 0, {
+    configurable: true,
+    get() { invokes++; return "alpha"; },
+  });
+  const rec = planRecovery(base({
+    worker: W({ state: "tool" }),
+    lastOutcome: { action: "nudge", strategyId: "nudge:progress:v1", progress: "uptake", progressEvidence: [] },
+    authority: AUTH({ diagnostics: undefined, models: models as unknown as string[] }),
+    facts: FACTS({ nudgesUsed: 1, otherApprovedModels: ["beta", "alpha"] }),
+  }));
+  assert.equal(invokes, 0, "onlyStrs must read element descriptors, never invoke accessors");
+  // The accessor element is DROPPED; the plain index-1 member survives.
+  assert.equal(rec.action, "model-swap");
+  assert.equal(rec.model, "beta", "accessor-backed member is not in the pool");
+});
+
+// C5-F1: a THROWING length trap rejects the list as EMPTY (never a
+// partial copy) — the pool is gone, so the swap reports swap:no-pool.
+test("C5-F1: throwing length trap on a str list rejects it as empty", () => {
+  const models = new Proxy(["beta", "gamma"], {
+    get(t, k, r) { if (k === "length") throw new Error("boom"); return Reflect.get(t, k, r); },
+  });
+  const rec = planRecovery(base({
+    worker: W({ state: "warned", sameGuardFires: 2 }),
+    authority: AUTH({ diagnostics: undefined, models: models as unknown as string[] }),
+    facts: FACTS({ nudgesUsed: 1, otherApprovedModels: ["beta", "gamma"] }),
+  }));
+  assert.notEqual(rec.action, "model-swap");
+  assert.ok(rec.alternatives.some((a) => a.action === "model-swap" && a.veto === "swap:no-pool"),
+    JSON.stringify(rec.alternatives));
+});
+
+// C5-F1 + F8/C1 (revised): a hostile ELEMENT getter on a str list is
+// never invoked — the old behavior (invoke, throw, PC1 bottom-out at
+// escalate/bad-input) is superseded: descriptor-only copying means the
+// accessor index is simply DROPPED and the plan proceeds normally.
+test("F8/C1+C5-F1: hostile element getter is never invoked (no bottom-out needed)", () => {
+  let invokes = 0;
+  const refs = ["ev-1"];
+  Object.defineProperty(refs, 1, { get() { invokes++; return "ev-boom"; } });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "premature-stop", confidence: 0.9, evidenceRefs: refs } as unknown as PlannerInput["diagnosis"],
+  }));
+  assert.equal(invokes, 0, "element accessors must never be invoked");
+  assert.notEqual(rec.rationale.includes("bad-input"), true);
+  assert.ok(!rec.evidenceRefs.includes("ev-boom"));
+});
+
+// C5-F2: the length of proposedActions is captured in ONE observation —
+// the auditor's Proxy returning 2 then 0 must REJECT the diagnosis
+// (cycle-4 validated with 2, iterated 0, re-verified against 0 ⇒ the
+// actionable diagnosis survived with no advice).
+test("C5-F2: proposedActions length 2-then-0 Proxy rejects the whole diagnosis", () => {
+  let reads = 0;
+  const pas = new Proxy([{ action: "kill" }, { action: "merge" }], {
+    get(t, k, r) {
+      if (k === "length") { reads++; return reads === 1 ? 2 : 0; }
+      return Reflect.get(t, k, r);
+    },
+  });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85, proposedActions: pas } as unknown as PlannerInput["diagnosis"],
+  }));
+  assert.ok(rec.rationale.includes("diagnosis:invalid"),
+    `extent-inconsistent advice array must invalidate the diagnosis: ${JSON.stringify(rec.rationale)}`);
+});
+
+// C5-F2: a THROWING length on proposedActions also rejects the diagnosis
+// (fail-closed — an unobservable extent is never treated as empty).
+test("C5-F2: throwing proposedActions length rejects the diagnosis", () => {
+  const pas = new Proxy([{ action: "repair" }], {
+    get(t, k, r) { if (k === "length") throw new Error("boom"); return Reflect.get(t, k, r); },
+  });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85, proposedActions: pas } as unknown as PlannerInput["diagnosis"],
+  }));
+  assert.ok(rec.rationale.includes("diagnosis:invalid"), JSON.stringify(rec.rationale));
+});
+
+// C5-F2: an own accessor element of proposedActions is never invoked —
+// descriptors only.
+test("C5-F2: proposedActions accessor element is never invoked", () => {
+  let invokes = 0;
+  const pas: unknown[] = [{ action: "repair" }];
+  Object.defineProperty(pas, 1, {
+    configurable: true,
+    get() { invokes++; return { action: "escalate" }; },
+  });
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85, proposedActions: pas } as unknown as PlannerInput["diagnosis"],
+    repairTarget: { paths: ["/etc/hosts"], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false },
+  }));
+  assert.equal(invokes, 0, "advice element descriptors are read, accessors never invoked");
+  assert.ok(!rec.alternatives.some((a) => a.action === "escalate" && a.veto === "advice-not-authority"),
+    "accessor-backed advice row must be dropped");
+});
+
+// C5-F3: advice that repeats an action the rule ALREADY vetoed merges
+// (first veto wins) instead of duplicating the action with a second,
+// conflicting veto. Auditor repro: task-defect + advice [{repair}] +
+// target outside authority ⇒ chosen investigate carries repair twice
+// (authority-denied AND advice-not-authority).
+test("C5-F3: advice repeating a rule-vetoed action merges, first veto wins", () => {
+  const rec = planRecovery(base({
+    diagnosis: { causeClass: "task-defect", confidence: 0.85, proposedActions: [{ action: "repair" }] } as unknown as PlannerInput["diagnosis"],
+    repairTarget: { paths: ["/etc/hosts"], touchesOutsideAuthority: false, externalEffect: false, installNeeded: false },
+  }));
+  assert.equal(rec.action, "investigate", JSON.stringify(rec.action));
+  const repairs = rec.alternatives.filter((a) => a.action === "repair");
+  assert.equal(repairs.length, 1, `repair must appear once, got: ${JSON.stringify(repairs)}`);
+  assert.ok(repairs[0]!.veto.startsWith("authority:denied"),
+    `the concrete authority veto must win over advice-not-authority: ${repairs[0]!.veto}`);
+});
+
+// C5-F4: an INHERITED `ownershipProvable` accessor is never invoked —
+// presence is own-property-gated (a prototype chain may not pose as a
+// stated ownership annotation, §12(16) hygiene).
+test("C5-F4: inherited ownershipProvable getter is never invoked", () => {
+  let invokes = 0;
+  const input = base({
+    worker: W({ state: "warned" }),
+    lastOutcome: { action: "nudge", strategyId: "nudge:progress:v1", progress: "none", progressEvidence: [] },
+    facts: FACTS({ nudgesUsed: 1 }),
+  });
+  Object.setPrototypeOf(input, {
+    get ownershipProvable() { invokes++; return false; },
+  });
+  const rec = planRecovery(input);
+  assert.equal(invokes, 0, "absent-own ownershipProvable must not execute inherited code");
+  assert.ok(!JSON.stringify(rec.alternatives).includes("ownership:unprovable"),
+    "an inherited annotation must not gate the ladder");
 });
 
 // ───────────────────────── §6 loop-breaker, §3 caps, §7 pool, §5 gate ───────
