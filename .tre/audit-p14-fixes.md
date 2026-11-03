@@ -74,3 +74,18 @@ exit 0.
 findings were fixed. Residual scope note: review was same-session (read-only
 reviewer lens), not a fresh cross-model family; a follow-up cross-model
 audit round remains open before the P14 roadmap row flips to accepted.
+
+---
+
+## Cycle-2 addendum (C2-F5, 2026-11-03)
+
+`.tre/audit-p14-cycle2.md` found this record overstating verification:
+(a) the "75 acceptance tests" count above was wrong — the rebuilt suite was
+**68** (cycle 2 grew it to 78); (b) this cycle was a SAME-SESSION reviewer
+lens (the review itself says so) and must not be described as an independent
+audit; (c) the round-trip tests above exercised `validateSupervisorRecord`
+field validation, not durable persistence — cycle 2 added a real
+`DecisionJournal.open`→`append`→`read` round-trip plus an `artifact:null`
+fails-closed-on-reopen regression. All corrected in HANDOFF.md, docs/13 §9,
+and the docs/11 ledger. Cross-model audit round remains the open
+acceptance gate.

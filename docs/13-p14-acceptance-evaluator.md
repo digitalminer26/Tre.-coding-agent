@@ -2,7 +2,9 @@
 
 > Status: CONTRACT + audit amendments (drafted 2026-11-03, implemented
 > 2026-11-03, amended 2026-11-03 after an independent review found F1–F7 —
-> see §8). Module: `src/acceptance/evaluator.ts`. Consumed by P10 (planner) and P9/M1
+> see §8; re-amended 2026-11-03 after a second review round found C2-F1–F5
+> — see §9, which is NORMATIVE over §4/§8 where they differ).
+> Module: `src/acceptance/evaluator.ts`. Consumed by P10 (planner) and P9/M1
 > composition; produces the S5 `kind:"acceptance"` record (§14.3).
 > Parent plan: docs/11 §11.1 P14 row, §9.1 "Acceptance" paragraph,
 > §13.3 rows "normal run ends before required check" / "work changes
@@ -158,7 +160,7 @@ so it never fails the whole input).
 | EV2 | **Required check coverage is per gate id.** A required check passes iff a *current* PASS result exists for it. Two PASSes are not stronger than one; a current PASS plus a current FAIL is CONTRADICTORY → `bad-input` (the caller must reconcile its own gate runs). |
 | EV3 | **A failed current gate makes the task `incomplete`, never `blocked`.** A gate failure is work-to-do evidence; `blocked` requires positive blocker evidence (§4). |
 | EV4 | **Artifact criteria:** an expected artifact is satisfied iff observed `exists:true` with a non-empty `digest` observed AT `current`. `exists:true` without a digest is an unsupported observation → `bad-input` (it is exactly the shape of an unverified claim). **F1 amendment:** `exists` ABSENT (or a non-boolean value) is an UNKNOWN observation, never a satisfied one — unknown → `uncertain` (EV9); a malformed `digest` type is `bad-input`. Only the exact shape `(exists === true, non-empty string digest)` satisfies. |
-| EV5 | **Claims are advice.** `worker-self-report` and `model-judgment` NEVER set or flip a verdict. They attach to `modelAdvisory` (latest per source) and may attach *to semantic criteria outcomes* only (EV6). A claim of "complete" with missing deterministic evidence yields at most `uncertain`. **F4 amendment (the AC1 floor):** a spec with NO required checks and NO expected artifacts yields at most `uncertain` from claims alone — `complete` requires at least one piece of current non-model evidence (a current gate result or a satisfied artifact observation). A spec whose only requirements are semantic is malformed *by construction* → the caller must provide deterministic evidence or the verdict is capped at `uncertain`. |
+| EV5 | **Claims are advice.** `worker-self-report` and `model-judgment` NEVER set or flip a verdict. They attach to `modelAdvisory` (latest per source) and may attach *to semantic criteria outcomes* only (EV6). A claim of "complete" with missing deterministic evidence yields at most `uncertain`. **F4 amendment (the AC1 floor):** a spec with NO required checks and NO expected artifacts yields at most `uncertain` from claims alone — `complete` requires at least one piece of current non-model evidence (a current gate result or a satisfied artifact observation). A spec whose only requirements are semantic is malformed *by construction* → the caller must provide deterministic evidence or the verdict is capped at `uncertain`. **C2-F2 scope correction:** a required DETERMINISTIC criterion is itself an evidence requirement (EV7 binds criterion ids to gate ids — repeating them in `requiredChecks` is redundant), so "claims-only" means no required check, no expected artifact AND no required deterministic criterion; such specs take the normal evidence rules (a current PASS funds, a current FAIL is `incomplete`). |
 | EV6 | **Semantic criteria** pass only by a current model-judgment claim (source `model-judgment`, `verdict:"complete"`, confidence ≥ the caller-supplied `semanticMinConfidence` [default 0.7]) naming the criterion — carried as ADVISORY: `pass:true`, `advisory:true`, evidence = the claim ref. Semantic FAILS from a claim are respected (a judge saying "incomplete" counts as remaining work, never waived upward). **F3 amendment:** "current" binds the CLAIM too — a claim may fund or fail a criterion only if `claim.at` equals the current artifact identity (`sameArtifact`); claims without `at`, or at a stale identity, are UNBOUND advice: reported in `staleEvidenceRefs` (when they carry refs), surfaced in `modelAdvisory` only if the advisory quote itself is harmless (advisory is never load-bearing), and they fund/flip NOTHING. |
 | EV7 | **Deterministic criteria** pass only by a current PASS gate result (the criterion `id` IS the gate id). No model output can produce a deterministic pass. Expected artifacts are judged separately (EV4), never as criteria. |
 | EV8 | **Blockers require positive, current evidence.** A `blocked` verdict additionally requires the required-evidence path be *unresolvable by more work evidence* — blockers never rescue a failed current gate (EV3 wins; the failed gate is reported, the stale blocker is listed and ignored for verdict). |
@@ -170,21 +172,27 @@ so it never fails the whole input).
 ## 4. Verdict function (normative)
 
 ```text
-bad input                                        → uncertain (bad-input:… recorded)
-claims-only spec (no required check, no artifact) → uncertain cap (F4/EV5 — at most uncertain)
+bad input                                  → uncertain (bad-input:… recorded)
+claims-only spec (F4, C2-F2 scoped: no required check, no expected
+    artifact AND no required deterministic criterion)
+                                           → uncertain cap (F4/EV5 — at most
+                                               uncertain; a required
+                                               deterministic criterion IS an
+                                               evidence requirement, EV7)
 judge-declared incomplete (required criterion)   → incomplete (F6: a CONCRETE
-                                                    finding — outranks ALL
-                                                    missing-evidence rules,
-                                                    never blocked)
-current FAIL gate/criterion                      → incomplete
-expected artifact unsatisfied:
-    observed exists:false at current             → incomplete  (missing artifact is work)
-    no observation at current                    → uncertain   (EV9 — never inferred)
-required gate missing/unbound at current         → uncertain   (EV9)
-required semantic criterion unfunded             → uncertain
-positive current blocker(s), nothing failed      → blocked
-all green (EV12)                                 → complete
-default (evidence exhausted without green)       → uncertain
+                                                    finding — never blocked)
+current FAIL gate/criterion                → incomplete  ┐ CONCRETE negative
+expected artifact observed exists:false    → incomplete  ┘ findings PRECEDE
+    at current  (C2-F1: proven absence is a finding, not an absence          the floor
+    of evidence — the floor never masks it)
+no current non-model evidence (F4)         → uncertain (COMPLETION-eligibility
+                                           floor only — see §9 C2-F1)
+required gate missing/unbound at current   → uncertain   (EV9)
+expected artifact unobserved at current    → uncertain   (EV9)
+required semantic criterion unfunded       → uncertain
+positive current blocker(s), nothing failed/missing → blocked
+all green (EV12, incl. floor)              → complete
+default (evidence exhausted without green) → uncertain
 ```
 
 Precedence is total and evaluated in this order; no rule rewrites an
@@ -288,26 +296,32 @@ is the contract record of what changed:
 | F1 | EV4 strictness: only `(exists === true, non-empty digest)` at current satisfies; `exists` absent/non-boolean is UNKNOWN → `uncertain`; malformed digest type → `bad-input`. |
 | F2 | All four evidence arrays must be arrays; non-array → `bad-input` (never silently empty). |
 | F3 | Claims bind to `claim.at`: a claim funds/fails a criterion ONLY at its own artifact identity; unbound claims (no `at`) fund nothing. Unbound claims are reported as stale advice (refs listed in `staleEvidenceRefs`). |
-| F4 | The AC1 floor is unconditional: a claims-only spec (no required check, no expected artifact) caps at `uncertain`; `complete` requires ≥1 current non-model evidence. |
+| F4 | The AC1 floor is unconditional: a claims-only spec (no required check, no expected artifact — *scoped by C2-F2: a required deterministic criterion counts as evidence shape too*) caps at `uncertain`; `complete` requires ≥1 current non-model evidence. |
 | F5 | Full output validation: claim fields consumed by the output are validated (dropped-claim on malformation); `toAcceptanceRecord` validates the COMPLETE record shape (throws `TypeError`); the P4 schema validates the amended fields; P4 TS types declare them. |
 | F6 | Judge-declared incomplete on a required criterion is a CONCRETE finding at the same rung as a current FAIL: it outranks missing-evidence rules (which are about ABSENCE of evidence, not presence of a negative finding). `incomplete` wins. |
 | F7 | `isStale`/`sameArtifact` treat a malformed stored artifact (empty sha) as never-live; identity validation precedes the liveness decision. |
 
-Precedence after F6 (total, evaluated top to bottom):
+Precedence after F6 was superseded by the cycle-2 restructure (§9/C2-F1 —
+concrete negative findings moved ABOVE the evidence floor); the live total
+order is the ladder in §4 as amended by §9.
 
-```text
-bad input                              → uncertain
-claims-only spec (F4 cap)              → uncertain (no required evidence shape)
-judge-declared incomplete (required)   → incomplete (concrete finding, F6 —
-                                         outranks ALL missing-evidence rules,
-                                         including the F4 evidence floor)
-no current non-model evidence (F4)     → uncertain (evidence floor)
-current FAIL gate/criterion            → incomplete
-artifact exists:false at current       → incomplete
-artifact unobserved at current         → uncertain
-required gate missing at current       → uncertain
-required criterion unfunded            → uncertain
-positive current blocker(s)            → blocked
-all green (EV12, incl. floor)          → complete
-default                                → uncertain
-```
+## 9. Cycle-2 audit amendments (2026-11-03 — second review round C2-F1–C2-F5)
+
+The cycle-1 closure was reviewed again (`.tre/audit-p14-cycle2.md`, against
+`efd1866` — same-session read-only lens, NOT a cross-model audit; see C2-F5).
+Five findings; all closed in code + tests. This section is normative over
+§4/§8 where they differ.
+
+| id | amendment |
+|----|-----------|
+| C2-F1 | The F4 evidence floor is a rule about COMPLETION ELIGIBILITY only — it never suppresses a concrete negative finding. An OBSERVED `exists:false` artifact at current (and a current FAIL) now precede the floor in the ladder: proven absence is non-model evidence of a finding, not an absence of evidence. `incomplete`/`verdict:artifact-missing` restored for the audit repro. |
+| C2-F2 | Claims-only classification corrected: a spec with a required DETERMINISTIC criterion is not claims-only (EV7 binds criterion ids to gate ids — repeating them in `requiredChecks` is redundant). Such a spec takes the normal evidence rules: current PASS funds, current FAIL → `incomplete` (EV3 no longer masked). Optional-only deterministic criteria demand nothing, so a spec of semantic + optional-deterministic criteria keeps the F4 cap. |
+| C2-F3 | Schema parity with P4 enforced at every emission point: claim intake requires non-empty `judge` (empty → malformed advice, dropped with a reason, funds nothing — the audit's complete-then-rejected repro now drops and lands on the evidence-only verdict); identity helpers require non-empty `dirtyDigest` when present; `toAcceptanceRecord` refuses empty `judge`/`dirtyDigest` and out-of-range/non-finite `confidence` (∈ [0,1]) — the converter is deliberately STRICTER than the journal `num` shape (no maximum; NaN passes `type:"number"`), strict-in-the-safe-direction: garbage the journal would tolerate is refused before emission. The P4 journal's acceptance `artifact` shape dropped `nullable` — `artifact:null` is now rejected (absent is the "no identity" case); the TS type (`artifact?: {…}`) and the journal agree. Parity is pinned by a matrix test: converter-accepted ⇒ `validateSupervisorRecord`-accepted for a valid envelope, plus the documented converter-strict cases. |
+| C2-F4 | `isStale` validates BOTH revisions (positive integers, matching `task.revision` §14.4) before equality: a malformed `taskRevision` on stored OR current ⇒ stale (never live). The F7 identity fix left this hole; `0`, `-1`, `1.5`, `undefined` all repro'd live and now repro stale. |
+| C2-F5 | Records corrected (this doc header, HANDOFF, `.tre/audit-p14-fixes.md` addendum): the F1–F7 review was a SAME-SESSION read-only review, not an "independent" (fresh model family) audit — the audit report said so and the HANDOFF headline contradicted it; the claimed "75 acceptance tests" was wrong (68 at rebuild — 10 new ones here bring the true count to 78). Durable-journal gap closed: a new regression performs a REAL `DecisionJournal.open` → `append` → `read` identity round-trip of an amended acceptance record and proves `artifact:null` fails closed on reopen (the earlier round-trips were field-validation only, not persistence). Audit acceptance remains OPEN pending a cross-model review round. |
+
+Cycle-2 regressions: `test/acceptance.test.ts` §"cycle-2 audit regressions"
+(C2-F1 ×2, C2-F2 ×3, C2-F3 ×3 incl. the durable round-trip, C2-F4 ×1,
+ladder-order ×1). All four audit repros re-run against rebuilt dist land on
+the corrected verdicts. Suite: 78 acceptance tests; full suite
+**1869 / 1855 pass / 0 fail / 14 skipped**, `npm test` exit 0.

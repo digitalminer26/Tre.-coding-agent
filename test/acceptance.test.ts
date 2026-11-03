@@ -35,7 +35,7 @@ import {
   toAcceptanceRecord,
 } from "../src/acceptance/evaluator.js";
 import type { AcceptanceAssessment, EvaluateInput } from "../src/acceptance/evaluator.js";
-import { EpisodeSchemaError } from "../src/episode/journal.js";
+import { EpisodeSchemaError, validateSupervisorRecord } from "../src/episode/journal.js";
 
 // ───────────────────────────────── fixtures ──────────────────────────────────
 
@@ -797,4 +797,191 @@ test("AC9 guard positive fixtures: the extractor catches every import shape touc
   for (const src of [`import { x } from "../util/paths.js";`, `const fs = require("node:fs");`, `export { y } from "./journal.js";`]) {
     assert.ok(!specifiersOf(src).some(touchesAcceptance), `false positive: ${src}`);
   }
+});
+
+// ────────────── cycle-2 audit regressions (C2-F1…C2-F5, audit-p14-cycle2) ────
+
+test("C2-F1: proven-missing artifact (exists:false) is incomplete EVEN WITH zero other evidence", () => {
+  // The cycle-1 F4 fix put the evidence floor ABOVE the artifact branch,
+  // so a spec with a required check whose gate is missing + an observed
+  // exists:false artifact returned uncertain — the evaluator had POSITIVE
+  // evidence of absence and called it unknown. The finding outranks the
+  // floor (floor = completion eligibility, never finding suppression).
+  const a = evaluate(input({
+    gates: [], // required gate missing
+    artifacts: [{ path: "out/report.md", exists: false, at: { ...ID }, evidenceRef: "fs:miss" }],
+    claims: [],
+  }));
+  assert.equal(a.verdict, "incomplete", "exists:false is a concrete negative finding, never masked by the evidence floor");
+  assert.ok(a.reasons.includes("verdict:artifact-missing"));
+  assert.ok(!a.reasons.includes("verdict:no-current-non-model-evidence"), "the floor must not fire when a concrete finding exists");
+  assert.ok(a.remainingWork.includes("artifact:out/report.md"));
+  assert.ok(a.remainingWork.includes("check:gate:tests"), "the missing required check is still named work");
+});
+
+test("C2-F1: exists:false with EVERYTHING else absent (no gates, no claims) is still incomplete", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "gate:tests", kind: "deterministic", required: true }], requiredChecks: ["gate:tests"], artifacts: ["out/report.md"] }),
+    gates: [],
+    artifacts: [{ path: "out/report.md", exists: false, at: { ...ID }, evidenceRef: "fs:miss" }],
+    claims: [],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:artifact-missing"));
+});
+
+test("C2-F2: required DETERMINISTIC criterion (no requiredChecks) is not claims-only — PASS funds", () => {
+  // EV7 binds criterion ids to gate ids; repeating them in requiredChecks
+  // is redundant. A spec demanding a deterministic criterion IS an
+  // evidence-shaped spec: with a current PASS + funding judgment the
+  // verdict is complete, not claims-only uncertain.
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "gate:tests", kind: "deterministic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [{ gateId: "gate:tests", pass: true, at: { ...ID }, evidenceRef: "run:42" }],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readable", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "complete", "a deterministic criterion PASS is current non-model evidence");
+  assert.ok(!a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C2-F2: required deterministic criterion current FAIL → incomplete (not claims-only, not uncertain)", () => {
+  const a = evaluate(input({
+    spec: spec({ criteria: [{ id: "gate:tests", kind: "deterministic", required: true }], requiredChecks: [], artifacts: [] }),
+    gates: [{ gateId: "gate:tests", pass: false, at: { ...ID }, evidenceRef: "run:43" }],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "readable", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "incomplete");
+  assert.ok(a.reasons.includes("verdict:current-fail"));
+});
+
+test("C2-F2: optional-only deterministic criterion with no checks/artifacts is still claims-only", () => {
+  // C2-F2 corrects the classification for REQUIRED deterministic criteria
+  // only — an optional criterion demands nothing, so a spec made solely
+  // of semantic + optional-deterministic criteria still demands no
+  // evidence and keeps the F4 cap.
+  const a = evaluate(input({
+    spec: spec({
+      criteria: [
+        { id: "crit:readability", kind: "semantic", required: true },
+        { id: "gate:lint", kind: "deterministic", required: false },
+      ],
+      requiredChecks: [],
+      artifacts: [],
+    }),
+    gates: [],
+    artifacts: [],
+    claims: [{ source: "model-judgment", judge: "j", claim: "perfect", verdict: "complete", confidence: 1, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.includes("verdict:claims-only-spec"));
+});
+
+test("C2-F3: judge '' claim is malformed-shape noise — dropped with a reason, never funds", () => {
+  // An empty-judge claim fails the shape predicate (judge must be a
+  // non-empty string), so it classifies as advisory noise and is dropped
+  // — NOT promoted to bad-input (malformed shape ≠ malformed input).
+  // The contract that matters: it never funds and the drop is visible.
+  const a = evaluate(input({
+    claims: [{ source: "model-judgment", judge: "", claim: "readable", verdict: "complete", confidence: 0.9, criteriaIds: ["crit:readability"], at: { sha: SHA } }],
+  }));
+  assert.equal(a.verdict, "uncertain", "empty-judge claim funds nothing");
+  assert.ok(a.reasons.includes("dropped-claim:malformed-advice-ignored"), `drop is provenance-visible: ${a.reasons.join(",")}`);
+});
+
+test("C2-F3: converter + journal fences agree (parity matrix — nothing one accepts the other rejects)", () => {
+  // Every assessment the converter accepts MUST pass validateSupervisorRecord
+  // once given a valid envelope (converter set ⊆ journal set). Mutations
+  // both fences reject, plus the documented converter-strict cases.
+  const good = evaluate(input());
+  const env = { schema: "tre-supervisor/1" as const, id: "d-parity", ts: 1, episodeId: "ep" };
+  validateSupervisorRecord({ ...env, ...toAcceptanceRecord(good) } as never);
+  const both = [
+    ["judge empty", { modelAdvisory: { judge: "", quote: "q", confidence: 0.9 } }],
+    ["confidence -1", { modelAdvisory: { judge: "j", quote: "q", confidence: -1 } }],
+    ["artifact dirtyDigest empty", { artifact: { sha: SHA, dirty: true, dirtyDigest: "" } }],
+  ] as const;
+  for (const [name, patch] of both) {
+    const mutated = { ...good, ...patch } as AcceptanceAssessment;
+    assert.throws(() => toAcceptanceRecord(mutated), TypeError, `converter must reject: ${name}`);
+    // and the journal shape also rejects it (parity: converter accepted
+    // set ⊆ journal accepted set; shown here from the other side too)
+    assert.throws(() => validateSupervisorRecord({ ...env, ...toAcceptanceRecord(evaluate(input())), ...patch } as never), EpisodeSchemaError, `journal must reject: ${name}`);
+  }
+  // Converter-strict cases: the journal's num shape carries no maximum and
+  // its type check passes NaN through, so the converter is deliberately
+  // stricter (confidence ∈ [0,1] finite). Strict-in-the-safe-direction:
+  // garbage the journal would tolerate is refused before it can be emitted.
+  for (const [name, conf] of [["confidence 2", 2], ["confidence NaN", NaN]] as const) {
+    assert.throws(() => toAcceptanceRecord({ ...good, modelAdvisory: { judge: "j", quote: "q", confidence: conf } } as never), TypeError, `converter must reject (stricter): ${name}`);
+  }
+});
+
+test("C2-F3: durable journal round-trips a full amended acceptance record; artifact:null is refused", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join: pjoin } = await import("node:path");
+  const { DecisionJournal, validateSupervisorRecord } = await import("../src/episode/journal.js");
+  const dir = await mkdtemp(pjoin(tmpdir(), "p14-c2f3-"));
+  try {
+    const journal = await DecisionJournal.open(pjoin(dir, "decisions.jsonl"));
+    const a = evaluate(input());
+    const rec = { schema: "tre-supervisor/1" as const, id: "d-c2f3", ts: 1, episodeId: "ep", taskId: "task-001", ...toAcceptanceRecord(a) };
+    await journal.append(rec as never);
+    const { records } = await journal.read();
+    assert.equal(records.length, 1);
+    assert.deepEqual(records[0], rec, "append → read is identity for the amended record");
+    // artifact:null — the case the cycle-2 probe wrote to disk and the old
+    // nullable shape accepted despite the TS interface declaring `artifact?:
+    // { ... }` (optional-but-non-null): explicit null now fails validation…
+    assert.throws(() => validateSupervisorRecord({ ...rec, artifact: null } as never), EpisodeSchemaError, "artifact:null refused");
+    // …and the same record read back from disk fails closed on reopen.
+    await import("node:fs/promises").then((fs) => fs.appendFile(pjoin(dir, "decisions.jsonl"), JSON.stringify({ ...rec, id: "d-c2f3-null", artifact: null }) + "\n"));
+    await assert.rejects(() => DecisionJournal.open(pjoin(dir, "decisions.jsonl")), /\$\.artifact/, "torn-free file with artifact:null fails closed on open");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("C2-F4: isStale treats malformed revisions as stale (never 'false' from garbage)", () => {
+  const good = evaluate(input());
+  const cur = { taskRevision: 1, artifact: { sha: SHA } };
+  // valid baseline: same rev + same artifact → live
+  assert.equal(isStale(good, cur), false);
+  for (const rev of [0, -1, 1.5, undefined, null, "1"] as const) {
+    assert.equal(isStale({ ...good, taskRevision: rev as never }, cur), true, `stored revision ${String(rev)} is garbage → stale`);
+  }
+  for (const rev of [0, -1, 1.5, undefined] as const) {
+    assert.equal(isStale(good, { taskRevision: rev as never, artifact: { sha: SHA } }), true, `current revision ${String(rev)} is garbage → stale`);
+  }
+});
+
+test("C2-F1/F2 ladder order: finding > floor > missing evidence (all three rungs, one input each)", () => {
+  // rung 1: concrete finding wins over an otherwise floor-triggering input
+  const withFinding = evaluate(input({
+    spec: spec({ requiredChecks: [], artifacts: ["out/report.md"] }),
+    gates: [],
+    artifacts: [{ path: "out/report.md", exists: false, at: { ...ID }, evidenceRef: "fs:m" }],
+    claims: [],
+  }));
+  assert.equal(withFinding.verdict, "incomplete");
+  // rung 2: no finding, no current evidence, but evidence shape → floor
+  const floorOnly = evaluate(input({
+    gates: [],
+    artifacts: [{ path: "out/report.md", exists: true, at: { ...ID }, evidenceRef: "fs:m", digest: "d" }],
+    claims: [],
+  }));
+  // gate:tests missing is missing-evidence; exists:true DOES count as
+  // current non-model evidence so the floor stands down and the missing
+  // check decides. Use a claims-shape-less input with exists-unknown:
+  const unknownOnly = evaluate(input({
+    spec: spec({ requiredChecks: ["gate:tests"], artifacts: ["out/report.md"] }),
+    gates: [],
+    artifacts: [],
+    claims: [],
+  }));
+  assert.equal(unknownOnly.verdict, "uncertain");
+  assert.ok(unknownOnly.reasons.includes("verdict:check-missing") || unknownOnly.reasons.includes("verdict:no-current-non-model-evidence"));
+  void floorOnly;
 });

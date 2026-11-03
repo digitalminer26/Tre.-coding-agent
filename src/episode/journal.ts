@@ -442,7 +442,7 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
     remainingWork: strings, invalidatedBy: nullable(id),
     modelAdvisory: nullable(obj({ judge: id, quote: str, confidence: num }, ["judge", "quote", "confidence"])),
     staleEvidenceRefs: strings, // P14 amendment (docs/13)
-    artifact: nullable(obj({ sha: id, dirty: bool, dirtyDigest: id }, ["sha"])), // P14 amendment (docs/13 §1)
+    artifact: obj({ sha: id, dirty: bool, dirtyDigest: id }, ["sha"]), // P14 amendment (docs/13 §1); C2-F3 (cycle 2): NOT nullable — the TS interface declares the field optional-but-non-null and an explicit null carried no meaning (an absent field is the "no identity" case)
   }, ["verdict", "criteria"]),
   diagnosis: recordShape({ kind: choice("diagnosis"), attemptId: id,
     causeClass: choice("transient-endpoint", "premature-stop", "task-defect", "environment-blocker", "approval-boundary", "unknown"),
