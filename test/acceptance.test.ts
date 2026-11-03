@@ -1240,3 +1240,117 @@ test("F-8: dirty identity survives the converter with its declared shape only", 
     schema: "tre-supervisor/1", id: "rec-1", ts: 1, episodeId: "ep-1", ...rec,
   } as unknown as Parameters<typeof validateSupervisorRecord>[0]);
 });
+
+// ─────────── sol (gpt-6.1-sol) third-family audit regressions, docs/13 §12 ───────────
+
+test("S-F1 (EV6 total replacement): at-bar funding then below-bar positive leaves the criterion UNFUNDED (no stale pass)", () => {
+  const mk = (v: "complete" | "incomplete", conf: number) => ({
+    source: "model-judgment" as const, judge: "j", claim: `say ${v}`, verdict: v,
+    confidence: conf, criteriaIds: ["crit:readability"], evidenceRefs: ["span:1"], at: { sha: SHA },
+  });
+  // complete(.9) → complete(.3): the LAST claim is below the bar, so the
+  // criterion is unfunded — the earlier funding is REPLACED, not retained.
+  const a = evaluate(input({ claims: [mk("complete", 0.9), mk("complete", 0.3)] }));
+  assert.notEqual(a.verdict, "complete");
+  assert.equal(a.verdict, "uncertain");
+  const row = a.criteria.find((c) => c.id === "crit:readability")!;
+  assert.equal(row.pass, false);
+  assert.ok(a.remainingWork.includes("criterion:crit:readability"));
+  assert.ok(a.reasons.includes("verdict:criterion-unfunded"));
+});
+
+test("S-F1: at-bar negative then below-bar negative → unfunded with NO stale judge finding", () => {
+  const mk = (conf: number) => ({
+    source: "model-judgment" as const, judge: "j", claim: "say incomplete", verdict: "incomplete" as const,
+    confidence: conf, criteriaIds: ["crit:readability"], evidenceRefs: ["span:1"], at: { sha: SHA },
+  });
+  // incomplete(.9) → incomplete(.3): replacement is total; the last claim
+  // is below the C3-F3 bar → no finding rung → uncertain, NOT incomplete.
+  const a = evaluate(input({ claims: [mk(0.9), mk(0.3)] }));
+  assert.notEqual(a.verdict, "incomplete");
+  assert.equal(a.verdict, "uncertain");
+});
+
+test("S-F1: at-bar funding replaced by a last blocked/unverdict claim → unfunded, never complete", () => {
+  const mk = (v: "complete" | "blocked", conf?: number) => ({
+    source: "model-judgment" as const, judge: "j", claim: `say ${v}`, verdict: v,
+    ...(conf === undefined ? {} : { confidence: conf }),
+    criteriaIds: ["crit:readability"], evidenceRefs: ["span:1"], at: { sha: SHA },
+  });
+  const a = evaluate(input({ claims: [mk("complete", 0.9), mk("blocked")] }));
+  assert.notEqual(a.verdict, "complete");
+  assert.equal(a.criteria.find((c) => c.id === "crit:readability")!.pass, false);
+});
+
+test("S-F2 (AC5 structural): throwing getters, hostile proxies and broken iterators yield bad-input, never escape", () => {
+  const hostile = { taskId: "t", get gates(): never { throw new Error("getter trap"); } };
+  const a = evaluate(hostile as unknown as EvaluateInput);
+  assert.equal(a.verdict, "uncertain");
+  assert.ok(a.reasons.some((r) => r.startsWith("bad-input")));
+  const revoked = new Proxy({}, { get() { throw new TypeError("proxy trap"); } });
+  const b = evaluate(revoked as unknown as EvaluateInput);
+  assert.equal(b.verdict, "uncertain");
+  assert.ok(b.reasons.some((r) => r.startsWith("bad-input")));
+  // a throwing iterator deep in a claimed array must not escape either
+  const badIter = { claims: [{ [Symbol.iterator]: () => { throw new Error("iter trap"); } }] };
+  const c = evaluate(badIter as unknown as EvaluateInput);
+  assert.equal(c.verdict, "uncertain");
+  assert.ok(c.reasons.some((r) => r.startsWith("bad-input")));
+});
+
+test("S-F3: converter rejects SPARSE string arrays (holes defeat every()) with TypeError", () => {
+  const a = evaluate(input());
+  const corrupt = (patch: Record<string, unknown>) =>
+    ({ ...a, ...patch }) as unknown as AcceptanceAssessment;
+  for (const patch of [
+    { remainingWork: Array(2) },
+    { staleEvidenceRefs: Array(2) },
+    { reasons: Array(2) },
+    // a hole AFTER valid entries too: ["ok", <hole>]
+    { remainingWork: (() => { const x = ["ok"]; x[2] = "tail"; return x; })() },
+  ]) {
+    assert.throws(() => toAcceptanceRecord(corrupt(patch)), TypeError,
+      `sparse array ${JSON.stringify(Object.keys(patch))} must be rejected as TypeError`);
+  }
+  // dense arrays still convert
+  assert.doesNotThrow(() => toAcceptanceRecord(corrupt({ remainingWork: ["a", "b"] })));
+});
+
+test("S-F4: converter clones the DECLARED advisory shape — inherited/valid fields survive the clone (87851dd spread regression)", () => {
+  const base = { judge: "j", quote: "q", confidence: 0.9 };
+  const inherited = Object.create(base) as AcceptanceAssessment["modelAdvisory"];
+  const a = { ...evaluate(input()), modelAdvisory: inherited };
+  const rec = toAcceptanceRecord(a);
+  assert.deepEqual(rec.modelAdvisory, base); // spread would have produced {}
+  validateSupervisorRecord({ schema: "tre-supervisor/1", id: "r-1", ts: 1, episodeId: "e-1", ...rec } as unknown as Parameters<typeof validateSupervisorRecord>[0]);
+  // own NON-enumerable but valid fields must also survive
+  const hidden = {};
+  Object.defineProperty(hidden, "judge", { value: "j", enumerable: false });
+  Object.defineProperty(hidden, "quote", { value: "q", enumerable: false });
+  Object.defineProperty(hidden, "confidence", { value: 0.5, enumerable: false });
+  const rec2 = toAcceptanceRecord({ ...evaluate(input()), modelAdvisory: hidden } as unknown as AcceptanceAssessment);
+  assert.deepEqual(rec2.modelAdvisory, { judge: "j", quote: "q", confidence: 0.5 });
+});
+
+test("S-F5 (§7.4 error-type fence): converter rejections are TypeErrors even when guards trip hostile values", () => {
+  const hostile = { verdict: { toString() { throw new Error("coercion trap"); } }, taskId: "t", taskRevision: 1 };
+  assert.throws(() => toAcceptanceRecord(hostile as unknown as AcceptanceAssessment), TypeError);
+  const trapped = { ...evaluate(input()), get verdict(): never { throw new RangeError("verdict trap"); } };
+  try {
+    toAcceptanceRecord(trapped as unknown as AcceptanceAssessment);
+    assert.fail("must throw");
+  } catch (e) {
+    assert.ok(e instanceof TypeError, `expected TypeError, got ${(e as Error).constructor.name}`);
+  }
+});
+
+test("S-F6 (converter-side pin): a DIRECT assessment with extra artifact keys converts to a record with the declared shape only", () => {
+  // F-8's original test converted evaluate() output, whose artifact was
+  // ALREADY projected — the converter's own drop was unpinned. Feed the
+  // corrupt object straight to the converter.
+  const a = evaluate(input());
+  const corrupt = { ...a, artifact: { ...a.artifact, junk: "leak" } } as unknown as AcceptanceAssessment;
+  const rec = toAcceptanceRecord(corrupt);
+  assert.equal((rec.artifact as unknown as Record<string, unknown>).junk, undefined);
+  assert.deepEqual(Object.keys(rec.artifact!).sort(), ["sha"]);
+});

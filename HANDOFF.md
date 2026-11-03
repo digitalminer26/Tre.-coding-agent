@@ -1,3 +1,32 @@
+## 2026-11-04 — P14 THIRD-FAMILY audit (gpt-6.1-sol): 5 Major + 1 Minor found & FIXED; acceptance RE-CLOSED
+
+Per user request the remediated evaluator (HEAD `87851dd`) was audited by a
+third, independent model family (`gpt-6.1-sol`; artifacts
+`.tre/delegation/p14-sol-audit/`, report `logs/S-report.md`, 5 probes,
+5,876 checks, dist freshness verified by in-memory recompile). Verdict:
+FINDINGS — all reproduced against HEAD before touching code:
+**S-F1** EV6 claim replacement was conditional, not total — a later
+below-bar positive silently RETAINED an earlier funding (optimistic
+`complete` from sub-bar confidence) and a later below-bar negative kept a
+stale finding (docs/13 §12). **S-F2** AC5's never-throw escaped for
+value-hostile objects (throwing getters / hostile Proxies / broken
+iterators — 17 throws) — `evaluate` is now a structural try/catch fence.
+**S-F3** sparse string arrays (`Array(2)`) defeated `every()` in the
+converter and escaped as journal-invalid records — `denseStringArray`
+checks index existence. **S-F4** regression *in* the F-8 fix: the
+`{...modelAdvisory}` spread cloned to `{}` for inherited/non-enumerable
+but VALID advisory fields — explicit declared-field copy now. **S-F5**
+the "throws TypeError" fence leaked `Error`/`RangeError` through guard
+interpolation — converter normalizes to TypeError. **S-F6** (Minor)
+F-8's converter-side key-drop test was unpinned (evaluate had already
+projected) — direct corrupt-assessment test added.
+8 named regressions (`S-F1..F6`), docs/13 §12 is the record. All five sol
+probes re-run against the fix: previously-failing probes now PASS.
+Suite: 104 acceptance, full **1895 / 1881 pass / 0 fail / 14 skipped**.
+P14 acceptance RE-CLOSED on three-family evidence; roadmap unchanged
+(P14 done). Next phase per docs/11 §11.1 remains P9/M1 (with P10 the
+first unstarted prerequisite).
+
 ## 2026-11-03 — P14 cross-model audit: PASS with docs/tests remediation; acceptance CLOSED
 
 The acceptance-blocking cross-model round (promised by C2-F5) ran: two

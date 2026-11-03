@@ -389,3 +389,64 @@ Verdict after remediation: the audit found **no defect in the verdict
 logic itself** — every finding was documentation drift, a missing test,
 or converter hygiene. With all nine dispositioned, P14 acceptance is
 CLOSED (docs/11 roadmap row: done).
+
+## 12. Third-family audit (2026-11-04 — gpt-6.1-sol, HEAD `87851dd`)
+
+Per user request the remediated module was audited again by a THIRD model
+family (`gpt-6.1-sol`) not involved in §11, adversarially, against docs/13
+as amended (artifacts `.tre/delegation/p14-sol-audit/`; report
+`logs/S-report.md`; 5 probes re-run twice byte-identical; dist freshness
+verified by in-memory recompile comparison, not assumed). Verdict:
+**FINDINGS — 5 Major + 1 Minor**, all reproduced against HEAD before fixing.
+
+- **S-F1 (Major, real logic defect): EV6 replacement was conditional, not
+  total.** The claim loop applied each naming claim *on top of* the row
+  state, so `complete(.9) → complete(.3)` RETAINED the pass (an optimistic
+  `complete` from sub-bar confidence) and `incomplete(.9) → incomplete(.3)`
+  retained the judge finding. EV6's ordering rule says the LAST naming
+  claim REPLACES the criterion's outcome — under total replacement the
+  last claim decides alone (funds / finds / unfunds; replaced cases are
+  conservative). Fixed: the loop now selects the last naming claim and
+  applies it exclusively. 3 new regression tests (positive→low-positive,
+  negative→low-negative, funding→blocked).
+- **S-F2 (Major): AC5's never-throw held for known shapes but not for
+  value-hostile objects** — throwing getters (even on unused properties),
+  hostile/revoked Proxies, and broken iterators escaped from the defensive
+  spread and deep property reads: 17 escaped throws. Fixed structurally:
+  `evaluate` is now a try/catch wrapper over `evaluateInner`; any escaped
+  exception is the AC5 record (`uncertain` + `bad-input:unrepresentable
+  input`). 1 test.
+- **S-F3 (Major): sparse string arrays bypassed the converter** — `every()`
+  skips holes, so `Array(2)` passed as `remainingWork`/`staleEvidenceRefs`
+  /`reasons` and the emitted record was rejected by the real journal
+  validator. Fixed: `denseStringArray` requires every index 0..len-1 to
+  exist. 1 test (incl. a trailing-hole variant + dense still passes).
+- **S-F4 (Major): regression in the §11 F-8 fix itself** — the
+  `{ ...modelAdvisory }` clone copies only own *enumerable* keys, while
+  validation used property access: an advisory with inherited or own
+  non-enumerable valid fields validated but cloned to `{}` and escaped as
+  an invalid record. Fixed with explicit declared-field copying (the
+  `identityOnly` pattern). 1 test (both representations + journal
+  round-trip).
+- **S-F5 (Major): the §7.4 "throws TypeError" fence leaked other error
+  types** — guard messages interpolate `String(a.verdict)`, so a hostile
+  verdict object with a throwing `toString` escaped `Error`, not
+  `TypeError`. Fixed: the converter wrapper normalizes non-TypeErrors to
+  TypeError. 1 test.
+- **S-F6 (Minor, coverage): F-8's converter-side extra-key drop was
+  unpinned** — the test converted `evaluate()` output whose artifact was
+  already projected, so an in-memory mutant restoring `{...a.artifact}`
+  survived. Fixed by a direct corrupt-assessment test (converter-side pin).
+
+Informational notes (no change): the ordinary 2,048-case precedence
+product, all boundary arithmetic, the identity/staleness matrix, purity/
+byte-stability, and P4 round-trip parity all PASSed independently — the
+findings delimit, not mask, the working core. The sparse-hostile-notes on
+`exists:false` reason wording (EV4 vs bad-input) were judged consistent by
+the auditor itself.
+
+Disposition: all six fixed in `src/acceptance/evaluator.ts` with 8 named
+regression tests (104 acceptance total); all five sol probes re-run against
+the fixed build: 01/02/03/04 PASS (previously FAIL), 05 pinned by the new
+direct test. Full suite: **1895 / 1881 pass / 0 fail / 14 skipped**.
+P14 acceptance RE-CLOSED on third-family evidence.

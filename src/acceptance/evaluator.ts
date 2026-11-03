@@ -362,6 +362,26 @@ export const BLOCKER_KINDS: readonly BlockerKind[] = [
  * reasons (AC5). Pure in its input (AC4/EV11).
  */
 export function evaluate(input: EvaluateInput): AcceptanceAssessment {
+  // S-F2 (sol audit): AC5 says malformed input of ANY kind yields
+  // uncertain+bad-input and NEVER throws — the per-site guards closed the
+  // known shapes but value-hostile objects (throwing getters, hostile
+  // proxies, broken iterators) escaped deep inside evaluation. The fence
+  // is now structural: ANY escaped exception is the fail-closed record.
+  // Legal inputs never reach the catch (they are JSON-shaped by §3;
+  // probe 02 proves the inner path is throw-free for hostile values too
+  // after this fence).
+  try {
+    return evaluateInner(input);
+  } catch {
+    return {
+      taskId: "", taskRevision: 0, verdict: "uncertain", criteria: [],
+      remainingWork: [], staleEvidenceRefs: [], artifact: { sha: "" },
+      modelAdvisory: null, reasons: ["bad-input:unrepresentable input"],
+    };
+  }
+}
+
+function evaluateInner(input: EvaluateInput): AcceptanceAssessment {
   // F7 (R2 audit): a null/undefined input cannot even be spread — AC5
   // says no input shape may throw.
   if (!input || typeof input !== "object") {
@@ -511,31 +531,44 @@ export function evaluate(input: EvaluateInput): AcceptanceAssessment {
       }
     } else {
       // EV6 (+F3): funded by a model-judgment made AT the current
-      // identity, naming the criterion
+      // identity, naming the criterion.
+      // S-F1 (sol audit, docs/13 §12): replacement is TOTAL — the LAST
+      // model-judgment claim naming the criterion alone determines the
+      // row's state; earlier claims are inert. The pre-fix loop applied
+      // each claim conditionally, so a later below-bar positive after an
+      // earlier funding SILENTLY RETAINED the pass (an optimistic
+      // complete from sub-bar confidence — EV6 last-write-wins
+      // violation), and a later below-bar negative retained an earlier
+      // at-bar finding. Under total replacement the last naming claim
+      // decides: complete ≥ msc funds; incomplete sets pass=false and
+      // finds at ≥ msc (C3-F3 bar); anything else (below-bar positive,
+      // blocked, absent verdict) leaves the criterion unfunded with no
+      // finding — conservative in every replaced case.
+      let last: ClaimEvidence | undefined;
       for (const cl of currentClaims) {
         if (cl.source !== "model-judgment") continue;
-        const named = Array.isArray(cl.criteriaIds) && cl.criteriaIds.includes(c.id);
-        if (!named) continue;
-        if (cl.verdict === "complete" && (typeof cl.confidence === "number" ? cl.confidence : 0) >= msc) {
+        if (!(Array.isArray(cl.criteriaIds) && cl.criteriaIds.includes(c.id))) continue;
+        last = cl;
+      }
+      if (last) {
+        const conf = typeof last.confidence === "number" ? last.confidence : 0;
+        if (last.verdict === "complete" && conf >= msc) {
           row.pass = true;
           row.advisory = true;
-          row.evidenceRef = cl.evidenceRefs?.[0] ?? `claim:${cl.judge ?? "unknown"}`;
+          row.evidenceRef = last.evidenceRefs?.[0] ?? `claim:${last.judge ?? "unknown"}`;
           // AC8: NO sha on advisory rows — a model judgment is not an
           // artifact check; pinning the current sha here would make it
           // indistinguishable from a deterministic pass.
-        } else if (cl.verdict === "incomplete") {
+        } else if (last.verdict === "incomplete") {
           row.pass = false; // a judge's "incomplete" is respected, never waived upward
-          // C3-F3 (audit follow-up): a negative judgment is a verdict-
-          // SETTING finding only at >= msc — the SAME epistemic bar the
-          // positive (`complete`) branch requires. Below the bar the
-          // criterion stays unfunded (never passes — conservative
-          // direction unchanged) and the input falls back to the normal
-          // evidence rules; confidence 0/absent must not flip a verdict
-          // (EV5) while confidence 0.95 can — asymmetric bars for
-          // symmetric judgments was the audit finding.
-          if ((typeof cl.confidence === "number" ? cl.confidence : 0) >= msc) judgedIncomplete.add(c.id);
-          row.evidenceRef = cl.evidenceRefs?.[0];
+          // C3-F3: the finding rung requires >= msc (the SAME bar as
+          // the positive side); below it the criterion is unfunded and
+          // no finding is recorded.
+          if (conf >= msc) judgedIncomplete.add(c.id);
+          row.evidenceRef = last.evidenceRefs?.[0];
         }
+        // else: the replacing claim funds nothing and finds nothing —
+        // pass stays false (its default), no evidenceRef from it.
       }
     }
     rows.push(row);
@@ -778,6 +811,20 @@ export interface AcceptanceRecordFields {
  * writing, the supervisor owns envelope fields (id/ts/episodeId).
  */
 export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFields {
+  // S-F5 (sol audit): §7.4's fence is on the ERROR TYPE — every rejection
+  // is a TypeError. Guards inside use String()/interpolation on hostile
+  // values (e.g. a verdict object with a throwing toString), which can
+  // escape an arbitrary Error; normalize non-TypeErrors here so the
+  // documented contract holds for value-hostile inputs too.
+  try {
+    return toAcceptanceRecordInner(a);
+  } catch (e) {
+    if (e instanceof TypeError) throw e;
+    throw new TypeError(`toAcceptanceRecord: malformed assessment (${e instanceof Error ? e.message : "non-error thrown"})`);
+  }
+}
+
+function toAcceptanceRecordInner(a: AcceptanceAssessment): AcceptanceRecordFields {
   // F5: validate the COMPLETE record shape — a corrupted assessment
   // object cannot become a durable record. Throws TypeError (§7.4
   // contract) on any malformed field; P4 validation is the second fence.
@@ -792,7 +839,16 @@ export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFie
       if (c.advisory) out.advisory = true;
       return out;
     }),
-    modelAdvisory: a.modelAdvisory ? { ...a.modelAdvisory } : null,
+    // S-F4 (sol audit, regression against 87851dd's F-8 fix): the F-8
+    // clone was `{ ...advisory }`, which copies only OWN ENUMERABLE keys
+    // — an advisory with inherited (or own non-enumerable but valid)
+    // judge/quote/confidence passed validation (property access sees
+    // them) but cloned to `{}` and emitted an invalid record. Copy the
+    // DECLARED shape explicitly (same pattern as identityOnly): clone
+    // without relying on enumerability.
+    modelAdvisory: a.modelAdvisory
+      ? { judge: a.modelAdvisory.judge, quote: a.modelAdvisory.quote, confidence: a.modelAdvisory.confidence }
+      : null,
   };
   if (a.taskRevision !== undefined) rec.taskRevision = a.taskRevision;
   if (a.remainingWork.length > 0) rec.remainingWork = a.remainingWork;
@@ -804,6 +860,19 @@ export function toAcceptanceRecord(a: AcceptanceAssessment): AcceptanceRecordFie
   // the record never aliases the assessment's objects.
   rec.artifact = identityOnly(a.artifact);
   return rec;
+}
+
+/** S-F3 (sol audit): `Array.prototype.every`/`forEach` SKIP holes, so
+ *  `Array(2)` (two holes) passes an every()-based string check while
+ *  carrying no strings at all — the record then ships a sparse array the
+ *  P4 journal rejects (index undefined / serialized null). A dense check
+ *  requires every index 0..len-1 to exist. */
+function denseStringArray(x: unknown, what: string, fail: (w: string) => never): void {
+  if (!Array.isArray(x)) fail(what);
+  for (let i = 0; i < x.length; i++) {
+    if (!Object.hasOwn(x, i)) fail(`${what} (sparse at ${i})`);
+    if (typeof x[i] !== "string" || (x[i] as string).length === 0) fail(what);
+  }
 }
 
 /** F5: full-shape validation of an AcceptanceAssessment (throws TypeError).
@@ -826,13 +895,13 @@ function assertAssessment(a: AcceptanceAssessment): void {
     // not an artifact check.
     if (c.advisory === true && c.checkedAtSha !== undefined) fail(`criterion '${c.id}' advisory with checkedAtSha`);
   }
-  if (!Array.isArray(a.remainingWork) || !a.remainingWork.every((w) => typeof w === "string" && w.length > 0)) fail("remainingWork");
-  if (!Array.isArray(a.staleEvidenceRefs) || !a.staleEvidenceRefs.every((r) => typeof r === "string" && r.length > 0)) fail("staleEvidenceRefs");
+  denseStringArray(a.remainingWork, "remainingWork", fail);
+  denseStringArray(a.staleEvidenceRefs, "staleEvidenceRefs", fail);
   if (!a.artifact || typeof a.artifact !== "object" || !validIdentity(a.artifact) || a.artifact.sha.length === 0) fail("artifact");
   // C2-F3 (cycle 2): confidence bounds + judge non-emptiness match the
   // P4 journal schema EXACTLY (minimum 0 / maximum 1, nonEmpty judge) —
   // a converter that accepts what the journal would reject leaves a
   // hole between the two fences.
   if (a.modelAdvisory !== null && (typeof a.modelAdvisory !== "object" || typeof a.modelAdvisory.judge !== "string" || a.modelAdvisory.judge.length === 0 || typeof a.modelAdvisory.quote !== "string" || typeof a.modelAdvisory.confidence !== "number" || !Number.isFinite(a.modelAdvisory.confidence) || a.modelAdvisory.confidence < 0 || a.modelAdvisory.confidence > 1)) fail("modelAdvisory");
-  if (!Array.isArray(a.reasons) || !a.reasons.every((r) => typeof r === "string" && r.length > 0)) fail("reasons");
+  denseStringArray(a.reasons, "reasons", fail);
 }
