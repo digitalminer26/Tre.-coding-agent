@@ -229,7 +229,9 @@ export interface PlanRecommendation {
 
 // ─── Action tables ─────────────────────────────────────────────────────────
 
-const ACTION_DECISION: Record<PlannerSupervisorAction | 'hold', RecoveryDecision> = {
+/** Exported for the P11 executor drift guard (docs/15 §7.3): the executor
+ *  mirrors this table and a test pins deep equality. */
+export const ACTION_DECISION: Record<PlannerSupervisorAction | 'hold', RecoveryDecision> = {
   'nudge': 'continue',
   'evidence-nudge-resume': 'continue',
   'backoff-retry': 'continue',
@@ -245,8 +247,9 @@ const ACTION_DECISION: Record<PlannerSupervisorAction | 'hold', RecoveryDecision
   'merge': 'escalate',
 };
 
-/** docs/11 §9 + §375: rungs for the P0-extended actions. */
-const ACTION_RUNG: Record<PlannerSupervisorAction | 'hold', number> = {
+/** docs/11 §9 + §375: rungs for the P0-extended actions.
+ *  Exported for the P11 executor drift guard (docs/15 §7.3). */
+export const ACTION_RUNG: Record<PlannerSupervisorAction | 'hold', number> = {
   'hold': 0,
   'accept-finish': 0,
   'nudge': 1,

@@ -39,7 +39,24 @@ import { SUPERVISOR_ACTIONS } from "../src/episode/journal.js";
 
 // fixtures live in the SOURCE tree (tsc does not copy assets); from
 // dist/test/*.js the repo root is two levels up.
-const FIXTURE_DIR = fileURLToPath(new URL("../../test/fixtures/planner", import.meta.url));
+// Fixture dir lookup: works under BOTH `tsx test/planner.test.ts` (where
+// ./fixtures/planner is correct) and the compiled `node --test
+// dist/test/planner.test.js` run (where fixtures are NOT copied into dist,
+// so the path must climb back to the source tree).
+async function resolveFixtureDir(): Promise<string> {
+  const candidates = [
+    fileURLToPath(new URL("./fixtures/planner", import.meta.url)),
+    fileURLToPath(new URL("../../test/fixtures/planner", import.meta.url)),
+  ];
+  for (const c of candidates) {
+    try {
+      await readdir(c);
+      return c;
+    } catch { /* try next */ }
+  }
+  return candidates[0]!;
+}
+const FIXTURE_DIR = await resolveFixtureDir();
 
 // ───────────────────────── helpers (mirrors of the fixture shapes) ───────────
 

@@ -69,3 +69,12 @@ scratch/
 # P3b audit-cycle raw transcripts (128KB reasoning dumps; prompts + final verdicts live in docs/audits/)
 docs/audits/audit-p3b-c[0-9].txt
 docs/audits/audit-c*.log
+
+# Adversarial-audit scratch (probes, repro harnesses) — never in git.
+.probe/
+.tre/audit-p11/
+.probe/
+.tre/audit-p11/
+# Round-scoped adversarial probe harnesses (@ts-nocheck repro scripts) —
+# findings are pinned as named regression tests; the probes themselves are scratch.
+test/probes/
