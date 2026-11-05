@@ -61,7 +61,10 @@ Boundary rules:
    charges BEFORE the call (a probe is never started when its own
    estimate would cross the cap). Zero/negative limits mean zero port
    calls. Every budget actually spent is reported in the record's
-   `limitsRespected`.
+   `limitsRespected`. A NEGATIVE finite `limits.maxUsd` is not bad
+   input: it clamps to `$0` (same zero-call rule); only a
+   present-but-unusable value (`NaN`, ±`Infinity`, non-number) marks
+   `bad-input:limits`.
 5. **Fail-closed, never throws (INV-1).** Malformed, hostile, or
    getter-laden input still yields a VALID §14.3 diagnosis record —
    worst case `causeClass:"unknown"`. Rejected input is DISCLOSED, not
@@ -69,10 +72,12 @@ Boundary rules:
    proxy) or a hostile-but-present `limits` handle each contribute a
    `bad-input:*` evidence marker (`bad-input:packet`,
    `bad-input:limits`); a self-check failure degrades to
-   `bad-input:self-check`. Fields that are merely absent or the wrong
-   type are dropped WITHOUT a marker (a missing optional field is not
-   bad input). A throwing tool port is a failed probe, not a failed
-   investigation.
+   `bad-input:self-check`. Fields that are merely absent (including an
+   explicit `undefined` VALUE) or the wrong type are dropped WITHOUT a
+   marker (a missing optional field is not bad input); only a present
+   field whose value is neither absent nor coercible marks
+   `bad-input:limits`. A throwing tool port is a failed probe, not a
+   failed investigation.
 6. **Self-containment (the P10/P14 pattern).** The module imports
    NOTHING at runtime (not even `node:` builtins). Closed-set drift is
    pinned by drift-guard tests against the REAL exports of
@@ -157,10 +162,29 @@ docs/11 §14.3 `kind:"diagnosis"` shape (plus `schema`/`kind`/envelope):
   `bad-input:*` markers — THEN the packet refs that survived
   validation. Markers are reserved before packet refs (cycle-A4 audit
   R4): a packet flooding `evidenceRefs` can evict other packet refs
-  but never the record's own provenance. When packet refs are dropped
-  to the `MAX_REFS` cap the record discloses it with `refs:truncated`
-  (appended only when it fits). The module never fabricates a ref
-  pointing at something it did not see.
+  but never the record's own provenance. Packet refs may NOT carry
+  module-origin prefixes (`rule:`, `text:`, `probe:`, `judge:`,
+  `investigation:`, `bad-input:`, `packet:`, `refs:`) — such refs are
+  forged provenance, dropped, and disclosed with `refs:spoofed`
+  (cycle-A5 F3). The truncation decision counts UNIQUE usable refs
+  (duplicates consume no slot, cycle-A5 F5); when packet refs are
+  dropped to the `MAX_REFS` cap the record discloses it with
+  `refs:truncated` (appended before the surviving refs, so the
+  disclosure can never be crowded out). The ingestion window is also
+  disclosed: `evidenceRefs` is copied through a `MAX_REFS`-bounded
+  fence, and a flood larger than the window that carried content NONE
+  of the copied refs had (cycle-A5 R1 — such entries were previously
+  dropped at ingestion with NO disclosure) forces `refs:truncated`
+  too; pure duplicates past the window disclose nothing (nothing
+  unique was lost, cycle-A5 F5). The scan itself is BUDGETED at
+  `COPY_SCAN_BUDGET` = 16 × `MAX_REFS` indices (cycle-A6 F1): a packet
+  may declare `length` up to 2^32−1 with no entries behind it, and the
+  pre-A6 per-index walk over such a sparse array stalled the module
+  for minutes. Exhausting the budget with entries unvisited is itself
+  disclosed — `bad-input:scan-budget` plus `refs:truncated` (the
+  unvisited tail can never be PROVEN duplicate, so F5's
+  duplicates-disclose-nothing rule cannot apply). The module never
+  fabricates a ref pointing at something it did not see.
 - `proposedActions` are built EXCLUSIVELY from the module's closed
   table (§6) keyed on the FINAL cause class. A packet or judge cannot
   inject proposed actions; the table's rungs and strategy ids are the
@@ -295,8 +319,12 @@ arguments the port can treat as a command channel beyond these.
 Port result handling (hostile): `{ facts?, evidenceRef?, usd? }` —
 facts filtered per §3.2; `evidenceRef` a non-empty string bounded to
 MAX_STR (else the probe contributes `probe:<id>:ran` as its own
-marker); `usd` finite non-negative (else the probe's full charged
-estimate stays spent — the charge is never refunded). A throw,
+marker); `usd` finite non-negative, and applied as
+`max(reported, estimate)` (cycle-A5 F2/F4): a report may ADD to the
+probe's charged estimate — a genuine overage stands in full in
+`limitsRespected.spendUsd` — but may never reduce it, so reporting `0`
+cannot refund the charge and re-open the budget. An absent or invalid
+`usd` leaves the estimate spent. A throw,
 rejection, or non-object result ⇒ marker `probe:<id>:failed`, the
 charge stands, loop continues.
 

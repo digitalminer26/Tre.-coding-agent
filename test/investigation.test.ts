@@ -291,10 +291,31 @@ test("INV-3: each probe AT MOST ONCE across the whole loop", async () => {
   assert.equal(new Set(seen).size, seen.length);
 });
 
-test("INV-3: reported probe usd replaces that probe's estimate (bounded by the charge-first check)", async () => {
+test("INV-3: a reported probe usd BELOW its estimate cannot refund it (cycle-A5 F2: max(reported, estimate))", async () => {
   const tools = scriptedTools({ "probe-endpoint": { facts: { endpointReachable: true }, usd: 0.005 } });
   const rec = await investigate(basePacket({ errors: [{ source: "fetch", text: "429" }] }), { now: clock(), tools });
-  assert.equal(rec.limitsRespected.spendUsd, 0.005);
+  // 0.005 < the 0.02 estimate: the estimate stands (a report may only ADD)
+  assert.equal(rec.limitsRespected.spendUsd, 0.02);
+});
+
+test("INV-3/F2: a 0-usd report cannot refund the charge and re-open the budget", async () => {
+  const log: { probe: string; episodeId: string }[] = [];
+  const tools = scriptedTools({
+    "probe-worker-tail": { facts: {}, usd: 0 },
+    "probe-endpoint": { facts: { endpointReachable: true }, usd: 0 },
+    "probe-env": { facts: {}, usd: 0 },
+    "probe-gate-rerun": { facts: {}, usd: 0 },
+  }, log);
+  // budget 0.04: endpoint(0.02)+env(0.02) fit; gate-rerun(0.10) never starts
+  const rec = await investigate(basePacket({ workerState: "stopped" }), { now: clock(), tools }, { limits: { maxUsd: 0.04 } });
+  assert.ok(!log.some((l) => l.probe === "probe-gate-rerun"), "the 0.10 probe cannot hide behind 0-reports");
+  assert.ok(rec.limitsRespected.spendUsd >= 0.02, "spend reflects estimates, not refunds");
+});
+
+test("F4: an over-reported probe usd stands in full (recorded honestly, finite)", async () => {
+  const tools = scriptedTools({ "probe-endpoint": { facts: { endpointReachable: true }, usd: 1e12 } });
+  const rec = await investigate(basePacket({ errors: [{ source: "fetch", text: "429" }] }), { now: clock(), tools });
+  assert.equal(rec.limitsRespected.spendUsd, 1e12);
 });
 
 test("INV-3: hostile limits (negative/NaN/Infinity) fall back to defaults, never below the floor", async () => {
@@ -634,6 +655,167 @@ test("A4-R4: exactly-filling packet refs still disclose refs:truncated (no crowd
   assert.ok(rec.evidenceRefs.includes("refs:truncated"));
   assert.ok(rec.evidenceRefs.includes("investigation:exhausted"));
   assert.equal(rec.evidenceRefs.length, 64);
+});
+
+// ───────────────────────── Cycle-A5 adversarial fixes ───────────────────────
+
+test("A5-F1: a method-style `now` (uses `this`) keeps its receiver — no silent ts=0", async () => {
+  const ports = {
+    t: 1_700_000_099_000,
+    now(this: { t: number }): number { return this.t; },
+  };
+  const rec = await investigate(basePacket(), ports as unknown as InvestigationPorts);
+  assert.equal(rec.ts, 1_700_000_099_000);
+});
+
+test("A5-F1: a throwing method-style `now` still fails closed to 0 (INV-1)", async () => {
+  const ports = {
+    now(): number { throw new Error("clock trap"); },
+  };
+  const rec = await investigate(basePacket(), ports as unknown as InvestigationPorts);
+  assert.equal(rec.ts, 0);
+  assertValid(rec);
+});
+
+test("A5-F3: packet refs with module-reserved prefixes are dropped and disclosed refs:spoofed", async () => {
+  const rec = await investigate(
+    basePacket({ evidenceRefs: ["judge:advisory", "probe:probe-env:ran", "rule:gate-failed", "pkt:ok-1"] }),
+    { now: clock() },
+  );
+  // nothing consulted or ran — the forged markers must NOT appear
+  assert.ok(!rec.evidenceRefs.includes("judge:advisory"), "no judge ran; cannot appear");
+  assert.ok(!rec.evidenceRefs.includes("probe:probe-env:ran"));
+  assert.ok(!rec.evidenceRefs.includes("rule:gate-failed"));
+  assert.ok(rec.evidenceRefs.includes("refs:spoofed"), "the forgery attempt is disclosed");
+  assert.ok(rec.evidenceRefs.includes("pkt:ok-1"), "benign refs pass through");
+  assertValid(rec);
+});
+
+test("A5-F3: reserved-prefix spoofing cannot displace the exhaustion marker under a flood", async () => {
+  const flood = Array.from({ length: 200 }, (_, i) => (i % 2 ? `pkt:z-${i}` : `bad-input:packet-${i}`));
+  const rec = await investigate(basePacket({ evidenceRefs: flood }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("investigation:exhausted"));
+  assert.ok(rec.evidenceRefs.includes("refs:spoofed"));
+  assert.ok(!rec.evidenceRefs.some((r) => r.startsWith("bad-input:packet-")), "forged bad-input refs dropped");
+});
+
+test("A5-F3: when spoofing AND truncation are both due, neither disclosure is lost", async () => {
+  // 64 refs (the copyStrs window, no ingestion overflow): 1 forged +
+  // 63 unique pkt refs. After the exhausted marker, capacity forces
+  // both disclosures — spoofing reserves the truncated slot so neither
+  // disappears un-disclosed.
+  const refs = ["judge:advisory", ...Array.from({ length: 63 }, (_, i) => `pkt:w-${i}`)];
+  const rec = await investigate(basePacket({ evidenceRefs: refs }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:spoofed"));
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "the evicted pkt ref is disclosed");
+  assert.ok(rec.evidenceRefs.includes("investigation:exhausted"));
+  assert.ok(!rec.evidenceRefs.includes("judge:advisory"));
+});
+
+test("A5-F5: duplicate packet refs that all fit do NOT cry refs:truncated", async () => {
+  const refs = Array.from({ length: 60 }, (_, i) => `pkt:d-${i % 10}`); // 60 slots (inside the 64 window), 10 unique
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: refs }), { now: clock() });
+  assert.ok(!rec.evidenceRefs.includes("refs:truncated"), "10 unique refs fit — no truncation");
+  assert.ok(!rec.evidenceRefs.includes("refs:spoofed"), "duplicates are not spoofing");
+  const pkt = rec.evidenceRefs.filter((r) => r.startsWith("pkt:"));
+  assert.equal(pkt.length, 10);
+  assert.equal(new Set(pkt).size, 10);
+});
+
+test("A5-F6: explicit `undefined` limit VALUES are absent fields, not bad input", async () => {
+  const rec = await investigate(basePacket(), { now: clock() }, { limits: { maxToolCalls: undefined, maxUsd: undefined } as never });
+  assert.ok(!rec.evidenceRefs.includes("bad-input:limits"), "undefined === absent (docs/17 §0 rule 5)");
+  assertValid(rec);
+});
+
+test("A5-F6: a present-but-garbage limit value still marks bad-input:limits", async () => {
+  const rec = await investigate(basePacket(), { now: clock() }, { limits: { maxToolCalls: "2" } as never });
+  assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
+});
+
+test("A5-R1: a flood larger than the ingestion window discloses refs:truncated", async () => {
+  // 200 entries, first 64 ALL fit: they are never seen, so the old
+  // capacity check (usable ≤ 64) could never fire — the flood vanished
+  // with no disclosure. The ingestion window now forces it.
+  const flood = Array.from({ length: 200 }, (_, i) => `pkt:r1-${i}`);
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: flood }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "invisible entries are disclosed");
+  assert.ok(rec.evidenceRefs.includes("rule:approval-pending:explicit"), "markers still survive");
+  assert.ok(rec.evidenceRefs.length <= 64);
+  assertValid(rec);
+});
+
+test("A5-R1 (discriminating): unique refs hidden past a duplicate-filled window ARE disclosed", async () => {
+  // The first 64 entries carry only 2 distinct refs, so the copied window
+  // fits capacity (uniqueUsable = 2). 100 NEW unique refs sit beyond the
+  // window and were silently lost before A5-R1. Only the ingestion-overflow
+  // flag can disclose them — this test fails if that OR is removed.
+  const window = Array.from({ length: 64 }, (_, i) => `pkt:win-${i % 2}`);
+  const hidden = Array.from({ length: 100 }, (_, i) => `pkt:hidden-${i}`);
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: [...window, ...hidden] }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "hidden unique content must be disclosed");
+  assertValid(rec);
+});
+
+test("A5-R1+F5: a >64 flood of pure duplicates discloses NOTHING (F5 still rules)", async () => {
+  // 200 slots, 5 unique — every dropped entry beyond the window is a
+  // duplicate of a copied ref, so no unique content was lost and
+  // `refs:truncated` would be a lie (the naive blind-overflow check
+  // regressed exactly this).
+  const dupes = Array.from({ length: 200 }, (_, i) => `pkt:r1c-${i % 5}`);
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: dupes }), { now: clock() });
+  assert.ok(!rec.evidenceRefs.includes("refs:truncated"), "no unique content lost — no truncation");
+  assert.equal(rec.evidenceRefs.filter((r) => r.startsWith("pkt:")).length, 5);
+});
+
+test("A5-R1: the ingestion window boundary does not fire a phantom truncated", async () => {
+  // 63 unique refs + the exhausted marker = exactly 64: everything fits
+  // and NO disclosure is due — the boundary must not misfire overflow.
+  const refs = Array.from({ length: 63 }, (_, i) => `pkt:r1b-${i}`);
+  const rec = await investigate(basePacket({ evidenceRefs: refs }), { now: clock() });
+  assert.ok(!rec.evidenceRefs.includes("refs:truncated"), "exact fit is not an overflow");
+  assert.ok(rec.evidenceRefs.includes("investigation:exhausted"));
+  assert.equal(rec.evidenceRefs.length, 64);
+});
+
+test("A5-R1: non-array evidenceRefs stays clean (no overflow phantoms)", async () => {
+  const rec = await investigate(basePacket({ evidenceRefs: "not-an-array" as never }), { now: clock() });
+  assert.ok(!rec.evidenceRefs.includes("refs:truncated"));
+});
+
+test("A6-F1: a sparse huge-length array returns fast and discloses the unvisited tail", async () => {
+  // A packet may declare length up to 2^32-1 with NO entries behind
+  // them; the pre-A6 per-index walk stalled investigate() ~40min at
+  // max length. The scan budget bounds the walk and the unvisited
+  // tail is disclosed (never silently dropped).
+  const sparse: string[] = []; sparse.length = 4294967295;
+  const t0 = Date.now();
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: sparse }), { now: clock() });
+  const ms = Date.now() - t0;
+  assert.ok(ms < 1000, `bounded scan must return fast (took ${ms}ms)`);
+  assert.ok(rec.evidenceRefs.includes("bad-input:scan-budget"), "exhausted budget is disclosed");
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "unvisited tail forces truncation");
+  assertValid(rec);
+});
+
+test("A6-F1: the scan budget does not fire for arrays within it (no phantom)", async () => {
+  // 1024 dense entries = exactly the budget: every index is visited,
+  // so no scan-budget marker — capacity truncation still applies.
+  const refs = Array.from({ length: 1024 }, (_, i) => `pkt:a6b-${i}`);
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: refs }), { now: clock() });
+  assert.ok(!rec.evidenceRefs.includes("bad-input:scan-budget"), "exact budget fit is not exhaustion");
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "capacity truncation still disclosed");
+});
+
+test("A6-F1: budget-exhausted duplicates still disclose (unvisited tail cannot be proven duplicate)", async () => {
+  // 1024 duplicates (within budget, all seen) + a declared length past
+  // it: entries 1024.. were never visited, so F5's "duplicates lose
+  // nothing" cannot rule out unique content — disclosure is mandatory.
+  const dupes = Array.from({ length: 1024 }, () => "pkt:a6d");
+  dupes.length = 1025; // 1 unvisited entry the scan can never see
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: dupes }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:scan-budget"));
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"));
 });
 
 // ───────────────────────── INV-7 record validity + freeze ───────────────────

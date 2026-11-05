@@ -78,3 +78,11 @@ docs/audits/audit-c*.log
 # Round-scoped adversarial probe harnesses (@ts-nocheck repro scripts) —
 # findings are pinned as named regression tests; the probes themselves are scratch.
 test/probes/
+# P15 cycle-A4/A5 audit probes (F1–F6, R1 repro harnesses, debug scripts) —
+# findings pinned as named regression tests (A4-*/A5-*); probes are scratch.
+.tre/*audit*.mjs
+.tre/*-fix.mjs
+.tre/dbg-a5.mjs
+.tre/p15-reprobe.mjs
+# Cycle-A6 audit probes (kept on disk for citation, never in git).
+.tre/a6-*

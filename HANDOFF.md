@@ -1,5 +1,86 @@
 # HANDOFF
 
+## 2026-12-08 — P15 audit cycle A5: A4's fixes audited, 6 findings fixed; next: P9/M1 composition
+
+**This session (P15 audit cycle A5):** audited the A4 commit (`7b70fba`)
+itself against the built module. The R1–R4 fixes held, but the audit
+found one regression and five claim gaps — all six fixed here:
+
+- **F1 (HIGH, regression):** A4's `safeRead`-based clock read called
+  `now()` WITHOUT its receiver, so any method-style clock (`now() {
+  return this.t }`) threw and `ts` silently fell to 0. Now resolved via
+  `resolvePortMethod` (full-arg `.apply(handle)`). All A4 test clocks
+  were closures — blind spot closed with method-clock + throwing-clock
+  tests.
+- **F2 (HIGH):** A4's usd rule only rejected NEGATIVE reports, so a
+  probe reporting `usd: 0` refunded its whole charge and re-opened the
+  budget (INV-3 cap bypassable by a hostile port). Now `max(reported,
+  estimate)`: a report may ADD (genuine overage stands in full, F4),
+  never subtract. Docs/17 §5 updated.
+- **F3 (MEDIUM):** packet `evidenceRefs` were copied verbatim — a
+  packet could forge `judge:advisory` / `probe:…:ran` provenance.
+  Reserved-prefix packet refs (`rule:`/`text:`/`probe:`/`judge:`/
+  `investigation:`/`bad-input:`/`packet:`/`refs:`) are now dropped and
+  disclosed `refs:spoofed`; when spoofing and truncation are both due
+  the capacity check reserves the disclosure slot.
+- **F5 (LOW):** duplicates counted toward `refs:truncated` — 70 refs
+  with 10 unique cried truncation though all fit. Truncation now
+  counts UNIQUE usable refs.
+- **F6 (LOW):** `{ maxToolCalls: undefined }` marked
+  `bad-input:limits`, contradicting docs/17 §0 rule 5 (undefined VALUE
+  = absent). Code now agrees with the doc.
+
+Tests: 10 new investigation tests (11 added, 1 INV-3 test rewritten
+for the max-rule), full suite **2204 pass / 0 fail / 14 skipped**
+(was 2194). Black-box reproducers live in `.tre/audit-a4.mjs` /
+`audit-a5.mjs` / `audit-a6.mjs` (now gitignored as probe scratch).
+
+**A5-R1 follow-up (same session, post-audit residual):** the A5/F5
+unique-count could not see floods LARGER than the 64-slot `copyStrs`
+ingestion window — 200 entries were dropped at copy time with no
+`refs:truncated` at all. `copyStrs` now scans the full input and
+reports `overflow` iff an entry beyond the window carried a string NO
+copied ref had (unique content invisible to the module); pure
+duplicates past the window disclose nothing (F5 stays honest). The
+assembly ORs `refsIn.overflow` into the truncation decision. The
+first naive cut (blind `raw.length > 64`) was rejected — it re-broke
+F5 (a 200-slot pure-duplicate flood claiming truncation) — caught by
+the new `A5-R1+F5` test. Docs/17 §2 updated with the window rule.
++4 tests (A5-R1 set), full suite **2208 pass / 0 fail / 14 skipped**.
+Probe harnesses `.tre/*audit*.mjs`, `.tre/*-fix.mjs`, `.tre/dbg-a5.mjs`,
+`.tre/p15-reprobe.mjs` added to `.gitignore` (scratch policy: findings
+are pinned as named regression tests, probes cited by path).
+
+Lesson for the next audit round: test ports/clocks as CLASS INSTANCES,
+not just closures — every A4 blind spot came from closure-only inputs.
+And when fixing a disclosure gap, re-test the ORIGINAL finding's
+fixtures against the fix (the blind-overflow cut regressed F5 on day
+one of its own proposal).
+
+**A6 follow-up (audit of the A5-R1 diff):** two findings, both from
+the audit mutating the fix rather than just re-reading it. (1) The
+original A5-R1 test did NOT discriminate — deleting
+`refsIn.overflow ||` from the truncation check kept all tests green,
+because the 200-unique flood also overflows capacity on its own. The
+discriminating fixture is a window of only 2 DISTINCT refs with new
+unique refs hidden past it; that test now fails under the mutation.
+(2) The full-input scan A5-R1 introduced turned the pre-existing
+sparse-array cost into a must-fix: `evidenceRefs` may declare
+`length` up to 2^32−1 with no entries, and the per-index
+getOwnPropertyDescriptor walk stalled investigate() ~40min at max
+length (measured 3.9s @ 100M holes). `copyStrs` now walks at most
+`COPY_SCAN_BUDGET` (16 × MAX_REFS = 1024) indices; exhaustion is
+disclosed as `bad-input:scan-budget` + `refs:truncated` (an unvisited
+tail can never be PROVEN duplicate, so F5 cannot waive it). Docs/17
+§0 gained the negative-`maxUsd` clamp rule (probed: `-1` clamps to
+$0 silently; `NaN`/±`Infinity` mark `bad-input:limits`). +3 A6-F1
+tests, full suite **2212 pass / 0 fail / 14 skipped**. `.gitignore`
+now covers `.tre/a6-*`.
+
+Lesson for the next audit round: a fix's test must FAIL when the fix
+is removed — mutate before believing. And any loop over
+attacker-controlled `length` needs a visit budget, dense or not.
+
 ## 2026-11-05 — P15 audit cycle A4 fixes landed; P15 hardening closed; next: P9/M1 composition
 
 **This session (P15 audit fixes):** a black-box hostile-probe round on the

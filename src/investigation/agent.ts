@@ -305,9 +305,25 @@ function safeRead(obj: unknown, key: string): unknown {
 }
 
 /** Copy a string array fence-safely: length observed ONCE and
- *  re-verified after the copy (P10 C5-F2); non-strings dropped. */
-function copyStrs(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
+ *  re-verified after the copy (P10 C5-F2); non-strings dropped.
+ *  Returns `overflow: true` when an entry beyond the `MAX_REFS` copy
+ *  window carried a string NO copied entry had — unique content the
+ *  caller can never see (cycle-A5 R1: a flood larger than the window
+ *  was previously dropped at ingestion with no disclosure). Pure
+ *  duplicates past the window disclose nothing (cycle-A5 F5: nothing
+ *  unique was lost). The post-window scan is BUDGETED (cycle-A6 F1):
+ *  a packet may declare `length` up to 2^32-1 with NO entries behind
+ *  them, and an unbounded per-index walk (getOwnPropertyDescriptor
+ *  every hole) let a hostile packet stall investigate() for minutes
+ *  — measured 3.9s at 100M holes, ~40min at max length. The scan
+ *  visits at most COPY_SCAN_BUDGET indices; exhausting the budget
+ *  with entries left unvisited counts as overflow (content we cannot
+ *  account for is DISCLOSED, never silently dropped) and marks
+ *  `bad-input:scan-budget` at the assembly site. Memory stays
+ *  bounded (64-entry set) in all paths. */
+const COPY_SCAN_BUDGET = MAX_REFS * 16; // 1024 indices — dense floods still disclose via capacity
+function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhausted: boolean } {
+  if (!Array.isArray(raw)) return { refs: [], overflow: false, scanExhausted: false };
   let n = 0;
   let ok = true;
   try {
@@ -318,7 +334,16 @@ function copyStrs(raw: unknown): string[] {
     ok = false;
   }
   const out: string[] = [];
-  for (let i = 0; i < n && out.length < MAX_REFS; i++) {
+  const seen = new Set<string>();
+  let overflow = false;
+  let scanExhausted = false;
+  let scanned = 0;
+  for (let i = 0; i < n; i++) {
+    if (scanned >= COPY_SCAN_BUDGET) {
+      scanExhausted = true; // cycle-A6 F1: entries remain unvisited
+      break;
+    }
+    scanned++;
     let d: PropertyDescriptor | undefined;
     try {
       d = Object.getOwnPropertyDescriptor(raw, i);
@@ -328,14 +353,20 @@ function copyStrs(raw: unknown): string[] {
     }
     if (d === undefined || !('value' in d)) continue;
     const s = boundedStr(d.value);
-    if (s !== undefined) out.push(s);
+    if (s === undefined) continue;
+    if (out.length < MAX_REFS) {
+      out.push(s);
+      seen.add(s);
+    } else if (!seen.has(s)) {
+      overflow = true;
+    }
   }
   try {
-    if (!ok || (raw as unknown[]).length !== n) return [];
+    if (!ok || (raw as unknown[]).length !== n) return { refs: [], overflow: false, scanExhausted: false };
   } catch {
-    return [];
+    return { refs: [], overflow: false, scanExhausted: false };
   }
-  return out;
+  return { refs: out, overflow, scanExhausted };
 }
 
 /** Merge ONLY the closed fact keys at boolean type (INV-4). Both the
@@ -543,15 +574,19 @@ function selfCheck(r: DiagnosisRecordFields): boolean {
  *  may be getters whose traps THROW, and even `typeof x.run` triggers
  *  them (audit R1). The resolved function is captured ONCE and the
  *  handle is never touched again. Returns undefined when the handle is
- *  absent, unusable, or its method is missing/not a function. */
-function resolvePortMethod(handle: unknown, method: string): ((req: unknown) => Promise<unknown> | unknown) | undefined {
+ *  absent, unusable, or its method is missing/not a function.
+ *  Audit A5/F1: the FULL argument list is forwarded with the handle as
+ *  receiver — a method-style clock (`now() { return this.t }`) lost its
+ *  `this` when the first fix call-dropped the receiver, silently
+ *  zeroing ts for every class-method caller. */
+function resolvePortMethod(handle: unknown, method: string): ((...args: unknown[]) => Promise<unknown> | unknown) | undefined {
   if (handle === undefined) return undefined;
   if (handle === null || typeof handle !== 'object') return undefined;
   const fn = safeRead(handle, method);
   if (typeof fn !== 'function') return undefined;
   // Keep the handle as the call receiver (real ports may use `this`);
   // the CALL itself sits inside callProbe/callJudge's try.
-  return (req: unknown) => (fn as (r: unknown) => Promise<unknown> | unknown).call(handle, req);
+  return (...args: unknown[]) => (fn as (...a: unknown[]) => Promise<unknown> | unknown).apply(handle, args);
 }
 
 async function callProbe(toolsRun: (req: unknown) => Promise<unknown> | unknown, probe: Probe, ep: string, taskId: string | undefined, attemptId: string | undefined):
@@ -615,12 +650,14 @@ export async function investigate(
   } catch {
     portsObj = undefined;
   }
-  // ── ts (INV-6: injected clock, never Date()) ──
+  // ── ts (INV-6: injected clock, never Date()). Audit A5/F1: resolved
+  // through resolvePortMethod so a method-style clock keeps its
+  // receiver. ──
   let ts = 0;
   try {
-    const nowFn = safeRead(portsObj, 'now');
-    if (typeof nowFn === 'function') {
-      const t = (nowFn as () => number)();
+    const now = resolvePortMethod(portsObj, 'now');
+    if (now !== undefined) {
+      const t = now();
       if (typeof t === 'number' && Number.isFinite(t) && t >= 0) ts = t;
     }
   } catch { /* fail-closed at 0 */ }
@@ -701,7 +738,8 @@ export async function investigate(
   // markers only; classification prefers explicit).
 
   // Packet refs: copied, never invented (INV-5).
-  const packetRefs = copyStrs(ownData(p, 'evidenceRefs').value);
+  const refsIn = copyStrs(ownData(p, 'evidenceRefs').value);
+  const packetRefs = refsIn.refs;
 
   // ── limits (INV-3) ──
   let badLimits = false;
@@ -725,12 +763,18 @@ export async function investigate(
     }
   }
   let badMaxCalls = false;
-  const maxToolCallsRaw = limRaw !== undefined ? finiteAtMostInt(ownData(limRaw, 'maxToolCalls').value, PROBES.length, 0) : undefined;
-  if (limRaw !== undefined && ownData(limRaw, 'maxToolCalls').present && maxToolCallsRaw === undefined) badMaxCalls = true;
+  const maxToolCallsSlot = limRaw !== undefined ? ownData(limRaw, 'maxToolCalls') : { present: false, value: undefined };
+  const maxToolCallsRaw = maxToolCallsSlot.present ? finiteAtMostInt(maxToolCallsSlot.value, PROBES.length, 0) : undefined;
+  // Audit A5/F6: an explicit `undefined` VALUE is an absent field
+  // (docs/17 §0 rule 5: missing/undefined fields drop silently) — only
+  // a present field with a non-undefined, non-coercible value is
+  // hostile input.
+  if (maxToolCallsSlot.present && maxToolCallsSlot.value !== undefined && maxToolCallsRaw === undefined) badMaxCalls = true;
   const maxToolCalls = maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length);
   let badMaxUsd = false;
-  const maxUsdRaw = limRaw !== undefined ? finiteAtMost(ownData(limRaw, 'maxUsd').value, Number.MAX_SAFE_INTEGER, 0) : undefined;
-  if (limRaw !== undefined && ownData(limRaw, 'maxUsd').present && maxUsdRaw === undefined) badMaxUsd = true;
+  const maxUsdSlot = limRaw !== undefined ? ownData(limRaw, 'maxUsd') : { present: false, value: undefined };
+  const maxUsdRaw = maxUsdSlot.present ? finiteAtMost(maxUsdSlot.value, Number.MAX_SAFE_INTEGER, 0) : undefined;
+  if (maxUsdSlot.present && maxUsdSlot.value !== undefined && maxUsdRaw === undefined) badMaxUsd = true;
   const maxUsd = maxUsdRaw ?? DEFAULT_MAX_USD;
 
   // ── classify → confirm → probe loop (docs/17 §3/§5) ──
@@ -775,7 +819,14 @@ export async function investigate(
       continue;
     }
     mergeFacts(explicit, mapToObj(res.facts));
-    if (res.usd !== undefined) spendUsd = spendUsd - next.estimateUsd + res.usd; // replace THIS probe's estimate (bounded; earlier probes stand)
+    // Audit A5/F2+F4: a port-reported `usd` may only ADD to the
+    // estimate, never replace it downward. `max(reported, estimate)`
+    // closes the refund bypass (reporting 0 used to erase the charge
+    // and re-open the budget for another probe), and an over-report
+    // is recorded honestly — the full reported amount stands (a real
+    // overage is evidence, not something to clamp away) while
+    // callProbe's MAX_SAFE_INTEGER ceiling keeps the arithmetic finite.
+    if (res.usd !== undefined) spendUsd = spendUsd - next.estimateUsd + Math.max(res.usd, next.estimateUsd);
     if (res.evidenceRef !== undefined) probeEvidence.push(res.evidenceRef);
     else markers.push(`probe:${next.id}:ran`);
     // Re-classify with the new facts; text-derived facts never change an
@@ -803,13 +854,30 @@ export async function investigate(
   if (cur.cause === 'unknown') markers.push('investigation:exhausted');
   if (badLimits || badMaxCalls || badMaxUsd) markers.push('bad-input:limits');
   if (badPacket) markers.push('bad-input:packet');
+  // cycle-A6 F1: the evidenceRefs scan hit its index budget, so part
+  // of the array was never visited — disclosed, never silently dropped.
+  if (refsIn.scanExhausted) markers.push('bad-input:scan-budget');
 
   // ── assemble the record (INV-5) ──
   // Audit R4: markers (rule:/text:/probe:/judge:/bad-input:/…) are
   // MODULE-origin evidence and are reserved BEFORE packet refs, so a
   // hostile packet overflowing evidenceRefs can never evict the record's
-  // own provenance. Dropped packet refs are disclosed with a
-  // `refs:truncated` marker; the ordering is packet-contents-independent.
+  // own provenance.
+  // Audit A5/F3: packet refs may not CARRY module-origin prefixes — a
+  // packet that listed `judge:advisory` used to forge "the judge was
+  // consulted". Reserved-prefix packet refs are dropped and disclosed
+  // with `refs:spoofed`.
+  // Audit A5/F5: the truncation decision counts UNIQUE refs (duplicates
+  // consume no slot), so a ref flood of repeats no longer cries
+  // `refs:truncated` when everything unique fits.
+  // Audit A5-R1: an ingestion-window overflow (more than MAX_REFS raw
+  // entries — the flood was never even seen) is itself disclosed:
+  // `refsIn.overflow` forces the disclosure even though `usable`
+  // (bounded by MAX_REFS) could never exceed capacity on its own.
+  // Cycle-A6 F1: an exhausted scan budget does too — entries past the
+  // budget were never visited, so we can only disclose, never prove
+  // nothing unique was lost.
+  const RESERVED_PREFIXES = ['rule:', 'text:', 'probe:', 'judge:', 'investigation:', 'bad-input:', 'packet:', 'refs:'];
   const seen = new Set<string>();
   const refsOut: string[] = [];
   const pushRef = (r: string): boolean => {
@@ -820,12 +888,18 @@ export async function investigate(
     return true;
   };
   for (const r of [...markers, ...probeEvidence]) pushRef(r);
-  // A packet with more unseen refs than the remaining slots is disclosed
-  // with refs:truncated — pushed BEFORE the packet refs fill the rest, so
-  // the disclosure can never be crowded out by the very overflow it names.
-  const unseenPacketRefs = packetRefs.filter((r) => !seen.has(r)).length;
-  if (unseenPacketRefs > MAX_REFS - refsOut.length) pushRef('refs:truncated');
-  for (const r of packetRefs) pushRef(r);
+  const usable = packetRefs.filter((r) => !RESERVED_PREFIXES.some((pre) => r.startsWith(pre)));
+  const spoofedCount = packetRefs.length - usable.length;
+  // One marker per disclosure; each is pushed BEFORE the refs it names
+  // fill the remaining slots, so a disclosure can never be crowded out
+  // by the very overflow it reports. The truncation capacity reserves
+  // the refs:spoofed slot too — otherwise the last usable ref vanishes
+  // un-disclosed when both disclosures are due.
+  const uniqueUsable = new Set(usable).size;
+  const disclosureSlots = spoofedCount > 0 ? 1 : 0;
+  if (refsIn.overflow || refsIn.scanExhausted || uniqueUsable > MAX_REFS - refsOut.length - disclosureSlots) pushRef('refs:truncated');
+  if (spoofedCount > 0) pushRef('refs:spoofed');
+  for (const r of usable) pushRef(r);
 
   const rec: DiagnosisRecordFields = {
     schema: 'tre-supervisor/1',
