@@ -381,3 +381,16 @@ Keyed on the FINAL class (values drift-pinned to planner
 - Charge spent diagnostic USD to the P8 ledger under the episode
   recovery budget (the record's `limitsRespected.spendUsd` is the
   amount to charge).
+
+## 9. Red-team harness
+
+`sh scripts/redteam.sh` is the repeatable attack suite for this module
+(promoted from the cycle-A5/A6 probe harnesses): phase 1 replays the
+hostile-packet probes that found the A5/A6 findings (window-overflow
+disclosure, the scan-budget DoS, the limits matrix, spend accounting)
+against the dist build; phase 2 mutates each protection out of the built
+agent one at a time and requires that the probes OR the unit tests fail —
+a surviving mutation means the suite stopped discriminating (the cycle-A6
+lesson: mutate-before-believing). Run it after ANY change to
+`src/investigation/agent.ts`, and add a probe + a mutation entry with each
+new fix. Exit code is non-zero on any regression.
