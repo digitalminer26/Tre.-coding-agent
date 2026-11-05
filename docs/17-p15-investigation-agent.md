@@ -72,10 +72,19 @@ Boundary rules:
    proxy) or a hostile-but-present `limits` handle each contribute a
    `bad-input:*` evidence marker (`bad-input:packet`,
    `bad-input:limits`); a self-check failure degrades to
-   `bad-input:self-check`. Fields that are merely absent (including an
-   explicit `undefined` VALUE) or the wrong type are dropped WITHOUT a
-   marker (a missing optional field is not bad input); only a present
-   field whose value is neither absent nor coercible marks
+   `bad-input:self-check`. Disclosure covers EVERY trap type, not just
+   `getPrototypeOf` (cycle-A7 F3/F7): a packet whose
+   `getOwnPropertyDescriptor` trap throws on ANY field read marks
+   `bad-input:packet`; a trapping descriptor on `limits.maxToolCalls`
+   or `limits.maxUsd` marks `bad-input:limits` AND fails the affected
+   budget closed to ZERO (never the default — a caller who asked for
+   `$0` must not get the default budget because the field trapped); a
+   revoked/trapping array passed as `evidenceRefs` or `errors` marks
+   `bad-input:packet` instead of throwing from `Array.isArray`
+   (cycle-A7 F1). Fields that are merely absent (including an
+   explicit `undefined` VALUE) or a plain wrong type are dropped
+   WITHOUT a marker (a missing optional field is not bad input); only
+   a present field whose value is neither absent nor coercible marks
    `bad-input:limits`. A throwing tool port is a failed probe, not a
    failed investigation.
 6. **Self-containment (the P10/P14 pattern).** The module imports
@@ -183,7 +192,14 @@ docs/11 §14.3 `kind:"diagnosis"` shape (plus `schema`/`kind`/envelope):
   for minutes. Exhausting the budget with entries unvisited is itself
   disclosed — `bad-input:scan-budget` plus `refs:truncated` (the
   unvisited tail can never be PROVEN duplicate, so F5's
-  duplicates-disclose-nothing rule cannot apply). The module never
+  duplicates-disclose-nothing rule cannot apply). The DISCARD paths
+  are disclosed too (cycle-A7 F2): when the copy is thrown away whole
+  (a per-index descriptor trap, a length-getter throw, or a
+  re-verify length mismatch), the record appends `refs:dropped` —
+  content was read and discarded, and can never be proven duplicate.
+  A revoked/trapping array (its `IsArray` probe throws) is hostile
+  input: it contributes nothing, never throws (cycle-A7 F1), and
+  marks `bad-input:packet`. The module never
   fabricates a ref pointing at something it did not see.
 - `proposedActions` are built EXCLUSIVELY from the module's closed
   table (§6) keyed on the FINAL cause class. A packet or judge cannot
@@ -331,6 +347,13 @@ charge stands, loop continues.
 Exhaustion: loop ended with `causeClass === "unknown"` ⇒
 `investigation:exhausted` appended (the §14.3 exhaustion marker).
 
+Cumulative bound (cycle-A7 F9): the running total in
+`limitsRespected.spendUsd` is clamped to `Number.MAX_SAFE_INTEGER`
+after each port report. Each probe's `usd` is already bounded there,
+but summing several maxima drifts past double-precision integer
+exactness — beyond the clamp the reported figure stops being reliable,
+so the honesty contract clamps rather than reports a corrupted sum.
+
 ## 6. Proposed actions (built-in table, advice only)
 
 Keyed on the FINAL class (values drift-pinned to planner
@@ -344,6 +367,20 @@ Keyed on the FINAL class (values drift-pinned to planner
 | environment-blocker | `investigate` (below bar), `escalate` (at/above bar) |
 | approval-boundary | `escalate` |
 | unknown | `investigate` |
+
+Confidence gating (cycle-A7 F10): only `environment-blocker` gates its
+`escalate` on `confidence >= CONFIDENCE_BAR` *inside this module*.
+`approval-boundary`/`task-defect` propose `escalate`/`repair` at any
+confidence — including a judge-filled class, whose confidence is
+capped below the bar (§4). That is sound ONLY because proposed actions
+are ADVICE this module emits, never authority: nothing is executed
+without the P10/planner re-checking the record's own confidence
+against its §0 rule-2 bar (§8 wiring). A model opinion therefore
+cannot take the ≥0.7 planner paths BY ITSELF — the gate lives in the
+consumer, and the judge's ≤0.69 confidence fails it there. The
+in-module `environment-blocker` gate is the belt; the consumer gate is
+the suspenders. Consumers MUST NOT treat a proposed action as
+pre-gated.
 
 ## 7. Invariants (named tests)
 
@@ -385,12 +422,22 @@ Keyed on the FINAL class (values drift-pinned to planner
 ## 9. Red-team harness
 
 `sh scripts/redteam.sh` is the repeatable attack suite for this module
-(promoted from the cycle-A5/A6 probe harnesses): phase 1 replays the
-hostile-packet probes that found the A5/A6 findings (window-overflow
-disclosure, the scan-budget DoS, the limits matrix, spend accounting)
-against the dist build; phase 2 mutates each protection out of the built
-agent one at a time and requires that the probes OR the unit tests fail —
-a surviving mutation means the suite stopped discriminating (the cycle-A6
-lesson: mutate-before-believing). Run it after ANY change to
+(promoted from the cycle-A5/A6 probe harnesses). Phase 0 ALWAYS rebuilds
+`dist/` from `src/` first (cycle-A7 F4: the suite used to attack whatever
+stale build was lying around — breaking src and running the harness
+printed green). Phase 1 replays the hostile-packet probes that found the
+A5/A6/A7 findings (window-overflow disclosure, the scan-budget DoS, the
+limits matrix, spend accounting, revoked-array INV-1, the lying-length
+discard, the trapping-descriptor budget, the packet descriptor trap, the
+cumulative spend clamp) against the built agent. Phase 2 mutates each
+protection out of the built agent one at a time (M1–M12: the overflow OR,
+the scan-budget marker, both bad-value budget markers, both
+trap-detection fail-closings and their markers, the hostile-array probe,
+the dropped-refs marker, the packet threw-watcher, the spend clamp) and
+requires that the probes OR the unit tests fail — a surviving mutation
+means the suite stopped discriminating (the cycle-A6 lesson:
+mutate-before-believing). The backup is PID-suffixed and phase 0 rebuilds
+unconditionally, so a `kill -9` mid-mutation can never leave a trusted
+mutant behind (cycle-A7 F5). Run it after ANY change to
 `src/investigation/agent.ts`, and add a probe + a mutation entry with each
 new fix. Exit code is non-zero on any regression.

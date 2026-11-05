@@ -818,6 +818,76 @@ test("A6-F1: budget-exhausted duplicates still disclose (unvisited tail cannot b
   assert.ok(rec.evidenceRefs.includes("refs:truncated"));
 });
 
+// ────────────────────── cycle-A7 findings (audit + fixes) ──────────────────
+
+test("A7-F1 (INV-1): a revoked array as evidenceRefs never throws and is disclosed", async () => {
+  // Array.isArray throws on a REVOKED Proxy (the trap is in the IsArray
+  // intrinsic) — the pre-A7 fence called it unguarded and investigate()
+  // rejected, leaving P9 with no record.
+  const { proxy, revoke } = Proxy.revocable<string[]>([], {});
+  revoke();
+  const rec = await investigate(basePacket({ evidenceRefs: proxy as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"));
+  assertValid(rec);
+});
+
+test("A7-F1 (INV-1): a revoked array as errors never throws and is disclosed", async () => {
+  const { proxy, revoke } = Proxy.revocable<unknown[]>([], {});
+  revoke();
+  const rec = await investigate(basePacket({ errors: proxy as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"));
+  assertValid(rec);
+});
+
+test("A7-F2: a lying length getter discards refs but discloses refs:dropped", async () => {
+  // length reads 100 first, 101 at re-verify: the pre-A7 copy returned
+  // an empty result with ALL flags false — the refs vanished silently,
+  // contrary to docs/17 §0 rule 5.
+  const arr = Array.from({ length: 100 }, (_, i) => `pkt:a7f2-${i}`);
+  let reads = 0;
+  const liar = new Proxy(arr, {
+    get(t, k) { if (k === "length") { reads++; return reads === 1 ? t.length : t.length + 1; } return Reflect.get(t, k); },
+  });
+  const rec = await investigate(basePacket({ evidenceRefs: liar as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:dropped"), "the discard must be disclosed");
+  assert.ok(!rec.evidenceRefs.some((r) => r.startsWith("pkt:a7f2-")), "discarded refs are not emitted");
+  assertValid(rec);
+});
+
+test("A7-F3 (INV-3): a maxUsd descriptor trap fails the budget CLOSED, not to the default", async () => {
+  // Pre-A7: the trap read as {present:false} -> DEFAULT_MAX_USD, so a
+  // caller who asked for $0 got $0.50 of probes with no marker.
+  const hostile = new Proxy({ maxUsd: 0 }, { getOwnPropertyDescriptor(t, k) { if (k === "maxUsd") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  let calls = 0;
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => { calls++; return { facts: {}, usd: 0 }; } } },
+    { limits: hostile as never });
+  assert.equal(calls, 0, "no probe may run under a trapped budget");
+  assert.equal(rec.limitsRespected.toolsUsed, 0);
+  assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
+  assertValid(rec);
+});
+
+test("A7-F7: a packet descriptor trap (proto passes) marks bad-input:packet", async () => {
+  // Pre-A7 only a throwing getPrototypeOf marked; docs/17 §0 rule 5
+  // promises disclosure for ANY trapping proxy.
+  const packet = new Proxy({ episodeId: "ep-1" }, {
+    getOwnPropertyDescriptor(t, k) { if (k !== "episodeId") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); },
+  });
+  const rec = await investigate(packet as never, { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"));
+  assertValid(rec);
+});
+
+test("A7-F9: cumulative spend clamps to MAX_SAFE_INTEGER (reported figure stays exact)", async () => {
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }) } },
+    { limits: { maxUsd: Number.MAX_SAFE_INTEGER } });
+  assert.ok(rec.limitsRespected.toolsUsed >= 3, "several probes must run to exercise the SUM");
+  assert.equal(rec.limitsRespected.spendUsd, Number.MAX_SAFE_INTEGER);
+  assertValid(rec);
+});
+
 // ───────────────────────── INV-7 record validity + freeze ───────────────────
 
 test("INV-7: every golden record passes the REAL validateSupervisorRecord round-trip", async () => {

@@ -114,5 +114,72 @@ const valid = (rec) => { try { validateSupervisorRecord(JSON.parse(JSON.stringif
     `probes=${log.join(",") || "none"} spend=${rec.limitsRespected.spendUsd}`);
 }
 
+// ── A7-F1: revoked arrays must never throw out of investigate() ───────────
+{
+  const mk = () => { const { proxy, revoke } = Proxy.revocable([], {}); revoke(); return proxy; };
+  let threw = false, rec;
+  try { rec = await investigate(basePacket({ evidenceRefs: mk() }), clock); } catch { threw = true; }
+  check("A7-F1: revoked array as evidenceRefs does not throw and marks bad-input:packet",
+    !threw && rec !== undefined && has(rec, "bad-input:packet") && valid(rec));
+  threw = false; rec = undefined;
+  try { rec = await investigate(basePacket({ errors: mk() }), clock); } catch { threw = true; }
+  check("A7-F1: revoked array as errors does not throw and marks bad-input:packet",
+    !threw && rec !== undefined && has(rec, "bad-input:packet") && valid(rec));
+  // A plain non-array stays benign (no phantom marker).
+  const rec5 = await investigate(basePacket({ evidenceRefs: { 0: "a", length: 1 } }), clock);
+  check("A7-F1: array-like plain object is NOT flagged hostile", !has(rec5, "bad-input:packet") && valid(rec5));
+}
+
+// ── A7-F2: discarded refs (lying length) are disclosed, never silent ──────
+{
+  const arr = Array.from({ length: 100 }, (_, i) => `pkt:liar-${i}`);
+  let reads = 0;
+  const liar = new Proxy(arr, { get(t, k) { if (k === "length") { reads++; return reads === 1 ? t.length : t.length + 1; } return Reflect.get(t, k); } });
+  const rec = await investigate(basePacket({ evidenceRefs: liar }), clock);
+  check("A7-F2: length-mismatch discard discloses refs:dropped",
+    has(rec, "refs:dropped") && rec.evidenceRefs.filter((r) => r.startsWith("pkt:")).length === 0 && valid(rec));
+  // A per-index descriptor trap mid-scan discloses too.
+  const trap = Array.from({ length: 10 }, (_, i) => `pkt:tb-${i}`);
+  const trapProxy = new Proxy(trap, { getOwnPropertyDescriptor(t, k) { if (String(k) === "5") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec2 = await investigate(basePacket({ evidenceRefs: trapProxy }), clock);
+  check("A7-F2: mid-scan descriptor trap discloses refs:dropped", has(rec2, "refs:dropped") && valid(rec2));
+}
+
+// ── A7-F3: trapping descriptor on a budget field fails CLOSED ─────────────
+{
+  let n = 0;
+  const tools = { run: async () => { n++; return { facts: {}, usd: 0 }; } };
+  const trapUsd = new Proxy({ maxUsd: 0 }, { getOwnPropertyDescriptor(t, k) { if (k === "maxUsd") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec = await investigate(basePacket({ workerState: "running" }), { ...clock, tools }, { limits: trapUsd });
+  check("A7-F3: maxUsd descriptor trap -> zero probes, zero spend, bad-input:limits",
+    n === 0 && rec.limitsRespected.toolsUsed === 0 && has(rec, "bad-input:limits") && valid(rec),
+    `probes=${n} spend=${rec.limitsRespected.spendUsd}`);
+  let m = 0;
+  const tools2 = { run: async () => { m++; return { facts: {}, usd: 0 }; } };
+  const trapCalls = new Proxy({}, { getOwnPropertyDescriptor(t, k) { if (k === "maxToolCalls") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec2 = await investigate(basePacket({ workerState: "running" }), { ...clock, tools: tools2 }, { limits: trapCalls });
+  check("A7-F3: maxToolCalls descriptor trap -> zero probes, bad-input:limits",
+    m === 0 && rec2.limitsRespected.toolsUsed === 0 && has(rec2, "bad-input:limits") && valid(rec2),
+    `probes=${m}`);
+}
+
+// ── A7-F7: packet descriptor-trap (proto passes) is disclosed ─────────────
+{
+  const packetTrap = new Proxy({ episodeId: "e1" }, { getOwnPropertyDescriptor(t, k) { if (k !== "episodeId") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec = await investigate(packetTrap, clock);
+  check("A7-F7: packet getOwnPropertyDescriptor trap marks bad-input:packet", has(rec, "bad-input:packet") && valid(rec));
+}
+
+// ── A7-F9: cumulative spend clamps to MAX_SAFE_INTEGER ─────────────────────
+{
+  // Each probe reports MSI/2: one report can never exceed MSI, but the
+  // SUM over several probes drifts past it — the clamp must hold at MSI.
+  const t = { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }) };
+  const rec = await investigate(basePacket({ workerState: "running" }), { now: () => 1, tools: t }, { limits: { maxUsd: Number.MAX_SAFE_INTEGER } });
+  check("A7-F9: summed over-reports clamp to MAX_SAFE_INTEGER",
+    rec.limitsRespected.toolsUsed >= 3 && rec.limitsRespected.spendUsd === Number.MAX_SAFE_INTEGER && valid(rec),
+    `spend=${rec.limitsRespected.spendUsd} tools=${rec.limitsRespected.toolsUsed}`);
+}
+
 console.log(fails === 0 ? "redteam-investigation: ALL PASS" : `redteam-investigation: ${fails} FAILURE(S)`);
 process.exit(fails === 0 ? 0 : 1);

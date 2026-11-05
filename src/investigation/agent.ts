@@ -242,10 +242,13 @@ export interface DiagnosisRecordFields {
 
 // ─── Hostile-input fence (the P10 snapshot pattern) ────────────────────────
 
-type Desc = { value?: unknown; present: boolean };
+type Desc = { value?: unknown; present: boolean; threw?: boolean };
 
 /** Own DATA descriptor only — an own accessor's getter is NEVER
- *  invoked; an inherited property is never read. */
+ *  invoked; an inherited property is never read.
+ *  Cycle-A7 F3/F7: a THROWING getOwnPropertyDescriptor trap is
+ *  hostile input, not an absent field — `threw: true` lets callers
+ *  disclose it instead of silently falling back to defaults. */
 function ownData(obj: unknown, key: string): Desc {
   if (typeof obj !== 'object' || obj === null) return { present: false };
   try {
@@ -253,7 +256,35 @@ function ownData(obj: unknown, key: string): Desc {
     if (d === undefined || !('value' in d)) return { present: false };
     return { value: d.value, present: true };
   } catch {
-    return { present: false };
+    return { present: false, threw: true };
+  }
+}
+
+/** `Array.isArray` is NOT trap-safe: it throws on a REVOKED Proxy
+ *  (cycle-A7 F1, critical: a revoked array as `evidenceRefs`/`errors`
+ *  propagated out of investigate() and broke INV-1 — the trap sits in
+ *  the IsArray intrinsic itself, so the value must be probed before
+ *  the array test, exactly like isPlainObj fences getPrototypeOf).
+ *  A revoked array passes `typeof 'object'` and throws here. */
+function isArraySafe(v: unknown): v is unknown[] {
+  if (typeof v !== 'object' || v === null) return false;
+  try {
+    return Array.isArray(v);
+  } catch {
+    return false; // revoked/trapping array
+  }
+}
+
+/** True ONLY when the IsArray intrinsic itself throws (a revoked proxy
+ *  or a trapping target) — a plain non-array answers false, so hostile
+ *  handles are distinguishable from harmless garbage (cycle-A7 F1). */
+function arrayTrap(v: unknown): boolean {
+  if (typeof v !== 'object' || v === null) return false;
+  try {
+    Array.isArray(v);
+    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -320,10 +351,25 @@ function safeRead(obj: unknown, key: string): unknown {
  *  with entries left unvisited counts as overflow (content we cannot
  *  account for is DISCLOSED, never silently dropped) and marks
  *  `bad-input:scan-budget` at the assembly site. Memory stays
- *  bounded (64-entry set) in all paths. */
-const COPY_SCAN_BUDGET = MAX_REFS * 16; // 1024 indices — dense floods still disclose via capacity
-function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhausted: boolean } {
-  if (!Array.isArray(raw)) return { refs: [], overflow: false, scanExhausted: false };
+ *  bounded (64-entry set) in all paths.
+ *  Cycle-A7 F2: the discard paths (descriptor trap, length-getter
+ *  throw, re-verify mismatch) used to return an empty result with ALL
+ *  flags false — the packet's refs vanished with NO disclosure,
+ *  contrary to docs/17 §0 rule 5. Every such path now sets
+ *  `dropped: true` (unique content may have been read and then thrown
+ *  away; it can never be proven duplicate, so the F5 waiver cannot
+ *  apply), disclosed as `refs:dropped`. An array handle whose IsArray
+ *  probe throws (revoked/trapping) sets `hostile: true` — a plain
+ *  non-array is NOT hostile; a hostile handle is disclosed as
+ *  `bad-input:packet` (cycle-A7 F1). */
+const COPY_SCAN_BUDGET = MAX_REFS * 16; // 1024 indices; the tail discloses via overflow + bad-input:scan-budget
+function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhausted: boolean; dropped: boolean; hostile: boolean } {
+  if (!isArraySafe(raw)) {
+    // Hostile-but-present (revoked/trapping array; `arrayTrap` answers
+    // false for a plain non-array) vs absent/plain garbage.
+    const hostile = arrayTrap(raw);
+    return { refs: [], overflow: false, scanExhausted: false, dropped: false, hostile };
+  }
   let n = 0;
   let ok = true;
   try {
@@ -361,12 +407,13 @@ function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhaus
       overflow = true;
     }
   }
+  if (!ok) return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
   try {
-    if (!ok || (raw as unknown[]).length !== n) return { refs: [], overflow: false, scanExhausted: false };
+    if ((raw as unknown[]).length !== n) return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
   } catch {
-    return { refs: [], overflow: false, scanExhausted: false };
+    return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
   }
-  return { refs: out, overflow, scanExhausted };
+  return { refs: out, overflow, scanExhausted, dropped: false, hostile: false };
 }
 
 /** Merge ONLY the closed fact keys at boolean type (INV-4). Both the
@@ -679,26 +726,38 @@ export async function investigate(
     p = {} as InvestigationPacket;
     badPacket = true;
   }
-  const id = boundedStr(ownData(p, 'id').value);
-  const episodeId = boundedStr(ownData(p, 'episodeId').value);
-  const taskId = boundedStr(ownData(p, 'taskId').value);
-  const attemptId = boundedStr(ownData(p, 'attemptId').value);
+  // Cycle-A7 F7: a packet whose getOwnPropertyDescriptor TRAP throws
+  // is hostile input even when the proto trap passes — docs/17 §0 rule
+  // 5 promises disclosure for trapping proxies, but previously only a
+  // throwing getPrototypeOf marked. Any field read that hit a throwing
+  // descriptor trap flips `badPacket` (fail-safe: fields fall back to
+  // absent AND `bad-input:packet` is disclosed).
+  let fieldTrap = false;
+  const pd = (key: string): Desc => {
+    const d = ownData(p, key);
+    if (d.threw) fieldTrap = true;
+    return d;
+  };
+  const id = boundedStr(pd('id').value);
+  const episodeId = boundedStr(pd('episodeId').value);
+  const taskId = boundedStr(pd('taskId').value);
+  const attemptId = boundedStr(pd('attemptId').value);
 
-  const signalRaw = ownData(p, 'signal').value;
+  const signalRaw = pd('signal').value;
   let signalKind: string | undefined;
   if (isPlainObj(signalRaw)) {
     const k = boundedStr(ownData(signalRaw, 'kind').value);
     if (k !== undefined && (SIGNAL_KINDS as readonly string[]).includes(k)) signalKind = k;
   }
-  const wsRaw = boundedStr(ownData(p, 'workerState').value);
+  const wsRaw = boundedStr(pd('workerState').value);
   const workerState = wsRaw !== undefined && (WORKER_STATES as readonly string[]).includes(wsRaw) ? wsRaw : undefined;
-  const runEndReasonRaw = boundedStr(ownData(p, 'runEndReason').value);
+  const runEndReasonRaw = boundedStr(pd('runEndReason').value);
   const runEndReason = runEndReasonRaw; // free text (bounded); matched by exact value only
-  const signalDetail = boundedStr(ownData(p, 'signalDetail').value);
-  const guardFiresN = finiteAtMost(ownData(p, 'guardFires').value, Number.MAX_SAFE_INTEGER, 0) ?? 0;
-  const staleFlag = ownData(p, 'stale').value === true;
+  const signalDetail = boundedStr(pd('signalDetail').value);
+  const guardFiresN = finiteAtMost(pd('guardFires').value, Number.MAX_SAFE_INTEGER, 0) ?? 0;
+  const staleFlag = pd('stale').value === true;
 
-  const accRaw = ownData(p, 'acceptance').value;
+  const accRaw = pd('acceptance').value;
   let acceptanceVerdict: string | undefined;
   if (isPlainObj(accRaw)) {
     const v = boundedStr(ownData(accRaw, 'verdict').value);
@@ -706,7 +765,7 @@ export async function investigate(
   }
 
   const explicit = new Map<string, boolean>();
-  mergeFacts(explicit, ownData(p, 'facts').value);
+  mergeFacts(explicit, pd('facts').value);
 
   // Text derivation (docs/17 §3.3): errors + signalDetail, bounded.
   const derived = new Set<string>();
@@ -714,8 +773,12 @@ export async function investigate(
   {
     const units: string[] = [];
     let total = 0;
-    const errsRaw = ownData(p, 'errors').value;
-    if (Array.isArray(errsRaw)) {
+    const errsSlot = pd('errors');
+    const errsRaw = errsSlot.value;
+    // Cycle-A7 F1: a REVOKED array (or any trap on IsArray) throws from
+    // Array.isArray itself — isArraySafe probes first; a hostile-but-
+    // present handle is disclosed, never propagated (INV-1).
+    if (isArraySafe(errsRaw)) {
       let n = 0;
       try { const len = (errsRaw as unknown[]).length; if (Number.isInteger(len) && len >= 0) n = Math.min(len, MAX_ERRS); } catch { n = 0; }
       for (let i = 0; i < n; i++) {
@@ -733,13 +796,19 @@ export async function investigate(
     if (signalDetail !== undefined && total < MAX_TEXT) units.push(signalDetail.toLowerCase());
     const signalEndpoint = signalKind === 'endpoint-error';
     for (const u of units) deriveTextUnit(u.slice(0, MAX_TEXT), derived, derivedMarkers, signalEndpoint);
+    // Cycle-A7 F1: `errors` is a HOSTILE array handle (revoked /
+    // IsArray trap — distinct from a plain non-array) — text
+    // derivation saw nothing; disclose via badPacket.
+    if (arrayTrap(errsRaw)) fieldTrap = true;
   }
   // Explicit facts shadow text derivations (the derived set stays for
   // markers only; classification prefers explicit).
 
   // Packet refs: copied, never invented (INV-5).
-  const refsIn = copyStrs(ownData(p, 'evidenceRefs').value);
+  const refsSlot = pd('evidenceRefs');
+  const refsIn = copyStrs(refsSlot.value);
   const packetRefs = refsIn.refs;
+  if (refsIn.hostile) fieldTrap = true; // cycle-A7 F1: revoked refs array
 
   // ── limits (INV-3) ──
   let badLimits = false;
@@ -764,18 +833,26 @@ export async function investigate(
   }
   let badMaxCalls = false;
   const maxToolCallsSlot = limRaw !== undefined ? ownData(limRaw, 'maxToolCalls') : { present: false, value: undefined };
+  // Cycle-A7 F3 (major): a getOwnPropertyDescriptor TRAP on the field
+  // reads as `{present:false}` — the old code fell through to the
+  // DEFAULT budget, so a hostile `limits` proxy spent money the caller
+  // never authorized ($0.15 spent under `maxUsd:0` in the A7 repro).
+  // A trapping field is hostile input: mark AND fail-closed to ZERO
+  // (never the default) — docs/17 §0 rule 4/5.
+  if (maxToolCallsSlot.threw) badMaxCalls = true;
   const maxToolCallsRaw = maxToolCallsSlot.present ? finiteAtMostInt(maxToolCallsSlot.value, PROBES.length, 0) : undefined;
   // Audit A5/F6: an explicit `undefined` VALUE is an absent field
   // (docs/17 §0 rule 5: missing/undefined fields drop silently) — only
   // a present field with a non-undefined, non-coercible value is
   // hostile input.
   if (maxToolCallsSlot.present && maxToolCallsSlot.value !== undefined && maxToolCallsRaw === undefined) badMaxCalls = true;
-  const maxToolCalls = maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length);
+  const maxToolCalls = maxToolCallsSlot.threw ? 0 : (maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length));
   let badMaxUsd = false;
   const maxUsdSlot = limRaw !== undefined ? ownData(limRaw, 'maxUsd') : { present: false, value: undefined };
+  if (maxUsdSlot.threw) badMaxUsd = true; // cycle-A7 F3: trap != absent (fail-closed, see above)
   const maxUsdRaw = maxUsdSlot.present ? finiteAtMost(maxUsdSlot.value, Number.MAX_SAFE_INTEGER, 0) : undefined;
   if (maxUsdSlot.present && maxUsdSlot.value !== undefined && maxUsdRaw === undefined) badMaxUsd = true;
-  const maxUsd = maxUsdRaw ?? DEFAULT_MAX_USD;
+  const maxUsd = maxUsdSlot.threw ? 0 : (maxUsdRaw ?? DEFAULT_MAX_USD);
 
   // ── classify → confirm → probe loop (docs/17 §3/§5) ──
   const ctx: ClassInput = { workerState, runEndReason, guardFires: guardFiresN, acceptanceVerdict };
@@ -827,6 +904,12 @@ export async function investigate(
     // overage is evidence, not something to clamp away) while
     // callProbe's MAX_SAFE_INTEGER ceiling keeps the arithmetic finite.
     if (res.usd !== undefined) spendUsd = spendUsd - next.estimateUsd + Math.max(res.usd, next.estimateUsd);
+    // Cycle-A7 F9 (minor): per-probe usd is capped at MAX_SAFE_INTEGER
+    // but the SUM across probes could drift past it, where doubles lose
+    // integer exactness — the REPORTED figure would be unreliable
+    // (honesty contract). Clamp the cumulative total; over-reporting
+    // beyond $9 quadrillion is disclosed as the clamp value.
+    if (spendUsd > Number.MAX_SAFE_INTEGER) spendUsd = Number.MAX_SAFE_INTEGER;
     if (res.evidenceRef !== undefined) probeEvidence.push(res.evidenceRef);
     else markers.push(`probe:${next.id}:ran`);
     // Re-classify with the new facts; text-derived facts never change an
@@ -853,10 +936,13 @@ export async function investigate(
   // ── exhaustion marker (docs/11 §14.3 expectedEvidence) ──
   if (cur.cause === 'unknown') markers.push('investigation:exhausted');
   if (badLimits || badMaxCalls || badMaxUsd) markers.push('bad-input:limits');
-  if (badPacket) markers.push('bad-input:packet');
+  if (badPacket || fieldTrap) markers.push('bad-input:packet');
   // cycle-A6 F1: the evidenceRefs scan hit its index budget, so part
   // of the array was never visited — disclosed, never silently dropped.
   if (refsIn.scanExhausted) markers.push('bad-input:scan-budget');
+  // cycle-A7 F2: a trap/length-mismatch discards everything copyStrs
+  // read — disclose the drop (rule 5), distinct from truncated/spoofed.
+  if (refsIn.dropped) markers.push('refs:dropped');
 
   // ── assemble the record (INV-5) ──
   // Audit R4: markers (rule:/text:/probe:/judge:/bad-input:/…) are
