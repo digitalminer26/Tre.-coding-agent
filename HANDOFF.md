@@ -1,3 +1,44 @@
+# HANDOFF
+
+## 2026-11-05 — P12 integration module CLOSED (4 audit cycles); P10–P12 catch-up record; next: P15
+
+**P12 (this session's closure, on top of commit `6f518d8`):** cycle-4 audit
+(`.tre/p12-cycle4.out`, findings F1–F5) all fixed, each pinned by a test that
+FAILS against the pre-fix source (revert-discrimination verified per fix):
+**F1** sticky terminals (`already-executed`/`not-replayable`) returned before
+the open-intent recovery block — an intent open at the journal tail under an
+acked/act-unknown identity was unclosable forever; terminals now short-circuit
+only when the tail is NOT an open intent (recovery first — it can only journal
+truthful closure, never re-execute; the block ends in an unconditional refusal,
+no fall-through). **F2** the two C3 sticky tests forged
+`schema:"tre.supervisor-record/1"` — the real validator rejects it (probed);
+both now carry `"tre-supervisor/1"` + `doesNotThrow` against the real
+`validateSupervisorRecord`. **F3** bare repo collapsed into
+`context:repoRoot-not-a-repo`; now probed via `--is-bare-repository` with its
+own reason, and a third shape (non-bare `.git` dir) pinned as the control.
+**F4** killed writer (no reported CAS exit) + head back at the OLD value read
+as provable no-effect — an ABA; ANY unreported CAS exit is now `act-unknown:`
+(`close:aba`). **F5** `repoRoot.startsWith("/")` made the win32 case-fold
+branch dead code; replaced with platform-aware `isAbsolute` (POSIX-neutral,
+0/15 probe diffs). Module 58 tests, full suite **2140 pass / 0 fail /
+14 skipped**, quality gate green. docs/16 §10 records the dispositions;
+docs/11 ledger row appended + P12 roadmap row flipped to done.
+
+**Catch-up (never recorded — the P10/P11/P12 sessions skipped HANDOFF):**
+P10 planner `src/planner/plan.ts` (pure, docs/14, 5 hardening cycles) and
+P11 executor `src/executor/exec.ts` (hostile-plan fence, intent-before-act,
+`no-effect:` provability invariant, docs/15, 4 adversarial rounds) are DONE
+— see their docs/11 ledger rows. P12 module `src/integration/merge.ts`
+(contract + as-built docs/16, cycles 1–4: F1–F10 / F1–F10 / C3-F1–F9 / F1–F5)
+is DONE. The executor keeps `merge-unwired`; P9 composition injects this
+module as the merge port.
+
+**Next per docs/11 §11.1/§11.3:** the M1 prerequisite chain's last unstarted
+compartment is **P15 (investigation & recovery agent)** — dependencies
+(P0+P4+P5+P8) are all done; P10 already consumes the §14.3 `diagnosis`
+record, so P15 is the producer side of an already-pinned contract. P9/M1
+composition then closes the loop (P13 basic escalation rides with it).
+
 ## 2026-11-04 — P14 THIRD-FAMILY audit (gpt-6.1-sol): 5 Major + 1 Minor found & FIXED; acceptance RE-CLOSED
 
 Per user request the remediated evaluator (HEAD `87851dd`) was audited by a

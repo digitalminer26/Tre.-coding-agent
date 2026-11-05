@@ -132,10 +132,15 @@ interface IntegrationResult {
    same fail-closed rule as docs/15 §4 step 2). Scan for this `actionId`
    (`a-<taskId>-merge-<fnv1a(canonical{repoRoot, episodeId, taskId,
    episodeBranch, seq})>`):
-   - **acked outcome** → `refused(already-executed)`.
+   - **acked outcome** → `refused(already-executed)` — UNLESS the tail
+     of the journal is an OPEN intent for this actionId (cycle-4 F1: the
+     sticky terminals stop replays but must not strand the tail intent,
+     which only observed reality may close — recovery runs first, then
+     the terminals re-assert).
    - **outcome, un-acked, `no-effect:` marker** → replay permitted (a fresh
      intent, distinct journal ids).
-   - **outcome, un-acked, no marker** → `refused(not-replayable)`.
+   - **outcome, un-acked, no marker** → `refused(not-replayable)` — same
+     open-tail exemption as the acked case.
    - **open intent** → remember `{candidateSha}` recorded in it (from its
      `expectedEvidence`), and continue to §3 **resolve**; after the head
      is known, `merge-base --is-ancestor candidate head` decides:
@@ -224,6 +229,7 @@ interface IntegrationResult {
 | intent append failed | refused | nothing | yes |
 | CAS rejected (head moved) | refused head-moved | intent + `no-effect:` outcome | yes — replay IS the §5 "rebuild and retest" |
 | CAS failed, head unchanged | refused advance-failed | intent + `no-effect:` outcome | yes |
+| CAS died WITHOUT a reported exit (kill/timeout), head ANY value | failed advance-unverified | intent + `act-unknown:` outcome (`close:aba` when head sits at the old value) | no (cycle-4 F4: landed-then-reverted reads identical to never-written) |
 | CAS failed, head moved but candidate IS its ancestor | failed advance-unverified | intent + `act-unknown:` outcome | no (cycle-2 F4: write may have landed and been moved on — never `no-effect:`) |
 | CAS ok but verify contradicts/head unreadable | failed advance-unverified | intent + `act-unknown:` outcome | no |
 | merged, outcome/acceptance lost | merged, `outcomeDurable:false` | intent (outcome lost) | no (reconcile closes) |
@@ -484,3 +490,63 @@ kill-site distinction, realpath identity, case-folded pin) fails
 closed toward refusal/act-unknown, journals nothing on refusals, and
 never advances a ref. The two sticky terminals are the only monotonic
 facts a journal may assert, and both forbid re-execution.
+
+## 10. Cycle-4 audit dispositions (p12-cycle4.out, findings F1–F5)
+
+All five residual findings fixed and pinned by tests; 58/58 module
+tests, `tsc --noEmit` clean, quality gate green.
+
+- **F1 (fixed)** the sticky terminals (`already-executed` /
+  `not-replayable`) returned BEFORE the open-intent recovery block, so
+  the interleaving intent → acked-outcome → LATE intent (a writer that
+  appended its intent and died before any outcome) left the tail intent
+  unclosable forever — §2 step 2 says a tail intent closes ONLY on
+  observed reality. The terminals now short-circuit only when the tail
+  is NOT an open intent (`if (!open)`); with an open tail the recovery
+  probe runs first. This is safe because the recovery branch performs no
+  side effect unless reality proves the closure — it can only journal a
+  truthful `recovered` outcome, never re-execute — and after the closure
+  lands, the next issue meets a closed tail and the terminals re-assert.
+  Pinned by two tests: acked + late intent → `recovered
+  close:head-equals-candidate`, then a third issue → `already-executed`;
+  and act-unknown + unrelated open intent → `intent-open` with zero
+  journal writes (recovery refuses, terminals never lie).
+- **F2 (fixed — tests)** the two cycle-3 sticky tests forged outcome
+  records with schema `"tre.supervisor-record/1"` — NOT the real
+  `DECISION_SCHEMA_ID` (`"tre-supervisor/1"`), so
+  `validateSupervisorRecord` (and a real `DecisionJournal.append`)
+  would reject them: the interleaving was never proven producible. Both
+  forgeries now carry the real schema id and are asserted
+  `doesNotThrow` against the real validator; a new end-to-end test
+  replays the whole race through an on-disk `DecisionJournal` (real
+  append, real fsync, real read-back).
+- **F3 (fixed)** a hard `--show-toplevel` failure collapsed BOTH the
+  non-repo dir AND a BARE repo (exit 128 "must be run in a work tree")
+  into `context:repoRoot-not-a-repo` — a bare repo is a legitimate repo
+  shape and the P6-F4 rule forbids collapsing distinct documented
+  negatives. The catch now inspects the stderr for the work-tree report
+  and probes `rev-parse --is-bare-repository`: bare roots refuse with
+  their own `context:repoRoot-bare`, plain dirs keep
+  `context:repoRoot-not-a-repo`. Pinned by a bare-vs-plain test.
+- **F4 (fixed)** the killed-writer escape (c) required a THIRD-value
+  head (`!casRejectedClean && headNow !== episodeHead`): a writer that
+  LANDS the candidate, dies without reporting an exit (kill -9 — git
+  never reports), and is followed by an unrelated RESET back to the
+  exact old value read as "head unmoved → provable no-effect". That is
+  an ABA — exactly as consistent with landing-then-reverting as with
+  never writing. Any unreported CAS exit is now act-unknown whatever
+  the re-read shows, with the revert-to-old case tagged `close:aba`.
+  Pinned by a shim test (land → kill -9 → reset to old) asserting
+  `failed advance-unverified`, `act-unknown:` notes, the `close:aba`
+  tag, `outcomeDurable:false`, and the chained not-replayable on retry.
+- **F5 (fixed)** `repoRoot.startsWith("/")` refused every win32-absolute
+  path (`C:\x\repo`) before the case-insensitive `pathEq` pin could
+  run — the claimed Windows support was dead code. The check is now
+  `isAbsolute` from `node:path` (platform-aware), so the identity pin
+  actually executes on win32.
+
+Doctrine check for cycle 4: every fix fails closed (new reasons refuse
+with zero journal writes; the widened act-unknown class can only
+FORBID a replay, never permit one; the recovery-first ordering performs
+no mutation without observed proof). The sticky terminals remain
+monotonic — F1 moves WHEN they are consulted, never WHAT they assert.

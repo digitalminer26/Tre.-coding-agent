@@ -1174,11 +1174,17 @@ test("P12 C3-F1 sticky: an acked outcome is NEVER unset by a later no-effect rec
   assert.equal(r1.status, "merged");
   // Forge B's late no-effect outcome for the SAME actionId (a journal
   // can always receive records out of order from another writer).
-  await j.append({
-    schema: "tre.supervisor-record/1", kind: "decision-outcome", id: `${r1.actionId}#o9`, ts: 1700000999999,
+  // Cycle-4 audit F2: the forged record must carry the REAL schema id
+  // ("tre-supervisor/1" — journal.ts DECISION_SCHEMA_ID) and pass the
+  // real validateSupervisorRecord, or the interleaving it simulates is
+  // not producible through a real DecisionJournal append.
+  const lateNoEffect = {
+    schema: "tre-supervisor/1", kind: "decision-outcome", id: `${r1.actionId}#o9`, ts: 1700000999999,
     episodeId: "ep1", taskId: "t1", actionId: r1.actionId, acked: false, progress: "none",
     notes: "no-effect: head-moved", evidenceRefs: [],
-  });
+  };
+  assert.doesNotThrow(() => validateSupervisorRecord(lateNoEffect as never), "forged record must be real-journal-producible");
+  await j.append(lateNoEffect);
   advanceBranch(fx.dir, "agent/ep1/t1", "new task work"); // would enable a NEW merge
   const again = await integrateTestedCandidate(req(fx, { now: 1700000888001 }), ports(j));
   assert.equal(again.status, "refused", "acked is sticky-terminal");
@@ -1196,11 +1202,16 @@ test("P12 C3-F1 sticky: act-unknown outranks interleaved no-effect outcomes", as
   assert.equal(r1.reason, "fence:verify:Error");
   assert.equal((j.records[1] as Record<string, unknown>).notes, "act-unknown: fence-verify:Error");
   // A LATER writer interleaves a no-effect outcome for the same identity.
-  await j.append({
-    schema: "tre.supervisor-record/1", kind: "decision-outcome", id: `${r1.actionId}#o8`, ts: 1700000999998,
+  // Cycle-4 audit F2: REAL schema id + real-validator check (see the
+  // companion test) — a forgery with a fake schema would never survive
+  // a DecisionJournal.append.
+  const interleaved = {
+    schema: "tre-supervisor/1", kind: "decision-outcome", id: `${r1.actionId}#o8`, ts: 1700000999998,
     episodeId: "ep1", taskId: "t1", actionId: r1.actionId, acked: false, progress: "none",
     notes: "no-effect: head-moved", evidenceRefs: [],
-  });
+  };
+  assert.doesNotThrow(() => validateSupervisorRecord(interleaved as never), "forged record must be real-journal-producible");
+  await j.append(interleaved);
   const again = await integrateTestedCandidate(req(fx, { now: 1700000888004 }), ports(j));
   assert.equal(again.status, "refused");
   assert.equal(again.reason, "not-replayable", "a later no-effect must not wash out the sticky act-unknown");
@@ -1379,4 +1390,189 @@ test("P12 C3-F9 case-folded path identity: differently-cased repoRoot is the sam
     assert.match(r.reason ?? "", /^context:repoRoot/);
   }
   assert.equal(head(fx.dir, "refs/heads/ep1"), j.records.length > 0 ? r.episodeHead : fx.epHead);
+});
+
+// ─── cycle-4 audit closures (C4-F1/F2/F3/F4) ─────────────────────────────
+
+test("P12 C4-F1: a sticky acked outcome does NOT strand a late open intent — recovery closes it on observed reality", async (t) => {
+  // The F1 interleaving: execution A merges and acks (sticky
+  // already-executed). Then a LATE intent for the SAME identity reaches
+  // the journal tail (a writer that appended its intent and died before
+  // any outcome — §2 step 2: the tail intent is closed ONLY by observed
+  // reality). Old code returned already-executed BEFORE the recovery
+  // probe, so the tail intent was unclosable forever.
+  const fx = makeRepo(t);
+  const j = memJournal();
+  const r1 = await integrateTestedCandidate(req(fx), ports(j));
+  assert.equal(r1.status, "merged");
+  const candidate = r1.candidateSha as string;
+  // Late writer: appends ONLY an intent for the same identity, then dies.
+  await j.append({
+    schema: "tre-supervisor/1", kind: "decision-intent", id: `${r1.actionId}#i99`, ts: 1700000999800,
+    episodeId: "ep1", taskId: "t1", actionId: r1.actionId, rung: 4, action: "merge",
+    expectedEvidence: `candidate:${candidate}`, authority: { grantedBy: "human", sideEffect: "external" },
+  } as never);
+  assert.doesNotThrow(() => validateSupervisorRecord((j.records[3] ?? {}) as never), "late intent must be real-journal-producible");
+  // Same identity re-issued: head still equals the recorded candidate →
+  // the tail intent CLOSES (recovered), it is not swallowed by the
+  // sticky ack.
+  const again = await integrateTestedCandidate(req(fx, { now: 1700000888100 }), ports(j));
+  assert.equal(again.status, "recovered", `the tail intent must be closable: ${again.stage}:${again.reason}`);
+  assert.ok(again.evidenceRefs.includes("close:head-equals-candidate"));
+  const tail = j.records[j.records.length - 1] as Record<string, unknown>;
+  assert.equal(tail.kind, "decision-outcome");
+  assert.equal(tail.acked, true);
+  // AND the sticky terminal still holds afterwards: a THIRD issue with no
+  // open intent finds already-executed, and journals nothing further.
+  const third = await integrateTestedCandidate(req(fx, { now: 1700000888101 }), ports(j));
+  assert.equal(third.status, "refused");
+  assert.equal(third.reason, "already-executed");
+});
+
+test("P12 C4-F1: sticky act-unknown does not strand an open tail intent either", async (t) => {
+  // act-unknown (not-replayable) + open tail intent: the recovery probe
+  // is side-effect-free until reality proves closure — when reality
+  // proves nothing (head descends from nothing, candidate unrelated),
+  // the request still refuses intent-open, journaling nothing.
+  const fx = makeRepo(t);
+  const j = memJournal();
+  const r1 = await integrateTestedCandidate(req(fx), ports(j));
+  assert.equal(r1.status, "merged");
+  git(fx.dir, ["update-ref", "refs/heads/ep1", fx.epHead]); // undo
+  // un-acked act-unknown outcome (sticky not-replayable)
+  await j.append({
+    schema: "tre-supervisor/1", kind: "decision-outcome", id: `${r1.actionId}#o50`, ts: 1700000999700,
+    episodeId: "ep1", taskId: "t1", actionId: r1.actionId, acked: false, progress: "none",
+    notes: "act-unknown: advance-unverified", evidenceRefs: [],
+  } as never);
+  // late open intent at the tail, candidate unrelated to reality
+  await j.append({
+    schema: "tre-supervisor/1", kind: "decision-intent", id: `${r1.actionId}#i98`, ts: 1700000999800,
+    episodeId: "ep1", taskId: "t1", actionId: r1.actionId, rung: 4, action: "merge",
+    expectedEvidence: `candidate:${"b".repeat(40)}`, authority: { grantedBy: "human", sideEffect: "external" },
+  } as never);
+  const before = j.records.length;
+  const again = await integrateTestedCandidate(req(fx, { now: 1700000888102 }), ports(j));
+  assert.equal(again.status, "refused");
+  // With an open tail intent the recovery branch runs first and finds
+  // nothing observable → intent-open (NOT the old not-replayable
+  // short-circuit); either way NOTHING is journaled and the ref is still
+  // untouched.
+  assert.equal(again.reason, "intent-open", `open-tail discipline: ${again.reason}`);
+  assert.equal(j.records.length, before, "a refusal journals nothing");
+  assert.equal(head(fx.dir, "refs/heads/ep1"), fx.epHead);
+});
+
+test("P12 C4-F2: the sticky interleaving is producible through the REAL DecisionJournal (no forged schema)", async (t) => {
+  // The cycle-3 F1 tests forged outcome records with a fake schema id —
+  // a real DecisionJournal.append (and the real P4 validator) would
+  // reject them, so the interleaving was never proven reachable. This is
+  // the real-journal end-to-end proof: merged (via the real journal), a
+  // late no-effect outcome appended THROUGH the real journal, re-issue →
+  // already-executed.
+  const dirw = mkdtempSync(join(tmpdir(), "tre-p12-c4f2-"));
+  t.after(() => rmSync(dirw, { recursive: true, force: true }));
+  const fx = makeRepo(t);
+  const real = await DecisionJournal.open(join(dirw, "decisions.jsonl"));
+  const r1 = await integrateTestedCandidate(req(fx, { now: 1700000888110 }), { journal: real, gate: passGate });
+  assert.equal(r1.status, "merged");
+  // Late CAS-loser outcome for the SAME identity — through the REAL
+  // append path (validate + fsync).
+  await real.append({
+    schema: "tre-supervisor/1", kind: "decision-outcome", id: `${r1.actionId}#o9`, ts: 1700000999999,
+    episodeId: "ep1", taskId: "t1", actionId: r1.actionId, acked: false, progress: "none",
+    notes: "no-effect: head-moved", evidenceRefs: [],
+  } as never);
+  advanceBranch(fx.dir, "agent/ep1/t1", "new task work");
+  const again = await integrateTestedCandidate(req(fx, { now: 1700000888111 }), { journal: real, gate: passGate });
+  assert.equal(again.status, "refused");
+  assert.equal(again.reason, "already-executed", "acked stays sticky across a real-journal interleave");
+  assert.equal(head(fx.dir, "refs/heads/ep1"), r1.candidateSha, "the refused replay never merges the new tip");
+  const read = await real.read();
+  for (const rec of read.records) {
+    assert.doesNotThrow(() => validateSupervisorRecord(rec as never), "every on-disk record is validator-clean");
+  }
+});
+
+test("P12 C4-F3: a BARE repo refuses with its own reason (context:repoRoot-bare), never the non-repo mask", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "tre-p12-bare-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bareDir = join(dir, "repo.git");
+  git(dir, ["init", "--bare", "-q", "repo.git"]);
+  const j = memJournal();
+  const r = await integrateTestedCandidate(
+    { ...req({ dir }, { now: 1700000888120 }), repoRoot: resolve(bareDir) }, ports(j));
+  assert.equal(r.status, "refused");
+  assert.equal(r.reason, "context:repoRoot-bare",
+    `a bare repo is a legitimate repo shape — the refusal must say so: ${r.reason}`);
+  assert.equal(j.records.length, 0, "the refusal journals nothing");
+  // Control: a plain non-repo dir keeps the ORIGINAL reason (F3 asked
+  // for distinguishability, not a rename).
+  const plain = mkdtempSync(join(tmpdir(), "tre-p12-plain-"));
+  t.after(() => rmSync(plain, { recursive: true, force: true }));
+  const r2 = await integrateTestedCandidate(
+    { ...req({ dir: plain }, { now: 1700000888121 }), repoRoot: resolve(plain) }, ports(j));
+  assert.equal(r2.status, "refused");
+  assert.equal(r2.reason, "context:repoRoot-not-a-repo");
+  // Third shape (probed): a NON-BARE .git dir ALSO fails --show-toplevel
+  // with the work-tree message, but --is-bare-repository answers
+  // "false" — the bare probe must not misclassify it as bare.
+  const work = mkdtempSync(join(tmpdir(), "tre-p12-gitdir-"));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  git(work, ["init", "-q"]);
+  const r3 = await integrateTestedCandidate(
+    { ...req({ dir: work }, { now: 1700000888122 }), repoRoot: resolve(join(work, ".git")) }, ports(j));
+  assert.equal(r3.status, "refused");
+  assert.equal(r3.reason, "context:repoRoot-not-a-repo",
+    `a non-bare .git dir hits the work-tree message but is NOT bare: ${r3.reason}`);
+});
+
+test("P12 C4-F4: killed writer (no reported exit) + head reverted to the OLD value → act-unknown close:aba, never no-effect", async (t) => {
+  // ABA state: update-ref LANDS the candidate, the writer is killed
+  // (137 — no exit git ever reported), and before our re-read an
+  // unrelated actor RESETS ep1 back to the exact old value. Head reads
+  // unmoved, which is exactly as consistent with "landed then reverted"
+  // as with "never wrote" — with the writer's death unreported,
+  // nothing-happened is NOT provable. Old code wrote no-effect.
+  const fx = makeRepo(t);
+  const j = memJournal();
+  const dir = mkdtempSync(join(tmpdir(), "tre-p12-shim-aba-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const probe = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" });
+  const real = (probe.stdout ?? "").trim();
+  if (!real) throw new Error("no real git on PATH for the shim");
+  const marker = join(dir, "ARMED");
+  const oldRef = join(dir, "OLDVAL");
+  // update-ref refs/heads/ep1 <new> <old>: capture <old>, land, arm, die.
+  // First post-arm rev-parse resets ep1 back to <old> (the ABA revert).
+  const body = [
+    "#!/bin/sh", `REAL="${real}"`, `MARKER="${marker}"`, `OLDREF="${oldRef}"`, `REPO="${fx.dir}"`,
+    'sub=""; for a in "$@"; do case "$a" in update-ref|rev-parse) sub="$a";; esac; done',
+    'if [ "$sub" = update-ref ]; then printf "%s" "$4" > "$OLDREF"; "$REAL" "$@"; rc=$?; [ $rc -eq 0 ] && touch "$MARKER"; kill -9 $$; fi',
+    'if [ "$sub" = rev-parse ] && [ -f "$MARKER" ] && [ ! -f "$MARKER.done" ]; then',
+    '  "$REAL" -C "$REPO" update-ref refs/heads/ep1 "$(cat "$OLDREF")" 2>/dev/null; touch "$MARKER.done"',
+    "fi",
+    '"$REAL" "$@"', "",
+  ].join("\n");
+  const shim = join(dir, "git");
+  writeFileSync(shim, body);
+  chmodSync(shim, 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${dir}${delimiter}${saved}`;
+  let r;
+  try { r = await integrateTestedCandidate(req(fx, { now: 1700000888130 }), ports(j)); } finally { process.env.PATH = saved; }
+  assert.equal(head(fx.dir, "refs/heads/ep1"), fx.epHead, "the revert really put the old value back");
+  assert.equal(r.status, "failed", `unreported writer death + ABA head is UNVERIFIABLE: ${r.stage}:${r.reason}`);
+  assert.equal(r.stage, "verify");
+  assert.equal(r.reason, "advance-unverified");
+  assert.equal(r.outcomeDurable, false, "landed-unknown is never claimed durable");
+  const outcome = j.records[1] as Record<string, unknown>;
+  assert.ok(String(outcome.notes).startsWith("act-unknown:"), `never no-effect: got ${JSON.stringify(outcome.notes)}`);
+  assert.ok((outcome.evidenceRefs as string[]).includes("close:aba"),
+    `expected the close:aba evidence tag, got ${JSON.stringify(outcome.evidenceRefs)}`);
+  // The chained §2 rule: the identity is now sticky not-replayable —
+  // recovery is a NEW identity (seq bump), not a same-identity retry.
+  const again = await integrateTestedCandidate(req(fx, { now: 1700000888131 }), ports(j));
+  assert.equal(again.status, "refused");
+  assert.equal(again.reason, "not-replayable");
 });

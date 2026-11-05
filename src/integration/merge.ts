@@ -43,6 +43,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 
 // ─── git plumbing (P6 discipline: fixed argv, bounded, documented negatives) ─
 
@@ -369,7 +370,13 @@ async function runMergeOnce(
     const taskId = own(r, "taskId");
     const episodeBranch = own(r, "episodeBranch");
     const nowRaw = own(r, "now");
-    if (!isStr(repoRoot) || !repoRoot.startsWith("/")) return refused("context", "context:repoRoot");
+    // Cycle-4 audit F5: `startsWith("/")` made the pathEq win32 case-fold
+    // branch below UNREACHABLE (a win32 absolute path like `C:\\x\\repo`
+    // was refused as context:repoRoot before the case-fold ever ran) — the
+    // claimed Windows support was dead code. node:path isAbsolute is
+    // platform-aware (POSIX: leading "/"; win32: drive letters and UNC),
+    // so the identity pin below actually runs on every supported platform.
+    if (!isStr(repoRoot) || !isAbsolute(repoRoot)) return refused("context", "context:repoRoot");
     if (typeof episodeId !== "string" || !SAFE_ID.test(episodeId) || episodeId === "." || episodeId === "..") return refused("context", "context:episodeId");
     if (typeof taskId !== "string" || !SAFE_ID.test(taskId) || taskId === "." || taskId === "..") return refused("context", "context:taskId");
     if (typeof episodeBranch !== "string" || !SAFE_ID.test(episodeBranch) || episodeBranch === "." || episodeBranch === "..") return refused("context", "context:episodeBranch");
@@ -486,10 +493,24 @@ async function runMergeOnce(
     } catch {
       return refused("dedup", "journal-unreadable", actionId);
     }
+    // Cycle-4 audit F1: the sticky TERMINALS used to return here, BEFORE
+    // the open-intent recovery block — so the interleaving intent →
+    // acked-outcome → LATE intent (a writer that appended its intent but
+    // died before the outcome; §2 step 2 says the tail intent is closed
+    // ONLY by observed reality) was unclosable forever: `done` short-
+    // circuited the recovery probe. Terminals are STILL sticky for
+    // replay, but the recovery branch below performs NO side effect
+    // unless observed reality proves the closure — running it against an
+    // open tail intent can only journal a truthful recovered outcome,
+    // never re-execute — so when the TAIL is an open intent, fall
+    // through: recovery first, terminals after (intent-tail discipline
+    // outranks terminal-replay discipline).
     const done = ackedSeen;
     const notReplayable = !ackedSeen && unknownSeen;
-    if (done) return refused("dedup", "already-executed", actionId);
-    if (notReplayable) return refused("dedup", "not-replayable", actionId);
+    if (!open) {
+      if (done) return refused("dedup", "already-executed", actionId);
+      if (notReplayable) return refused("dedup", "not-replayable", actionId);
+    }
     // Replay suffixes by per-actionId counts (distinct journal ids; the
     // real DecisionJournal's duplicate-id reporting stays advisory).
     const intentSuffix = nIntent === 0 ? `${snap.seq}` : `${snap.seq}r${nIntent}`;
@@ -535,7 +556,24 @@ async function runMergeOnce(
     let toplevel = "";
     try {
       toplevel = (await git(repo, ["rev-parse", "--show-toplevel"])).trim();
-    } catch {
+    } catch (e) {
+      // Cycle-4 audit F3: `--show-toplevel` fails (exit 128) BOTH outside
+      // any repo AND inside a BARE repo ("fatal: this operation must be
+      // run in a work tree" — probed). Bare-ness is a legitimate repo
+      // shape, so the two cases must not collapse into one reason (the
+      // P6-F4 rule: documented negatives stay distinguishable). Probe
+      // `--is-bare-repository`: exit 0 + "true" anywhere inside a repo
+      // (bare or not), non-zero outside one. A merge needs a work tree
+      // (no work-tree execution here), so a bare root refuses with its
+      // OWN reason rather than masquerading as "not a git repo".
+      const msg = (e as GitFail)?.stderr ?? "";
+      const maybeBare = typeof (e as GitFail)?.code === "number"
+        && /must be run in a work tree/i.test(msg);
+      if (maybeBare) {
+        let bare = false;
+        try { bare = ((await git(repo, ["rev-parse", "--is-bare-repository"])).trim() === "true"); } catch { bare = false; }
+        if (bare) return refused("context", "context:repoRoot-bare", actionId);
+      }
       return refused("context", "context:repoRoot-not-a-repo", actionId);
     }
     // Cycle-3 audit C3-F9: on case-INSENSITIVE filesystems (APFS case-
@@ -842,20 +880,26 @@ async function runMergeOnce(
       //      into a ref a later actor then DELETED (docs table: "head
       //      unreadable → UNKNOWN, never no-effect") → UNKNOWN.
       //  (c) the CAS died WITHOUT reporting an exit code (signal kill /
-      //      timeout) and head sits at a third value — the kill may have
-      //      come after the rename landed, and a later reset to an
-      //      unrelated commit erases the ancestor evidence → UNKNOWN.
+      //      timeout): the kill may have come AFTER the rename landed.
+      //      Cycle-4 audit F4 extends this to head sitting back at the
+      //      OLD value: landed-then-reverted-to-old (an ABA) is exactly
+      //      as consistent with a killed writer as head at a third value
+      //      is — "head equals the old value" is NOT evidence nothing
+      //      happened once the writer's death is unreported (a later
+      //      `update-ref old` erases the trace). Any unreported CAS exit
+      //      is act-unknown, whatever the re-read shows.
       // A CLEAN numeric rejection (git's own old-value/stale-lock report,
       // exit before the rename) with head observable at a value is the
       // only state where no-effect is provable.
       const landedThenMoved = headNow !== "" && headNow !== episodeHead
         && await probeExit0(repo, ["merge-base", "--is-ancestor", candidateSha, headNow]).catch(() => true);
-      if (landedThenMoved || headNow === "" || (!casRejectedClean && headNow !== episodeHead)) {
+      if (landedThenMoved || headNow === "" || !casRejectedClean) {
         await appendOutcome({
           id: `${actionId}#o${outcomeSuffix}`, ts: now, episodeId: snap.episodeId, taskId: snap.taskId,
           actionId, acked: false, progress: "none",
           evidenceRefs: [`head:${headNow === "" ? "unreadable" : headNow}`, `candidate:${candidateSha}`,
-            landedThenMoved ? "close:candidate-ancestor-of-head" : headNow === "" ? "close:head-unreadable" : "close:cas-kill-unverifiable"],
+            landedThenMoved ? "close:candidate-ancestor-of-head" : headNow === "" ? "close:head-unreadable"
+              : headNow === episodeHead ? "close:aba" : "close:cas-kill-unverifiable"],
           notes: "act-unknown: advance-unverified",
         });
         return { actionId, status: "failed", stage: "verify", reason: "advance-unverified",
