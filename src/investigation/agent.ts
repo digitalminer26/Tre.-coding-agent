@@ -288,6 +288,24 @@ function arrayTrap(v: unknown): boolean {
   }
 }
 
+/** True ONLY for a hostile-present handle of ANY shape: an object whose
+ *  IsArray or getPrototypeOf intrinsic THROWS (a revoked proxy or a
+ *  trapping target). Plain objects, plain arrays, and every primitive
+ *  answer false, so harmless garbage stays distinguishable from an
+ *  actively hostile handle (cycle-A8 F2: isPlainObj's catch used to
+ *  erase revoked `facts`/`signal`/`acceptance` handles with NO marker
+ *  — classification silently changed under the caller). */
+function trapPresent(v: unknown): boolean {
+  if (typeof v !== 'object' || v === null) return false;
+  try {
+    Array.isArray(v);
+    Object.getPrototypeOf(v);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function isStr(v: unknown): v is string {
   return typeof v === 'string';
 }
@@ -365,9 +383,11 @@ function safeRead(obj: unknown, key: string): unknown {
 const COPY_SCAN_BUDGET = MAX_REFS * 16; // 1024 indices; the tail discloses via overflow + bad-input:scan-budget
 function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhausted: boolean; dropped: boolean; hostile: boolean } {
   if (!isArraySafe(raw)) {
-    // Hostile-but-present (revoked/trapping array; `arrayTrap` answers
-    // false for a plain non-array) vs absent/plain garbage.
-    const hostile = arrayTrap(raw);
+    // Hostile-but-present (revoked/trapping handle of any shape;
+    // `trapPresent` answers false for plain garbage) vs absent/plain
+    // garbage. Cycle-A8 F2: broadened from arrayTrap so a trapping-
+    // prototype object is disclosed too.
+    const hostile = trapPresent(raw);
     return { refs: [], overflow: false, scanExhausted: false, dropped: false, hostile };
   }
   let n = 0;
@@ -407,11 +427,21 @@ function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhaus
       overflow = true;
     }
   }
-  if (!ok) return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
+  // Cycle-A8 F6 (minor): every path below is a TRAP or a LIE about the
+  // handle (per-index descriptor trap, length-getter throw, re-verify
+  // mismatch), so `hostile` rides along with `dropped` —
+  // bad-input:packet + refs:dropped. A consumer keying on
+  // bad-input:packet as "hostile packet" can no longer miss it.
+  if (!ok) return dropHostile();
   try {
-    if ((raw as unknown[]).length !== n) return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
+    if ((raw as unknown[]).length !== n) return dropHostile(); // the handle LIED about its length within one call
   } catch {
-    return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: false };
+    return dropHostile(); // length-getter trap on re-verify
+  }
+  /* shared discard value for the trap/lie paths (named so the
+     red-team mutation M15 targets one site) */
+  function dropHostile(): { refs: string[]; overflow: boolean; scanExhausted: boolean; dropped: boolean; hostile: boolean } {
+    return { refs: [], overflow: false, scanExhausted: false, dropped: true, hostile: true };
   }
   return { refs: out, overflow, scanExhausted, dropped: false, hostile: false };
 }
@@ -419,16 +449,22 @@ function copyStrs(raw: unknown): { refs: string[]; overflow: boolean; scanExhaus
 /** Merge ONLY the closed fact keys at boolean type (INV-4). Both the
  *  packet's `facts` and probe results pass through here; anything
  *  else in either object is dropped without being read. */
-function mergeFacts(target: Map<string, boolean>, raw: unknown): void {
-  if (!isPlainObj(raw)) return;
+/** Returns TRUE when ANY closed-key descriptor read trapped (cycle-A8
+ *  F2: a trapping `facts` handle used to merge NOTHING with no trace —
+ *  classification silently changed under the caller). */
+function mergeFacts(target: Map<string, boolean>, raw: unknown): boolean {
+  if (!isPlainObj(raw)) return false;
   let merged = 0;
+  let trapped = false;
   for (const k of FACT_KEYS) {
     const d = ownData(raw, k);
+    if (d.threw) trapped = true;
     if (d.present && typeof d.value === 'boolean') {
       target.set(k, d.value);
       if (++merged >= MAX_FACT_KEYS) break;
     }
   }
+  return trapped;
 }
 
 // ─── Text-pattern derivation (docs/17 §3.3) — closed substring table ──────
@@ -746,9 +782,11 @@ export async function investigate(
   const signalRaw = pd('signal').value;
   let signalKind: string | undefined;
   if (isPlainObj(signalRaw)) {
-    const k = boundedStr(ownData(signalRaw, 'kind').value);
+    const kd = ownData(signalRaw, 'kind');
+    const k = boundedStr(kd.value);
     if (k !== undefined && (SIGNAL_KINDS as readonly string[]).includes(k)) signalKind = k;
-  }
+    if (kd.threw) fieldTrap = true; // cycle-A8 F2: descriptor trap inside a tame handle is hostile input
+  } else if (trapPresent(signalRaw)) fieldTrap = true; // cycle-A8 F2: revoked/trapping signal handle
   const wsRaw = boundedStr(pd('workerState').value);
   const workerState = wsRaw !== undefined && (WORKER_STATES as readonly string[]).includes(wsRaw) ? wsRaw : undefined;
   const runEndReasonRaw = boundedStr(pd('runEndReason').value);
@@ -760,12 +798,21 @@ export async function investigate(
   const accRaw = pd('acceptance').value;
   let acceptanceVerdict: string | undefined;
   if (isPlainObj(accRaw)) {
-    const v = boundedStr(ownData(accRaw, 'verdict').value);
+    const vd = ownData(accRaw, 'verdict');
+    const v = boundedStr(vd.value);
     if (v === 'complete' || v === 'incomplete' || v === 'blocked' || v === 'uncertain') acceptanceVerdict = v;
-  }
+    if (vd.threw) fieldTrap = true; // cycle-A8 F2
+  } else if (trapPresent(accRaw)) fieldTrap = true; // cycle-A8 F2
 
   const explicit = new Map<string, boolean>();
-  mergeFacts(explicit, pd('facts').value);
+  {
+    // cycle-A8 F2: a revoked/trapping `facts` handle silently flipped
+    // classification pre-A8 (isPlainObj's catch erased it); so did a
+    // descriptor trap on a CLOSED fact key. Both now disclose via
+    // fieldTrap -> bad-input:packet.
+    const factsRaw = pd('facts').value;
+    if (mergeFacts(explicit, factsRaw) || trapPresent(factsRaw)) fieldTrap = true;
+  }
 
   // Text derivation (docs/17 §3.3): errors + signalDetail, bounded.
   const derived = new Set<string>();
@@ -780,13 +827,19 @@ export async function investigate(
     // present handle is disclosed, never propagated (INV-1).
     if (isArraySafe(errsRaw)) {
       let n = 0;
-      try { const len = (errsRaw as unknown[]).length; if (Number.isInteger(len) && len >= 0) n = Math.min(len, MAX_ERRS); } catch { n = 0; }
+      // Cycle-A8 F2: a length-GETTER trap zeroed the collection in
+      // silence pre-A8 (the errors text derivation simply saw nothing).
+      try { const len = (errsRaw as unknown[]).length; if (Number.isInteger(len) && len >= 0) n = Math.min(len, MAX_ERRS); } catch { n = 0; fieldTrap = true; }
       for (let i = 0; i < n; i++) {
         let d: PropertyDescriptor | undefined;
         try {
           d = Object.getOwnPropertyDescriptor(errsRaw, i);
         } catch {
-          break; // per-index descriptor trap (audit R1): stop collecting
+          // per-index descriptor trap (audit R1): stop collecting —
+          // cycle-A8 F2: the text derivation lost the remaining errors
+          // to a TRAP on the packet's own handle: disclose.
+          fieldTrap = true;
+          break;
         }
         if (d === undefined || !('value' in d) || !isPlainObj(d.value)) continue;
         const t = boundedStr(ownData(d.value, 'text').value);
@@ -832,6 +885,11 @@ export async function investigate(
     }
   }
   let badMaxCalls = false;
+  let badMaxUsdEarly = badLimits; // set before the slots below; folded into badMaxUsd at its declaration
+  // Cycle-A8 F1: an unusable limits HANDLE (revoked / trapping /
+  // non-plain) makes both field reads vacuous — treat both budgets as
+  // hostile BEFORE the slot tri-state decides, or the defaults leak.
+  if (badLimits) badMaxCalls = true;
   const maxToolCallsSlot = limRaw !== undefined ? ownData(limRaw, 'maxToolCalls') : { present: false, value: undefined };
   // Cycle-A7 F3 (major): a getOwnPropertyDescriptor TRAP on the field
   // reads as `{present:false}` — the old code fell through to the
@@ -846,13 +904,20 @@ export async function investigate(
   // a present field with a non-undefined, non-coercible value is
   // hostile input.
   if (maxToolCallsSlot.present && maxToolCallsSlot.value !== undefined && maxToolCallsRaw === undefined) badMaxCalls = true;
-  const maxToolCalls = maxToolCallsSlot.threw ? 0 : (maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length));
-  let badMaxUsd = false;
+  // Cycle-A8 F1 (major): ANY hostile-but-present limits input (trapping
+  // field, present-but-unusable value, unusable handle) fails the
+  // budget CLOSED to zero. Pre-A8 only descriptor TRAPS failed closed;
+  // `{maxUsd:"0"}` / `{maxUsd:NaN}` / a revoked limits handle still
+  // fell through to the DEFAULT budget — the exact $0.15-spent-under-
+  // maxUsd:0 harm A7-F3 closed, reachable through other paths.
+  // An absent field is NOT hostile input and keeps the default.
+  const maxToolCalls = badMaxCalls ? 0 : (maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length));
+  let badMaxUsd = badMaxUsdEarly; // cycle-A8 F1: unusable handle == the usd budget is hostile too
   const maxUsdSlot = limRaw !== undefined ? ownData(limRaw, 'maxUsd') : { present: false, value: undefined };
   if (maxUsdSlot.threw) badMaxUsd = true; // cycle-A7 F3: trap != absent (fail-closed, see above)
   const maxUsdRaw = maxUsdSlot.present ? finiteAtMost(maxUsdSlot.value, Number.MAX_SAFE_INTEGER, 0) : undefined;
   if (maxUsdSlot.present && maxUsdSlot.value !== undefined && maxUsdRaw === undefined) badMaxUsd = true;
-  const maxUsd = maxUsdSlot.threw ? 0 : (maxUsdRaw ?? DEFAULT_MAX_USD);
+  const maxUsd = badMaxUsd ? 0 : (maxUsdRaw ?? DEFAULT_MAX_USD); // cycle-A8 F1: fail closed on ANY hostile limits input
 
   // ── classify → confirm → probe loop (docs/17 §3/§5) ──
   const ctx: ClassInput = { workerState, runEndReason, guardFires: guardFiresN, acceptanceVerdict };
@@ -882,7 +947,11 @@ export async function investigate(
     if (next === undefined) break;
     // Charge-first budget check: never start a probe whose estimate
     // would cross the cap (INV-3). Skip WITHOUT counting as used.
-    if (spendUsd + next.estimateUsd > maxUsd + 1e-9 || toolsUsed >= maxToolCalls) {
+    // Cycle-A8 F4 (minor): at maxUsd = MAX_SAFE_INTEGER the cumulative
+    // clamp makes spendUsd MSI-exact while the TRUE sum keeps growing
+    // (MSI + 0.02 rounds back to MSI, so the `>` check passes forever)
+    // — a saturated ledger stops admission regardless of the estimate.
+    if (spendUsd >= Number.MAX_SAFE_INTEGER || spendUsd + next.estimateUsd > maxUsd + 1e-9 || toolsUsed >= maxToolCalls) {
       markers.push(`probe:${next.id}:skipped-budget`);
       tried.add(next.id); // a skipped probe is never re-considered
       continue;

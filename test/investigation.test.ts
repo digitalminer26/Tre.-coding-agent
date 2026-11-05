@@ -598,14 +598,17 @@ test("A4-R1: tools:null and a throwing `run` getter never crash the loop", async
   assert.equal(hits, 1, "the run getter is resolved exactly once, never re-invoked per probe");
 });
 
-test("A4-R1: options/limits handles with throwing getters fall back to defaults", async () => {
+test("A4-R1/A8-F1: options/limits handles with throwing getters fail CLOSED (no default-budget spend)", async () => {
   const opts = { get limits(): never { throw new Error("limits trap"); } };
   const log: { probe: string; episodeId: string }[] = [];
-  const rec = await investigate(basePacket(), { now: clock(), tools: scriptedTools({}, log) }, opts as never);
+  const rec = await investigate(basePacket({ workerState: "running" }), { now: clock(), tools: scriptedTools({}, log) }, opts as never);
   assertValid(rec);
-  // hostile-but-present limits handle is disclosed, defaults still applied
+  // hostile-but-present limits handle is disclosed AND fails the
+  // budget closed (cycle-A8 F1: the old "defaults still applied"
+  // behavior spent the caller's $0.50 under a hostile handle).
   assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
-  assert.equal(log.length > 0, true, "default budget still allows probes");
+  assert.equal(log.length, 0, "a trapping limits getter may not admit probes");
+  assert.equal(rec.limitsRespected.toolsUsed, 0);
 });
 
 test("A4-R2: fractional maxToolCalls FLOORS — 2.5 admits TWO probes, never three", async () => {
@@ -881,10 +884,118 @@ test("A7-F7: a packet descriptor trap (proto passes) marks bad-input:packet", as
 
 test("A7-F9: cumulative spend clamps to MAX_SAFE_INTEGER (reported figure stays exact)", async () => {
   const rec = await investigate(basePacket({ workerState: "running" }),
-    { now: clock(), tools: { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }) } },
+    { now: clock(), tools: { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER * 0.75 }) } },
     { limits: { maxUsd: Number.MAX_SAFE_INTEGER } });
-  assert.ok(rec.limitsRespected.toolsUsed >= 3, "several probes must run to exercise the SUM");
+  // Cycle-A8: reports of 0.75*MSI make the TRUE sum 1.5*MSI (MSI/2
+  // reports round exactly onto MSI and could not tell the clamp from
+  // the F4 saturation stop); the clamp holds the figure at MSI and
+  // admission stops (a clamped total can no longer re-admit probes).
+  assert.ok(rec.limitsRespected.toolsUsed >= 2, "at least the saturating probes must run");
   assert.equal(rec.limitsRespected.spendUsd, Number.MAX_SAFE_INTEGER);
+  const saturated = rec.evidenceRefs.filter((r) => r.includes("skipped-budget"));
+  assert.ok(saturated.length > 0, "saturation must stop admission with the budget-skip disclosure");
+  assertValid(rec);
+});
+
+// ────────────────────── cycle-A8 findings (audit + fixes) ──────────────────
+
+test("A8-F1 (INV-3): present-but-unusable maxUsd value fails the budget CLOSED, not to the default", async () => {
+  // Pre-A8: {maxUsd:"0"} marked bad-input:limits but spent the DEFAULT
+  // $0.50 (4 probes, $0.22) — the A7-F3 harm through a different door.
+  let calls = 0;
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => { calls++; return { facts: {}, usd: 0 }; } } },
+    { limits: { maxUsd: "0" } as never });
+  assert.equal(calls, 0, "a garbage budget value may not admit probes");
+  assert.equal(rec.limitsRespected.toolsUsed, 0);
+  assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
+  assertValid(rec);
+});
+
+test("A8-F1: a revoked limits HANDLE fails both budgets closed and marks bad-input:limits", async () => {
+  const { proxy, revoke } = Proxy.revocable({ maxUsd: 0 }, {});
+  revoke();
+  let calls = 0;
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => { calls++; return { facts: {}, usd: 0 }; } } },
+    proxy as never);
+  assert.equal(calls, 0);
+  assert.equal(rec.limitsRespected.toolsUsed, 0);
+  assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
+  assertValid(rec);
+});
+
+test("A8-F1 (no phantom): absent limits still gets the documented default budget", async () => {
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => ({ facts: {}, usd: 0 }) } });
+  assert.ok(rec.limitsRespected.toolsUsed > 0, "defaults still admit probes when nothing hostile was passed");
+  assert.ok(!rec.evidenceRefs.includes("bad-input:limits"));
+});
+
+test("A8-F2: a revoked facts handle never silently flips classification — marks bad-input:packet", async () => {
+  // Pre-A8: isPlainObj's catch erased the revoked handle; the record
+  // said `unknown` with ZERO markers (live repro), so a hostile packet
+  // could hide its own approvalPending fact with no trace.
+  const { proxy, revoke } = Proxy.revocable({ approvalPending: true }, {});
+  revoke();
+  const rec = await investigate(basePacket({ facts: proxy as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"), "a revoked nested handle must be disclosed");
+  assertValid(rec);
+});
+
+test("A8-F2: a descriptor trap on a closed fact key marks bad-input:packet", async () => {
+  const facts = new Proxy({ approvalPending: true }, {
+    getOwnPropertyDescriptor(t, k) { if (k === "gatePass") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); },
+  });
+  const rec = await investigate(basePacket({ facts: facts as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"));
+  assertValid(rec);
+});
+
+test("A8-F2: revoked signal and acceptance handles are disclosed too", async () => {
+  const mk = () => { const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); return proxy; };
+  const r1 = await investigate(basePacket({ signal: mk() as never }), { now: clock() });
+  assert.ok(r1.evidenceRefs.includes("bad-input:packet"), "revoked signal");
+  const r2 = await investigate(basePacket({ acceptance: mk() as never }), { now: clock() });
+  assert.ok(r2.evidenceRefs.includes("bad-input:packet"), "revoked acceptance");
+});
+
+test("A8-F6: a mid-scan descriptor trap marks BOTH refs:dropped and bad-input:packet", async () => {
+  // Pre-A8 the trap-discard disclosed only refs:dropped; the handle
+  // itself (an actively trapping proxy) went unmarked, contrary to the
+  // §0 rule 5 promise consumers key on.
+  const arr = ["pkt:a", "pkt:b"];
+  const trapArr = new Proxy(arr, { getOwnPropertyDescriptor(t, k) { if (k === "1") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: trapArr as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:dropped"));
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"), "a trapping refs handle is hostile input");
+  assertValid(rec);
+});
+
+test("A8-F6: a lying length marks hostile too; a plain non-array stays clean", async () => {
+  const arr = Array.from({ length: 30 }, (_, i) => `pkt:a8f6b-${i}`);
+  let reads = 0;
+  const liar = new Proxy(arr, { get(t, k) { if (k === "length") { reads++; return reads === 1 ? t.length : t.length + 1; } return Reflect.get(t, k); } });
+  const rec = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: liar as never }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:dropped"));
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"), "a handle that lies about its length is hostile");
+  const clean = await investigate(basePacket({ facts: { approvalPending: true }, evidenceRefs: "not-an-array" as never }), { now: clock() });
+  assert.ok(!clean.evidenceRefs.includes("bad-input:packet"), "plain garbage is NOT hostile input");
+  assert.ok(!clean.evidenceRefs.includes("refs:dropped"));
+});
+
+test("A8-F4: a saturated ledger stops probe admission (no re-admission past the clamp)", async () => {
+  // Two probes at MSI/2 saturate the ledger exactly; every later
+  // admission check against the clamped value would pass forever
+  // (MSI + 0.02 rounds back to MSI). Saturation itself must stop the
+  // loop, with the standard budget-skip disclosure.
+  let calls = 0;
+  const rec = await investigate(basePacket({ workerState: "running" }),
+    { now: clock(), tools: { run: async () => { calls++; return { facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }; } } },
+    { limits: { maxUsd: Number.MAX_SAFE_INTEGER, maxToolCalls: Number.MAX_SAFE_INTEGER } });
+  assert.equal(rec.limitsRespected.spendUsd, Number.MAX_SAFE_INTEGER);
+  assert.ok(calls <= 3, `saturation must cap the calls (got ${calls} of 4 probes)`);
+  assert.ok(rec.evidenceRefs.some((r) => r.includes("skipped-budget")), "the stopped probes are disclosed");
   assertValid(rec);
 });
 

@@ -172,13 +172,94 @@ const valid = (rec) => { try { validateSupervisorRecord(JSON.parse(JSON.stringif
 
 // ── A7-F9: cumulative spend clamps to MAX_SAFE_INTEGER ─────────────────────
 {
-  // Each probe reports MSI/2: one report can never exceed MSI, but the
-  // SUM over several probes drifts past it — the clamp must hold at MSI.
-  const t = { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }) };
+  // Each probe reports 0.75*MSI: one report can never exceed MSI, but
+  // the SUM over two probes reaches 1.5*MSI — the clamp must hold at
+  // MSI (cycle-A8: MSI/2 reports land EXACTLY on MSI after FP rounding
+  // and cannot discriminate the clamp from the F4 saturation stop).
+  const t = { run: async () => ({ facts: {}, usd: Number.MAX_SAFE_INTEGER * 0.75 }) };
   const rec = await investigate(basePacket({ workerState: "running" }), { now: () => 1, tools: t }, { limits: { maxUsd: Number.MAX_SAFE_INTEGER } });
   check("A7-F9: summed over-reports clamp to MAX_SAFE_INTEGER",
-    rec.limitsRespected.toolsUsed >= 3 && rec.limitsRespected.spendUsd === Number.MAX_SAFE_INTEGER && valid(rec),
+    // Cycle-A8 F4: two probes at MSI/2 saturate the ledger exactly;
+    // admission stops at saturation (a clamped total re-admits nothing).
+    rec.limitsRespected.toolsUsed >= 2 && rec.limitsRespected.spendUsd === Number.MAX_SAFE_INTEGER &&
+      rec.evidenceRefs.some((r) => r.includes("skipped-budget")) && valid(rec),
     `spend=${rec.limitsRespected.spendUsd} tools=${rec.limitsRespected.toolsUsed}`);
+}
+
+// ── A8-F1: ANY hostile limits input fails the budget CLOSED ───────────────
+{
+  const n = { hits: 0 };
+  const t = { run: async () => { n.hits++; return { facts: {}, usd: 0 }; } };
+  const mkRevoked = () => { const { proxy, revoke } = Proxy.revocable({ maxUsd: 0 }, {}); revoke(); return proxy; };
+  const cases = [
+    ["maxUsd:'0' (string)", { maxUsd: "0" }],
+    ["maxUsd:NaN", { maxUsd: NaN }],
+    ["maxToolCalls:'2' (string)", { maxToolCalls: "2" }],
+    ["revoked limits handle", mkRevoked()],
+  ];
+  for (const [name, lim] of cases) {
+    n.hits = 0;
+    const rec = await investigate(basePacket({ workerState: "running" }), { now: () => 1, tools: t }, { limits: lim });
+    check(`A8-F1: ${name} -> zero probes, zero spend, bad-input:limits`,
+      n.hits === 0 && rec.limitsRespected.toolsUsed === 0 && rec.limitsRespected.spendUsd === 0 &&
+        has(rec, "bad-input:limits") && valid(rec),
+      `hits=${n.hits} spend=${rec.limitsRespected.spendUsd}`);
+  }
+  const recD = await investigate(basePacket({ workerState: "running" }), { now: () => 1, tools: t });
+  check("A8-F1 no-phantom: absent limits keep the documented default budget",
+    recD.limitsRespected.toolsUsed > 0 && !has(recD, "bad-input:limits") && valid(recD),
+    `tools=${recD.limitsRespected.toolsUsed}`);
+}
+
+// ── A8-F2: nested hostile handles disclose, never silently flip ───────────
+{
+  const mkRevoked = (o) => { const { proxy, revoke } = Proxy.revocable(o, {}); revoke(); return proxy; };
+  const factsTrap = mkRevoked({ approvalPending: true });
+  const rec = await investigate({ ...basePacket({ workerState: "running" }), facts: factsTrap }, { now: () => 1 });
+  check("A8-F2: revoked facts handle -> bad-input:packet (silently flipped class pre-A8)",
+    has(rec, "bad-input:packet") && valid(rec));
+  const factKeyTrap = new Proxy({ approvalPending: true }, { getOwnPropertyDescriptor(t, k) { if (k === "gatePass") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec2 = await investigate({ ...basePacket({ workerState: "running" }), facts: factKeyTrap }, { now: () => 1 });
+  check("A8-F2: descriptor trap on a closed fact key -> bad-input:packet",
+    has(rec2, "bad-input:packet") && valid(rec2));
+  const sigRec = await investigate({ ...basePacket({ workerState: "running" }), signal: mkRevoked({}) }, { now: () => 1 });
+  check("A8-F2: revoked signal handle -> bad-input:packet", has(sigRec, "bad-input:packet") && valid(sigRec));
+  const accRec = await investigate({ ...basePacket({ workerState: "running" }), acceptance: mkRevoked({}) }, { now: () => 1 });
+  check("A8-F2: revoked acceptance handle -> bad-input:packet", has(accRec, "bad-input:packet") && valid(accRec));
+  const errsTrap = mkRevoked([{ text: "429" }]);
+  const rec3 = await investigate({ ...basePacket({ workerState: "running" }), errors: errsTrap }, { now: () => 1 });
+  check("A8-F2: revoked errors handle -> bad-input:packet", has(rec3, "bad-input:packet") && valid(rec3));
+  // plain garbage stays harmless
+  const clean = await investigate({ ...basePacket({ facts: { approvalPending: true } }), evidenceRefs: "not-an-array" }, { now: () => 1 });
+  check("A8-F2 no-phantom: plain non-array refs is NOT hostile input",
+    !has(clean, "bad-input:packet") && !has(clean, "refs:dropped") && valid(clean));
+}
+
+// ── A8-F6: trap-discard on refs marks the handle hostile too ──────────────
+{
+  const arr = ["pkt:a", "pkt:b"];
+  const idxTrap = new Proxy(arr, { getOwnPropertyDescriptor(t, k) { if (k === "1") throw new Error("boom"); return Reflect.getOwnPropertyDescriptor(t, k); } });
+  const rec = await investigate({ ...basePacket({ facts: { approvalPending: true } }), evidenceRefs: idxTrap }, { now: () => 1 });
+  check("A8-F6: mid-scan descriptor trap -> refs:dropped AND bad-input:packet",
+    has(rec, "refs:dropped") && has(rec, "bad-input:packet") && valid(rec));
+  const arr2 = Array.from({ length: 30 }, (_, i) => `pkt:f6-${i}`);
+  let reads = 0;
+  const liar = new Proxy(arr2, { get(t, k) { if (k === "length") { reads++; return reads === 1 ? t.length : t.length + 1; } return Reflect.get(t, k); } });
+  const rec2 = await investigate({ ...basePacket({ facts: { approvalPending: true } }), evidenceRefs: liar }, { now: () => 1 });
+  check("A8-F6: lying length -> refs:dropped AND bad-input:packet",
+    has(rec2, "refs:dropped") && has(rec2, "bad-input:packet") && valid(rec2));
+}
+
+// ── A8-F4: a saturated ledger stops admission (clamped total re-admits nothing) ──
+{
+  let hits = 0;
+  const t = { run: async () => { hits++; return { facts: {}, usd: Number.MAX_SAFE_INTEGER / 2 }; } };
+  const rec = await investigate(basePacket({ workerState: "running" }), { now: () => 1, tools: t },
+    { limits: { maxUsd: Number.MAX_SAFE_INTEGER, maxToolCalls: Number.MAX_SAFE_INTEGER } });
+  check("A8-F4: saturated ledger stops admission with budget-skip disclosure",
+    rec.limitsRespected.spendUsd === Number.MAX_SAFE_INTEGER && hits <= 3 &&
+      rec.evidenceRefs.some((r) => r.includes("skipped-budget")) && valid(rec),
+    `hits=${hits} spend=${rec.limitsRespected.spendUsd}`);
 }
 
 console.log(fails === 0 ? "redteam-investigation: ALL PASS" : `redteam-investigation: ${fails} FAILURE(S)`);

@@ -62,9 +62,17 @@ Boundary rules:
    estimate would cross the cap). Zero/negative limits mean zero port
    calls. Every budget actually spent is reported in the record's
    `limitsRespected`. A NEGATIVE finite `limits.maxUsd` is not bad
-   input: it clamps to `$0` (same zero-call rule); only a
-   present-but-unusable value (`NaN`, ±`Infinity`, non-number) marks
-   `bad-input:limits`.
+   input: it clamps to `$0` (same zero-call rule); a present-but-unusable
+   value (`NaN`, ±`Infinity`, non-number — INCLUDING a numeric STRING
+   like `"0"`), OR a hostile `limits` handle of ANY kind (revoked proxy,
+   throwing getter, descriptor trap) marks `bad-input:limits` AND fails
+   BOTH budgets closed to ZERO — cycle-A8 F1: "defaults still applied"
+   was itself the vulnerability (a caller who asked for `$0` under a
+   trapping handle must never get the default budget, and a hostile
+   handle must never silently unlock the $0.50/4-call default).
+   Bounded means count + USD only: port methods are NOT timeout-bounded
+   (cycle-A8 F8) — a hung port stalls `investigate()`; wall-time
+   bounding is P9 wiring's job (the abort path around the call).
 5. **Fail-closed, never throws (INV-1).** Malformed, hostile, or
    getter-laden input still yields a VALID §14.3 diagnosis record —
    worst case `causeClass:"unknown"`. Rejected input is DISCLOSED, not
@@ -81,7 +89,13 @@ Boundary rules:
    `$0` must not get the default budget because the field trapped); a
    revoked/trapping array passed as `evidenceRefs` or `errors` marks
    `bad-input:packet` instead of throwing from `Array.isArray`
-   (cycle-A7 F1). Fields that are merely absent (including an
+   (cycle-A7 F1). Nested hostile handles are disclosed too (cycle-A8
+   F2): a revoked/trapping `facts`, `signal`, or `acceptance` handle,
+   a descriptor trap on a CLOSED fact key or on `signal.kind` /
+   `acceptance.verdict`, and a revoked/trapping `errors` array each
+   mark `bad-input:packet` — classification may change under such a
+   handle, so it is never silently absorbed (the pre-A8 state).
+   Fields that are merely absent (including an
    explicit `undefined` VALUE) or a plain wrong type are dropped
    WITHOUT a marker (a missing optional field is not bad input); only
    a present field whose value is neither absent nor coercible marks
@@ -207,6 +221,24 @@ docs/11 §14.3 `kind:"diagnosis"` shape (plus `schema`/`kind`/envelope):
   planner's own `ACTION_RUNG`/`STRATEGY_TEMPLATES` values (drift-pinned).
 - `confidence` is always present, clamped to `[0, 1]`.
 - `limitsRespected.toolsUsed/spendUsd` are the ACTUAL consumption.
+
+### 2.1 Marker taxonomy (closed vocabulary)
+
+Disclosure markers only — provenance refs (`probe:`, `rule:`, `text:`,
+`judge:`, `investigation:`) carry no disclosure meaning and are not
+listed. Nothing outside this table may appear as a DISCLOSURE (the
+self-check counts them).
+
+| Marker | Emitted when | Meaning for consumers |
+|---|---|---|
+| `refs:dropped` | refs copy discarded whole (index trap, length throw, re-verify mismatch) or a trap discards entries/refs mid-copy (cycle-A8 F6) | packet content was read and lost — never provably duplicate |
+| `refs:spoofed` | copied ref array later mutated by the packet (Proxy) after the copy | the caller is gaming the record after the fact |
+| `refs:truncated` | unique refs exceeded `MAX_REFS`, or scan budget exhausted with entries unvisited | a unique ref or refs are missing from `evidenceRefs` |
+| `bad-input:scan-budget` | copy scan hit `COPY_SCAN_BUDGET` before the declared length ended | the packet declared a pathologically large array |
+| `bad-input:packet` | ANY trap on the packet or its nested handles (revoked, IsArray, descriptor, `getOwnPropertyDescriptor`, hostile-but-present `errors`/`refs`, revoked/trapping `facts`/`signal`/`acceptance`, closed-fact-key trap — cycle-A7 F1/F3/F7, cycle-A8 F2/F6) | the packet is hostile: classification ran on a partial view |
+| `bad-input:limits` | ANY hostile or unusable `limits` input (bad value, trap, revoked handle, string-number) — both budgets fail CLOSED to zero (cycle-A5 F6, A7-F3, A8-F1) | the caller's budget request is untrusted; zero port calls were admitted |
+| `bad-input:self-check` | the §7 self-check failed after building the record | the record is degraded to `unknown`/zero-spend — do not dispatch on it |
+| `packet:stale` | packet failed the freshness check (see §2 `packetStale`) | the diagnosis describes a stale episode — P8 must not act on it |
 
 ## 3. Classification (rules-only, closed)
 

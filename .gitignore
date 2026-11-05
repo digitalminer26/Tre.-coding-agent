@@ -31,6 +31,11 @@ tre.json
 # Read-only doc/code audit rounds (auditor prompts, verdicts, session
 # transcripts) — same class of local orchestration artifacts.
 .tre/audits/
+# Per-cycle audit scratch (reproducers, findings notes, kick scripts) —
+# findings are pinned as named regression tests; scratch stays local.
+.tre/a[0-9]-*.mjs
+.tre/a[0-9]-*.md
+.tre/a[0-9]-kick.sh
 # GitHub push token. The machine-level home is ~/.tre/github-token (outside
 # the repo, never in git). This entry is a legacy safety net for the old
 # repo-local location, still honored by the release tooling as a fallback.

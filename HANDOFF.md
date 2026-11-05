@@ -1,5 +1,66 @@
 # HANDOFF
 
+## 2026-12-09 — P15 audit cycle A8: A7's fixes audited (Haiku 5.5), 8 findings — all closed; next: P9/M1 composition
+
+**This session (P15 audit cycle A8):** audited the A7 commit (`b15aab6`)
+with a fresh Haiku 5.5 auditor over `720d0d5..b15aab6`
+(`~/.tre/audits/p15-cycleA8.out`). 8 findings, all closed here:
+
+- **F1 (major):** present-but-unusable limits (`maxUsd:"0"`, `NaN`) and
+  hostile `limits` handles (revoked proxy, throwing getter) fell back to
+  the DEFAULT $0.50/4-call budget — A7-F3's "never the default" covered
+  only descriptor traps. Now ANY hostile/unusable limits input fails BOTH
+  budgets closed to zero (`badMaxUsdEarly` folds the handle-level
+  hostility into both slots). The old A4-R1 test asserted the
+  vulnerable behavior ("default budget still allows probes") — rewritten
+  to assert zero probes.
+- **F2 (major):** nested hostile handles were silently absorbed — a
+  revoked `facts`/`signal`/`acceptance` handle or a descriptor trap on a
+  CLOSED fact key flipped classification with no marker (docs/17 §0 rule
+  5 claimed "EVERY trap type"). Now `trapPresent()` on the facts handle,
+  `ownData` traps on `signal.kind`/`acceptance.verdict`, closed-key
+  descriptor traps, and revoked/trapping `errors` all mark
+  `bad-input:packet`.
+- **F3 (major, harness):** a mutation scored CAUGHT on ANY non-zero
+  exit — crashes/broken mutants counted as catches, and a missing unit
+  leg made every verdict unverifiable. redteam.sh now has phase 0 (build
+  + unit-leg LIVE precheck on the clean build), catch-vs-crash
+  classification (a leg that dies before any check line is `CRASH?` +
+  failure, never CAUGHT), and SKIP-not-abort on pattern misses.
+- **F4 (minor):** at `maxUsd = MAX_SAFE_INTEGER` the clamped total
+  re-admitted probes (`MSI + ε` rounds to MSI). Admission now stops at
+  saturation; F9's clamp test moved to 0.75×MSI reports (MSI/2 landed
+  exactly on MSI and could not discriminate clamp from saturation —
+  same number also fixed M10's mutation survival).
+- **F5 (minor, harness):** concurrent runs shared `dist` — the blind
+  `*.redteam-bak.*` sweep deleted a live run's backup. Now an exclusive
+  lock dir (`dist/.redteam-lock.$`, held for the whole run, taken over
+  only from a DEAD pid) and dead-pid-only BAK sweep.
+- **F6 (minor):** a trap that discarded refs mid-copy (per-index
+  descriptor trap, lying length) disclosed only `refs:dropped`, not the
+  handle's hostility. Trap-discards now mark `bad-input:packet` too.
+- **F7:** docs/17 gained §2.1 — the closed marker-taxonomy table
+  (`refs:dropped`/`refs:spoofed`/`refs:truncated`/`bad-input:*`/
+  `packet:stale`) — and rule 4/5 text corrected to what the code now
+  delivers (fail-closed ANY hostile limits input; nested-handle
+  disclosure; the stale "silently absent" claim removed).
+- **F8:** port timeouts are OUT of scope by contract — documented in
+  rule 4 ("bounded means count + USD only; wall-time bounding is P9
+  wiring's abort path").
+
+Harness: +12 hostile probes in redteam-investigation.mjs (fail-closed
+matrix ×4, nested-handle matrix ×6, saturation stop, no-phantom checks);
+mutations M13 (saturation stop), M14 (facts-handle disclosure), M15
+(trap-discard hostility) — **all 15 mutations CAUGHT-behaviorally**.
+Unit tests: 87 pass / 0 fail (6 new A8 tests; A4-R1 rewritten). Full
+suite 2237 pass / 1 fail — the 1 is `eval-run.js` (LIVE-model behavior
+eval, fails identically on clean HEAD; unrelated to P15).
+
+Lesson for the next round: F1 proved that a fix's OWN test can pin the
+vulnerable behavior when the test was written from the fix's prose
+("defaults still applied") — audit tests must attack the INVARIANT
+(caller's budget is authority), not the changelog.
+
 ## 2026-12-08 — P15 audit cycle A5: A4's fixes audited, 6 findings fixed; next: P9/M1 composition
 
 **This session (P15 audit cycle A5):** audited the A4 commit (`7b70fba`)
