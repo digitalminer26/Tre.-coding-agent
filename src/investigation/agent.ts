@@ -268,10 +268,40 @@ function finiteAtMost(v: unknown, hi: number, lo: number): number | undefined {
   if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
   return Math.min(hi, Math.max(lo, v));
 }
+/** Integer variant for budgets: the old ternary check let a fractional
+ *  2.5 through and `toolsUsed >= 2.5` admitted a THIRD probe (audit
+ *  R1: non-integer maxToolCalls bypassed INV-3 by one call). A
+ *  fractional budget floors to the integer below. */
+function finiteAtMostInt(v: unknown, hi: number, lo: number): number | undefined {
+  const n = finiteAtMost(v, hi, lo);
+  return n === undefined ? undefined : Math.floor(n);
+}
 function isPlainObj(v: unknown): v is Record<string, unknown> {
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
+  // Hostile proxies: `IsArray`, `getPrototypeOf`, and revoked targets can
+  // all THROW from inside these intrinsics (audit R1: `getPrototypeOf`
+  // trap). The fence treats a throwing trap as "not a plain object" —
+  // INV-1 never propagates a caller-side trap across this boundary.
+  try {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  } catch {
+    return false;
+  }
+}
+
+/** Read ONE property off a caller-owned handle (ports/options) whose
+ *  GETTER may throw. Own-data descriptors keep the fence for data;
+ *  this is for the two handles where the fence itself must reach
+ *  through a hostile object (audit R1: throwing `tools`/`limits`
+ *  getters). A trap that throws reads as `undefined` (absent). */
+function safeRead(obj: unknown, key: string): unknown {
+  try {
+    if (obj === undefined || obj === null) return undefined;
+    return (obj as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Copy a string array fence-safely: length observed ONCE and
@@ -289,7 +319,13 @@ function copyStrs(raw: unknown): string[] {
   }
   const out: string[] = [];
   for (let i = 0; i < n && out.length < MAX_REFS; i++) {
-    const d = Object.getOwnPropertyDescriptor(raw, i);
+    let d: PropertyDescriptor | undefined;
+    try {
+      d = Object.getOwnPropertyDescriptor(raw, i);
+    } catch {
+      ok = false; // a per-index getOwnPropertyDescriptor trap (audit R1)
+      break;
+    }
     if (d === undefined || !('value' in d)) continue;
     const s = boundedStr(d.value);
     if (s !== undefined) out.push(s);
@@ -503,33 +539,54 @@ function selfCheck(r: DiagnosisRecordFields): boolean {
 
 // ─── Port-call helpers (never throw; results fenced) ───────────────────────
 
-async function callProbe(tools: DiagnosticToolPort, probe: Probe, ep: string, taskId: string | undefined, attemptId: string | undefined):
+/** Resolve a port method OFF a hostile handle: `tools.run` / `judge.judge`
+ *  may be getters whose traps THROW, and even `typeof x.run` triggers
+ *  them (audit R1). The resolved function is captured ONCE and the
+ *  handle is never touched again. Returns undefined when the handle is
+ *  absent, unusable, or its method is missing/not a function. */
+function resolvePortMethod(handle: unknown, method: string): ((req: unknown) => Promise<unknown> | unknown) | undefined {
+  if (handle === undefined) return undefined;
+  if (handle === null || typeof handle !== 'object') return undefined;
+  const fn = safeRead(handle, method);
+  if (typeof fn !== 'function') return undefined;
+  // Keep the handle as the call receiver (real ports may use `this`);
+  // the CALL itself sits inside callProbe/callJudge's try.
+  return (req: unknown) => (fn as (r: unknown) => Promise<unknown> | unknown).call(handle, req);
+}
+
+async function callProbe(toolsRun: (req: unknown) => Promise<unknown> | unknown, probe: Probe, ep: string, taskId: string | undefined, attemptId: string | undefined):
   Promise<{ ok: boolean; facts: Map<string, boolean>; evidenceRef?: string; usd?: number }> {
   const facts = new Map<string, boolean>();
   try {
     const req: { probe: string; episodeId: string; taskId?: string; attemptId?: string } = { probe: probe.id, episodeId: ep };
     if (taskId !== undefined) req.taskId = taskId;
     if (attemptId !== undefined) req.attemptId = attemptId;
-    const raw = await tools.run(req);
+    const raw = await toolsRun(req);
     if (!isPlainObj(raw)) return { ok: false, facts };
     mergeFacts(facts, ownData(raw, 'facts').value);
     const ref = boundedStr(ownData(raw, 'evidenceRef').value);
+    // docs/17 §5: `usd` must be finite and NON-NEGATIVE — a negative
+    // report is rejected (the full charged estimate stands), never
+    // applied as a refund below the probe's actual cost (audit R3).
     const usdSlot = ownData(raw, 'usd');
-    const usd = usdSlot.present ? finiteAtMost(usdSlot.value, Number.MAX_SAFE_INTEGER, 0) : undefined;
+    let usd: number | undefined;
+    if (usdSlot.present && typeof usdSlot.value === 'number' && Number.isFinite(usdSlot.value) && usdSlot.value >= 0) {
+      usd = Math.min(usdSlot.value, Number.MAX_SAFE_INTEGER);
+    }
     return { ok: true, facts, evidenceRef: ref !== undefined && ref.length > 0 ? ref : undefined, usd };
   } catch {
     return { ok: false, facts };
   }
 }
 
-async function callJudge(judge: JudgePort, ep: string, taskId: string | undefined, facts: FactPatch, workerState: string | undefined, signal: string | undefined):
+async function callJudge(judgeJudge: (req: unknown) => Promise<unknown> | unknown, ep: string, taskId: string | undefined, facts: FactPatch, workerState: string | undefined, signal: string | undefined):
   Promise<{ cause: CauseClass; conf: number } | undefined> {
   try {
     const req: { episodeId: string; taskId?: string; facts: FactPatch; workerState?: string; signal?: string } = { episodeId: ep, facts };
     if (taskId !== undefined) req.taskId = taskId;
     if (workerState !== undefined) req.workerState = workerState;
     if (signal !== undefined) req.signal = signal;
-    const raw = await judge.judge(req);
+    const raw = await judgeJudge(req);
     if (!isPlainObj(raw)) return undefined;
     const cc = ownData(raw, 'causeClass').value;
     if (!isStr(cc) || !(CAUSE_CLASSES as readonly string[]).includes(cc)) return undefined;
@@ -549,17 +606,42 @@ export async function investigate(
   ports: InvestigationPorts,
   options?: InvestigationOptions,
 ): Promise<DiagnosisRecordFields> {
+  // ── ports handle (audit R1: `ports` itself may be a hostile object
+  // whose getters — or typeof's [[GetPrototypeOf]] — throw; every
+  // handle read goes through safeRead) ──
+  let portsObj: InvestigationPorts | undefined;
+  try {
+    portsObj = (typeof ports === 'object' && ports !== null) ? ports : undefined;
+  } catch {
+    portsObj = undefined;
+  }
   // ── ts (INV-6: injected clock, never Date()) ──
   let ts = 0;
   try {
-    if (typeof ports?.now === 'function') {
-      const t = ports.now();
+    const nowFn = safeRead(portsObj, 'now');
+    if (typeof nowFn === 'function') {
+      const t = (nowFn as () => number)();
       if (typeof t === 'number' && Number.isFinite(t) && t >= 0) ts = t;
     }
   } catch { /* fail-closed at 0 */ }
 
-  // ── fence-read the packet ──
-  const p = (typeof packet === 'object' && packet !== null) ? packet : ({} as InvestigationPacket);
+  // ── fence-read the packet. A REVOKED proxy survives `typeof` on this
+  // V8 but throws from [[GetPrototypeOf]] (and any own-property read);
+  // a trapping proxy can throw from either. A proto read that throws
+  // while typeof passed is hostile-present: mark bad-input:packet. ──
+  let p: InvestigationPacket;
+  let badPacket = false;
+  try {
+    if (typeof packet === 'object' && packet !== null) {
+      Object.getPrototypeOf(packet); // trap probe: revoked proxies throw HERE
+      p = packet;
+    } else {
+      p = {} as InvestigationPacket; // primitives: absent evidence, no marker
+    }
+  } catch {
+    p = {} as InvestigationPacket;
+    badPacket = true;
+  }
   const id = boundedStr(ownData(p, 'id').value);
   const episodeId = boundedStr(ownData(p, 'episodeId').value);
   const taskId = boundedStr(ownData(p, 'taskId').value);
@@ -600,7 +682,12 @@ export async function investigate(
       let n = 0;
       try { const len = (errsRaw as unknown[]).length; if (Number.isInteger(len) && len >= 0) n = Math.min(len, MAX_ERRS); } catch { n = 0; }
       for (let i = 0; i < n; i++) {
-        const d = Object.getOwnPropertyDescriptor(errsRaw, i);
+        let d: PropertyDescriptor | undefined;
+        try {
+          d = Object.getOwnPropertyDescriptor(errsRaw, i);
+        } catch {
+          break; // per-index descriptor trap (audit R1): stop collecting
+        }
         if (d === undefined || !('value' in d) || !isPlainObj(d.value)) continue;
         const t = boundedStr(ownData(d.value, 'text').value);
         if (t !== undefined && total < MAX_TEXT) { units.push(t.toLowerCase()); total += t.length; }
@@ -617,10 +704,33 @@ export async function investigate(
   const packetRefs = copyStrs(ownData(p, 'evidenceRefs').value);
 
   // ── limits (INV-3) ──
-  const limRaw = (typeof options?.limits === 'object' && options?.limits !== null) ? options.limits : undefined;
-  const maxToolCallsRaw = limRaw !== undefined ? finiteAtMost(ownData(limRaw, 'maxToolCalls').value, PROBES.length, 0) : undefined;
+  let badLimits = false;
+  let limRaw: InvestigationLimits | undefined;
+  {
+    // A `limits` getter that THROWS is distinguishable from an absent
+    // property and is hostile input: mark it (audit R1 — fail-closed to
+    // defaults AND disclose).
+    let threw = false;
+    let optionsRaw: unknown;
+    try {
+      optionsRaw = (options === undefined || options === null) ? undefined : (options as { limits?: unknown }).limits;
+    } catch {
+      threw = true;
+      optionsRaw = undefined;
+    }
+    if (threw) badLimits = true;
+    if (optionsRaw !== undefined && optionsRaw !== null) {
+      limRaw = isPlainObj(optionsRaw) ? optionsRaw as InvestigationLimits : undefined;
+      if (limRaw === undefined) badLimits = true; // hostile handle present but unusable
+    }
+  }
+  let badMaxCalls = false;
+  const maxToolCallsRaw = limRaw !== undefined ? finiteAtMostInt(ownData(limRaw, 'maxToolCalls').value, PROBES.length, 0) : undefined;
+  if (limRaw !== undefined && ownData(limRaw, 'maxToolCalls').present && maxToolCallsRaw === undefined) badMaxCalls = true;
   const maxToolCalls = maxToolCallsRaw ?? Math.min(DEFAULT_MAX_TOOL_CALLS, PROBES.length);
+  let badMaxUsd = false;
   const maxUsdRaw = limRaw !== undefined ? finiteAtMost(ownData(limRaw, 'maxUsd').value, Number.MAX_SAFE_INTEGER, 0) : undefined;
+  if (limRaw !== undefined && ownData(limRaw, 'maxUsd').present && maxUsdRaw === undefined) badMaxUsd = true;
   const maxUsd = maxUsdRaw ?? DEFAULT_MAX_USD;
 
   // ── classify → confirm → probe loop (docs/17 §3/§5) ──
@@ -637,9 +747,13 @@ export async function investigate(
   let spendUsd = 0;
   const probeEvidence: string[] = [];
   const tried = new Set<string>();
-  const tools = ports?.tools;
+  // Audit R1 (HIGH): the old `tools !== undefined && typeof tools.run
+  // === 'function'` guard let `tools: null` THROUGH (null !== undefined)
+  // and then crashed on `.run`; it also INVOKED a `run` getter trap on
+  // a hostile handle. resolvePortMethod fences both and binds `this`.
+  const toolsRun = resolvePortMethod(safeRead(portsObj, 'tools'), 'run');
 
-  while (cur.conf < CONFIDENCE_BAR && tools !== undefined && typeof tools.run === 'function') {
+  while (cur.conf < CONFIDENCE_BAR && toolsRun !== undefined) {
     // Order: probes confirming the CURRENT class first, then table order.
     let next: Probe | undefined;
     for (const pr of PROBES) if (tried.has(pr.id) === false && pr.forClass === cur.cause) { next = pr; break; }
@@ -655,7 +769,7 @@ export async function investigate(
     tried.add(next.id);
     toolsUsed += 1;
     spendUsd += next.estimateUsd; // charge BEFORE the call (no refund)
-    const res = await callProbe(tools, next, episodeId ?? '', taskId, attemptId);
+    const res = await callProbe(toolsRun, next, episodeId ?? '', taskId, attemptId);
     if (!res.ok) {
       markers.push(`probe:${next.id}:failed`);
       continue;
@@ -672,24 +786,46 @@ export async function investigate(
 
   // ── judge: fills in ONLY `unknown`, clamped below the bar (INV-2) ──
   let judgeUsed = false;
-  if (cur.cause === 'unknown' && ports?.judge !== undefined && typeof ports.judge.judge === 'function') {
+  const judgeJudge = resolvePortMethod(safeRead(portsObj, 'judge'), 'judge');
+  if (cur.cause === 'unknown' && judgeJudge !== undefined) {
     const factsObj = mapToObj(explicit) as FactPatch;
-    const j = await callJudge(ports.judge, episodeId ?? '', taskId, factsObj, workerState, signalKind);
+    const j = await callJudge(judgeJudge, episodeId ?? '', taskId, factsObj, workerState, signalKind);
     if (j !== undefined) {
       cur = { cause: j.cause, conf: j.conf, rule: cur.rule };
       judgeUsed = true;
+      // INV-2 provenance marker is MODULE-origin: reserved with the
+      // other markers (below), never evicted by packet refs.
+      markers.push('judge:advisory');
     }
   }
 
   // ── exhaustion marker (docs/11 §14.3 expectedEvidence) ──
   if (cur.cause === 'unknown') markers.push('investigation:exhausted');
+  if (badLimits || badMaxCalls || badMaxUsd) markers.push('bad-input:limits');
+  if (badPacket) markers.push('bad-input:packet');
 
-  // ── assemble the record ──
+  // ── assemble the record (INV-5) ──
+  // Audit R4: markers (rule:/text:/probe:/judge:/bad-input:/…) are
+  // MODULE-origin evidence and are reserved BEFORE packet refs, so a
+  // hostile packet overflowing evidenceRefs can never evict the record's
+  // own provenance. Dropped packet refs are disclosed with a
+  // `refs:truncated` marker; the ordering is packet-contents-independent.
+  const seen = new Set<string>();
   const refsOut: string[] = [];
-  for (const r of [...packetRefs, ...markers, ...probeEvidence]) {
-    if (refsOut.length >= MAX_REFS) break;
-    if (!refsOut.includes(r)) refsOut.push(r);
-  }
+  const pushRef = (r: string): boolean => {
+    if (seen.has(r)) return true;
+    if (refsOut.length >= MAX_REFS) return false;
+    seen.add(r);
+    refsOut.push(r);
+    return true;
+  };
+  for (const r of [...markers, ...probeEvidence]) pushRef(r);
+  // A packet with more unseen refs than the remaining slots is disclosed
+  // with refs:truncated — pushed BEFORE the packet refs fill the rest, so
+  // the disclosure can never be crowded out by the very overflow it names.
+  const unseenPacketRefs = packetRefs.filter((r) => !seen.has(r)).length;
+  if (unseenPacketRefs > MAX_REFS - refsOut.length) pushRef('refs:truncated');
+  for (const r of packetRefs) pushRef(r);
 
   const rec: DiagnosisRecordFields = {
     schema: 'tre-supervisor/1',
@@ -705,7 +841,6 @@ export async function investigate(
   };
   if (taskId !== undefined && taskId.length > 0) rec.taskId = taskId;
   if (attemptId !== undefined && attemptId.length > 0) rec.attemptId = attemptId;
-  if (judgeUsed && rec.evidenceRefs.length < MAX_REFS) rec.evidenceRefs.push('judge:advisory');
 
   // INV-7 belt: a self-check failure means a module bug — degrade to a
   // minimal honest record rather than an invalid one.

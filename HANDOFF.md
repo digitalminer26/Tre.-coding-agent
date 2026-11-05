@@ -1,5 +1,60 @@
 # HANDOFF
 
+## 2026-11-05 — P15 audit cycle A4 fixes landed; P15 hardening closed; next: P9/M1 composition
+
+**This session (P15 audit fixes):** a black-box hostile-probe round on the
+shipped `src/investigation/agent.ts` (commit `bc58122`) found six findings;
+all closed, docs/17 corrected where it disagreed with the code.
+
+- **R1 fence traps (HIGH):** `tools: null` passed the old
+  `!== undefined && typeof tools.run === 'function'` guard and crashed on
+  `.run`; that guard also INVOKED a `run` getter trap per check. Fixed via
+  `resolvePortMethod(handle, method)` — resolved ONCE through `safeRead`,
+  `this`-bound, never re-invoked; same for `judge.judge`. `isPlainObj` now
+  survives a throwing `getPrototypeOf` trap; errors-array and refs copies
+  survive per-index `getOwnPropertyDescriptor` traps; `Object.getPrototypeOf`
+  on the packet is the hostile probe (a REVOKED proxy survives `typeof` on
+  this V8 but throws at `[[GetPrototypeOf]]`) → `bad-input:packet`; a
+  throwing `limits` getter → `bad-input:limits` (distinguishable from
+  absent, so NOT silently missing).
+- **R2:** fractional `maxToolCalls` (2.5) admitted an extra probe —
+  budgets now floor to the integer (`finiteAtMostInt`).
+- **R3:** a probe reporting negative `usd` refunded below the actual
+  charge — reports are now REJECTED unless finite and ≥ 0; the estimate
+  stands; `spendUsd` never decreases below what was actually spent.
+- **R4 (was a doc/code disagreement):** §2 documented packet-refs-first
+  composition; the code did packet-first too, so a 200-ref flood evicted
+  the record's own `rule:`/`judge:` markers. Now markers are reserved
+  BEFORE packet refs; overflow disclosed with `refs:truncated` pushed
+  before the fill (can't be crowded out — pinned at exactly 64 refs);
+  `judge:advisory` moved into the reserved set.
+- **Docs/17 corrections:** §0 rule 5 rewrite (disclosure taxonomy —
+  absent/wrong-type fields drop silently; hostile-PRESENT input gets a
+  `bad-input:*` marker), §1 fence note (trap behavior), §2 composition
+  order fixed to markers-first, §3.3 "unit" defined (one error text or
+  signalDetail; endpoint-context = same-unit substring hit), §4 judge
+  cap note (cap applies to ANY output incl. reported 1.0; missing conf
+  reads 0).
+
+Tests: investigation suite 45 → **54** (revoked proxy, all-trap proxies,
+throwing run/judge/limits getters, fractional budget, negative-usd refund,
+200-ref flood marker reservation, exactly-64 flood disclosure,
+`refs:`/`packet:` prefixes in the ref-provenance validator). Full suite
+**2194 pass / 0 fail / 14 skipped**. Standalone black-box re-probe:
+`.tre/p15-reprobe.mjs` (12 cases — run it after any agent.ts change;
+`node .tre/p15-reprobe.mjs` from the repo root after `npx tsc`).
+
+**Gotchas learned:** revoked proxies pass `typeof` (probe proto instead);
+a throwing getter IS distinguishable from a missing property (disclose
+it); reserve disclosure markers before the data they describe; the test
+runner is `tsc && node --test dist/test/*.js` (no tsx — `isArray` is not
+a real ProxyHandler trap and tsc catches made-up handler keys).
+
+**Next (unchanged):** P9 M1 composition — P14 acceptance → P15 diagnosis
+→ P10 planning → P11 execution in a closed loop (docs/17 §8, docs/15 §8,
+docs/16). Audit precedent held again: P15 needed a second round after its
+initial implementation; budget P9 for adversarial rounds from the start.
+
 ## 2026-11-05 — P15 investigation agent implemented (contract docs/17); next: P9/M1 composition
 
 **P15 (this session):** `src/investigation/agent.ts` — `investigate(packet, ports, options)`

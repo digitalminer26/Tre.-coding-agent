@@ -64,8 +64,14 @@ Boundary rules:
    `limitsRespected`.
 5. **Fail-closed, never throws (INV-1).** Malformed, hostile, or
    getter-laden input still yields a VALID §14.3 diagnosis record —
-   worst case `causeClass:"unknown"` with a `bad-input:*` evidence
-   marker. A throwing tool port is a failed probe, not a failed
+   worst case `causeClass:"unknown"`. Rejected input is DISCLOSED, not
+   silent: a packet handle that throws when probed (revoked/trapping
+   proxy) or a hostile-but-present `limits` handle each contribute a
+   `bad-input:*` evidence marker (`bad-input:packet`,
+   `bad-input:limits`); a self-check failure degrades to
+   `bad-input:self-check`. Fields that are merely absent or the wrong
+   type are dropped WITHOUT a marker (a missing optional field is not
+   bad input). A throwing tool port is a failed probe, not a failed
    investigation.
 6. **Self-containment (the P10/P14 pattern).** The module imports
    NOTHING at runtime (not even `node:` builtins). Closed-set drift is
@@ -101,7 +107,10 @@ interface InvestigationPacket {
 }
 
 interface InvestigationLimits {   // from episode policy authority.diagnostics
-  maxToolCalls?: number;      // [default 20, clamped to probe-table size]
+  maxToolCalls?: number;      // [default 20, clamped to probe-table size;
+                              //  fractional budgets FLOOR to the integer
+                              //  below — a fractional cap never admits an
+                              //  extra probe (cycle-A4 audit R2)]
   maxUsd?: number;            // [default $0.50]
 }
 
@@ -115,6 +124,16 @@ interface InvestigationPorts {
 All fields are read through an own-data-descriptor fence (the P10
 snapshot pattern): accessors are never invoked, inherited properties are
 never read, arrays are copied index-wise under a once-observed length.
+A hostile `packet`/`ports` handle can make even `Object.getPrototypeOf`
+or `getOwnPropertyDescriptor` THROW (a revoked Proxy survives `typeof`
+but traps `[[GetPrototypeOf]]`), so every fence read — including the
+port method resolution (`tools.run` / `judge.judge`, resolved ONCE and
+bound to the handle) — is wrapped: a throwing trap is treated as
+"missing" (fail-closed), it never propagates across this boundary
+(INV-1). A packet whose `typeof` passes but whose proto read throws is
+disclosed as `bad-input:packet`; a `limits` getter that throws is
+disclosed as `bad-input:limits` (a throwing getter is distinguishable
+from an absent property, so it is NOT silently "missing").
 
 ## 2. Output
 
@@ -129,14 +148,19 @@ docs/11 §14.3 `kind:"diagnosis"` shape (plus `schema`/`kind`/envelope):
   limitsRespected: { toolsUsed, spendUsd } }
 ```
 
-- `evidenceRefs` composition (I3 — copied, never invented): every
-  packet ref that survived validation, then `rule:<id>` codes, then
+- `evidenceRefs` composition (I3 — copied, never invented): the
+  module's OWN observation markers come FIRST — `rule:<id>`, then
   `text:<factKey>` derivation markers (and `packet:stale` when the
   envelope's stale flag is set), then probe markers/evidence refs
   (`probe:<id>:ran` / `:failed` / `:skipped-budget` or the port's own
-  `evidenceRef`), then `judge:advisory` / `investigation:exhausted`
-  markers. The module never fabricates a ref pointing at something it
-  did not see.
+  `evidenceRef`), then `judge:advisory` / `investigation:exhausted` /
+  `bad-input:*` markers — THEN the packet refs that survived
+  validation. Markers are reserved before packet refs (cycle-A4 audit
+  R4): a packet flooding `evidenceRefs` can evict other packet refs
+  but never the record's own provenance. When packet refs are dropped
+  to the `MAX_REFS` cap the record discloses it with `refs:truncated`
+  (appended only when it fits). The module never fabricates a ref
+  pointing at something it did not see.
 - `proposedActions` are built EXCLUSIVELY from the module's closed
   table (§6) keyed on the FINAL cause class. A packet or judge cannot
   inject proposed actions; the table's rungs and strategy ids are the
@@ -209,15 +233,18 @@ text-derived ones.
 
 `errors[].text` + `signalDetail` (bounded, lowercased) are scanned for
 a FIXED substring table — no regexes on caller data, no matching beyond
-this table. A hit derives the named fact (tentative; explicit facts
-always shadow it). Substrings: `rateLimited` ← "429" / "rate limit" /
+this table. Each scanned **unit** is ONE error text or the signalDetail
+(the first MAX_ERRS errors, accumulated text capped at MAX_TEXT chars;
+a unit is itself truncated to MAX_TEXT). A hit derives the named fact
+(tentative; explicit facts always shadow it). Substrings: `rateLimited`
+← "429" / "rate limit" /
 "too many requests" / "quota exceeded"; `endpointHttp5xx` ← "bad
 gateway" / "service unavailable" / "overloaded" / "status 500" /
 "status 502" / "status 503" / "status 504"; `endpointUnreachable` ←
 "econnrefused" / "econnreset" / "socket hang up" / "fetch failed" /
 "could not connect" / "name resolution" / "timed out" / "timeout"
-(when endpoint context, i.e. same source line as any endpoint marker
-OR `signal.kind = endpoint-error`); `permissionDenied` ← "eacces" /
+(when endpoint context, i.e. the SAME UNIT also carries a rateLimited
+or endpointHttp5xx substring hit, OR `signal.kind = endpoint-error`); `permissionDenied` ← "eacces" /
 "permission denied"; `diskFull` ← "enospc" / "no space left";
 `missingBinary` ← "command not found" / "spawn enoent";
 `approvalPending` ← "awaiting approval" / "waiting for approval" /
@@ -239,12 +266,14 @@ Consulted ONLY when the deterministic classification is `unknown` AND
 the probe loop produced no upgrade. The response is hostile:
 `causeClass` must be in the closed enum (else dropped), `confidence`
 finite (else 0) and is CLAMPED to `JUDGE_CONFIDENCE_CAP = 0.69` —
-strictly below the planner's actionable bar. Success appends
-`judge:advisory` to evidenceRefs. A throwing/rejecting judge is
-swallowed (the record stays `unknown`). The judge never adds facts,
-proposed actions, or refs, and its model cost is NOT charged to
-`limitsRespected.spendUsd` (P8 prices harness model calls through the
-usage ledger; `spendUsd` counts probe spend only).
+strictly below the planner's actionable bar (the cap applies to ANY
+output, including a reported 1.0; a missing confidence reads as 0).
+Success records `judge:advisory` among the module's reserved markers
+(§2 composition — never evictable by packet refs). A throwing or
+rejecting judge is swallowed (the record stays `unknown`). The judge
+never adds facts, proposed actions, or refs, and its model cost is NOT
+charged to `limitsRespected.spendUsd` (P8 prices harness model calls
+through the usage ledger; `spendUsd` counts probe spend only).
 
 ## 5. Probe table (closed, run-once, read-only by contract)
 

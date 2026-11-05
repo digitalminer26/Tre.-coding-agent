@@ -390,7 +390,7 @@ test("INV-5: packet refs are copied verbatim (non-strings dropped); markers trac
   // every entry is a string the packet held or a module marker
   for (const r of rec.evidenceRefs) {
     assert.equal(typeof r, "string");
-    const known = ["rule:", "text:", "probe:", "judge:", "investigation:", "bad-input:"].some((p) => r.startsWith(p));
+    const known = ["rule:", "text:", "probe:", "judge:", "investigation:", "bad-input:", "refs:", "packet:"].some((p) => r.startsWith(p));
     assert.ok(known || r === "sig:guard-7" || r === "tail:att-1#L20-31", `unexplained ref: ${r}`);
   }
 });
@@ -536,6 +536,104 @@ test("text table: direct endpoint markers derive without context; generic words 
     signalDetail: "request timed out",
   }), { now: clock() });
   assert.ok(withCtx.evidenceRefs.includes("text:endpointUnreachable"));
+});
+
+// ──────────────── audit cycle-A4 fixes (fence traps, budgets, refs) ─────────
+
+test("A4-R1: revoked-proxy packet (getPrototypeOf trap) => valid record + bad-input:packet", async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke(); // revoke BEFORE the call: typeof on a revoked proxy throws
+  const rec = await investigate(proxy as never, { now: clock() });
+  assertValid(rec);
+  assert.equal(rec.causeClass, "unknown");
+  assert.ok(rec.evidenceRefs.includes("bad-input:packet"));
+});
+
+test("A4-R1: isPlainObj survives a getPrototypeOf trap that throws", async () => {
+  const trap = new Proxy({}, {
+    getPrototypeOf() { throw new Error("proto trap"); },
+  });
+  // facts/signal/errors all route through isPlainObj — a throwing
+  // getPrototypeOf trap reads as "not a plain object", never a throw.
+  const rec = await investigate(basePacket({
+    facts: trap as never, signal: trap as never, acceptance: trap as never,
+    errors: [trap] as never,
+  }), { now: clock() });
+  assertValid(rec);
+});
+
+test("A4-R1: tools:null and a throwing `run` getter never crash the loop", async () => {
+  // `tools: null` used to pass the old `!== undefined` guard and crash on `.run`.
+  const rec1 = await investigate(basePacket({ workerState: "stopped" }), { now: clock(), tools: null as never });
+  assertValid(rec1);
+  const throwing = { get run(): never { throw new Error("run trap"); } };
+  const rec2 = await investigate(basePacket({ workerState: "stopped" }), { now: clock(), tools: throwing });
+  assertValid(rec2);
+  // getter is resolved ONCE — a getter that counts would be hit once, but
+  // a throwing one must be swallowed with zero probes attempted.
+  let hits = 0;
+  const counting = { get run(): never { hits += 1; throw new Error("x"); } };
+  await investigate(basePacket({ workerState: "stopped" }), { now: clock(), tools: counting });
+  assert.equal(hits, 1, "the run getter is resolved exactly once, never re-invoked per probe");
+});
+
+test("A4-R1: options/limits handles with throwing getters fall back to defaults", async () => {
+  const opts = { get limits(): never { throw new Error("limits trap"); } };
+  const log: { probe: string; episodeId: string }[] = [];
+  const rec = await investigate(basePacket(), { now: clock(), tools: scriptedTools({}, log) }, opts as never);
+  assertValid(rec);
+  // hostile-but-present limits handle is disclosed, defaults still applied
+  assert.ok(rec.evidenceRefs.includes("bad-input:limits"));
+  assert.equal(log.length > 0, true, "default budget still allows probes");
+});
+
+test("A4-R2: fractional maxToolCalls FLOORS — 2.5 admits TWO probes, never three", async () => {
+  const log: { probe: string; episodeId: string }[] = [];
+  const tools = scriptedTools({}, log);
+  const rec = await investigate(basePacket(), { now: clock(), tools }, { limits: { maxToolCalls: 2.5 } as never });
+  assert.equal(log.length, 2);
+  assert.equal(rec.limitsRespected.toolsUsed, 2);
+});
+
+test("A4-R3: a negative reported probe usd is REJECTED (estimate stands; never a refund below 0)", async () => {
+  const tools = scriptedTools({ "probe-endpoint": { facts: { endpointReachable: true }, usd: -5 } });
+  const rec = await investigate(basePacket({ errors: [{ source: "fetch", text: "429 rate limited" }] }), { now: clock(), tools });
+  // probe-endpoint estimate 0.02 stands — no refund, no negative spend
+  assert.equal(rec.limitsRespected.spendUsd, 0.02);
+  assert.ok(rec.limitsRespected.spendUsd >= 0);
+});
+
+test("A4-R4: marker-reserving truncation — overflowing packet refs evict OTHER REFS, never markers; refs:truncated disclosed", async () => {
+  const flood = Array.from({ length: 200 }, (_, i) => `pkt:ref-${i}`);
+  const rec = await investigate(basePacket({
+    facts: { approvalPending: true }, // rule marker + escalate
+    evidenceRefs: flood,
+  }), { now: clock() });
+  assert.ok(rec.evidenceRefs.length <= 64);
+  assert.ok(rec.evidenceRefs.includes("rule:approval-pending:explicit"), "rule marker survives a 200-ref flood");
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"), "overflow is disclosed");
+  // markers come first: everything before the packet refs is module-owned
+  assert.equal(rec.evidenceRefs[0], "rule:approval-pending:explicit");
+  const firstPkt = rec.evidenceRefs.findIndex((r) => r.startsWith("pkt:"));
+  assert.ok(rec.evidenceRefs.slice(0, firstPkt).every((r) => !r.startsWith("pkt:")));
+});
+
+test("A4-R4: judge:advisory is reserved against a ref flood too", async () => {
+  const flood = Array.from({ length: 200 }, (_, i) => `pkt:x-${i}`);
+  const judge = { async judge(): Promise<unknown> { return { causeClass: "premature-stop", confidence: 0.5 }; } };
+  const rec = await investigate(basePacket({ workerState: "running", evidenceRefs: flood }), { now: clock(), judge });
+  assert.ok(rec.evidenceRefs.includes("judge:advisory"));
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"));
+});
+
+test("A4-R4: exactly-filling packet refs still disclose refs:truncated (no crowding out)", async () => {
+  // 64 refs, no markers besides rule/refs: unknown packet yields
+  // investigation:exhausted marker (1) + 64 packet refs => 63 packet kept.
+  const flood = Array.from({ length: 64 }, (_, i) => `pkt:y-${i}`);
+  const rec = await investigate(basePacket({ evidenceRefs: flood }), { now: clock() });
+  assert.ok(rec.evidenceRefs.includes("refs:truncated"));
+  assert.ok(rec.evidenceRefs.includes("investigation:exhausted"));
+  assert.equal(rec.evidenceRefs.length, 64);
 });
 
 // ───────────────────────── INV-7 record validity + freeze ───────────────────
