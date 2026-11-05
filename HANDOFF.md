@@ -1,5 +1,46 @@
 # HANDOFF
 
+## 2026-11-05 — P15 investigation agent implemented (contract docs/17); next: P9/M1 composition
+
+**P15 (this session):** `src/investigation/agent.ts` — `investigate(packet, ports, options)`
+— the producer of the §14.3 `diagnosis` record the P10 planner already
+consumes. Contract `docs/17` (written first, then corrected in three places
+where the draft drifted from the implementation: probe-`usd` accounting is
+replace-not-max; the loop marker set is `ran/failed/skipped-budget` with no
+`:ok`; the stale flag is a `packet:stale` marker with no classification
+effect). Design in one breath: closed priority rule table
+(approval > env > endpoint > gate-defect > premature-stop > unknown) with a
+confirmed (≥0.7) / tentative (0.6–0.65) split so a TEXT/signal-only match
+can never reach the planner bar without probe confirmation; bounded
+text-derivation via a fixed substring table (endpoint-context gating on
+generic connect words like "timed out"); a 4-probe closed table with
+class-first selection, run-once semantics, and charge-first budgeting; an
+advisory judge consulted ONLY for `unknown` and clamped to 0.69 (INV-2 —
+the judge can never make advice actionable); proposed actions exclusively
+from a built-in table keyed on the FINAL class (planner rungs/strategy ids
+drift-pinned). Hostile-input fence is the P10/P11 pattern throughout
+(own-data descriptors, no getters, once-observed re-verified array lengths,
+Proxy-with-all-traps-throw still yields a valid record). Compartment is
+P10-strict: **zero imports — not even `node:`** (guarded), nothing imports
+it outside tests until P9 wires `dispatch.investigate` (docs/17 §8 lists the
+wiring: packet from the executor's evidence, limits from graph policy
+`authority.diagnostics`, spend charged to the recovery ledger). One
+cross-compartment gotcha learned the hard way: the P7 journal-ownership
+grep (episode-journal test) matches the STRING `episode/journal` anywhere
+in src/ comments — the planner's convention is naming "the episode journal
+module" in prose; P15 follows it. 45 tests (golden rule-table fixtures,
+INV-1..INV-9 named, drift pins, Proxy/getter/prototype-pollution/hard-limit
+adversarial); full suite **2185 pass / 0 fail / 14 skipped**; docs/11 P15
+row + Change Ledger row flipped.
+
+**Next per docs/11 §11.1/§11.3:** with P10–P12 and P15 done, the M1
+prerequisite chain is complete — **P9 M1 composition** (one worker: P14
+acceptance → P15 diagnosis → P10 planning → P11 execution in a closed loop,
+P13 basic escalation riding along) is the remaining work. Wiring notes:
+docs/17 §8 (P15), docs/15 §8 (P11 ports), docs/16 (P12 merge port).
+Audit precedent: P11 and P12 each took 4 adversarial rounds — budget the
+same for P15/P9 review; the docs/17 §7 invariant names are the test hooks.
+
 ## 2026-11-05 — P12 integration module CLOSED (4 audit cycles); P10–P12 catch-up record; next: P15
 
 **P12 (this session's closure, on top of commit `6f518d8`):** cycle-4 audit
