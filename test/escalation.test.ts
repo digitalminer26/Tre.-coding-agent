@@ -1407,3 +1407,30 @@ test("loop-c2-rec: the multi-line hint names U+2028/U+2029 line separators", () 
   assert.ok(resolutionRejectionHint(`/resolve ${id} deny:a\u2028b`) !== null, "U+2028 hinted");
   assert.ok(resolutionRejectionHint(`/resolve ${id} deny:a\u2029b`) !== null, "U+2029 hinted");
 });
+
+test("loop-c3-F1: an unverifiable-count refusal survives restart — a refusal line never resets the cap", async () => {
+  const big: unknown[] = [];
+  const ch1 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t" }), now: () => big.length, maxRedeliver: 1 });
+  const r1 = (await ch1.raise(valid() as never)) as RaiseResult;
+  assert.equal(r1.delivered, true);
+  for (let i = 0; i < 100_005; i++) big.push({ schema: "other", kind: "noise", i });
+  // Restart #1: truncated window, no proof of the past delivery -> refusal line appended.
+  const ch2 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t2" }), now: () => big.length, maxRedeliver: 1 });
+  const r2 = (await ch2.raise(valid({ decisionNeeded: "changed: a NEW ask" }) as never)) as RaiseResult;
+  assert.equal(r2.delivered, false, "cycle-2 behavior preserved: unverifiable budget refuses");
+  const refusalLine = big[big.length - 1];
+  assert.ok(refusalLine !== undefined && typeof refusalLine === "object" && (refusalLine as { countUnverifiable?: unknown }).countUnverifiable === true, "the refusal line carries its own evidence");
+  // Restart #2: the refusal line sits back INSIDE the window. Before the fix its
+  // deliveredCount: 0 minted a fresh budget and the key delivered again (auditor:
+  // 6 deliveries against cap 3 across restarts).
+  const ch3 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t3" }), now: () => big.length, maxRedeliver: 1 });
+  const r3 = (await ch3.raise(valid({ decisionNeeded: "changed again: a NEWER ask" }) as never)) as RaiseResult;
+  assert.equal(r3.delivered, false, "restart must NOT reset the unverifiable budget");
+  assert.ok(r3.disclosed?.includes("delivery:unverifiable-count"), "still disclosed as unverifiable after the restart");
+  // Restart #3: a COMPLETE replay of the truncation-gap log (only the refusal
+  // line visible, nothing cut now) — the gap is permanent, so still refuse.
+  const ch4 = makeEscalationChannel({ append: async () => {}, read: async () => [refusalLine], deliver: async () => ({ channel: "t4" }), now: () => 1, maxRedeliver: 1 });
+  const r4 = (await ch4.raise(valid({ decisionNeeded: "changed yet again" }) as never)) as RaiseResult;
+  assert.equal(r4.delivered, false, "a complete replay of a once-truncated log stays refused");
+  assert.ok(r4.disclosed?.includes("delivery:unverifiable-count"), "complete-replay refusal is disclosed too");
+});

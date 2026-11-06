@@ -328,6 +328,13 @@ export interface EscalationRecord {
   attempts: EscalationAttempt[];
   reNotice: number;
   deliveredCount: number;
+  /** Loop-c3 F1: this line was appended while its delivery count was
+   *  UNVERIFIABLE (a truncated replay could not see the key's history).
+   *  Replay treats such a line as NON-authoritative for the count — the
+   *  key stays unverifiable, so the refusal line can never mint a fresh
+   *  budget for a later raise (the exact bypass the c3 audit found).
+   *  Additive and monotone: forging it can only REFUSE delivery. */
+  countUnverifiable?: true;
   /** sha256 hex of the question-relevant fields (blocker|sorted evidence|
    *  attempts count|decisionNeeded) — the re-notice "is this new state?" test. */
   evidenceDigest: string;
@@ -475,6 +482,8 @@ function parseEscalationLine(line: unknown): EscalationRecord | undefined {
   const reNotice = typeof reNoticeRaw === 'number' && Number.isInteger(reNoticeRaw) && reNoticeRaw >= 0 ? Math.min(reNoticeRaw, 1_000_000) : 0;
   const delRaw = ownData(line, 'deliveredCount').value;
   const deliveredCount = typeof delRaw === 'number' && Number.isInteger(delRaw) && delRaw >= 0 ? Math.min(delRaw, 1_000_000) : 0;
+  // Loop-c3 F1: the refusal marker is read through the same fence.
+  const countUnverifiable = ownData(line, 'countUnverifiable').value === true;
   const attemptId = boundedStr(ownData(line, 'attemptId').value);
   const dn = decisionNeededRaw !== undefined && decisionNeededRaw !== '' ? decisionNeededRaw : DEFAULT_DECISION_NEEDED[blocker];
   const recOut: EscalationRecord = {
@@ -492,6 +501,7 @@ function parseEscalationLine(line: unknown): EscalationRecord | undefined {
     attempts: attCopy.attempts,
     reNotice,
     deliveredCount,
+    ...(countUnverifiable ? { countUnverifiable: true as const } : {}),
     // Recomputed from the RESOLVED fields — identical to what raise
     // baked in for the same line, so cross-restart dedup agrees.
     evidenceDigest: evidenceDigestOf({ blocker, decisionNeeded: dn, evidence: evCopy.strs, attempts: attCopy.attempts }),
@@ -602,6 +612,12 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
    *  the max deliveredCount of EVERY escalation line the scan saw,
    *  resolved or not; every successful replay ratchets the ledger from it. */
   const ledgerMaxScan = new Map<string, number>();
+  /** Loop-c3 F1: keys whose delivery count THIS process has proven
+   *  unverifiable (a truncated window hid their history). Sticky for the
+   *  process lifetime AND carried on every line written under the state
+   *  (countUnverifiable), so the refusal survives restarts: a refusal line
+   *  back inside the window must not read as a deliveredCount-0 proof. */
+  const unverifiableKeys = new Set<string>();
 
   /** Audit cycle-1 F1 (INV-5): the dedup decision, the cap check, and the
    *  ledger reservation run AFTER `await replayOpen()` but BEFORE the
@@ -733,6 +749,10 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     let prior: { rec: EscalationRecord; delivered: number } | undefined = openMirror.get(escalationId);
     let shouldDeliverEarly = true;
     let reasonEarly: RaiseResult['reason'] | undefined;
+    // Loop-c3 F1: WHY the early refusal fired — an unverifiable budget is
+    // overridden by a same-digest re-notice (which never delivers), so the
+    // c1-F1 dedup contract survives the sticky refusal.
+    let unverifiableEarly = false;
     if (deps.read !== undefined) {
       const { open, ok, truncated } = await replayOpen();
       if (ok && !truncated) {
@@ -758,6 +778,18 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           const cur = deliveryLedger.get(k) ?? 0;
           if (v > cur) deliveryLedger.set(k, v);
         }
+        // Loop-c3 F1: a complete replay of a log that ONCE truncated still
+        // contains gaps (the lost lines are lost forever) — a key flagged
+        // countUnverifiable keeps its refusal even when the current window
+        // parses cleanly. Fail closed on the count, always — UNLESS this
+        // process has proven deliveries or a CREDIBLE mirror record of the
+        // key (in-process truth beats a stale refusal carried in at restart).
+        if (unverifiableKeys.has(escalationId) && (deliveryLedger.get(escalationId) ?? 0) === 0 && (mirrored === undefined || mirrored.rec.countUnverifiable === true)) {
+          shouldDeliverEarly = false;
+          reasonEarly = 'redeliver-cap';
+          unverifiableEarly = true;
+          disclosed.push('delivery:unverifiable-count');
+        }
       } else if (ok && truncated) {
         // Cycle-1 F1 + cycle-2 F6: truncation is NOT authoritative for
         // ABSENCE (keep the mirror prior), but an in-window line IS
@@ -779,8 +811,15 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         // fails closed; the record still appends and the host sees the
         // disclosure). A key this lifetime HAS delivered (ledger > 0)
         // keeps its in-process truth and the normal cap applies.
+        // Loop-c3 F1: a refusal line back INSIDE the window is not budget
+        // proof either — its deliveredCount: 0 was written precisely because
+        // the truth was unknowable. In-process truth (a CREDIBLE mirror, a
+        // proven delivery) still outranks a carried-in refusal (c1-F1
+        // re-notice). A mirror holding ONLY the refusal record (0 delivered,
+        // countUnverifiable) is not proof — that is the refusal itself.
+        const noProcessProof = (mirrored === undefined || mirrored.rec.countUnverifiable === true) && (deliveryLedger.get(escalationId) ?? 0) === 0;
         let unverifiableCount = false;
-        if (fromLog === undefined && mirrored === undefined && (deliveryLedger.get(escalationId) ?? 0) === 0 && !seenEver.has(escalationId)) {
+        if (noProcessProof && (unverifiableKeys.has(escalationId) || fromLog?.countUnverifiable === true || (fromLog === undefined && !seenEver.has(escalationId)))) {
           unverifiableCount = true;
         }
         // Cycle-3 F2/F3: the window is partial truth — seed the ledger
@@ -798,8 +837,12 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         }
         disclosed.push('replay:truncated');
         if (unverifiableCount) {
+          // Loop-c3 F1: sticky for the process AND written on the line, so
+          // the refusal survives the next restart too.
+          unverifiableKeys.add(escalationId);
           shouldDeliverEarly = false;
           reasonEarly = 'redeliver-cap';
+          unverifiableEarly = true;
           disclosed.push('delivery:unverifiable-count'); // loop-c2 F2 marker
         }
       }
@@ -815,6 +858,11 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       // any other rule — an unprovable budget is spent, never granted.
       shouldDeliver = false;
       reason = reasonEarly;
+      // Loop-c3 F1: but a same-digest re-notice never delivers — the cap
+      // is not what stops it, so the refusal is mislabeled for it.
+      if (unverifiableEarly && prior !== undefined && !force && prior.rec.evidenceDigest === evidenceDigestOf({ blocker, decisionNeeded, evidence, attempts: attCopy.attempts })) {
+        reason = 're-notice';
+      }
     } else if (baseDelivered >= maxRedeliver) {
       shouldDeliver = false;
       reason = 'redeliver-cap';
@@ -849,6 +897,9 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       attempts: attCopy.attempts,
       reNotice,
       deliveredCount,
+      // Loop-c3 F1: an unverifiable-count refusal carries its own evidence
+      // — replay must never read this line's deliveredCount as budget proof.
+      ...(unverifiableKeys.has(escalationId) ? { countUnverifiable: true as const } : {}),
       evidenceDigest: evidenceDigestOf({ blocker, decisionNeeded, evidence, attempts: attCopy.attempts }),
       provenance: 'P13/M1',
     };
@@ -987,6 +1038,13 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         seenEver.add(esc.escalationId);
         if ((noticeFloor.get(esc.escalationId) ?? -1) < esc.reNotice) noticeFloor.set(esc.escalationId, esc.reNotice);
         if ((ledgerMaxScan.get(esc.escalationId) ?? -1) < esc.deliveredCount) ledgerMaxScan.set(esc.escalationId, esc.deliveredCount); // cycle-4 HIGH-2
+        // Loop-c3 F1: a line that admits an unverifiable count keeps the
+        // key unverifiable — its deliveredCount is NOT seeded as authority.
+        if (esc.countUnverifiable === true) {
+          unverifiableKeys.add(esc.escalationId);
+          out.set(esc.escalationId, esc);
+          continue;
+        }
         out.set(esc.escalationId, esc);
         continue;
       }
