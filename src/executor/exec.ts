@@ -179,6 +179,14 @@ export interface RunnerPort {
 export interface GatePort {
   check(policy: unknown, request: GateRequest): Promise<{ allowed: boolean; denials: { code: string; detail: string }[] }>;
   reserve(policy: unknown, request: GateRequest): Promise<void>;
+  /** Audit R4-2: optional host close doors. The executor itself NEVER
+   *  calls them — the supervisor loop wraps this port, holds the open
+   *  record's id, and closes the reservation when it senses the spawned
+   *  attempt's exit (settled, attested) or proves nothing spawned
+   *  (released). Without a close door the ledger's expiry backstops. */
+  closeReservation?(refId: string, reason: 'settled' | 'released', attest?: { outcome: string; evidence: string }): Promise<unknown>;
+  /** Alternate close name some hosts expose. */
+  release?(refId: string, reason: 'settled' | 'released', attest?: { outcome: string; evidence: string }): Promise<unknown>;
 }
 
 /** Mirror of `GateRequest` (src/budget/ledger.ts), trimmed to what the
@@ -791,6 +799,10 @@ export async function executeRecoveryAction(
         return refused('gate', 'gate-denied', now, action, actionId, { denials });
       }
       try {
+        // Audit R4-2: resolve VALUE is ignored (void-or-record hosts).
+        // The reservation's close is owned by the SUPERVISOR loop, which
+        // wraps this gate port and holds the open record's id — the
+        // executor stays a pure single-act module (docs/18 §9).
         await gate!.reserve(undefined, gateReq);
       } catch (e) {
         // reserve throws iff the action was NOT admitted (port contract).

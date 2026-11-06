@@ -91,3 +91,7 @@ test/probes/
 .tre/p15-reprobe.mjs
 # Cycle-A6 audit probes (kept on disk for citation, never in git).
 .tre/a6-*
+
+# P9 acceptance-audit scratch (reviewer prompts/logs/sessions/pids) —
+# findings are pinned as named regression tests; the rounds themselves are scratch.
+.scratch/
