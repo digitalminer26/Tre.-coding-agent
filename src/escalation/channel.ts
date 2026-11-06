@@ -368,7 +368,7 @@ export interface RaiseResult {
   reason?: 're-notice' | 'redeliver-cap';
   channel?: string;
   delivery?: { ok: boolean; error?: string };
-  disclosed?: string[]; // e.g. bad-input:packet / bad-input:evidence|attempts|force|blocker|attemptId|decisionNeeded|by|note / evidence:dropped|skipped|clipped|truncated / attempts:* / decisionNeeded:clipped / attemptId:clipped / by:clipped / note:clipped / replay:truncated (delivery failure is the `delivery` FIELD — there is no delivery:failed marker; no 'scan-budget' marker — exhaustion emits '…:truncated'; docs/17 is the scan-budget doc)
+  disclosed?: string[]; // e.g. bad-input:packet / bad-input:evidence|attempts|force|blocker|attemptId|decisionNeeded|by|note / evidence:dropped|skipped|clipped|truncated / attempts:* / decisionNeeded:clipped / attemptId:clipped / by:clipped / note:clipped / replay:truncated / delivery:unverifiable-count (loop-c2 F2: truncated window, no local proof of the count) (delivery failure is the `delivery` FIELD — there is no delivery:failed marker; no 'scan-budget' marker — exhaustion emits '…:truncated'; docs/17 is the scan-budget doc)
 }
 
 export interface DeliverPort {
@@ -617,13 +617,24 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     opQueue = run.then(() => undefined, () => undefined);
     return run;
   };
+  /** Loop-c2 F1 (audit): the mutex covers replay→decide→build→APPEND→
+   *  reservation ONLY. `deliver` (a port to the human world — a stuck
+   *  Telegram send must not wedge every other raise/resolve, and INV-2
+   *  makes the durable line the promise, not the send) runs after the
+   *  queue is released: raisePrepare returns everything the off-queue
+   *  deliverAndFinish needs. The cap still holds: the ledger/mirror
+   *  reservation happens BEFORE the release point, so a concurrent raise
+   *  of the same key sees the committed count while the first send is
+   *  still in flight. */
+  type PreparedRaise = { rec: EscalationRecord; shouldDeliver: boolean; allowedByDedup: boolean; disclosed: string[]; reason?: RaiseResult['reason'] };
   let resSeq = 0; // cycle-2 F11: per-process monotonic suffix for resolution line ids
   // Cycle-3 F10: a per-process random salt makes resolution ids distinct
   // across restarts/colliding processes (resSeq resets to 0 after a restart).
   const resSalt = Math.random().toString(36).slice(2, 10);
 
-  const raise = (req: RaiseRequest): Promise<RaiseResult | null> => enqueue(() => raiseInner(req));
-  const raiseInner = async (req: RaiseRequest): Promise<RaiseResult | null> => {
+  const raise = (req: RaiseRequest): Promise<RaiseResult | null> =>
+    enqueue(() => raisePrepare(req)).then((p) => (p === null ? null : deliverAndFinish(p)));
+  const raisePrepare = async (req: RaiseRequest): Promise<PreparedRaise | null> => {
     if (!isPlainObj(req)) return null;
     // Cycle-3 F1: identity is NEVER truncated. A >MAX_STR episodeId/taskId
     // would hash distinct-but-collide after clipping, merging two episodes'
@@ -642,9 +653,13 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const disclosed: string[] = [];
     const hostilePacket = trapPresent(req);
 
-    const blockerRaw = boundedStr(ownData(req, 'blocker').value);
+    const blockerOwn = ownData(req, 'blocker');
+    const blockerRaw = boundedStr(blockerOwn.value);
     const blocker: Blocker = (BLOCKERS as readonly string[]).includes(blockerRaw ?? '') ? (blockerRaw as Blocker) : 'unknown';
-    if (ownData(req, 'blocker').accessor || ownData(req, 'blocker').threw) disclosed.push('bad-input:blocker'); // cycle-4 F3: a throwing descriptor is disclosed, never a silent floor
+    if (blockerOwn.accessor || blockerOwn.threw) disclosed.push('bad-input:blocker'); // cycle-4 F3: a throwing descriptor is disclosed, never a silent floor
+    // Loop-c2 F3: a PRESENT non-string is untrusted data that did not
+    // survive the fence — disclosed, never a silent floor to 'unknown'.
+    if (blockerOwn.value !== undefined && typeof blockerOwn.value !== 'string') disclosed.push('bad-input:blocker');
 
     const attemptIdOwn = ownData(req, 'attemptId');
     if (attemptIdOwn.accessor || attemptIdOwn.threw) disclosed.push('bad-input:attemptId'); // cycle-4 F3
@@ -652,10 +667,12 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     // Cycle-3 F6 (audit round 3): a bounded shortening of a scalar is
     // disclosed like a clipped evidence entry — never a silent slice.
     if (typeof attemptIdOwn.value === 'string' && attemptIdOwn.value.length > MAX_STR) disclosed.push('attemptId:clipped');
+    if (attemptIdOwn.value !== undefined && typeof attemptIdOwn.value !== 'string') disclosed.push('bad-input:attemptId'); // loop-c2 F3
     const decisionOwn = ownData(req, 'decisionNeeded');
     if (decisionOwn.accessor || decisionOwn.threw) disclosed.push('bad-input:decisionNeeded'); // cycle-4 F3
     const decisionRaw = boundedStr(decisionOwn.value);
     if (typeof decisionOwn.value === 'string' && decisionOwn.value.length > MAX_STR) disclosed.push('decisionNeeded:clipped'); // cycle-3 F6
+    if (decisionOwn.value !== undefined && typeof decisionOwn.value !== 'string') disclosed.push('bad-input:decisionNeeded'); // loop-c2 F3
     const decisionNeeded = decisionRaw !== undefined && decisionRaw !== '' ? decisionRaw : DEFAULT_DECISION_NEEDED[blocker];
 
     const evOwn = ownData(req, 'evidence');
@@ -690,6 +707,9 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const forceOwn = ownData(req, 'force');
     if (forceOwn.accessor) disclosed.push('bad-input:force'); // cycle-3 F11: consistent with every other field
     if (forceOwn.threw) disclosed.push('bad-input:force'); // cycle-4 F3
+    // Loop-c2 F3: force is a boolean or it is untrusted-present garbage —
+    // force:'yes' silently false is exactly the hidden loss INV-4 forbids.
+    if (forceOwn.value !== undefined && typeof forceOwn.value !== 'boolean') disclosed.push('bad-input:force');
     const force = forceOwn.value === true;
 
     if (hostilePacket && !disclosed.includes('bad-input:packet')) disclosed.push('bad-input:packet');
@@ -711,6 +731,8 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     // doesn't (deliveries after the prior append in this lifetime): the
     // newer record wins, deliveries take the max.
     let prior: { rec: EscalationRecord; delivered: number } | undefined = openMirror.get(escalationId);
+    let shouldDeliverEarly = true;
+    let reasonEarly: RaiseResult['reason'] | undefined;
     if (deps.read !== undefined) {
       const { open, ok, truncated } = await replayOpen();
       if (ok && !truncated) {
@@ -750,6 +772,17 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
             delivered: Math.max(fromLog.deliveredCount, mirrored?.delivered ?? 0),
           };
         }
+        // Loop-c2 F2 (audit): a key ABSENT from a truncated window may
+        // have been delivered past the cap in lines the scan never saw.
+        // If nothing in this process's ledger proves a prior delivery
+        // either, the count is UNVERIFIABLE — deliver nothing (INV-5
+        // fails closed; the record still appends and the host sees the
+        // disclosure). A key this lifetime HAS delivered (ledger > 0)
+        // keeps its in-process truth and the normal cap applies.
+        let unverifiableCount = false;
+        if (fromLog === undefined && mirrored === undefined && (deliveryLedger.get(escalationId) ?? 0) === 0 && !seenEver.has(escalationId)) {
+          unverifiableCount = true;
+        }
         // Cycle-3 F2/F3: the window is partial truth — seed the ledger
         // from it but do NOT treat it as the whole picture.
         // Cycle-4 HIGH-2 + A10: ledgerMaxScan covers the RESOLVED keys in
@@ -764,6 +797,11 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           if (v > cur) deliveryLedger.set(k, v);
         }
         disclosed.push('replay:truncated');
+        if (unverifiableCount) {
+          shouldDeliverEarly = false;
+          reasonEarly = 'redeliver-cap';
+          disclosed.push('delivery:unverifiable-count'); // loop-c2 F2 marker
+        }
       }
     }
 
@@ -772,10 +810,12 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const baseDelivered = Math.max(prior?.delivered ?? 0, deliveryLedger.get(escalationId) ?? 0);
     let shouldDeliver = true;
     let reason: RaiseResult['reason'] | undefined;
-    // Cycle-3 F2: the cap is checked EVEN WITHOUT a prior — resolving a
-    // question and re-raising it (mirror cleared) must not restart the
-    // delivery budget, and maxRedeliver:0 means "record, never deliver".
-    if (baseDelivered >= maxRedeliver) {
+    if (!shouldDeliverEarly) {
+      // Loop-c2 F2: the truncated-window unverifiable count refuses before
+      // any other rule — an unprovable budget is spent, never granted.
+      shouldDeliver = false;
+      reason = reasonEarly;
+    } else if (baseDelivered >= maxRedeliver) {
       shouldDeliver = false;
       reason = 'redeliver-cap';
     } else if (prior !== undefined) {
@@ -820,6 +860,14 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     seenEver.add(escalationId);
     if (deliveredCount > (deliveryLedger.get(escalationId) ?? 0)) deliveryLedger.set(escalationId, deliveredCount); // cycle-3 F2
 
+    // Loop-c2 F1 release point: the durable line + the cap reservation are
+    // committed; the queue is released and the (possibly slow) send runs
+    // off-queue. A queued raise that starts now already sees this count.
+    return { rec, shouldDeliver, allowedByDedup, disclosed, ...(reason !== undefined ? { reason } : {}) };
+  };
+
+  const deliverAndFinish = async (p: PreparedRaise): Promise<RaiseResult> => {
+    const { rec, shouldDeliver, allowedByDedup, disclosed, reason: reasonForFinish } = p;
     let delivered = false;
     let channel: string | undefined;
     let delivery: RaiseResult['delivery'] | undefined;
@@ -859,7 +907,7 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const out: RaiseResult = {
       record: Object.freeze(rec) as EscalationRecord,
       delivered,
-      ...(reason !== undefined ? { reason } : {}),
+      ...(reasonForFinish !== undefined ? { reason: reasonForFinish } : {}),
       ...(channel !== undefined ? { channel } : {}),
       ...(delivery !== undefined ? { delivery } : {}),
       ...(disclosed.length > 0 ? { disclosed } : {}),
@@ -897,6 +945,7 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const note = boundedStr(noteOwn.value);
     if (typeof noteOwn.value === 'string' && noteOwn.value.length > MAX_STR) resolveDisclosed.push('note:clipped'); // cycle-3 F6
     if (noteOwn.threw) resolveDisclosed.push('bad-input:note');
+    if (noteOwn.value !== undefined && typeof noteOwn.value !== 'string') resolveDisclosed.push('bad-input:note'); // loop-c2 F3
     const ts = safeTs(deps.now);
     resSeq += 1; // cycle-2 F11: same person/decision/note in one tick gets distinct ids
     const rec: ResolutionRecord = {
@@ -963,7 +1012,10 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       // resolution whose ref traps). A 'kind' that claims the schema but
       // fails everything else is the concerning class — count it. MED-4:
       // a scan that silently ignored such lines must not report complete.
-      if (claimsSchema(line)) unreadable += 1;
+      // Loop-c2 F5 (audit): a Proxy whose getPrototypeOf throws fails
+      // isPlainObj INSIDE claimsSchema (→ false) even though the line is
+      // unreadable-hostile. trapPresent names exactly that class.
+      if (trapPresent(line) || claimsSchema(line)) unreadable += 1;
     }
     return { open: out, ok: true, truncated: copy.truncated, seen, lenientClosed, unreadable };
   };
@@ -1090,9 +1142,20 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // Cycle-2 F1: leave room for BOTH the 'action:' evidence and the
     // marker — otherwise our own list overflows the channel cap and the
     // marker is pushed out of the record entirely.
-    const room = MAX_EVIDENCE - 1 - (actionId !== undefined ? 1 : 0);
+    // Loop-c2 F4 (audit): slots are reserved for the markers FIRST —
+    // computing 'room' before any entry is pushed means the markers can
+    // never be squeezed out of the record by a full rationale list (the
+    // old last-slot-wins overwrite lost 'actionId:clipped' when BOTH
+    // 'rationale:truncated' and the channel's own 'truncated' marker
+    // competed for the tail).
+    const entryClipped0 = ev.clipped;
+    const markersPre: string[] = [];
+    if (ev.dropped || ev.hostile) markersPre.push('rationale:dropped');
+    else if (ev.overflow || ev.skipped || ev.clipped || entryClipped0) markersPre.push('rationale:truncated');
+    if (actionIdClipped) markersPre.push('actionId:clipped');
+    const room = MAX_EVIDENCE - (actionId !== undefined ? 1 : 0) - markersPre.length;
     for (const r of ev.strs) {
-      if (evidenceSrc.length >= room) break;
+      if (evidenceSrc.length >= Math.max(0, room)) break;
       // F3 (audit): a rationale that is literally 'truncated' is ordinary
       // text. The overflow marker comes ONLY from the copy's structural
       // signal below, never from a value a caller can forge.
@@ -1114,14 +1177,15 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // Cycle-1/audit (rec R4 fold + F2): the 80-slice clip flag comes from
     // copyStrs' OWN scan (clipAt=80) — no second scan, no raw Array.isArray
     // (a revoked 'rationale' proxy threw on the bare IsArray before).
-    const entryClipped = ev.clipped;
-    const markers: string[] = [];
-    if (ev.dropped || ev.hostile) markers.push('rationale:dropped');
-    else if (ev.overflow || ev.skipped || ev.clipped || entryClipped || ev.strs.length > evidenceSrc.length) markers.push('rationale:truncated');
-    if (actionIdClipped) markers.push('actionId:clipped');
+    // The entry-loop may have overflowed its own room (more source entries
+    // than fit) — that is itself 'rationale:truncated'; markers now always
+    // land, and the channel's own cap copy can no longer evict them (the
+    // array we hand raise() is ≤ MAX_EVIDENCE including markers).
+    const markers: string[] = [...markersPre];
+    if (ev.strs.length > evidenceSrc.length && !markers.includes('rationale:truncated') && !markers.includes('rationale:dropped')) markers.push('rationale:truncated');
     for (const marker of markers) {
-      if (evidenceSrc.length < MAX_EVIDENCE) evidenceSrc.push(marker);
-      else evidenceSrc[evidenceSrc.length - 1] = marker;
+      if (evidenceSrc.length < MAX_EVIDENCE - (actionId !== undefined ? 1 : 0)) evidenceSrc.push(marker);
+      else evidenceSrc[evidenceSrc.length - 1] = marker; // last resort (markers > room)
     }
     const res = await deps.channel.raise({
       episodeId,

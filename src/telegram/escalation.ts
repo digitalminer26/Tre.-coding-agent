@@ -163,7 +163,9 @@ export interface ParsedResolution {
 export function resolutionRejectionHint(text: string): string | null {
   if (typeof text !== 'string') return null;
   if (!/^\/resolve\b/.test(text)) return null;
-  if (/[\r\n]/.test(text)) {
+  // Loop-c2 (rec): U+2028/U+2029 are line separators for many consumers —
+  // the parser refuses them (the $ anchor), so the hint must name them too.
+  if (/[\r\n\u2028\u2029]/.test(text)) {
     return 'The note must be on one line: /resolve <esc-id> <decision>: <note>';
   }
   return null;

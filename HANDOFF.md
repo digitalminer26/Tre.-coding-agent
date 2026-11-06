@@ -30,6 +30,26 @@ skipped.
 `.tre/implement-audit/p13-escalation/`. A CLEAN verdict stops early; an
 exhausted budget reports unresolved findings.
 
+**Loop-c2 fix round (this session):** haiku 5.5 audit 2 → FINDINGS, 5
+bugs + 2 recs, all closed: (F1) the cycle-1 mutex ran `deliver` INSIDE the
+queue — one hung Telegram send wedged every raise/resolve; the mutex now
+covers replay→decide→append→reservation only (`raisePrepare` returns a
+PreparedRaise; the send runs off-queue — verified resolve/second-raise/
+pendingStatus all flow while a send hangs forever). (F2) past REPLAY_CAP a
+restart's truncated window made the delivery budget unverifiable and a
+re-raise DELIVERED past the cap; a key absent from the window with no
+in-process proof of prior delivery now fails closed with
+`delivery:unverifiable-count`. (F3) present-but-wrong-type scalars
+(blocker/attemptId/decisionNeeded/force/resolve-note) silently defaulted —
+now each pushes `bad-input:<field>`. (F4) the dispatcher's last-slot-wins
+marker logic let a 20-entry rationale flood evict `actionId:clipped` —
+marker slots are now reserved BEFORE entries are pushed. (F5) a replay line
+whose getPrototypeOf traps skipped with `complete:true` — `trapPresent`
+lines now count as unreadable. (rec) the multi-line `/resolve` hint now
+names U+2028/U+2029. (rec) intermittent 1-fail: 7 subsequent FULL suite
+runs green (3 `node --test` + 4 `npm test`), not reproduced. 6 regression
+tests (loop-c2-*); gate: build 0, 2392 tests.
+
 **Loop-c1 fix round (this session):** haiku 5.5 audit 1 → FINDINGS, 3
 bugs + 1 recommendation, all closed: (F1) concurrent `raise()`s of one key
 ran the dedup/cap decision before either append — two dispatches for one

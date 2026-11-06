@@ -1333,3 +1333,77 @@ test("loop-c1-F3: renderEscalation survives a per-index TRAPPING evidence array"
   const out = renderEscalation(rec as unknown as EscalationRecord);
   assert.ok(out.includes("/resolve"), "renderer degraded to a resolve-able message, never threw");
 });
+
+// ──────────────────── audit cycle 2 (implement-audit loop) ──────────────────
+
+test("loop-c2-F1: a HUNG deliver never wedges resolve or another raise (mutex covers state, not the send)", async () => {
+  const appends: { escalationId: string }[] = [];
+  const ch = makeEscalationChannel({
+    append: async (r) => { appends.push(r as { escalationId: string }); },
+    read: async () => [...appends],
+    deliver: () => new Promise(() => { /* the send never settles */ }),
+    now: () => appends.length + 1,
+  });
+  ch.raise(valid() as never); // fire-and-forget: this send hangs forever
+  await new Promise((r) => setTimeout(r, 5));
+  const res = await Promise.race([
+    ch.resolve(appends[0]!.escalationId, { decision: "approve", by: "u" }),
+    new Promise<null>((_, j) => setTimeout(() => j(null), 100)),
+  ]);
+  assert.ok(res !== null, "resolve flowed while the send hung");
+  ch.raise(valid({ decisionNeeded: "a different question" }) as never);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(appends.length, 3, "the second raise appended off-queue; the first send still hangs");
+});
+
+test("loop-c2-F2: past REPLAY_CAP a restarted channel cannot verify the count — delivery fails CLOSED", async () => {
+  const big: unknown[] = [];
+  const ch1 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t" }), now: () => big.length, maxRedeliver: 1 });
+  const v = valid();
+  const r1 = (await ch1.raise(v as never)) as RaiseResult;
+  assert.equal(r1.delivered, true);
+  for (let i = 0; i < 100_005; i++) big.push({ schema: "other", kind: "noise", i });
+  const ch2 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t2" }), now: () => big.length, maxRedeliver: 1 });
+  const r2 = (await ch2.raise(valid({ decisionNeeded: "changed: a NEW ask" }) as never)) as RaiseResult;
+  assert.equal(r2.delivered, false, "an unverifiable delivery budget is spent, never granted");
+  assert.equal(r2.reason, "redeliver-cap");
+  assert.ok(r2.disclosed?.includes("delivery:unverifiable-count"), "the fail-closed reason is disclosed");
+});
+
+test("loop-c2-F3: present-but-wrong-type scalars are disclosed, never silently defaulted", async () => {
+  const ch = makeEscalationChannel({ append: async () => {}, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const r = (await ch.raise({ episodeId: "e", taskId: "t", decisionNeeded: 42, attemptId: 7, blocker: 5, force: "yes" } as never)) as RaiseResult;
+  for (const m of ["bad-input:blocker", "bad-input:attemptId", "bad-input:decisionNeeded", "bad-input:force"]) {
+    assert.ok((r.disclosed ?? []).includes(m), `${m} disclosed`);
+  }
+  const appends: unknown[] = [];
+  const ch2 = makeEscalationChannel({ append: async (x) => { appends.push(x); }, now: () => 1 });
+  const rr = (await ch2.raise({ episodeId: "e", taskId: "t", blocker: "gate-defect" } as never)) as RaiseResult;
+  const res = await ch2.resolve(rr.record.escalationId, { decision: "approve", by: "u", note: 42 } as never);
+  assert.ok(res !== null && (res.disclosed ?? []).includes("bad-input:note"), "resolve note type-loss disclosed");
+});
+
+test("loop-c2-F4: 'actionId:clipped' survives a full rationale list (slots reserved before entries)", async () => {
+  const appends: { evidence: string[] }[] = [];
+  const ch = makeEscalationChannel({ append: async (r) => { appends.push(r as { evidence: string[] }); }, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const d = makeEscalationDispatcher({ channel: ch });
+  await d.escalate({ episodeId: "e", taskId: "t", actionId: "a".repeat(300), rationale: Array.from({ length: 20 }, (_, i) => `r${i}`) } as never);
+  const ev = appends[0]!.evidence;
+  assert.ok(ev.includes("actionId:clipped"), "the clip marker was NOT evicted by the rationale flood");
+  assert.ok(ev.includes("rationale:truncated"), "the rationale truncation is marked too");
+  assert.ok(ev.length <= 16);
+});
+
+test("loop-c2-F5: a replay line whose prototype read traps is counted unreadable — never skipped with complete:true", async () => {
+  const log: unknown[] = [];
+  const trap = new Proxy({}, { get() { throw new Error("t"); }, getOwnPropertyDescriptor() { throw new Error("t"); }, getPrototypeOf() { throw new Error("t"); } });
+  const ch = makeEscalationChannel({ append: async (r) => { log.push(r); }, read: async () => [...log, trap], now: () => 1 });
+  const st = await ch.pendingStatus();
+  assert.equal(st.complete, false, "an unreadable hostile line is never silently skipped");
+});
+
+test("loop-c2-rec: the multi-line hint names U+2028/U+2029 line separators", () => {
+  const id = "esc-" + "0".repeat(16);
+  assert.ok(resolutionRejectionHint(`/resolve ${id} deny:a\u2028b`) !== null, "U+2028 hinted");
+  assert.ok(resolutionRejectionHint(`/resolve ${id} deny:a\u2029b`) !== null, "U+2029 hinted");
+});
