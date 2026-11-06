@@ -1,5 +1,35 @@
 # HANDOFF
 
+## 2026-12-10 — P13 escalation channel implemented; 3 prior audit rounds closed; entering 5-cycle implement-audit (worker: Qwen3.8, auditor: haiku 5.5)
+
+**This session (P13):** implemented the escalation channel per
+docs/19-p13-escalation-channel.md: `src/escalation/channel.ts` (the
+channel + dispatcher: content-derived ids, durable append before
+delivery, dedup/open-set mirror, delivery ledger vs the maxRedeliver cap,
+resolve + replay, all-hostile-input fail-closed with the closed
+disclosure vocabulary), `src/telegram/escalation.ts` (the single
+allow-listed consumer: renderer with the 2000-char cap + resolve-line
+reservation, the deliver port, the closed `/resolve` grammar),
+`test/escalation.test.ts` (87 tests incl. the INV-8 compartment guards),
+`docs/19-p13-escalation-channel.md`. The module arrived with three
+independent audit rounds already applied (cycle-1..4 markers in code);
+this session closed their remaining list — dispatcher oversized-identity
+rejection (HIGH), the delivery ledger seeded from EVERY escalation line
+so a resolved question's cap survives restarts (HIGH), throwing-
+descriptor disclosures across raise/resolve/dispatcher, replay/reader
+tolerance alignment (lenient resolution close + `pendingStatus`
+completeness accounting), copyAttempts non-string disclosure, dispatcher
+rationale/actionId clip markers, `noteClipped` on the consumer parse,
+the renderer's get-fence against revoked/trapping records, the doc
+drifts, and 9 new regression tests (c4-F1…F9).
+Full gate green: `npm run build && npm test` → 2383 tests / 0 fail / 14
+skipped.
+
+**Next:** the 5-cycle implement-audit loop (worker Qwen3.8-Flash-Next-Q4
+= default, auditor anthropic/claude-haiku-5.5), state under
+`.tre/implement-audit/p13-escalation/`. A CLEAN verdict stops early; an
+exhausted budget reports unresolved findings.
+
 ## 2026-12-09 — P15 audit cycle A8: A7's fixes audited (Haiku 5.5), 8 findings — all closed; next: P9/M1 composition
 
 **This session (P15 audit cycle A8):** audited the A7 commit (`b15aab6`)
