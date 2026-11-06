@@ -1434,3 +1434,75 @@ test("loop-c3-F1: an unverifiable-count refusal survives restart — a refusal l
   assert.equal(r4.delivered, false, "a complete replay of a once-truncated log stays refused");
   assert.ok(r4.disclosed?.includes("delivery:unverifiable-count"), "complete-replay refusal is disclosed too");
 });
+
+test("loop-c4-F1: a legacy refusal line (no marker) in a truncated window never mints a budget", async () => {
+  // A log written before countUnverifiable existed: a key with reNotice > 0
+  // and deliveredCount 0 — those lines were written precisely because the
+  // count was unverifiable (or nothing was ever deliverable). A restarted
+  // channel must not read that 0 as proof of an unspent budget.
+  const big: unknown[] = [];
+  // ch1 has NO deliver port: lines accumulate with deliveredCount 0.
+  const ch1 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], now: () => big.length, maxRedeliver: 1 });
+  await ch1.raise(valid() as never);                       // reNotice 0, deliveredCount 0
+  await ch1.raise(valid({ decisionNeeded: "changed: v2" }) as never); // reNotice 1, deliveredCount 0
+  for (let i = 0; i < 100_005; i++) big.push({ schema: "other", kind: "noise", i });
+  const ch2 = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t2" }), now: () => big.length, maxRedeliver: 1 });
+  const r = (await ch2.raise(valid({ decisionNeeded: "changed: v3" }) as never)) as RaiseResult;
+  assert.equal(r.delivered, false, "a legacy reNotice>0/count-0 line is not budget proof");
+  assert.ok(r.disclosed?.includes("delivery:unverifiable-count"), "fail-closed is disclosed");
+  const last = big[big.length - 1] as { countUnverifiable?: unknown };
+  assert.equal(last.countUnverifiable, true, "the legacy log is healed: the new refusal line carries the marker");
+});
+
+test("loop-c4-F2: a forged non-boolean countUnverifiable still refuses — only absent/undefined/false verifies", async () => {
+  // Produce a REAL record so the in-window line shares the key the later
+  // raise recomputes (escalationId is derived from episodeId|taskId|blocker).
+  const seed = makeEscalationChannel({ append: async () => {}, now: () => 1 });
+  const seeded = (await seed.raise(valid({ blocker: "gate-defect", decisionNeeded: "orig ask" }) as never)) as RaiseResult;
+  const baseRec = { ...(seeded.record as object), deliveredCount: 1, reNotice: 0 } as Record<string, unknown>;
+  const forged: { name: string; make: () => object }[] = [
+    { name: "'true'", make: () => ({ ...baseRec, countUnverifiable: "true" }) },
+    { name: "1", make: () => ({ ...baseRec, countUnverifiable: 1 }) },
+    { name: "{}", make: () => ({ ...baseRec, countUnverifiable: {} }) },
+    { name: "getter->true", make: () => Object.defineProperty({ ...baseRec }, "countUnverifiable", { get: () => true }) },
+    { name: "getter throws", make: () => Object.defineProperty({ ...baseRec }, "countUnverifiable", { get() { throw new Error("x"); } }) },
+    { name: "accessor", make: () => Object.defineProperty({ ...baseRec }, "countUnverifiable", { get: undefined, set: undefined }) },
+  ];
+  const mkWindow = (line: object) => {
+    const big: unknown[] = [];
+    for (let i = 0; i < 100_005; i++) big.push({ schema: "other", kind: "noise", i });
+    big.push(line); // the line sits INSIDE the window; the noise cuts the true history
+    return big;
+  };
+  for (const f of forged) {
+    const big = mkWindow(f.make());
+    const ch = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t" }), now: () => 1, maxRedeliver: 3 });
+    const r = (await ch.raise(valid({ blocker: "gate-defect", decisionNeeded: "new ask" }) as never)) as RaiseResult;
+    assert.equal(r.delivered, false, `${f.name}: a present non-boolean marker must refuse`);
+    assert.ok(r.disclosed?.includes("delivery:unverifiable-count"), `${f.name}: disclosed`);
+  }
+  // Control: the same window with NO marker (and one with false) delivers.
+  for (const over of [{}, { countUnverifiable: false }]) {
+    const big = mkWindow({ ...baseRec, ...over });
+    const ch = makeEscalationChannel({ append: async (r) => { big.push(r); }, read: async () => [...big], deliver: async () => ({ channel: "t" }), now: () => 1, maxRedeliver: 3 });
+    const r = (await ch.raise(valid({ blocker: "gate-defect", decisionNeeded: "new ask" }) as never)) as RaiseResult;
+    assert.equal(r.delivered, true, `control (${JSON.stringify(over)}): an honest line keeps its verified budget`);
+  }
+});
+
+test("loop-c4-F3: a 235-char actionId is bounded with room for the 'action:' prefix — clipped is disclosed", async () => {
+  const appends: { evidence: string[] }[] = [];
+  const ch = makeEscalationChannel({ append: async (r) => { appends.push(r as { evidence: string[] }); }, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const d = makeEscalationDispatcher({ channel: ch });
+  await d.escalate({ episodeId: "e", taskId: "t", actionId: "a".repeat(235) } as never);
+  const ev = appends[0]!.evidence;
+  assert.ok(ev[0]!.startsWith("action:"), "composed entry intact");
+  assert.equal(ev[0]!.length, 240, "composed entry fits MAX_STR exactly (no silent channel-side clip)");
+  assert.equal(ev[0], "action:" + "a".repeat(233), "the id keeps exactly the room the prefix left");
+  assert.ok(ev.includes("actionId:clipped"), "the composed-clip is disclosed (raw 235 + 7 > 240)");
+  // Boundary: 233 + 'action:' = 240 fits — NOT clipped, no marker.
+  appends.length = 0;
+  await d.escalate({ episodeId: "e", taskId: "t2", actionId: "a".repeat(233) } as never);
+  assert.equal(appends[0]!.evidence[0], "action:" + "a".repeat(233));
+  assert.ok(!appends[0]!.evidence.includes("actionId:clipped"), "an exact fit is not a clip");
+});

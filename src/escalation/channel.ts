@@ -483,7 +483,14 @@ function parseEscalationLine(line: unknown): EscalationRecord | undefined {
   const delRaw = ownData(line, 'deliveredCount').value;
   const deliveredCount = typeof delRaw === 'number' && Number.isInteger(delRaw) && delRaw >= 0 ? Math.min(delRaw, 1_000_000) : 0;
   // Loop-c3 F1: the refusal marker is read through the same fence.
-  const countUnverifiable = ownData(line, 'countUnverifiable').value === true;
+  // Loop-c4 F2 (audit): the marker is fail-closed on ANY present value —
+  // forging it with a non-boolean ('true', 1, {}, a getter) must still
+  // refuse (additive + monotone: it can only ever REFUSE delivery), and an
+  // accessor or a throwing descriptor is unreadable => refuse too. Only an
+  // ABSENT field, an explicit `undefined`, or literal `false` verifies.
+  const cuOwn = ownData(line, 'countUnverifiable');
+  const countUnverifiable = cuOwn.threw === true || cuOwn.accessor === true
+    || (cuOwn.present && cuOwn.value !== undefined && cuOwn.value !== false);
   const attemptId = boundedStr(ownData(line, 'attemptId').value);
   const dn = decisionNeededRaw !== undefined && decisionNeededRaw !== '' ? decisionNeededRaw : DEFAULT_DECISION_NEEDED[blocker];
   const recOut: EscalationRecord = {
@@ -819,7 +826,14 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         // countUnverifiable) is not proof — that is the refusal itself.
         const noProcessProof = (mirrored === undefined || mirrored.rec.countUnverifiable === true) && (deliveryLedger.get(escalationId) ?? 0) === 0;
         let unverifiableCount = false;
-        if (noProcessProof && (unverifiableKeys.has(escalationId) || fromLog?.countUnverifiable === true || (fromLog === undefined && !seenEver.has(escalationId)))) {
+        // Loop-c4 F1 (audit): a LEGACY log (written before the marker
+        // existed) — or any log whose marker was stripped — holds a line
+        // whose deliveredCount: 0 was itself written under an unverifiable
+        // budget (that is the only way a key shows reNotice > 0 with count
+        // 0 while nothing in THIS process proves a delivery). The line's
+        // 0 is not budget proof; fail closed like a marked refusal.
+        const legacyRefusal = fromLog !== undefined && fromLog.reNotice > 0 && fromLog.deliveredCount === 0;
+        if (noProcessProof && (unverifiableKeys.has(escalationId) || fromLog?.countUnverifiable === true || legacyRefusal || (fromLog === undefined && !seenEver.has(escalationId)))) {
           unverifiableCount = true;
         }
         // Cycle-3 F2/F3: the window is partial truth — seed the ledger
@@ -1174,10 +1188,18 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     const episodeId = boundedStr(epRaw) ?? '';
     const taskId = boundedStr(tkRaw) ?? '';
     const actionIdOwn = ownData(req, 'actionId');
-    const actionId = boundedStr(actionIdOwn.value);
+    // Loop-c4 F3 (audit): the evidence entry is 'action:'+actionId — the
+    // channel clips every entry at MAX_STR, so the RAW bound must leave
+    // room for the prefix or the id is silently cut with no marker.
+    const ACTION_PREFIX_LEN = 7;
+    const actionIdRawStr = typeof actionIdOwn.value === 'string' ? (actionIdOwn.value as string) : undefined;
+    const actionId = actionIdRawStr !== undefined
+      ? (actionIdRawStr.length > MAX_STR - ACTION_PREFIX_LEN ? actionIdRawStr.slice(0, MAX_STR - ACTION_PREFIX_LEN) : actionIdRawStr)
+      : boundedStr(actionIdOwn.value);
     // Cycle-4 F6 (audit MED-6): clips in the dispatcher are disclosed as
     // evidence markers (the dispatcher has no `disclosed` channel of its own).
-    const actionIdClipped = typeof actionIdOwn.value === 'string' && (actionIdOwn.value as string).length > MAX_STR;
+    // Loop-c4 F3: the clip test covers the COMPOSED entry, not just the raw id.
+    const actionIdClipped = actionIdRawStr !== undefined && actionIdRawStr.length + ACTION_PREFIX_LEN > MAX_STR;
     // Fence-safe copy (never `.map` across a hostile array): rationale
     // entries become evidence refs under the same bounds as the channel.
     const ratOwn = ownData(req, 'rationale');
@@ -1264,7 +1286,14 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     if ((typeof epRaw2 === 'string' && epRaw2.length > MAX_STR) || (typeof tkRaw2 === 'string' && tkRaw2.length > MAX_STR)) return;
     const episodeId = boundedStr(epRaw2) ?? '';
     const taskId = boundedStr(tkRaw2) ?? '';
-    const actionId = boundedStr(ownData(req, 'actionId').value);
+    // Loop-c4 F3 (audit): same composed-entry bound as escalate — a
+    // 235+ char id would be cut by the channel with no marker. park has
+    // no disclosed channel of its own; the bound is preventive.
+    const parkActionOwn = ownData(req, 'actionId');
+    const parkActionRaw = typeof parkActionOwn.value === 'string' ? (parkActionOwn.value as string) : undefined;
+    const actionId = parkActionRaw !== undefined
+      ? (parkActionRaw.length > MAX_STR - 7 ? parkActionRaw.slice(0, MAX_STR - 7) : parkActionRaw)
+      : boundedStr(parkActionOwn.value);
     await deps.channel.raise({
       episodeId,
       taskId,

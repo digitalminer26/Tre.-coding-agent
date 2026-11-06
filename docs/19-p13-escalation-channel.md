@@ -106,6 +106,13 @@ Boundary rules (invariants, pinned by tests):
 ```
 
 - `attemptId` optional (a budget-exhausted stop may have none).
+- `countUnverifiable: true` (optional, loop-c3/c4) — written on a line whose
+  deliveredCount could NOT be verified (window truncated with no in-process
+  proof, or a carried-in refusal). The line's `deliveredCount` is then NOT
+  budget proof: replay treats the key as cap-spent (fail closed). The field
+  is additive and monotone — ANY present value other than an absent field,
+  `undefined`, or `false` (including a forged non-boolean or an accessor)
+  refuses; it can never grant delivery.
 - `decisionNeeded` is free text (bounded, INV-4) — it names the EXACT
   decision the human must make (docs/11 P13 row). The planner/loop fills
   it; the channel never invents one (absent → the blocker's §2 default).
@@ -171,7 +178,12 @@ interface EscalationDeps {
   resolution closes its escalation; corrupt lines are skipped silently.
   The replay copy is TAIL-first over `REPLAY_CAP` (100,000) lines: for an
   append-only log the NEWEST lines are the current state, so a truncation
-  drops stale history, never open work (cycle-1 F1/F2). `pendingStatus()`
+  drops stale history, never open work (cycle-1 F1/F2). A line carrying
+  `countUnverifiable` (§1) keeps its key cap-spent on replay — and so does
+  a TRUNCATED window holding a `reNotice > 0, deliveredCount: 0` line for
+  a key no in-process ledger proves delivered (legacy logs predate the
+  marker, loop-c4 F1): neither line may be read as budget proof — the cap
+  fails closed (INV-5). `pendingStatus()`
   returns the same view plus `complete: boolean` — `false` whenever the
   replay was truncated, unreadable, or absent; a host must present an
   incomplete queue AS incomplete (cycle-1 F4: exactly one replay per call).
