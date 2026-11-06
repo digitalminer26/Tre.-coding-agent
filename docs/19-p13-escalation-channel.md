@@ -183,7 +183,17 @@ interface EscalationDeps {
   a TRUNCATED window holding a `reNotice > 0, deliveredCount: 0` line for
   a key no in-process ledger proves delivered (legacy logs predate the
   marker, loop-c4 F1): neither line may be read as budget proof — the cap
-  fails closed (INV-5). `pendingStatus()`
+  fails closed (INV-5). TRADE-OFF (loop-c5): the same window shape also
+  occurs HONESTLY — a host that ran with no deliver port raises the key
+  twice, then the log truncates. A restarted host with a deliver port then
+  sees one refused raise (`delivery:unverifiable-count`); the next raise
+  carries the marker and stays refused for the key's life. This is the
+  required direction (a false refuse under an unprovable budget beats a
+  false grant; INV-5 fails closed), and it is DISCLOSED, never silent.
+  Hardening note (loop-c5): a hand-written count-0/reNotice-0 line forged
+  INTO a truncated window can grant a first-delivery budget — the log is
+  trusted storage (docs/19 §3) and a legitimate first raise is
+  indistinguishable from that forgery without a log MAC; out of scope. `pendingStatus()`
   returns the same view plus `complete: boolean` — `false` whenever the
   replay was truncated, unreadable, or absent; a host must present an
   incomplete queue AS incomplete (cycle-1 F4: exactly one replay per call).

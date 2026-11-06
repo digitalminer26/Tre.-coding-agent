@@ -1200,6 +1200,12 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // evidence markers (the dispatcher has no `disclosed` channel of its own).
     // Loop-c4 F3: the clip test covers the COMPOSED entry, not just the raw id.
     const actionIdClipped = actionIdRawStr !== undefined && actionIdRawStr.length + ACTION_PREFIX_LEN > MAX_STR;
+    // Loop-c5 F2 (audit): a PRESENT-but-unusable actionId (non-string, an
+    // accessor, a throwing descriptor) must not vanish silently (INV-4) —
+    // same rule the 'rationale' path follows: drop WITH a marker.
+    const actionIdDropped = actionId === undefined
+      && (actionIdOwn.accessor === true || actionIdOwn.threw === true
+          || (actionIdOwn.present && actionIdOwn.value !== undefined));
     // Fence-safe copy (never `.map` across a hostile array): rationale
     // entries become evidence refs under the same bounds as the channel.
     const ratOwn = ownData(req, 'rationale');
@@ -1233,6 +1239,7 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     if (ev.dropped || ev.hostile) markersPre.push('rationale:dropped');
     else if (ev.overflow || ev.skipped || ev.clipped || entryClipped0) markersPre.push('rationale:truncated');
     if (actionIdClipped) markersPre.push('actionId:clipped');
+    if (actionIdDropped) markersPre.push('actionId:dropped'); // loop-c5 F2
     const room = MAX_EVIDENCE - (actionId !== undefined ? 1 : 0) - markersPre.length;
     for (const r of ev.strs) {
       if (evidenceSrc.length >= Math.max(0, room)) break;
@@ -1287,19 +1294,30 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     const episodeId = boundedStr(epRaw2) ?? '';
     const taskId = boundedStr(tkRaw2) ?? '';
     // Loop-c4 F3 (audit): same composed-entry bound as escalate — a
-    // 235+ char id would be cut by the channel with no marker. park has
-    // no disclosed channel of its own; the bound is preventive.
+    // 235+ char id would be cut by the channel with no marker.
+    // Loop-c5 F1/F2 (audit): park ALSO discloses through the evidence —
+    // 'actionId:clipped' on a composed clip, 'actionId:dropped' when the
+    // field was present but unusable. Silent loss is the INV-4 failure.
     const parkActionOwn = ownData(req, 'actionId');
     const parkActionRaw = typeof parkActionOwn.value === 'string' ? (parkActionOwn.value as string) : undefined;
-    const actionId = parkActionRaw !== undefined
+    const parkActionId = parkActionRaw !== undefined
       ? (parkActionRaw.length > MAX_STR - 7 ? parkActionRaw.slice(0, MAX_STR - 7) : parkActionRaw)
       : boundedStr(parkActionOwn.value);
+    const parkMarkers: string[] = [];
+    if (parkActionRaw !== undefined && parkActionRaw.length + 7 > MAX_STR) parkMarkers.push('actionId:clipped');
+    if (parkActionId === undefined && (parkActionOwn.accessor === true || parkActionOwn.threw === true || (parkActionOwn.present && parkActionOwn.value !== undefined))) parkMarkers.push('actionId:dropped');
+    const parkEvidence: string[] = [];
+    if (parkActionId !== undefined) parkEvidence.push(`action:${parkActionId}`);
+    for (const m of parkMarkers) {
+      if (parkEvidence.length < MAX_EVIDENCE) parkEvidence.push(m);
+      else parkEvidence[parkEvidence.length - 1] = m;
+    }
     await deps.channel.raise({
       episodeId,
       taskId,
       blocker: 'repeated-strategy',
       decisionNeeded: 'the task is parked — approve a new approach, rewrite it, or abort',
-      ...(actionId !== undefined ? { evidence: [`action:${actionId}`] } : {}),
+      ...(parkEvidence.length > 0 ? { evidence: parkEvidence } : {}),
     });
   };
 

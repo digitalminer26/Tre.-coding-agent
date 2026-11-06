@@ -1506,3 +1506,30 @@ test("loop-c4-F3: a 235-char actionId is bounded with room for the 'action:' pre
   assert.equal(appends[0]!.evidence[0], "action:" + "a".repeat(233));
   assert.ok(!appends[0]!.evidence.includes("actionId:clipped"), "an exact fit is not a clip");
 });
+
+test("loop-c5-F1: park bounds AND marks a composed actionId clip (the escalate fix had to cover park)", async () => {
+  const appends: { evidence: string[] }[] = [];
+  const ch = makeEscalationChannel({ append: async (r) => { appends.push(r as { evidence: string[] }); }, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const d = makeEscalationDispatcher({ channel: ch });
+  await d.park({ episodeId: "e", taskId: "t", actionId: "x".repeat(235) } as never);
+  const ev = appends[0]!.evidence;
+  assert.ok(ev[0]!.startsWith("action:"), "composed entry intact");
+  assert.ok(ev[0]!.length <= 240, "the composed entry fits the channel bound");
+  assert.equal(ev[0], "action:" + "x".repeat(233), "the id keeps exactly the room the prefix left");
+  assert.ok(ev.includes("actionId:clipped"), "park discloses the clip — silent loss was the finding");
+});
+
+test("loop-c5-F2: a present-but-unusable actionId is dropped WITH a marker (escalate and park)", async () => {
+  const appends: { evidence: string[] }[] = [];
+  const ch = makeEscalationChannel({ append: async (r) => { appends.push(r as { evidence: string[] }); }, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const d = makeEscalationDispatcher({ channel: ch });
+  await d.escalate({ episodeId: "e1", taskId: "t", actionId: 42, rationale: ["r"] } as never);
+  assert.ok(appends[0]!.evidence.includes("actionId:dropped"), "escalate: numeric actionId disclosed");
+  await d.escalate({ episodeId: "e2", taskId: "t", get actionId(): never { throw new Error("x"); }, rationale: ["r"] } as never);
+  assert.ok(appends[1]!.evidence.includes("actionId:dropped"), "escalate: throwing getter disclosed");
+  await d.park({ episodeId: "e3", taskId: "t", actionId: 7 } as never);
+  assert.ok(appends[2]!.evidence.includes("actionId:dropped"), "park: numeric actionId disclosed");
+  // Absent actionId stays marker-free (control).
+  await d.park({ episodeId: "e4", taskId: "t" } as never);
+  assert.ok(!appends[3]!.evidence.includes("actionId:dropped"), "absent is not 'dropped'");
+});
