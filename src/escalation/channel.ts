@@ -116,7 +116,7 @@ type StrCopy = { strs: string[]; overflow: boolean; dropped: boolean; hostile: b
 /** Copy a string array fence-safely: length observed ONCE and re-verified
  *  after the copy; per-index descriptor traps, length lies, and scan-budget
  *  exhaustion all DISCLOSE (P15 A6/A7 pattern, docs/19 §7). */
-function copyStrs(raw: unknown): StrCopy {
+function copyStrs(raw: unknown, clipAt?: number): StrCopy {
   if (!isArraySafe(raw)) {
     // Cycle-3 F6: a PRESENT non-array (evidence:"x") is untrusted data
     // that did not survive — nonArray discloses it, never a silent [].
@@ -164,7 +164,7 @@ function copyStrs(raw: unknown): StrCopy {
       if (rawV !== undefined) skipped = true; // present garbage: disclosed
       continue;
     }
-    if (rawV.length > MAX_STR) clipped = true;
+    if (rawV.length > MAX_STR || (clipAt !== undefined && rawV.length > clipAt)) clipped = true;
     if (out.length < MAX_EVIDENCE) out.push(s);
     else overflow = true;
   }
@@ -602,12 +602,28 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
    *  the max deliveredCount of EVERY escalation line the scan saw,
    *  resolved or not; every successful replay ratchets the ledger from it. */
   const ledgerMaxScan = new Map<string, number>();
+
+  /** Audit cycle-1 F1 (INV-5): the dedup decision, the cap check, and the
+   *  ledger reservation run AFTER `await replayOpen()` but BEFORE the
+   *  `await deps.append()` — two CONCURRENT raises of one key (two
+   *  dispatches for one task) could both pass the cap before either
+   *  appended, minting duplicate deliveries. raise/resolve are serialized
+   *  per channel through this promise-chain mutex; a failed link never
+   *  wedges the queue. (Pending reads are not serialized: they observe a
+   *  settled prefix and never mutate the maps.) */
+  let opQueue: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = opQueue.then(task, task);
+    opQueue = run.then(() => undefined, () => undefined);
+    return run;
+  };
   let resSeq = 0; // cycle-2 F11: per-process monotonic suffix for resolution line ids
   // Cycle-3 F10: a per-process random salt makes resolution ids distinct
   // across restarts/colliding processes (resSeq resets to 0 after a restart).
   const resSalt = Math.random().toString(36).slice(2, 10);
 
-  const raise = async (req: RaiseRequest): Promise<RaiseResult | null> => {
+  const raise = (req: RaiseRequest): Promise<RaiseResult | null> => enqueue(() => raiseInner(req));
+  const raiseInner = async (req: RaiseRequest): Promise<RaiseResult | null> => {
     if (!isPlainObj(req)) return null;
     // Cycle-3 F1: identity is NEVER truncated. A >MAX_STR episodeId/taskId
     // would hash distinct-but-collide after clipping, merging two episodes'
@@ -851,7 +867,8 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     return out;
   };
 
-  const resolve = async (escalationId: string, res: { decision: string; by: string; note?: string }): Promise<ResolutionRecord | null> => {
+  const resolve = (escalationId: string, res: { decision: string; by: string; note?: string }): Promise<ResolutionRecord | null> => enqueue(() => resolveInner(escalationId, res));
+  const resolveInner = async (escalationId: string, res: { decision: string; by: string; note?: string }): Promise<ResolutionRecord | null> => {
     if (!isEscalationId(escalationId)) return null;
     if (!isPlainObj(res)) return null;
     const resolveDisclosed: string[] = []; // cycle-3 F5: disclosures on the ResolutionRecord
@@ -1067,7 +1084,7 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // to nothing ONLY with a structural marker in the evidence.
     const ev = ratOwn.accessor || ratOwn.threw // cycle-4 F3: a throwing descriptor drops WITH the marker
       ? { strs: [] as string[], overflow: false, dropped: true, hostile: true, skipped: false, clipped: false, nonArray: false }
-      : copyStrs(ratOwn.value);
+      : copyStrs(ratOwn.value, 80); // the dispatcher slices rationale at 80 — the clip must disclose
     if (ev.nonArray) { ev.dropped = true; ev.strs = []; } // cycle-3 F6: rationale:"text" is disclosed, not silently empty
     const evidenceSrc: string[] = [];
     // Cycle-2 F1: leave room for BOTH the 'action:' evidence and the
@@ -1094,16 +1111,10 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // marker list is appended in order; on a full list the LAST marker
     // wins its slot (the strongest signal is 'actionId:clipped' last).
     // (source entries beyond the copy budget are disclosed by ev.overflow)
-    let entryClipped = false;
-    if (Array.isArray(ratOwn.value)) {
-      let scanLen = 0;
-      try { scanLen = Math.min(ratOwn.value.length, COPY_SCAN_BUDGET); } catch { scanLen = 0; }
-      for (let i = 0; i < scanLen; i++) {
-        let v: unknown;
-        try { v = ratOwn.value[i]; } catch { break; } // hostile getter: copyStrs discards it with the dropped marker
-        if (typeof v === 'string' && v.length > 80) { entryClipped = true; break; }
-      }
-    }
+    // Cycle-1/audit (rec R4 fold + F2): the 80-slice clip flag comes from
+    // copyStrs' OWN scan (clipAt=80) — no second scan, no raw Array.isArray
+    // (a revoked 'rationale' proxy threw on the bare IsArray before).
+    const entryClipped = ev.clipped;
     const markers: string[] = [];
     if (ev.dropped || ev.hostile) markers.push('rationale:dropped');
     else if (ev.overflow || ev.skipped || ev.clipped || entryClipped || ev.strs.length > evidenceSrc.length) markers.push('rationale:truncated');

@@ -30,6 +30,19 @@ skipped.
 `.tre/implement-audit/p13-escalation/`. A CLEAN verdict stops early; an
 exhausted budget reports unresolved findings.
 
+**Loop-c1 fix round (this session):** haiku 5.5 audit 1 → FINDINGS, 3
+bugs + 1 recommendation, all closed: (F1) concurrent `raise()`s of one key
+ran the dedup/cap decision before either append — two dispatches for one
+task could each deliver past the INV-5 cap; raise+resolve are now
+serialized per channel through a promise-chain mutex (`enqueue`).
+(F2) the dispatcher's rationale scan called raw `Array.isArray` on the
+`rationale` value — a revoked proxy threw at the caller; the scan is gone
+entirely (rec R4 fold: `copyStrs` gained a `clipAt` threshold so the 80-
+slice clip flags from the copy's own fenced scan). (F3) the renderer's
+evidence copy passed `isArr` but `.map()` then per-index-GETed a trapping
+array proxy — now a bounded index loop with a per-read try. 3 regression
+tests (loop-c1-F1/F2/F3); gate: build 0, 2386 tests / 0 fail / 14 skip.
+
 ## 2026-12-09 — P15 audit cycle A8: A7's fixes audited (Haiku 5.5), 8 findings — all closed; next: P9/M1 composition
 
 **This session (P15 audit cycle A8):** audited the A7 commit (`b15aab6`)

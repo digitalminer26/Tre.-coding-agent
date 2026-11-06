@@ -1292,3 +1292,44 @@ test("c4-F9 (MED-4): a resolution line the strict parse rejects but the grammar 
   assert.equal(st.open.length, 0, "the lenient close closed it");
   assert.equal(st.complete, false, "a lenient-only close makes the view partial truth, never 'complete'");
 });
+
+// ──────────────────── audit cycle 1 (implement-audit loop) ──────────────────
+
+test("loop-c1-F1: CONCURRENT raises of one key cannot both pass the INV-5 cap (per-channel serialization)", async () => {
+  const appends: unknown[] = [];
+  const delivers: unknown[] = [];
+  const ch = makeEscalationChannel({
+    append: async (r) => { appends.push(r); },
+    read: async () => [...appends],
+    deliver: async (r) => { delivers.push(r); return { channel: "t" }; },
+    now: () => 1700000000 + appends.length,
+    maxRedeliver: 1,
+  });
+  const rs = await Promise.all([ch.raise(valid() as never), ch.raise(valid() as never), ch.raise(valid() as never)]);
+  assert.equal(delivers.length, 1, "one delivery across three concurrent raises");
+  assert.equal(rs[0]!.delivered, true);
+  assert.equal(rs[1]!.delivered, false, "the second concurrent raise sees the cap");
+  assert.equal(rs[2]!.delivered, false);
+});
+
+test("loop-c1-F2: dispatcher survives a revoked 'rationale' proxy — drops WITH the structural marker", async () => {
+  const appends: { evidence: string[] }[] = [];
+  const ch = makeEscalationChannel({ append: async (r) => { appends.push(r as { evidence: string[] }); }, deliver: async () => ({ channel: "t" }), now: () => 1 });
+  const d = makeEscalationDispatcher({ channel: ch });
+  const { proxy, revoke } = Proxy.revocable<string[]>([], {});
+  revoke();
+  const r = await d.escalate({ episodeId: "e2", taskId: "t", rationale: proxy } as never);
+  assert.ok(r !== null, "the escalate completed, no throw escaped");
+  assert.ok(appends[0]!.evidence.includes("rationale:dropped"), "hostile rationale disclosed in the record");
+});
+
+test("loop-c1-F3: renderEscalation survives a per-index TRAPPING evidence array", () => {
+  const rec = {
+    schema: ESCALATION_SCHEMA, kind: "escalation", id: "esc-0000000000000001#0", escalationId: "esc-" + "1".repeat(16), ts: 1,
+    episodeId: "e", taskId: "t", blocker: "gate-defect", decisionNeeded: "d",
+    evidence: new Proxy(["ok"], { get(): never { throw new Error("index-trap"); } }),
+    attempts: [], reNotice: 0, deliveredCount: 0, evidenceDigest: "0".repeat(16), provenance: "P13/M1",
+  };
+  const out = renderEscalation(rec as unknown as EscalationRecord);
+  assert.ok(out.includes("/resolve"), "renderer degraded to a resolve-able message, never threw");
+});

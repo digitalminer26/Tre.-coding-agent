@@ -73,9 +73,22 @@ export function renderEscalation(rec: EscalationRecord): string {
   const who = [`episode ${flatten(str(get('episodeId')))}`, `task ${flatten(str(get('taskId')))}`, ...(typeof attRaw === 'string' && attRaw !== '' ? [`attempt ${flatten(attRaw)}`] : [])].join(' · ');
   const dn = flatten(str(get('decisionNeeded')));
   const evRaw = get('evidence');
-  const ev = (isArr(evRaw) ? (evRaw as unknown[]) : [])
-    .map((x) => { try { return flatten(str(x)); } catch { return ''; } })
-    .filter((s) => s.length > 0);
+  // Cycle-1 audit F3: isArr only fences the IsArray intrinsic — .map() then
+  // does a per-index GET, and a trapping array proxy throws there. Copy by
+  // index under a bounded loop with a per-read try (a trap stops the copy;
+  // what was copied stands — degraded, never a throw at a phone-facing call).
+  const ev: string[] = [];
+  if (isArr(evRaw)) {
+    let n = 0;
+    try { n = Math.min(Math.max(0, Math.trunc((evRaw as unknown[]).length) || 0), 16); } catch { n = 0; }
+    for (let i = 0; i < n; i++) {
+      let x: unknown;
+      try { x = (evRaw as unknown[])[i]; } catch { break; }
+      let line: string;
+      try { line = flatten(str(x)); } catch { line = ''; }
+      if (line.length > 0) ev.push(line);
+    }
+  }
   // Build with a bounded number of evidence entries (newest first are no
   // more truthful than the oldest — keep the first N that fit).
   let shown = ev.length > MAX_EVIDENCE_SHOWN ? ev.slice(0, MAX_EVIDENCE_SHOWN) : ev;
