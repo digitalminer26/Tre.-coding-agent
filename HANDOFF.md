@@ -1,5 +1,37 @@
 # HANDOFF
 
+## 2026-12-10 — W7: audit of the W5/W6 changes (probe-driven)
+
+Audited my own W6 diff-cap retirement. Probe results, including the parts
+that came back CLEAN:
+- CLEAN: digest is byte-exact for binary/invalid-UTF-8 diffs (sha256 of
+  raw bytes, not a UTF-8 round-trip); a REAL 75 MB diff (>64 MiB) with an
+  edit in a late-sorting file MOVES the digest in 325 ms; a 2 GiB
+  untracked file hashes at +8 MB RSS (constant memory); the identity is
+  deterministic across repeat runs; unborn HEAD fails closed, never clean.
+- **W7-A1 (major, FIXED): the options-object signature silently
+  reintroduced the W4-A1 blindness.** `runObservedGit`'s 4th param went
+  from `maxBytes: number` to an options object; a stale JS caller passing
+  a number had it swallowed as `{}`, so `maxBytes` was undefined → legacy
+  16 KiB TAIL, with `truncated` UNSET so nothing failed closed (probe:
+  27300-byte status returned 16384). A numeric 4th arg is now coerced to
+  `{ maxBytes }`. Regression test verified to FAIL on pre-W7 code.
+- **W7-A2 (fixed): `maxBytes` + `hashStdout` together were ambiguous** —
+  the combo returned EMPTY stdout WITH a digest (caller asked for a
+  capped copy, got no copy and no truncation flag). Now refused outright.
+- W7-A3 (consistency): `write-tree` ran with the 64 MiB default for a
+  40-byte output; now capped at 4096. Guard test only (passes pre-W7).
+- **DISCLOSED, not "fixed": the untracked-content read has NO time
+  bound.** Every other observation has one, but the untracked files are
+  hashed in-process. Probe: 4 GiB of sparse untracked content = 2.2 s.
+  A time cutoff was deliberately NOT added: it would make the digest
+  nondeterministic (the same tree hashing differently run-to-run), which
+  is worse than slow. Cost is proportional to untracked BYTES, so a tree
+  with tens of GiB untracked is slow-but-correct. If that ever bites,
+  the fix is a byte BUDGET that folds an explicit "unhashed" marker into
+  the digest (deterministic, still fail-closed) — not a timeout.
+- Gate: 2407 pass / 0 fail / 14 skipped.
+
 ## 2026-12-10 — W6: the diff capture cap is RETIRED (streaming-hash digest)
 
 Follow-up to W5-A1's fail-closed marker: rather than keep a 64 MiB cap

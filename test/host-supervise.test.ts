@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEpisodeLayout, type EpisodeGraph } from "../src/episode/journal.js";
-import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity } from "../src/host/supervise.js";
+import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit } from "../src/host/supervise.js";
 
 async function freshEpisode(t: { diagnostic: (m: string) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
   const root = await mkdtemp(join(tmpdir(), "tre-host-"));
@@ -521,4 +521,54 @@ test("W5-A2: a mid-file edit in a >16 MiB untracked file MOVES the digest (no si
   const fh = await open(big, "r+"); await fh.write("B", 8 * 1024 * 1024); await fh.close();
   const u2 = await observeIdentity(wt, sha);
   assert.notEqual(u2.dirtyDigest, u1.dirtyDigest, "a mid-file edit in a >16 MiB untracked file MUST move the digest");
+});
+
+test("W7-A1: a stale NUMERIC 4th arg to runObservedGit is a maxBytes request, never a silent 16KiB tail", async () => {
+  // Audit probe: the 4th param changed from `maxBytes: number` to an
+  // options object. A stale JS caller passing a number had it swallowed
+  // as an options object, so maxBytes was undefined → legacy 16 KiB TAIL
+  // with `truncated` UNSET (27300-byte status returned 16384, nothing
+  // failed closed). That is the W4-A1 blindness re-entering by the API.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w7a1-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  execFileSync("git", ["init", "-q"], { cwd: wt });
+  for (let i = 0; i < 700; i++) await writeFile(join(wt, `untracked-with-a-long-name-${String(i).padStart(4, "0")}.txt`), "x");
+  const args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+  const stale = await runObservedGit(wt, args, 10, 64 * 1024 * 1024 as unknown as { maxBytes?: number });
+  const correct = await runObservedGit(wt, args, 10, { maxBytes: 64 * 1024 * 1024 });
+  assert.ok(correct.stdout.length > 16 * 1024, "fixture must exceed the legacy 16KiB tail");
+  assert.equal(stale.stdout.length, correct.stdout.length, "a numeric 4th arg must FULL-capture, not fall back to the tail");
+  assert.notEqual(stale.stdout.length, 16384, "must never silently return the 16KiB tail");
+});
+
+test("W7-A2: runObservedGit REFUSES maxBytes + hashStdout together (ambiguous capture modes)", async () => {
+  // Probe: the combo returned EMPTY stdout WITH a digest — a caller
+  // asking for a capped copy got no copy and no truncation flag.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w7a2-"));
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  await assert.rejects(
+    () => runObservedGit(root, ["status", "--porcelain=v1"], 10, { maxBytes: 1024, hashStdout: true }),
+    /mutually exclusive/,
+    "the ambiguous combination must be refused, not guessed",
+  );
+});
+
+test("W7-A3: the write-tree observation is bounded (small capture) yet still yields the full tree sha", async () => {
+  // Audit: write-tree ran with the DEFAULT 64 MiB capture while its
+  // output is a single 40-byte sha — inconsistent with every other
+  // identity run and needlessly large a buffer. CONSISTENCY fix: this
+  // test passes on pre-W7 code too (it is a guard, not a regression
+  // proof — the old behavior was wasteful, not wrong).
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w7a3-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "f.txt"), "f"); g("add", "."); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+  await writeFile(join(wt, "f.txt"), "changed");
+  const id = await observeIdentity(wt, sha);
+  assert.equal(id.dirty, true, "still observes dirt correctly under the bounded write-tree run");
+  const wt2 = await runObservedGit(wt, ["write-tree"], 10, { maxBytes: 4096 });
+  assert.equal(wt2.code, 0);
+  assert.match(wt2.stdout.trim(), /^[0-9a-f]{40}$/, "write-tree output fits the small cap intact");
+  assert.equal(wt2.truncated ?? false, false, "never truncated at 4096 for a tree sha");
 });

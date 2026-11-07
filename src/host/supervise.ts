@@ -351,7 +351,15 @@ export function shellQuote(a: string): string {
  *  minimal env (`GIT_ENV`) as the policy gate — the W1-era gate and
  *  observation inherited DIFFERENT things, so they could disagree about
  *  the same tree (the "clean gate passed @ dirty identity" shape). */
-export async function runObservedGit(repo: string, args: string[], timeoutS = 30, opts?: { maxBytes?: number; hashStdout?: boolean }): Promise<ShellResult> {
+export async function runObservedGit(repo: string, args: string[], timeoutS = 30, opts?: { maxBytes?: number; hashStdout?: boolean } | number): Promise<ShellResult> {
+  // W7-A1 (audit of W6): the 4th param USED to be a bare `maxBytes`
+  // number. A stale/untyped JS caller still passing a number would have
+  // it treated as an OPTIONS OBJECT — i.e. `maxBytes` silently undefined
+  // and the call falls back to the legacy 16 KiB TAIL, which is exactly
+  // the W4-A1 blindness (PROVEN: 27300-byte status came back as 16384,
+  // with `truncated` NOT set, so nothing failed closed). Coerce instead:
+  // a numeric 4th arg is a maxBytes request, never a silent downgrade.
+  const o: { maxBytes?: number; hashStdout?: boolean } = typeof opts === "number" ? { maxBytes: opts } : (opts ?? {});
   const pinned = [
     "git",
     "-c", "status.untrackedFiles=all",
@@ -369,7 +377,14 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
   // W6: `hashStdout` replaces capture entirely for big streams — every
   // stdout byte is digested as it flows (constant memory, no cap), and
   // the digest is withheld on any cut-short stream.
-  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, ...opts });
+  // W7-A2: hashStdout WINS over maxBytes when both are passed (probe
+  // A4: the combo silently returned empty stdout WITH a digest, i.e. a
+  // caller asking for a capped copy got no copy and no truncation flag).
+  // Refuse the ambiguous combination rather than guess.
+  if (o.maxBytes !== undefined && o.hashStdout === true) {
+    throw new Error("host: runObservedGit maxBytes and hashStdout are mutually exclusive (a capped copy and a full digest cannot both be requested)");
+  }
+  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, ...o });
 }
 
 /** Observe the working tree's identity: HEAD sha + a digest of tracked
@@ -458,7 +473,7 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // staged path/mode/blob, so `diff.noprefix`, `diff.mnemonicPrefix`,
   // `core.symlinks`, `diff.ignoreSubmodules` and friends can never bend
   // it (unlike any diff OUTPUT).
-  const indexTree = await runObservedGit(cwd, ["write-tree"], 10);
+  const indexTree = await runObservedGit(cwd, ["write-tree"], 10, { maxBytes: 4096 });
   if (indexTree.code !== 0 || indexTree.stdout.trim() === "" || indexTree.truncated) {
     // fail closed: an index we cannot hash (unmerged entries, EACCES,
     // timeout) is dirt we cannot see.
