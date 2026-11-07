@@ -22,6 +22,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink, open } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -471,22 +472,39 @@ test("W4-A1: a truncated observation FAILS CLOSED to dirty-unknown (tiny capture
   assert.equal(capped2.dirtyDigest, capped.dirtyDigest, "fail-closed identity is deterministic");
 });
 
-test("W5-A1: a tracked diff past the capture cap FAILS CLOSED (never a prefix-only stamp)", async () => {
-  // Audit probe: a >cap tracked diff was hashed as a prefix, so an edit in a
-  // late-sorting file (its diff past the cap) left the digest unchanged.
-  // Fix: a truncated diff is dirty-unknown. A small cap makes the cut
-  // deterministic without a 64 MiB fixture.
-  const root = await mkdtemp(join(tmpdir(), "tre-host-w5a1-"));
+test("W5-A1/W6: a tracked diff LARGER than any capture cap is fully bound — a late-file edit moves the digest (streaming hash, cap retired)", async () => {
+  // The W5 fail-open: a diff past the capture cap was hashed as a
+  // prefix (or a truncated marker), so an edit to a late-sorting file
+  // left the digest unchanged. W6 streams every diff byte through
+  // sha256 (constant memory): the cap no longer applies to the diff,
+  // so ANY edit moves the digest at ANY maxBytes.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w6-"));
   const wt = join(root, "wt"); await mkdir(wt);
   const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   g("init", "-q"); await writeFile(join(wt, "a-big.txt"), "seed\n"); await writeFile(join(wt, "z-small.txt"), "seed\n"); g("add", "."); g("commit", "-q", "-m", "b");
   const sha = g("rev-parse", "HEAD").trim();
-  await writeFile(join(wt, "a-big.txt"), "x".repeat(4096) + "\n");
+  await writeFile(join(wt, "a-big.txt"), "x".repeat(200 * 1024) + "\n"); // diff >> any cap
   await writeFile(join(wt, "z-small.txt"), "small-A\n");
-  const capped = await observeIdentity(wt, sha, 1024);
-  assert.equal(capped.dirty, true, "a truncated diff is dirty-unknown, never clean");
-  const complete = await observeIdentity(wt, sha);
-  assert.notEqual(capped.dirtyDigest, complete.dirtyDigest, "the truncated identity is a distinct fail-closed marker, not the prefix hashed as whole");
+  const a = await observeIdentity(wt, sha, 1024); // tiny cap: old code truncated here
+  await writeFile(join(wt, "z-small.txt"), "small-B\n"); // edit PAST the old cap position
+  const b = await observeIdentity(wt, sha, 1024);
+  assert.notEqual(b.dirtyDigest, a.dirtyDigest, "a late-file edit MUST move the digest even when the diff exceeds maxBytes");
+  const complete = await observeIdentity(wt, sha); // default: no cap on the diff
+  assert.equal(b.dirtyDigest, complete.dirtyDigest, "with streaming hash the cap no longer changes the identity at all (no marker, no fail-closed downgrade)");
+});
+
+test("W6: runShell hashStdout digests the FULL stream (multi-chunk) and withholds the digest on a cut-short stream", async () => {
+  // hash mode: every byte hashed, stdout never accumulated; a timeout
+  // (stream cut short) yields NO digest — callers fail closed.
+  const big = "0123456789".repeat(20000); // 200KB: many pipe chunks
+  const r = await runShell(`printf '%s' '${big}'`, tmpdir(), 30, { hashStdout: true });
+  assert.equal(r.code, 0);
+  const expect = createHash("sha256").update(big).digest("hex");
+  assert.equal(r.stdoutDigest, expect, "digest covers every streamed byte");
+  assert.equal(r.stdout, "", "stdout is NOT accumulated in hash mode (constant memory)");
+  const t = await runShell("echo started; sleep 5", tmpdir(), 1, { hashStdout: true });
+  assert.equal(t.cause, "timeout");
+  assert.equal(t.stdoutDigest, undefined, "a cut-short stream has NO digest (never a partial one)");
 });
 
 test("W5-A2: a mid-file edit in a >16 MiB untracked file MOVES the digest (no size-only fallback)", async () => {

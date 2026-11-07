@@ -134,6 +134,13 @@ interface ShellResult {
    *  complete output. Observation paths must treat this as fail-closed;
    *  tail-mode callers never see it (undefined). */
   truncated?: boolean;
+  /** W6 (audit cycle W5 follow-up): set ONLY in `hashStdout` mode — the
+   *  SHA-256 (hex) of EVERY stdout byte the child wrote, with no cap and
+   *  no stored copy (constant memory). ABSENT when the stream was cut
+   *  short (timeout / signal / spawn-error): an unaccounted prefix is
+   *  never handed out as a digest, so callers must treat its absence as
+   *  fail-closed. */
+  stdoutDigest?: string;
 }
 
 /** The git/gate execution environment (W2-M5, audit cycle W2): ONE
@@ -175,8 +182,9 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
  *  `truncated: true` fails the observation closed. Display/gate-log
  *  callers keep the 16 KiB tail (a truncated LOG is a display issue;
  *  a truncated IDENTITY is a soundness one). */
-export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?: NodeJS.ProcessEnv; maxBytes?: number }): Promise<ShellResult> {
+export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?: NodeJS.ProcessEnv; maxBytes?: number; hashStdout?: boolean }): Promise<ShellResult> {
   const maxBytes = opts?.maxBytes; // undefined = legacy 16KiB tail mode
+  const hashMode = opts?.hashStdout === true; // W6: digest-only capture
   return new Promise((res) => {
     let child;
     try {
@@ -195,6 +203,9 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
     // is ever digested as if complete). Tail mode (no maxBytes) keeps
     // the legacy 16KiB-slice behavior for display/gate-log callers.
     const fullChunks: Buffer[] = [];
+    // W6: hash mode digests every stdout byte as it streams (never
+    // stored), so a diff of ANY size is fully bound at constant memory.
+    const stdoutHash = createHash("sha256");
     let kept = 0;
     /** Resolve-once: composes the result, adding the full-capture stdout
      *  (and the truncated flag) in full mode, the tail string otherwise.
@@ -221,7 +232,12 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
         finish({ code: -1, stdout: maxBytes !== undefined ? "" : stdout, stderr: stderr + "\n(gate timeout: process group SIGKILLed)", cause: "timeout" }, true);
       }
     }, Math.max(1, timeoutS) * 1000);
-    if (maxBytes !== undefined) {
+    if (hashMode) {
+      // W6: digest-only capture — bytes flow into the hash and are
+      // dropped; stdout is never accumulated (constant memory for a
+      // diff of ANY size). No cap, so no `truncated` concept here.
+      child.stdout.on("data", (d: Buffer) => { stdoutHash.update(d); });
+    } else if (maxBytes !== undefined) {
       child.stdout.on("data", (d: Buffer) => {
         if (truncated) return; // drain past the cap
         if (kept + d.length <= maxBytes) { fullChunks.push(d); kept += d.length; }
@@ -254,7 +270,9 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
       // buffers we are about to return.
       killGroup();
       if (code === null) finish({ code: -1, stdout, stderr, cause: "signal", ...(signal != null ? { signal: String(signal) } : {}) });
-      else finish({ code, stdout, stderr, cause: "exit" });
+      // W6: the digest covers EVERY byte only on a normal exit — a
+      // signal-killed stream stopped mid-flight, so no stdoutDigest.
+      else finish({ code, stdout, stderr, cause: "exit", ...(hashMode ? { stdoutDigest: stdoutHash.digest("hex") } : {}) });
     });
   });
 }
@@ -333,7 +351,7 @@ export function shellQuote(a: string): string {
  *  minimal env (`GIT_ENV`) as the policy gate — the W1-era gate and
  *  observation inherited DIFFERENT things, so they could disagree about
  *  the same tree (the "clean gate passed @ dirty identity" shape). */
-export async function runObservedGit(repo: string, args: string[], timeoutS = 30, maxBytes = 64 * 1024 * 1024): Promise<ShellResult> {
+export async function runObservedGit(repo: string, args: string[], timeoutS = 30, opts?: { maxBytes?: number; hashStdout?: boolean }): Promise<ShellResult> {
   const pinned = [
     "git",
     "-c", "status.untrackedFiles=all",
@@ -348,7 +366,10 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
   // output on dirty trees, blinding the digest to early entries. A cap
   // hit sets `truncated`, which observeIdentity fails CLOSED on;
   // nothing past the cap is ever digested as if complete.
-  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, maxBytes });
+  // W6: `hashStdout` replaces capture entirely for big streams — every
+  // stdout byte is digested as it flows (constant memory, no cap), and
+  // the digest is withheld on any cut-short stream.
+  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, ...opts });
 }
 
 /** Observe the working tree's identity: HEAD sha + a digest of tracked
@@ -417,7 +438,7 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // W3-A1: `-z` gives NUL-separated, UNSAFE-path-QUOTE-FREE records — a
   // filename containing a quote or newline can no longer forge a porcelain
   // line into (or out of) the digest text; the ?? paths are extracted raw.
-  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, maxBytes);
+  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes });
   if (dirty.code !== 0) {
     // W1-M1 fail CLOSED: status failed (index.lock, EACCES, timeout) —
     // a tree whose dirt cannot be verified is treated as dirty, never clean.
@@ -449,20 +470,20 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // bend `git diff --binary` bytes (experiment: same content, hostile
   // config, different digest); explicit prefixes beat both. ext-diff/
   // textconv could rewrite content wholesale; -c pins hold the rest.
-  // W4-A1: the diff runs under FULL capture now, so the old
-  // slice(-4MiB) (which sliced the FRONT off — the same bug class) is
-  // GONE: the whole captured diff (<= the 64 MiB runObservedGit cap)
-  // is hashed. A cap hit is disclosed in the digest text alongside the
-  // retained prefix (64 MiB of identity beats zero — and the marker
-  // says the observation was capped, never silently bent).
-  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 30, maxBytes);
-  // W5-A1 fail CLOSED: a diff that hit the capture cap is a prefix —
-  // edits past the cap (a later file's header/body) were invisible to the
-  // digest (probe: late-file edit left the digest unchanged). Never stamp it.
-  if (diff.truncated) {
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`diff-truncated:${diff.stdout.length}\x00${diff.stderr.slice(-2048)}`).digest("hex") };
-  }
-  const diffPart = diff.code !== 0 ? `diff-failed:code=${diff.cause}:${diff.code}` : diff.stdout;
+  // W6 (fix round for the W5 cap finding): the diff runs in STREAMING-
+  // HASH mode — every byte is digested as it flows, at constant memory,
+  // so the 64 MiB capture cap no longer applies to the diff AT ALL: a
+  // tracked delta of any size is fully bound (no prefix, no truncation,
+  // no size-only marker). The digest is withheld on a cut-short stream
+  // (timeout/signal/spawn-error) — fail closed exactly like the old
+  // W5-A1 marker, but WITHOUT losing coverage on large deltas.
+  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 60, { hashStdout: true });
+  // W5-A1 (superseded by W6): a truncated diff used to fail closed as a
+  // prefix marker; now any missing digest (stream cut short) or a failed
+  // diff fails closed the same way — never a partial stamp.
+  const diffPart = diff.code !== 0 || diff.stdoutDigest === undefined
+    ? `diff-failed:code=${diff.cause}:${diff.code}:${diff.stdoutDigest ?? "no-digest"}`
+    : `sha256:${diff.stdoutDigest}`;
   // W3-A1: untracked content is FOLDED IN (audit finding: two different
   // contents under the same ?? path used to share one identity, so a gate
   // PASS stamped on it could be re-used against bytes it never measured).

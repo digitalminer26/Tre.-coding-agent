@@ -1,5 +1,27 @@
 # HANDOFF
 
+## 2026-12-10 — W6: the diff capture cap is RETIRED (streaming-hash digest)
+
+Follow-up to W5-A1's fail-closed marker: rather than keep a 64 MiB cap
+and downgrade big deltas to a dirty-unknown marker, the identity diff now
+runs in `hashStdout` mode — every stdout byte flows through sha256 as it
+is produced (constant memory, NO cap, no stored copy).
+- `runShell` gained `opts.hashStdout`: digest-only capture; `stdoutDigest`
+  is returned ONLY on a normal exit — a timeout/signal/spawn-error stream
+  is cut short and carries NO digest (callers fail closed; the old
+  W5-A1 marker shape remains for that case).
+- `observeIdentity` diff part is now `sha256:<digest>` of the COMPLETE
+  diff at any size; `maxBytes` no longer touches the diff (status keeps
+  its front-kept capture + fail-closed truncation). Diff timeout raised
+  30s→60s (hashing a huge delta is slower than a capped copy).
+- `runObservedGit` opts param: `{ maxBytes?, hashStdout? }` (GIT_ENV pin
+  unchanged — W2-M5 intact; W2-M5 test still green).
+- Tests: W5-A1 rewritten as a W6 proof (late-file edit past maxBytes
+  MOVES the digest, and the tiny-cap identity EQUALS the uncapped one —
+  the cap no longer changes the answer); new runShell hash test (multi-
+  chunk full digest + withheld digest on timeout). Both verified to FAIL
+  on pre-W6 code. Gate: 2404 pass / 0 fail / 14 skipped.
+
 ## W5 audit of W4 (commit 214329b): two fail-opens in the identity digest
 
 - **W5-A1 (major): truncated tracked diff hashed as a prefix.** A tracked
