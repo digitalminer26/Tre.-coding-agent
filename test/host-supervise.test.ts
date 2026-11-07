@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink, open } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -469,4 +469,38 @@ test("W4-A1: a truncated observation FAILS CLOSED to dirty-unknown (tiny capture
   // Determinism of the fail-closed path (same tree, same cap, same answer):
   const capped2 = await observeIdentity(wt, sha, 16);
   assert.equal(capped2.dirtyDigest, capped.dirtyDigest, "fail-closed identity is deterministic");
+});
+
+test("W5-A1: a tracked diff past the capture cap FAILS CLOSED (never a prefix-only stamp)", async () => {
+  // Audit probe: a >cap tracked diff was hashed as a prefix, so an edit in a
+  // late-sorting file (its diff past the cap) left the digest unchanged.
+  // Fix: a truncated diff is dirty-unknown. A small cap makes the cut
+  // deterministic without a 64 MiB fixture.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w5a1-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "a-big.txt"), "seed\n"); await writeFile(join(wt, "z-small.txt"), "seed\n"); g("add", "."); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+  await writeFile(join(wt, "a-big.txt"), "x".repeat(4096) + "\n");
+  await writeFile(join(wt, "z-small.txt"), "small-A\n");
+  const capped = await observeIdentity(wt, sha, 1024);
+  assert.equal(capped.dirty, true, "a truncated diff is dirty-unknown, never clean");
+  const complete = await observeIdentity(wt, sha);
+  assert.notEqual(capped.dirtyDigest, complete.dirtyDigest, "the truncated identity is a distinct fail-closed marker, not the prefix hashed as whole");
+});
+
+test("W5-A2: a mid-file edit in a >16 MiB untracked file MOVES the digest (no size-only fallback)", async () => {
+  // Audit probe P2: files over 16 MiB were recorded by size only, so a
+  // same-size edit mid-file was invisible. Every byte is now hashed.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w5a2-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "base.txt"), "b"); g("add", "base.txt"); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+  const big = join(wt, "untracked-big.bin");
+  await writeFile(big, Buffer.alloc(17 * 1024 * 1024, 0x41));
+  const u1 = await observeIdentity(wt, sha);
+  const fh = await open(big, "r+"); await fh.write("B", 8 * 1024 * 1024); await fh.close();
+  const u2 = await observeIdentity(wt, sha);
+  assert.notEqual(u2.dirtyDigest, u1.dirtyDigest, "a mid-file edit in a >16 MiB untracked file MUST move the digest");
 });

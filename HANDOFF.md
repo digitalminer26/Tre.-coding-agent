@@ -1,5 +1,22 @@
 # HANDOFF
 
+## W5 audit of W4 (uncommitted → see commit): two fail-opens in the identity digest
+
+- **W5-A1 (major): truncated tracked diff hashed as a prefix.** A tracked
+  edit whose diff header sat past the 64 MiB cap left the digest
+  unchanged (probe: late-file edit → same digest). The W4 "disclosure"
+  was a constant marker, so it never moved the digest. Fix: a truncated
+  diff now fails closed to dirty-unknown.
+- **W5-A2 (minor-major): oversized untracked files recorded by size only.**
+  Files >16 MiB produced `oversized:<size>`, so a same-size mid-file edit
+  was invisible (probe: digest unchanged). Fix: every untracked file is
+  streamed and hashed in full at constant memory; the size-only marker
+  and `UNTRACKED_CONTENT_CAP` are removed.
+- Tests: W5-A1 (truncated diff ≠ complete identity, dirty) and W5-A2
+  (mid-file edit in a 17 MiB untracked file moves the digest). Both were
+  verified to FAIL against the pre-W5 `supervise.ts` and pass after.
+- Gate: `npm test` → 2403 pass / 0 fail / 14 skipped.
+
 ## 2026-12-10 — audit cycle W4 fix round: capture-path truncation closed (the W3 fix's own major gap)
 
 **This session (W4)** audited the W3 commit (`761ff17`) and found the
@@ -16,9 +33,9 @@ W3 fix itself unsound on big trees; fixes:
   stdout buffered from the FRONT up to the cap, then `truncated: true`
   and drain; `runObservedGit` uses it (64 MiB). `observeIdentity`
   FAILS CLOSED on a truncated status (dirty-unknown marker) and on a
-  truncated write-tree; a truncated diff is disclosed IN the digest
-  (64 MiB beats zero — nothing past the cap is ever digested as if
-  complete). The digest line's no-op slices are GONE (full text is
+  truncated write-tree. (CORRECTED in W5: a truncated diff was originally
+  hashed as a prefix — see W5-A1; it now fails closed too.)
+  The digest line's no-op slices are GONE (full text is
   hashed). Gate/display callers keep the legacy 16 KiB tail unchanged
   (a truncated LOG is a display issue; a truncated IDENTITY is a
   soundness one — both semantics tested).

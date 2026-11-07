@@ -310,7 +310,7 @@ export interface AcceptEvidenceOptions {
  *    `git diff --binary HEAD` + the sha256 of every untracked file's
  *    content (W3-A1), so two different edits — tracked OR untracked —
  *    never collide and hostile repo diff config never bends it
- *    (W2-H1); oversized (>16 MiB) or unreadable untracked entries are
+ *    (W2-H1); unreadable untracked entries are
  *    disclosed in the digest (fail closed). */
 /** Shell-quote one argv token for the /bin/sh -c route (single quotes;
  *  embedded single quotes re-emitted as '\''). Host-built argv only —
@@ -358,16 +358,9 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
  *  file's content (W3-A1).
  *  W2-H1: EVERY argv is scrubbed and env-unified; a failed observation
  *  fails CLOSED (dirty with the failure in the digest, never clean). */
-/** Per-untracked-file content cap folded into the dirty digest (audit W3-A1):
- *  untracked content IS bound (a gate PASS stamped on an identity that
- *  ignored it could be re-used against different bytes), but a huge
- *  untracked file is DISCLOSED as size-only rather than silently
- *  truncated, and anything unreadable fails the digest CLOSED. */
-const UNTRACKED_CONTENT_CAP = 16 * 1024 * 1024;
-
 /** Fold every `??` (untracked) path from a `status -z --untracked-files=all`
- *  run into the digest as path + size + content sha256 (sizes over the cap
- *  contribute a size-only marker; a path that cannot be statted or read
+ *  run into the digest as path + size + content sha256 (streamed, so any
+ *  size is fully bound at constant memory; a path that cannot be statted or read
  *  contributes an unreadable marker so the digest MOVES — fail closed, an
  *  unreadable untracked file is dirt we cannot see, never "ignored"). */
 async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<string> {
@@ -394,10 +387,10 @@ async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<st
         lines.push(`nonfile:${p}:${String(st.mode)}`); // dir/socket/etc: path+kind, content N/A
         continue;
       }
-      if (st.size > UNTRACKED_CONTENT_CAP) {
-        lines.push(`oversized:${p}:${st.size}`); // disclosed, not silently truncated
-        continue;
-      }
+      // W5-A2: no size-only fallback. Oversized files used to be recorded
+      // as `oversized:<size>` — a same-size mid-file edit was INVISIBLE
+      // (probe: digest unchanged). The hash below streams in 64 KiB chunks,
+      // so the full file is bound at constant memory.
       const h = createHash("sha256");
       const fh = await open(join(repo, p), "r");
       try {
@@ -462,8 +455,14 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // is hashed. A cap hit is disclosed in the digest text alongside the
   // retained prefix (64 MiB of identity beats zero — and the marker
   // says the observation was capped, never silently bent).
-  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 30);
-  const diffPart = diff.code !== 0 ? `diff-failed:code=${diff.cause}:${diff.code}` : diff.truncated ? `diff-truncated:${diff.stdout.length}\x00${diff.stdout}` : diff.stdout;
+  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 30, maxBytes);
+  // W5-A1 fail CLOSED: a diff that hit the capture cap is a prefix —
+  // edits past the cap (a later file's header/body) were invisible to the
+  // digest (probe: late-file edit left the digest unchanged). Never stamp it.
+  if (diff.truncated) {
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`diff-truncated:${diff.stdout.length}\x00${diff.stderr.slice(-2048)}`).digest("hex") };
+  }
+  const diffPart = diff.code !== 0 ? `diff-failed:code=${diff.cause}:${diff.code}` : diff.stdout;
   // W3-A1: untracked content is FOLDED IN (audit finding: two different
   // contents under the same ?? path used to share one identity, so a gate
   // PASS stamped on it could be re-used against bytes it never measured).
