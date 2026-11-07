@@ -449,3 +449,24 @@ test("W4-A1: identity digests bind the FIRST-listed entry on trees big enough to
   const d2 = await observeIdentity(wt, sha2);
   assert.notEqual(d2.dirtyDigest, d1.dirtyDigest, "edit to the FIRST-listed file of a >16KiB tracked diff MUST move the digest");
 });
+
+test("W4-A1: a truncated observation FAILS CLOSED to dirty-unknown (tiny capture cap never digests partial state as complete)", async () => {
+  // The fail-closed contract of full-capture: when the capture cap cuts
+  // the status output, the identity must NOT be a digest of the partial
+  // list (that is the W4-A1 bug class) — it lands dirty-UNKNOWN.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w4cap-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "base.txt"), "b"); g("add", "base.txt"); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+  await writeFile(join(wt, "u1.txt"), "one");
+  await writeFile(join(wt, "u2.txt"), "two");
+
+  const full = await observeIdentity(wt, sha); // default 64MiB cap: complete
+  const capped = await observeIdentity(wt, sha, 16); // 16 bytes: status is cut
+  assert.equal(capped.dirty, true, "a truncated observation is dirty, never clean");
+  assert.notEqual(capped.dirtyDigest, full.dirtyDigest, "the capped identity is NOT the digest of the partial list");
+  // Determinism of the fail-closed path (same tree, same cap, same answer):
+  const capped2 = await observeIdentity(wt, sha, 16);
+  assert.equal(capped2.dirtyDigest, capped.dirtyDigest, "fail-closed identity is deterministic");
+});

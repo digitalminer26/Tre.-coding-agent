@@ -420,11 +420,11 @@ async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<st
   return lines.join("\n");
 }
 
-export async function observeIdentity(cwd: string, sha: string): Promise<ArtifactIdentity> {
+export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 1024 * 1024): Promise<ArtifactIdentity> {
   // W3-A1: `-z` gives NUL-separated, UNSAFE-path-QUOTE-FREE records — a
   // filename containing a quote or newline can no longer forge a porcelain
   // line into (or out of) the digest text; the ?? paths are extracted raw.
-  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10);
+  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, maxBytes);
   if (dirty.code !== 0) {
     // W1-M1 fail CLOSED: status failed (index.lock, EACCES, timeout) —
     // a tree whose dirt cannot be verified is treated as dirty, never clean.

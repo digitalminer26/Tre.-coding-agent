@@ -29,10 +29,12 @@ W3 fix itself unsound on big trees; fixes:
 Tests: W4-A1 runShell full/tail capture semantics (front-kept, exact
 cap, disclosed truncated flag, tail unchanged); W4-A1 repro (600
 untracked files, edit FIRST-listed moves the digest; >16 KiB tracked
-diff, edit FIRST-listed moves the digest); W3-A1 symlink asserts
-updated to the bind-link-not-target semantics.
-Gate: `npm run build && npm test` → **2400 / 0 fail / 14 skipped**
-(2414 total), tsc clean via the build.
+diff, edit FIRST-listed moves the digest); truncated observation fails
+closed to a deterministic dirty-unknown digest, never the partial list
+(`observeIdentity` takes the capture cap for testability); W3-A1
+symlink asserts updated to the bind-link-not-target semantics.
+Gate: `npm run build && npm test` → **2401 / 0 fail / 14 skipped**
+(2415 total), tsc clean via the build.
 
 ## 2026-12-10 — audit cycle W3 fix round: self-audit of the W2 commit (1 major digest gap + test/commit findings closed)
 
