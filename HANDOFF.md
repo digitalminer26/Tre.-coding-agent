@@ -1,5 +1,38 @@
 # HANDOFF
 
+## 2026-12-10 — audit cycle W3 fix round: self-audit of the W2 commit (1 major digest gap + test/commit findings closed)
+
+**This session (W3)** audited the W2 commit itself (`075a5d0`), not just
+the module. Findings + fixes:
+- **W3-A1 (major, the real gap): untracked content was NOT bound into
+  the dirty digest.** Two different contents under the same `??` path
+  shared one identity (porcelain `?? path` is byte-identical), so a
+  gate PASS stamped on that identity could be re-used against different
+  bytes. Fixed: `observeIdentity` now runs `status --porcelain=v1 -z`
+  (NUL records — a hostile filename can no longer forge porcelain text)
+  and folds every untracked file's `path:size:sha256(content)` into the
+  digest (cap 16 MiB/file → disclosed `oversized:` marker; unreadable →
+  `unreadable:` marker so the digest MOVES — fail closed; `lstat`, so a
+  symlink's target is never silently followed). Regression test W3-A1:
+  two-contents-one-path moves the digest, same content is stable,
+  removal returns clean, symlink-target churn does NOT move it.
+- **W3-A4 (minor):** the W2-M5 test proved the gate SEES GIT_ENV but
+  never proved ambient host env is EXCLUDED. Tightened: an ambient
+  secret in the test process must arrive as `(unset)` and never appear
+  in the evidence file.
+- **W3-A3 (minor, disclosed trade-off):** `runShell` kills the process
+  group the moment the LEADER exits — a gate that legitimately
+  daemonizes has its child SIGKILLed silently. Deliberate (no writer
+  may outlive the identity stamp); documented in the code comment.
+- **W3-A2 (process):** commit `075a5d0` is NOT W2-only — its message
+  undersells it: the commit contains the ENTIRE new `src/host/
+  supervise.ts` (786 lines: the whole P16 host wiring, W1 included) +
+  compose.ts changes + 347 lines of tests. The module landed as ONE
+  unreviewed commit. History left as-is (no rewrite); this note is the
+  correction — read `075a5d0` as "the whole P16 wiring increment".
+Gate: `npm run build && npm test` → **2398 / 0 fail / 14 skipped**
+(2412 total), `tsc` clean via the build.
+
 ## 2026-12-10 — audit cycle W2 fix round: observation-path hardening (2 HIGH + 2 MED closed)
 
 **This session (W2 fix round)** on `src/host/supervise.ts` (state: the

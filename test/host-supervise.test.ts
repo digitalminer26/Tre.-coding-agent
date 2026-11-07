@@ -326,22 +326,74 @@ test("W2-H1: dirty identity digest is CONTENT-addressed (write-tree), not diff O
   assert.notEqual(e3.current.dirtyDigest, e2.current.dirtyDigest, "staged content is bound into the digest");
 });
 
-test("W2-M5: the policy gate runs under the SAME unified env (GIT_ENV) as the identity observation", async () => {
+test("W2-M5: the policy gate runs under the SAME unified env (GIT_ENV) as the identity observation — and ambient host env is EXCLUDED (audit W3-A4)", async () => {
   // The gate's env is constructed by the host (GIT_ENV), so a marker
   // ONLY that env carries must reach the gate's shell. This pins the
   // unification: the old gate env had PATH alone; a drift back to
   // inherited-env or PATH-only fails here.
+  // W3-A4: the EXCLUSION half used to be untested — a secret set in the
+  // test process env must NOT reach the gate. A regression to a full
+  // inherited env fails the "(unset)" assertion below.
   const root = await mkdtemp(join(tmpdir(), "tre-host-env-"));
   const graph: EpisodeGraph = {
     schema: "tre-graph/1", episodeId: "ep-env", goal: "g",
     tasks: [{ id: "t1", persona: "w", promptRef: "p", dependsOn: [], acceptance: { criteria: [], requiredChecks: [], artifacts: [] } }],
-    policy: { gate: { cmd: 'echo "p=$GIT_PORCELAIN n=$GIT_CONFIG_NOSYSTEM t=$GIT_TERMINAL_PROMPT"' } },
+    policy: { gate: { cmd: 'echo "p=$GIT_PORCELAIN n=$GIT_CONFIG_NOSYSTEM t=$GIT_TERMINAL_PROMPT a=${TRE_W3_AMBIENT:-(unset)}"' } },
   };
   assert.ok(!(await import("node:process")).env["GIT_PORCELAIN"], "the marker is NOT in the test process env (no false positive)");
-  await mkdir(join(root, "eps"), { recursive: true }); // the gate spawns WITHIN epPath
-  const ev = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath: join(root, "eps") });
-  const row = ev.gates.find((g) => g.gateId === "policy-gate");
-  assert.ok(row !== undefined && row.pass, "the marker-echo gate exits 0");
-  const evidence = await readFile(join(root, "eps", "acceptance", "evidence.jsonl"), "utf8");
-  assert.ok(evidence.includes("p=1 n=1 t=0"), `gate saw the unified GIT_ENV (evidence: ${evidence.slice(-300)})`);
+  (await import("node:process")).env["TRE_W3_AMBIENT"] = "sekret-must-not-leak";
+  try {
+    await mkdir(join(root, "eps"), { recursive: true }); // the gate spawns WITHIN epPath
+    const ev = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath: join(root, "eps") });
+    const row = ev.gates.find((g) => g.gateId === "policy-gate");
+    assert.ok(row !== undefined && row.pass, "the marker-echo gate exits 0");
+    const evidence = await readFile(join(root, "eps", "acceptance", "evidence.jsonl"), "utf8");
+    assert.ok(evidence.includes("p=1 n=1 t=0"), `gate saw the unified GIT_ENV (evidence: ${evidence.slice(-300)})`);
+    assert.ok(evidence.includes("a=(unset)"), "ambient host env is EXCLUDED from the gate (W3-A4)");
+    assert.ok(!evidence.includes("sekret-must-not-leak"), "the ambient secret never appears in the evidence");
+  } finally {
+    delete (await import("node:process")).env["TRE_W3_AMBIENT"];
+  }
+});
+
+test("W3-A1: untracked file CONTENT is bound into the dirty digest (two contents, one path — the digests move)", async () => {
+  // The audit experiment that found the gap, as a regression test:
+  // `?? path` porcelain is IDENTICAL for two different contents, so the
+  // pre-W3 digest collided. The identity a gate PASS is stamped on must
+  // measure every byte that differs between the trees — untracked too.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-ut-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "base.txt"), "b"); g("add", "base.txt"); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  await writeFile(join(wt, "new.txt"), "content-one");
+  const i1 = await observeIdentity(wt, sha);
+  assert.equal(i1.dirty, true);
+  await writeFile(join(wt, "new.txt"), "content-TWO-different");
+  const i2 = await observeIdentity(wt, sha);
+  assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "different untracked content under the same path MUST move the digest");
+
+  // Same content again → stable (no spurious movement from mtime/size churn).
+  await writeFile(join(wt, "new.txt"), "content-TWO-different");
+  const i3 = await observeIdentity(wt, sha);
+  assert.equal(i3.dirtyDigest, i2.dirtyDigest, "identical content is digest-stable");
+
+  // Deleting the untracked file returns the tree to CLEAN (no digest at
+  // all) — the identity path for "no dirt" must be reachable again.
+  const rmSync = (await import("node:fs")).rmSync;
+  rmSync(join(wt, "new.txt"));
+  const i4 = await observeIdentity(wt, sha);
+  assert.notEqual(i4.dirty, true, "tree with the untracked file removed is clean again");
+  // A symlinked untracked entry must NOT have its TARGET's bytes bound
+  // (lstat, disclosed nonfile): swapping the target moves the digest via
+  // the link itself only when the link changes — never silently follows.
+  const lnSync = (await import("node:fs")).symlinkSync;
+  const outside = join(root, "outside.txt");
+  await writeFile(outside, "outside-A");
+  lnSync(outside, join(wt, "link"));
+  const i5 = await observeIdentity(wt, sha);
+  await writeFile(outside, "outside-B");
+  const i6 = await observeIdentity(wt, sha);
+  assert.equal(i5.dirtyDigest, i6.dirtyDigest, "a symlink's (unfollowed) target changing MUST NOT move the digest — lstat, no silent follow");
 });

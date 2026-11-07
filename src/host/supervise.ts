@@ -21,7 +21,7 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, mkdir, readFile, rename } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, lstat, open } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -192,6 +192,12 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
     // mislabel: an exit-0 gate journalled as a 120s timeout because a
     // lingering `sleep &` held the pipe open). Kill on 'exit'; 'close'
     // (all pipe writers gone) then resolves the result.
+    // W3-A3 (disclosed trade-off): the group is killed the moment the
+    // leader exits, so a gate that legitimately DAEMONIZES (spawns a
+    // server meant to outlive the gate) has its child SIGKILLed silently
+    // here. That is deliberate: the supervisor's tree must never have a
+    // writer alive after the gate's identity was stamped — a persistent
+    // service does not belong inside an acceptance gate.
     child.on("exit", () => { killGroup(); });
     child.on("close", (code, signal) => {
       if (done) return;
@@ -250,16 +256,18 @@ export interface AcceptEvidenceOptions {
 }
 
 /** Observe the working tree's artifact identity (audit W1 M1/M4/minor-9,
- *  hardened W2-H1/H2). Fail-closed on every uncertain branch:
+ *  hardened W2-H1/H2, W3-A1). Fail-closed on every uncertain branch:
  *  - `git status` fails or times out       → the tree is DIRTY-UNKNOWN (a
  *    failed status can never stamp a tree clean);
  *  - CLEAN is only ever empty porcelain (untracked-files=all pinned,
  *    excludes disabled — a repo config can no longer hide files);
- *  - the dirty digest is CONTENT-bound: `git write-tree` (the index's
- *    own content hash) + a config-pinned `git diff --binary HEAD`, so
- *    two different edits of the same file never collide and hostile
- *    repo diff config never bends it (W2-H1); untracked content is NOT
- *    hashed (size/mtime via porcelain); the digest text discloses this. */
+ *  - the dirty digest is CONTENT-bound on all three parts: `git
+ *    write-tree` (the index's own content hash) + a config-pinned
+ *    `git diff --binary HEAD` + the sha256 of every untracked file's
+ *    content (W3-A1), so two different edits — tracked OR untracked —
+ *    never collide and hostile repo diff config never bends it
+ *    (W2-H1); oversized (>16 MiB) or unreadable untracked entries are
+ *    disclosed in the digest (fail closed). */
 /** Shell-quote one argv token for the /bin/sh -c route (single quotes;
  *  embedded single quotes re-emitted as '\''). Host-built argv only —
  *  but the observation command line is policy-critical, so it is quoted
@@ -297,11 +305,67 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
 /** Observe the working tree's identity: HEAD sha + a digest of tracked
  *  content (the index, hashed as raw object content — the staged blob,
  *  NOT `git diff --cached` whose OUTPUT bytes depend on diff
- *  machinery/config) + the worktree change over HEAD.
+ *  machinery/config) + the worktree change over HEAD + every untracked
+ *  file's content (W3-A1).
  *  W2-H1: EVERY argv is scrubbed and env-unified; a failed observation
  *  fails CLOSED (dirty with the failure in the digest, never clean). */
+/** Per-untracked-file content cap folded into the dirty digest (audit W3-A1):
+ *  untracked content IS bound (a gate PASS stamped on an identity that
+ *  ignored it could be re-used against different bytes), but a huge
+ *  untracked file is DISCLOSED as size-only rather than silently
+ *  truncated, and anything unreadable fails the digest CLOSED. */
+const UNTRACKED_CONTENT_CAP = 16 * 1024 * 1024;
+
+/** Fold every `??` (untracked) path from a `status -z --untracked-files=all`
+ *  run into the digest as path + size + content sha256 (sizes over the cap
+ *  contribute a size-only marker; a path that cannot be statted or read
+ *  contributes an unreadable marker so the digest MOVES — fail closed, an
+ *  unreadable untracked file is dirt we cannot see, never "ignored"). */
+async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<string> {
+  const paths: string[] = [];
+  for (const rec of porcelainZ.split("\0")) {
+    if (rec.startsWith("?? ")) paths.push(rec.slice(3));
+  }
+  paths.sort();
+  const lines: string[] = [];
+  for (const p of paths) {
+    try {
+      const st = await lstat(join(repo, p)); // lstat: never follow a hostile symlink
+      if (!st.isFile()) {
+        lines.push(`nonfile:${p}:${String(st.mode)}`); // dir/symlink/etc: path+kind, content N/A
+        continue;
+      }
+      if (st.size > UNTRACKED_CONTENT_CAP) {
+        lines.push(`oversized:${p}:${st.size}`); // disclosed, not silently truncated
+        continue;
+      }
+      const h = createHash("sha256");
+      const fh = await open(join(repo, p), "r");
+      try {
+        const buf = Buffer.alloc(64 * 1024);
+        let pos = 0;
+        for (;;) {
+          const { bytesRead } = await fh.read(buf, 0, Math.min(64 * 1024, st.size - pos), pos);
+          h.update(buf.subarray(0, bytesRead));
+          pos += bytesRead;
+          if (bytesRead === 0 || pos >= st.size) break;
+        }
+      } finally {
+        await fh.close();
+      }
+      lines.push(`file:${p}:${st.size}:${h.digest("hex")}`);
+    } catch {
+      lines.push(`unreadable:${p}`); // fail closed: the digest moves, never silently drops
+    }
+  }
+  return lines.join("\n");
+}
+
 export async function observeIdentity(cwd: string, sha: string): Promise<ArtifactIdentity> {
-  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all"], 10);
+  // W3-A1: `-z` gives NUL-separated, UNSAFE-path-QUOTE-FREE records — a
+  // filename containing a quote or newline can no longer forge a porcelain
+  // line into (or out of) the digest text; the ?? paths are extracted raw.
+  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10);
   if (dirty.code !== 0) {
     // W1-M1 fail CLOSED: status failed (index.lock, EACCES, timeout) —
     // a tree whose dirt cannot be verified is treated as dirty, never clean.
@@ -330,10 +394,14 @@ export async function observeIdentity(cwd: string, sha: string): Promise<Artifac
   // textconv could rewrite content wholesale; -c pins hold the rest.
   const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 30);
   const diffPart = diff.code === 0 ? diff.stdout : `diff-failed:code=${diff.cause}:${diff.code}`;
+  // W3-A1: untracked content is FOLDED IN (audit finding: two different
+  // contents under the same ?? path used to share one identity, so a gate
+  // PASS stamped on it could be re-used against bytes it never measured).
+  const untrackedPart = await untrackedDigestPart(cwd, dirty.stdout);
   return {
     sha,
     dirty: true,
-    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart.slice(-2 * 1024 * 1024)}\x00diff-binary-head\n${diffPart.slice(-4 * 1024 * 1024)}`).digest("hex"),
+    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart.slice(-2 * 1024 * 1024)}\x00diff-binary-head\n${diffPart.slice(-4 * 1024 * 1024)}\x00untracked\n${untrackedPart.slice(-4 * 1024 * 1024)}`).digest("hex"),
   };
 }
 
