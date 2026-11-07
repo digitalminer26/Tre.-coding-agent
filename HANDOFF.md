@@ -1,6 +1,6 @@
 # HANDOFF
 
-## W5 audit of W4 (uncommitted → see commit): two fail-opens in the identity digest
+## W5 audit of W4 (commit 214329b): two fail-opens in the identity digest
 
 - **W5-A1 (major): truncated tracked diff hashed as a prefix.** A tracked
   edit whose diff header sat past the 64 MiB cap left the digest
