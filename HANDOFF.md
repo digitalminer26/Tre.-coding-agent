@@ -1,5 +1,24 @@
 # HANDOFF
 
+## 2026-12-10 — Housekeeping: repo hygiene + release tag (open items closed)
+
+- **`.tre/` scratch untracked:** 5 files were force-added before the
+  logs-are-scratch policy (p14 test/gate logs, `p15-reprobe.mjs`) —
+  `git rm --cached`, kept on disk, pinned in `.gitignore`. Consolidated
+  review MDs stay tracked per the docs/audits convention.
+- **Tag fix — with a correction to the W10-era inventory:** tags
+  v0.4.4–v0.4.7 DID exist on the remote; a stale local `v0.1.1` (pointing
+  at a different commit) made `git fetch --tags` refuse to clobber and
+  hid them. Fetched with --force (stale kept as `v0.1.1-local-stale`).
+  The real gap was HEAD (81 commits past the 0.4.7 bump: all of P13 +
+  the W1–W10 arc) being unreleased — bumped to **0.4.8** (bump commit +
+  tag `v0.4.8` at the W10 tip, per the repo's bump-commit convention)
+  and pushed main + tag. A follow-up commit synced `package-lock.json`
+  (stuck at 0.1.0 since inception — prior bumps touched package.json
+  only); it follows the tag rather than moving a published one.
+- End state: main == origin/main == b3392f7, clean tree, v0.4.8 on
+  remote, suite 2413 pass / 0 fail.
+
 ## 2026-12-10 — W10: cosmetic fallback label fixed (follow-up to W9)
 
 - `no-worktree:fallback=given` → `no-worktree:fallback=worktree-unobservable`.
