@@ -119,6 +119,12 @@ export interface HostEpisodeResult {
 
 const now = () => Date.now();
 
+// W12-F2 (P16 audit W5): channels whose name itself is the documented
+// refusal-to-send (docs/19) — the port records durably but never pings
+// the human. A host log must NEVER claim "dispatched" for these; both
+// the escalate and the park disclosure consult this set.
+const F2_DISABLED_CHANNELS = new Set(["telegram:disabled"]);
+
 function assertId(v: string, what: string): string {
   if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) {
     throw new Error(`host: ${what} must be a safe, non-empty path component (got ${JSON.stringify(v)})`);
@@ -1050,9 +1056,22 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // B-F2 (audit cycle P16, docs/19 §6): a parked task is an open
     // question — 'repeated-strategy' with the approve/rewrite/abort
     // decision, raised through the dispatcher so it is durable AND
-    // delivered (and a missing delivery disclosed, as in escalate).
+    // delivered. W12-F1 (P16 audit W5): the dispatcher's delivery record
+    // is DISCLOSED here exactly as escalate's is — before, park journalled
+    // the question and stayed silent about a human who was never asked
+    // (the B-F1 defect on the park path).
     try {
-      await escalationDispatcher.park({ episodeId: graph.episodeId, taskId: opts.taskId });
+      const r = await escalationDispatcher.park({ episodeId: graph.episodeId, taskId: opts.taskId });
+      if (r.channel.startsWith("escalation:")) {
+        log(`park: question NOT delivered (${r.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
+      } else if (F2_DISABLED_CHANNELS.has(r.channel)) {
+        // W12-F2: a ':disabled' channel is the port's documented
+        // refusal-to-send (docs/19) — logging it as dispatched told the
+        // host the user was pinged when the bridge was deliberately off.
+        log(`park: question recorded but NOT delivered (${r.channel} — bridge off); see ${escalationPath}`);
+      } else {
+        log(`park: question dispatched via ${r.channel}`);
+      }
     } catch (e) {
       log(`park: escalation raise failed (${String((e as Error)?.message ?? e).slice(0, 120)}) — state written, human NOT notified`);
     }
@@ -1116,6 +1135,8 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // log instead of a bare acked.
         if (res.channel.startsWith("escalation:")) {
           log(`escalate NOT delivered (${res.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
+        } else if (F2_DISABLED_CHANNELS.has(res.channel)) {
+          log(`escalate recorded but NOT delivered (${res.channel} — bridge off); see ${escalationPath}`);
         } else {
           log(`escalate dispatched via ${res.channel}`);
         }

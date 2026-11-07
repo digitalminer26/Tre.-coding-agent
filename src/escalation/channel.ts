@@ -1161,7 +1161,10 @@ export interface DispatcherDeps {
 
 export interface EscalationDispatcher {
   escalate(req: { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[]; [k: string]: unknown }): Promise<{ channel: string }>;
-  park(req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<void>;
+  // W12-F1 (P16 audit W5): park returns the SAME delivery-channel record
+  // as escalate — the host must be able to tell "asked the human" from
+  // "journalled only". Silent void was the B-F1 defect on the park path.
+  park(req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string }>;
 }
 
 /**
@@ -1284,13 +1287,13 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`) };
   };
 
-  const park = async (req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<void> => {
-    if (!isPlainObj(req)) return;
+  const park = async (req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string }> => {
+    if (!isPlainObj(req)) return { channel: 'escalation:invalid' };
     // Cycle-4 F1 (audit HIGH-1): same rule as escalate — an oversized
     // identity is refused, never clipped into a shared key.
     const epRaw2 = ownData(req, 'episodeId').value;
     const tkRaw2 = ownData(req, 'taskId').value;
-    if ((typeof epRaw2 === 'string' && epRaw2.length > MAX_STR) || (typeof tkRaw2 === 'string' && tkRaw2.length > MAX_STR)) return;
+    if ((typeof epRaw2 === 'string' && epRaw2.length > MAX_STR) || (typeof tkRaw2 === 'string' && tkRaw2.length > MAX_STR)) return { channel: 'escalation:invalid' };
     const episodeId = boundedStr(epRaw2) ?? '';
     const taskId = boundedStr(tkRaw2) ?? '';
     // Loop-c4 F3 (audit): same composed-entry bound as escalate — a
@@ -1312,13 +1315,18 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
       if (parkEvidence.length < MAX_EVIDENCE) parkEvidence.push(m);
       else parkEvidence[parkEvidence.length - 1] = m;
     }
-    await deps.channel.raise({
+    const res = await deps.channel.raise({
       episodeId,
       taskId,
       blocker: 'repeated-strategy',
       decisionNeeded: 'the task is parked — approve a new approach, rewrite it, or abort',
       ...(parkEvidence.length > 0 ? { evidence: parkEvidence } : {}),
     });
+    // W12-F1: identical delivery-record rule as escalate above — a
+    // delivered send carries the port's channel name; every non-delivery
+    // is namespaced 'escalation:…' for the host to disclose.
+    if (res === null) return { channel: 'escalation:invalid' };
+    return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`) };
   };
 
   return { escalate, park };
