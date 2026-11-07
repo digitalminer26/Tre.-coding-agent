@@ -95,3 +95,10 @@ test/probes/
 # P9 acceptance-audit scratch (reviewer prompts/logs/sessions/pids) —
 # findings are pinned as named regression tests; the rounds themselves are scratch.
 .scratch/
+# P14-era gate/test logs + the P15 reprobe script were force-added before the
+# logs-are-scratch policy settled — untracked (git rm --cache) and kept on
+# disk; same policy as .tre/tmp/. Consolidated human review reports
+# (audit-*-review.md, remaining-items-review.md) stay tracked as history.
+.tre/p14-*.log
+.tre/qg-p14*.log
+.tre/p15-reprobe.mjs
