@@ -1014,7 +1014,9 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
             // refusal name is used as-is, never double-prefixed.
             // W13-F4b: only the SANITIZED name rides; a hostile name is
             // dropped to 'unknown' (disclosed above), never printed.
-            const name = chName !== undefined ? chName.slice(0, 80) : 'unknown';
+            // chName is already bounded by LOG_TOKEN_RE (≤64 chars), so no
+            // further truncation is needed here.
+            const name = chName !== undefined ? chName : 'unknown';
             channel = name.startsWith('escalation:') ? name : `escalation:refused:${name}`;
             refused = true;
             delivered = false;

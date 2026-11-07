@@ -782,7 +782,6 @@ test("W13-F4b (follow-up): a VALID-CHARSET channel name over the 64-char cap is 
   const rr = (await refuser.raise(valid() as never)) as RaiseResult;
   assert.equal(rr.refused, true, "the refusal stands");
   assert.equal(rr.channel, "escalation:refused:unknown", "the over-length name never rides");
-  assert.ok(!String(rr.channel).includes("aaaa"), "no 200-char token in the channel field");
   assert.ok((rr.disclosed ?? []).includes("bad-input:channel"), "the dropped name is disclosed");
 
   const sender = makeEscalationChannel({
