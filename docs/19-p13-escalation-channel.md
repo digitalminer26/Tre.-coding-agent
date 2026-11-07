@@ -281,6 +281,14 @@ import it):
   a module gap. Until that wiring lands, every loop escalation is
   recorded durably (and shows in `pending()`), and `pendingStatus` /
   the host log are the operator's view — nothing sends.
+  **Update (P17):** the second production entry — `tre.-episode`
+  (`src/host/activate.ts`, added by the activation workstream) — is a
+  sanctioned caller of `runHostEpisode` and plugs the real bridge on
+  demand: `tre.-episode --telegram …` wires `makeTelegramDeliver` into
+  the host, so the F5 seam IS pluggable from the shipped CLI. The
+  default remains off (no `--telegram` flag ⇒ no dispatcher, nothing
+  sends), so `src/cli` (`tre.`) behavior is unchanged; the compose-loop
+  wiring decision above stands for that entry point.
 - `parseTelegramResolution(text, by)` → `null | { escalationId, decision, by, note?, noteClipped? }`:
   accepts `/resolve <esc-id> <decision>[: note]` (`by` = the message
   sender, passed by the host and bounded). Anything else parses to null —

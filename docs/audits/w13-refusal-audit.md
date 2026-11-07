@@ -100,6 +100,10 @@ CLI at `src/cli/main.ts` never imports it), and `escalationDeliver` is
 referenced only by `supervise.ts` itself, so `makeTelegramDeliver` is wired
 only by tests. The real loop (`src/supervisor/compose.ts`) reaches `park` →
 executor and `finish('parked')` but never passes an escalation dispatcher.
+(**Superseded in part by P17:** `tre.-episode` (`src/host/activate.ts`) is
+now a sanctioned `runHostEpisode` caller and wires the real bridge under
+`--telegram`; see docs/19 §5 "Update (P17)". The compose-loop wiring below
+still stands.)
 So W12-F1/F2 and W13-F2c are correct **in the seam** while the seam is not
 plugged into the shipped product. Owner should decide whether the host loop
 is the intended production path (then wire it, and the bridge-off budget burn

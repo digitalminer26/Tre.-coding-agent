@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "tre.": "dist/src/cli/main.js",
-    "coding-agent": "dist/src/cli/main.js"
+    "coding-agent": "dist/src/cli/main.js",
+    "tre.-episode": "dist/src/host/activate.js"
   },
   "description": "Tre Coding Agent — a small, fully-owned coding agent: TypeScript harness talking to OpenAI-compatible LLM endpoints. Built from scratch, pi as design reference (see PLAN.md). Invoke as `tre.` (coding-agent is a legacy alias).",
   "engines": {
@@ -19,8 +20,8 @@
     "THIRD_PARTY.md"
   ],
   "scripts": {
-    "prepare": "tsc && chmod +x dist/src/cli/main.js",
-    "build": "tsc && chmod +x dist/src/cli/main.js",
+    "prepare": "tsc && chmod +x dist/src/cli/main.js dist/src/host/activate.js",
+    "build": "tsc && chmod +x dist/src/cli/main.js dist/src/host/activate.js",
     "check": "sh scripts/quality-check.sh",
     "test": "sh scripts/quality-check.sh && tsc && node --test dist/test/*.test.js",
     "eval": "tsc && node dist/test/eval-run.js",

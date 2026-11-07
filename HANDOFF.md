@@ -1,5 +1,51 @@
 # HANDOFF
 
+## 2026-11-07 — P17: `tre.-episode` — the activation entry point (`src/host/activate.ts`)
+
+**What landed.** A second production binary for the repo: `tre.-episode`
+(package.json `bin`, next to `tre.`) starts ONE supervised recovery episode
+through the sanctioned host wiring — it is the first sanctioned caller of
+`runHostEpisode` (src/host/supervise.ts). It adds NO policy of its own:
+argv parsing, the closed stop-reason → exit-code map (0 accepted-finish /
+completed, 3 loop-error, 4 initial-run-denied, 5 every other bounded stop;
+1 reserved for a throwing setup failure, 2 usage error), the stderr sink,
+and the OPTIONAL Telegram delivery wire (`--telegram` →
+`makeTelegramBridge(cwd)` + `makeTelegramDeliver`, docs/19 §6 — the
+host-wiring decision made at activation instead of being left open).
+Flags: `--graph` (required), `--task` (required), `--granted-by` (default
+`cli-activate`), `--episodes-root`, `--worktree`, `--worker`,
+`--max-iterations`, `--telegram`, `--help`. Auto-run guard: the module
+executes only when `realpathSync(argv[1])` equals its own URL (npm-bin
+symlinks resolve), so tests import it cleanly.
+**Thinness (docs/18 §0.1):** activate.ts imports ONLY `node:fs`,
+`node:url`, `./supervise.js`, `../telegram/bridge.js`,
+`../telegram/escalation.js` — pinned as a CLOSED import set by
+`test/host-activation.test.ts` (an added import fails the pin, and the
+docs say why). All episode-journal string literals live behind the host
+module: the file touches none, so the grep-guard
+(test/episode-journal.test.ts) stays untouched.
+**Tests (14, all new).** Parse defaults + every usage-error shape,
+`--help` exits 0, the exit map is pinned 1:1 against the `StopReason`
+union (a new stop value that isn't mapped fails the test), setup failure
+exits 1 honestly (bad graph, absent task), and two e2e runs over the REAL
+host + journal modules (exit-0 worker + passing policy gate ⇒ exit 0 with
+the stop summary; `--telegram` with no machine bridge ⇒ still runs and
+discloses the MISSING delivery, never claims it).
+**Two real bugs the e2e caught:** (1) help/usage went around the injected
+`log` sink — output must flow through the one sink the caller passed
+(fixed: single sink, test captures it); (2) `createEpisodeLayout` nests
+the episode at `<root>/<episodeId>/` — the graph path is the RETURNED dir
++ `graph.json`, not `<root>/graph.json` (test fixed; the host contract
+was already right).
+**Docs.** docs/19 §5 gains the "Update (P17)" note (the F5 seam is now
+pluggable from the shipped CLI under `--telegram`; the default — no flag,
+nothing sends — and the `tre.`/compose-loop posture are unchanged);
+docs/audits/w13-refusal-audit.md F5 gets a superseded-in-part pointer.
+**Gate.** `tsc` clean, quality-check clean (77 files), full suite
+2467 tests (14 of them new): **2453 pass / 0 fail / 14 skipped** —
+identical skips to the pre-workstream baseline.
+
+
 ## 2026-11-07 — W13 refusal audit findings F1–F5 fixed (`docs/audits/w13-refusal-audit.md`)
 
 **What landed.** All five findings of the W13 audit of `e0c0e08`:
