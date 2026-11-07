@@ -1,5 +1,68 @@
 # HANDOFF
 
+## 2026-11-07 — W13 refusal audit findings F1–F5 fixed (`docs/audits/w13-refusal-audit.md`)
+
+**What landed.** All five findings of the W13 audit of `e0c0e08`:
+- **F1 (MAJOR)** — a refused send (`*:disabled` / `refused:true`) no longer
+  burns the redeliver budget. `deliveredCount` stays reserved pre-act
+  (INV-5 unchanged); on refusal the channel appends a durable
+  `deliveryRefused` correction line (`{schema, kind, id, ref, ts}`) and
+  refunds the mirror + lifetime ledger in-process. `replayOpen` parses the
+  kind, subtracts one refund per line from the open record (any window)
+  AND the ledger-max scan (complete windows only — review-round guard:
+  a truncated window must not refund the process-sticky ledger max,
+  clamped ≥ 0), resets a key's pending refunds on a
+  newer escalation line (a success past a refusal is never over-refunded),
+  and `claimsSchema` knows the kind so consumed lines never read as
+  `unreadable`. A correction-append failure discloses
+  `refusal-correction:failed` and stays burned (fail closed). A send
+  THROW stays burned — the attempt may have reached the human (docs/19 §5).
+  The audit probe (3 bridge-off raises + restart + bridge on) now
+  delivers on raise 4; counts no longer mute the key.
+- **F2** — the refusal decision is an EXPLICIT field: `DeliverPort.deliver`
+  returns `DeliverResult { channel?, refused? }`; refusal means
+  `refused === true` (fence-read; a non-boolean is disclosed
+  `bad-input:refused`, never coerced) or the `:disabled` name suffix as
+  the documented backstop. `RaiseResult.refused` surfaces it.
+- **F3** — refusal namespacing is idempotent: a name already carrying
+  `escalation:` is used as-is (no `refused:refused` stacking).
+- **F4** — the dispatcher returns `{ channel, error? }` (both acts);
+  escalate/park carry the delivery error home and the host log prints
+  it: `escalate NOT delivered (recorded: Error) — the human has NOT
+  been asked…` (deduped when the error repeats the channel tail). The
+  error is the class name ONLY — `describeErr` returns `Error#name`,
+  never `#message` (the thrown value is untrusted; a full message in
+  the log was considered and rejected in the post-audit review). A
+  throw therefore prints its class (e.g. `: Error`), which is less
+  than the audit's `bridge down` wish but adds no untrusted text.
+- **F5** — docs/19 §5 now states plainly that the human loop is
+  **unreachable in prod today**: `runHostEpisode` has no caller in
+  `src/` (verified by grep), `escalationDeliver` is test-wired only, and
+  enabling delivery is a host-wiring decision (docs/19 §6), not a module
+  gap. Audit dispositions are recorded in the audit doc's disposition
+  lines.
+
+**Tests.** 9 new channel tests (F1 in-process + durable restart probe,
+F1 truncated-window scope ×2 — one pins the ledger guard and was
+mutation-checked against a guard-disabled build, F1 malformed-correction
+fail-closed, F2 explicit-field + non-boolean garbage, F3 idempotence,
+F4 dispatcher error field) + the host throwing-deliver test strengthened
+to pin the delivery error in the log line (exact class-name form). Full
+suite **2435 pass / 0 fail / 14
+skip** (was 2426).
+
+**Deliberate shape.** The refund only ever RESTORES — it can mint no
+negative count and cannot cross a truncation/unverifiable gate (those
+rules run before it and still fail closed); replay applies refunds after
+the ledger max-merge, so an over-scan can never refund twice per burn.
+Per the W13 review round the ledger-SCAN refund runs only on a COMPLETE
+replay window (ledgerMaxScan is process-sticky; a truncated window may
+carry a max earned outside it — refunding there could under-state the
+cap's memory); the open-record refund stays valid in-window, and both
+edges are pinned by tests. A send THROW stays burned — the attempt may
+have reached the human.
+
+
 ## 2026-12-11 — P16 arc closed: park reachable e2e, audit findings fixed (Waves 4–6)
 
 **What landed.** (1) Wave-4 (`61fc548`): `parkTask` test seam + `escalationDeliver`

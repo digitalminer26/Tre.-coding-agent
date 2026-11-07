@@ -605,6 +605,206 @@ test("deliver: disabled bridge → refusal is a FACT (delivered:false, escalatio
   assert.ok(res.record !== undefined, "the durable record stands regardless (INV-2)");
 });
 
+// ── W13 (refusal audit): refusals refund the redeliver budget, durably ──
+
+test("W13-F1: refused sends never burn the budget — the 4th raise (bridge back ON) delivers in-process", async () => {
+  // The audit probe: with the bridge off, every refused raise still
+  // incremented deliveredCount; three refusals MUTE-keyed the question
+  // forever ('redeliver-cap' after the bridge came back). The refusal now
+  // refunds its own pre-act reservation (mirror + lifetime ledger), so a
+  // refused send is not a spent delivery.
+  let refuse = true;
+  const appends: unknown[] = [];
+  const sends: string[] = [];
+  const ch = makeEscalationChannel({
+    append: async (r) => { appends.push(r as Rec); },
+    read: async () => [...appends],
+    deliver: async () => {
+      if (refuse) return { channel: "telegram:disabled", refused: true };
+      sends.push("sent");
+      return { channel: "telegram" };
+    },
+    now: () => 1700000000 + appends.length,
+  });
+  for (let i = 1; i <= 3; i++) {
+    const r = (await ch.raise(valid({ evidence: [`e${i}`] }) as never)) as RaiseResult;
+    assert.equal(r.delivered, false, `raise ${i} refused`);
+    assert.equal(r.refused, true, `raise ${i} says refused (W13-F2)`);
+    assert.equal(r.reason, undefined, `raise ${i} is not capped — it was attempted`);
+  }
+  refuse = false;
+  const r4 = (await ch.raise(valid({ evidence: ["e4"] }) as never)) as RaiseResult;
+  assert.equal(r4.delivered, true, "the budget survived three refusals");
+  assert.equal(sends.length, 1);
+});
+
+test("W13-F1: the refund is DURABLE — a restarted channel still has budget after bridge-off raises", async () => {
+  // The exact audit scenario: 3 refused raises are journalled, the process
+  // restarts, the bridge is back. Replay must subtract the refusal
+  // correction lines from the durable counts (the audit probe showed
+  // deliveredCount [1,2,3,3] and a permanent redeliver-cap).
+  const appends: unknown[] = [];
+  const deps = (refuse: boolean) => ({
+    append: async (r: object) => { appends.push(r as Rec); },
+    read: async () => [...appends],
+    deliver: async () => (refuse ? { channel: "telegram:disabled", refused: true } : { channel: "telegram" }),
+    now: () => 1700000000 + appends.length,
+  });
+  const chA = makeEscalationChannel(deps(true));
+  for (let i = 1; i <= 3; i++) {
+    const r = (await chA.raise(valid({ evidence: [`e${i}`] }) as never)) as RaiseResult;
+    assert.equal(r.refused, true, `raise ${i} refused on the dead bridge`);
+  }
+  const refusals = appends.filter((a) => (a as Rec).kind === "deliveryRefused");
+  assert.equal(refusals.length, 3, "each refusal appended a durable correction line");
+  const chB = makeEscalationChannel(deps(false)); // restart, bridge restored
+  const r4 = (await chB.raise(valid({ evidence: ["e4"] }) as never)) as RaiseResult;
+  assert.equal(r4.reason !== "redeliver-cap", true, "replay restored the budget from the correction lines");
+  assert.equal(r4.delivered, true, "the restarted channel delivers — refusals were not deliveries");
+  // The correction lines must not poison the pending() view (claimsSchema
+  // knows the kind; a consumed line is never counted unreadable).
+  const status = await chB.pendingStatus();
+  assert.equal(status.complete, true, "the correction lines are read, not 'unreadable'");
+  assert.equal(status.open.length, 1, "the question is open exactly once");
+});
+
+test("W13-F2: refusal is the EXPLICIT field — a refused:true port without a ':disabled' name still refuses", async () => {
+  const ch = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: "carrier-pigeon", refused: true }),
+    now: () => 1,
+  });
+  const r = (await ch.raise(valid() as never)) as RaiseResult;
+  assert.equal(r.delivered, false);
+  assert.equal(r.refused, true);
+  assert.equal(r.channel, "escalation:refused:carrier-pigeon", "the name rides along for the log");
+});
+
+test("W13-F2: a non-boolean `refused` is untrusted-present garbage — disclosed, never coerced", async () => {
+  const ch = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: "weird", refused: "yes" }) as never,
+    now: () => 1,
+  });
+  const r = (await ch.raise(valid() as never)) as RaiseResult;
+  assert.equal(r.delivered, true, "'yes' is not true — the send stands as delivered");
+  assert.ok((r.disclosed ?? []).includes("bad-input:refused"), "but the garbage field is disclosed");
+});
+
+test("W13-F3: refusal namespacing is IDEMPOTENT — no double escalation:refused: prefix", async () => {
+  // A port (or a forwarding wrapper) that already namespaced its refusal
+  // must not get the prefix stacked a second time.
+  const ch = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: "escalation:refused:telegram:disabled", refused: true }),
+    now: () => 1,
+  });
+  const r = (await ch.raise(valid() as never)) as RaiseResult;
+  assert.equal(r.channel, "escalation:refused:telegram:disabled", "exactly one prefix");
+  assert.ok(!String(r.channel).includes("refused:refused"), "never double-prefixed");
+});
+
+test("W13-F4: the dispatcher carries the delivery CAUSE — escalate/park return the error the host logs", async () => {
+  const appends: unknown[] = [];
+  const channel = makeEscalationChannel({
+    append: async (r) => { appends.push(r as Rec); },
+    deliver: async () => { throw new Error("boom"); },
+    now: () => 1700000000 + appends.length,
+  });
+  const d = makeEscalationDispatcher({ channel });
+  const e = await d.escalate({ episodeId: "ep1", taskId: "t9", rationale: ["why"] });
+  assert.ok(e.channel.startsWith("escalation:"), `non-delivery is namespaced, got ${e.channel}`);
+  assert.equal(typeof e.error, "string", "the cause rides home on the dispatch result");
+  const p = await d.park({ episodeId: "ep1", taskId: "t9" });
+  assert.ok(p.channel.startsWith("escalation:"));
+  assert.equal(typeof p.error, "string", "park carries the cause too");
+});
+
+test("W13-F1 (truncated window): the open-record refund still applies in-window; the lifetime ledger is untouched", async () => {
+  // Review finding (2): the OPEN refund is safe under truncation because
+  // presence and last-line order INSIDE a window are authoritative (the
+  // escalation-line reset keeps a correction from refunding a count
+  // written after it). The LEDGER-SCAN refund is skipped under
+  // truncation (fail closed): ledgerMaxScan is process-sticky and may
+  // carry a max earned outside this window. This test pins the kept
+  // behavior — a future edit must not disable the open refund here.
+  const L: unknown[] = [];
+  const ch = makeEscalationChannel({
+    append: async (r) => { L.push(r as Rec); },
+    read: async () => [...L],
+    deliver: async () => ({ channel: "telegram" }),
+    now: () => 1700000000 + L.length,
+    maxRedeliver: 3,
+  });
+  const r1 = (await ch.raise(valid() as never)) as RaiseResult;
+  assert.equal(r1.delivered, true);
+  const key = r1.record.escalationId;
+  // A refusal correction for the journalled-but-refused burn.
+  L.push({ schema: ESCALATION_SCHEMA, kind: "deliveryRefused", ref: key, ts: 1 });
+  // Pad BEFORE the pair so the replay window cuts the head (truncated)
+  // while keeping the escalation line AND its correction inside the tail.
+  L.unshift(...Array.from({ length: 100_001 }, (_, i) => ({ schema: "other", kind: "noise", i })));
+  const st = await ch.pendingStatus();
+  assert.equal(st.complete, false, "the window is truncated");
+  assert.equal(st.open.length, 1, "the question is still open");
+  assert.equal((st.open[0] as { deliveredCount?: number })?.deliveredCount, 0, "the in-window correction refunds the open record even under truncation");
+});
+
+test("W13-F1: a truncated scan never re-refunds the sticky ledger max (guard pin)", async () => {
+  // The one process-sticky case where a refund can double-spend.
+  // Scenario: scan #1 sees ONLY the delivered escalation line (no
+  // correction yet) and sets the sticky ledgerMaxScan=1; the correction
+  // is then journalled by another writer; scan #2 is TRUNCATED, so the
+  // escalation line sits outside the window and only the correction
+  // survives. Refunding the sticky max there would erase the one proven
+  // delivery and re-mint budget the cap is supposed to remember. With
+  // the guard the raise caps; without it the key delivers again
+  // (mutation-checked: disabling the guard fails this test).
+  const escOnly: unknown[] = [];
+  const seed = makeEscalationChannel({
+    append: async (r) => { escOnly.push(r as Rec); },
+    deliver: async () => ({ channel: "telegram" }),
+    now: () => 1700000000 + escOnly.length,
+    maxRedeliver: 1,
+  });
+  const r0 = (await seed.raise(valid() as never)) as RaiseResult;
+  assert.equal(r0.delivered, true, "the proven delivery (escalation line: deliveredCount 1)");
+  const key = r0.record.escalationId;
+  const correction = { schema: ESCALATION_SCHEMA, kind: "deliveryRefused", ref: key, ts: 2 };
+  const noise = Array.from({ length: 100_001 }, (_, i) => ({ schema: "other", kind: "noise", i }));
+  let trunc = false;
+  const ch = makeEscalationChannel({
+    append: async () => {},
+    // scan #1: complete — just the escalation line (max := 1, no refund).
+    // scan #2: truncated — the head is cut, only the correction survives.
+    read: async () => (trunc ? [...noise, correction] : [...escOnly]),
+    deliver: async () => ({ channel: "telegram" }),
+    now: () => 999,
+    maxRedeliver: 1,
+  });
+  const st1 = await ch.pendingStatus();
+  assert.equal(st1.complete, true, "scan #1 is complete");
+  assert.equal((st1.open[0] as { deliveredCount?: number })?.deliveredCount, 1, "the durable count stands at 1 — no correction in this window");
+  trunc = true;
+  const r2 = (await ch.raise(valid({ decisionNeeded: "a NEW ask" }) as never)) as RaiseResult;
+  assert.ok(r2.disclosed?.includes("replay:truncated"), "scan #2 is truncated");
+  assert.equal(r2.delivered, false, "the sticky max survives the truncated scan — the proven delivery is never refunded away twice");
+  assert.equal(r2.reason, "redeliver-cap");
+});
+
+test("W13-F1: a malformed deliveryRefused line is fail-closed — counted unreadable, never silently skipped", async () => {
+  // Review finding (3): parseDeliveryRefusedLine requires schema+kind+ref;
+  // a line CLAIMING the kind with a ref that fails the fence falls to
+  // claimsSchema (which now knows 'deliveryRefused') → unreadable. One
+  // such line must make pending() incomplete, not disappear.
+  const bad = { schema: ESCALATION_SCHEMA, kind: "deliveryRefused", ref: 42, ts: 1 }; // ref must be an escalation id
+  const ch = makeEscalationChannel({ append: async () => {}, read: async () => [bad], deliver: async () => ({ channel: "telegram" }), now: () => 1 });
+  const st = await ch.pendingStatus();
+  assert.equal(st.complete, false, "a correction line whose ref fails the fence is unreadable — never silently skipped");
+  const r = await ch.raise(valid() as never);
+  assert.equal((r as RaiseResult).delivered, true, "a malformed correction does not block a delivery");
+});
+
 test("deliver: a send throw propagates and raise discloses it (INV-2)", async () => {
   const deliver = makeTelegramDeliver({
     enabled: true,

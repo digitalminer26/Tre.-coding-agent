@@ -212,7 +212,7 @@ export interface DispatchPorts {
   investigate?(req: object): Promise<{ evidenceRefs?: string[] } | void>;
   repair?(req: object): Promise<{ evidenceRefs?: string[] } | void>;
   rewriteTask?(req: object): Promise<{ taskRevision?: number } | void>;
-  escalate?(req: object): Promise<{ channel?: string } | void>;
+  escalate?(req: object): Promise<{ channel?: string; error?: string } | void>;
   park?(req: object): Promise<void>;
 }
 

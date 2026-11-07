@@ -1061,7 +1061,14 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // redeliver-cap/refused:<channel>), so no channel-name matching is
       // needed here and a new refusal channel cannot log as dispatched.
       if (r.channel.startsWith("escalation:")) {
-        log(`park: question NOT delivered (${r.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
+        // W13-F4 (audit): same cause-threading as escalate — the why,
+        // not just the what (dedup when the error repeats the channel).
+        let parkCause = "";
+        if (r.error !== undefined) {
+          const de = r.error.startsWith("deliver:") ? r.error.slice(8) : r.error;
+          if (!r.channel.includes(de)) parkCause = `: ${r.error}`;
+        }
+        log(`park: question NOT delivered (${r.channel.slice(11)}${parkCause}) — the human has NOT been asked; see ${escalationPath}`);
       } else {
         log(`park: question dispatched via ${r.channel}`);
       }
@@ -1121,15 +1128,27 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           ...(typeof r.actionId === "string" ? { actionId: r.actionId } : {}),
           ...(Array.isArray(r.rationale) ? { rationale: r.rationale } : {}),
         });
-        // The dispatcher returns {channel} only: a delivered send carries
+        // The dispatcher returns {channel, error?}: a delivered send carries
         // the port's channel name (e.g. 'telegram'); every NON-delivery
         // is namespaced 'escalation:…' (invalid/recorded/re-notice/
         // redeliver-cap/refused:<channel>) — B-F1 demanded that
         // distinction reach the host log instead of a bare acked.
         // W13-F2c: the refusal case is namespaced AT THE SOURCE, so this
         // host has ONE rule and no channel-name set to maintain.
+        // W13-F4 (audit): the delivery error rides home on the result —
+        // the log names it (class name for a throw; describeErr never
+        // surfaces an untrusted message), not just the fact of the
+        // non-delivery.
         if (res.channel.startsWith("escalation:")) {
-          log(`escalate NOT delivered (${res.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
+          // A refusal's error is `deliver:refused:<name>` — the channel
+          // already carries that tail, so the cause only prints when it
+          // adds information (a throw's name, e.g. ': Error').
+          let cause = "";
+          if (res.error !== undefined) {
+            const de = res.error.startsWith("deliver:") ? res.error.slice(8) : res.error;
+            if (!res.channel.includes(de)) cause = `: ${res.error}`;
+          }
+          log(`escalate NOT delivered (${res.channel.slice(11)}${cause}) — the human has NOT been asked; see ${escalationPath}`);
         } else {
           log(`escalate dispatched via ${res.channel}`);
         }

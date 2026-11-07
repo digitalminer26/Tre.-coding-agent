@@ -1197,5 +1197,10 @@ test("W13 park+throwing deliver (audit row 8): the park survives, the failure is
   const parkLines = lines.filter((l) => l.startsWith("park:"));
   assert.ok(parkLines.some((l) => l.includes("NOT delivered")),
     `the host log carries the failure disclosure, got ${JSON.stringify(parkLines)}`);
+  // W13-F4 (audit): the log names the delivery error, not just the
+  // fact. A throw's disclosure is the CLASS name only (describeErr
+  // never surfaces the untrusted message), so the pin is `: Error`.
+  assert.ok(parkLines.some((l) => /NOT delivered \((?:recorded|re-notice): Error/.test(l)),
+    `the host log names the delivery error, got ${JSON.stringify(parkLines)}`);
   assert.ok(!parkLines.some((l) => l.includes("dispatched")), "nothing may claim a dispatch the port could not perform");
 });

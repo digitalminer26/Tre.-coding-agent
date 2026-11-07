@@ -239,14 +239,42 @@ import it):
   flattened: a raw `\n/resolve …` inside decisionNeeded or evidence
   renders as visible text and can never forge a second command line.
   Returns `{ channel: 'telegram' }`. `enabled:false` → returns
-  `{ channel: 'telegram:disabled' }` WITHOUT sending (the record still
-  stands — INV-2). W13-F2c: the channel layer reads any port return whose
-  channel ends in `:disabled` as the documented REFUSAL-to-send — the
-  raise RESULT becomes `delivered:false` with `channel:
-  'escalation:refused:<name>'` and `delivery:{ok:false,…}` (the durable
-  line is untouched: the append precedes the act, so the attempt count
-  stands while the success does not). A send throw propagates to `raise`,
-  which discloses it per INV-2.
+  `{ channel: 'telegram:disabled', refused: true }` WITHOUT sending (the
+  record still stands — INV-2). W13 (refusal audit): the refusal is an
+  EXPLICIT field, not a name to infer — the channel layer treats
+  `refused:true` (read through the hostile-input fence; a non-boolean is
+  disclosed `bad-input:refused` and never coerced) or, as backstop for
+  third-party ports predating the field, any channel ending `:disabled`,
+  as REFUSAL-to-send: the raise RESULT becomes `delivered:false,
+  refused:true` with `channel:'escalation:refused:<name>'` (namespacing
+  is IDEMPOTENT — an already-namespaced name is never double-prefixed)
+  and `delivery:{ok:false,error:'deliver:refused:<name>'}`. A refusal
+  also REFUNDS the redeliver budget (W13-F1): `deliveredCount` is
+  reserved pre-act (INV-5), so a refused send appends a durable
+  `deliveryRefused` correction line (`kind:'deliveryRefused',
+  ref:<escalationId>`) and the in-process mirror/ledger each give back
+  exactly this attempt's burn — replay subtracts one refund per
+  correction line (clamped at 0, reset by a newer escalation line), so
+  bridge-off raises no longer MUTE a question across restarts. A
+  correction whose append fails is disclosed `refusal-correction:failed`
+  and stays burned (fail closed). A send THROW is different: it stays
+  burned (the attempt may have reached the human) and is disclosed via
+  the `delivery` field. W13-F4: the dispatcher returns
+  `{ channel, error? }` and the host log prints the delivery error, not
+  just the fact of non-delivery (`escalate NOT delivered (recorded:
+  Error) …`). Note the error for a THROW is the exception's CLASS NAME
+  only — `describeErr` never surfaces `Error#message` (untrusted port
+  text stays out of the operator log; review-round decision).
+- **Unreachable in prod today (W13-F5, audit disposition).** The real
+  production entrypoint (`src/cli` → compose loop) does not yet wire
+  `escalationDeliver` / the dispatcher into the loop host: the Telegram
+  deliver port is exercised by the test harness
+  (`runHostEpisode({ escalationDeliver })`) only. The channel, the
+  dispatcher, and this consumer are complete and test-pinned; enabling
+  the human loop in production is a host-wiring decision (docs §6), not
+  a module gap. Until that wiring lands, every loop escalation is
+  recorded durably (and shows in `pending()`), and `pendingStatus` /
+  the host log are the operator's view — nothing sends.
 - `parseTelegramResolution(text, by)` → `null | { escalationId, decision, by, note?, noteClipped? }`:
   accepts `/resolve <esc-id> <decision>[: note]` (`by` = the message
   sender, passed by the host and bounded). Anything else parses to null —

@@ -126,20 +126,21 @@ export function renderEscalation(rec: EscalationRecord): string {
 
 /**
  * The deliver port (docs/19 §5): render + send through the bridge seam.
- * `enabled:false` → `{ channel: 'telegram:disabled' }` and NOTHING is
- * sent (INV-2: the record stands regardless). W13-F2c: the channel layer
- * treats any return whose channel ends in ':disabled' as the documented
- * refusal-to-send — the raise result comes back delivered:false with
- * `channel: 'escalation:refused:telegram:disabled'`, so the host never
- * logs a dispatch for a send that did not happen. A send throw
- * propagates to `raise`, which discloses it per INV-2 — the consumer
- * adds no catch: swallowing a failed send here would hide a
- * human-visible failure.
+ * `enabled:false` → `{ channel: 'telegram:disabled', refused: true }` and
+ * NOTHING is sent (INV-2: the record stands regardless). W13-F2: the
+ * refusal is EXPLICIT (`refused:true`) — the channel layer no longer has
+ * to infer it from the name (the `:disabled` suffix stays as the
+ * backstop). The raise result comes back delivered:false, refused:true
+ * with `channel: 'escalation:refused:telegram:disabled'`, and the
+ * refusal REFUNDS the redeliver budget (W13-F1) — bridge-off raises no
+ * longer mute the key. A send throw propagates to `raise`, which
+ * discloses it per INV-2 — the consumer adds no catch: swallowing a
+ * failed send here would hide a human-visible failure.
  */
-export function makeTelegramDeliver(bridge: Pick<TelegramBridge, 'enabled' | 'send'>): (rec: EscalationRecord) => Promise<{ channel: string }> {
+export function makeTelegramDeliver(bridge: Pick<TelegramBridge, 'enabled' | 'send'>): (rec: EscalationRecord) => Promise<{ channel: string; refused?: boolean }> {
   return async (rec) => {
     if (bridge !== null && typeof bridge === 'object' && bridge.enabled === false) {
-      return { channel: 'telegram:disabled' };
+      return { channel: 'telegram:disabled', refused: true };
     }
     await bridge.send(renderEscalation(rec));
     return { channel: 'telegram' };

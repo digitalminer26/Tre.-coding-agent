@@ -374,12 +374,25 @@ export interface RaiseResult {
   delivered: boolean;
   reason?: 're-notice' | 'redeliver-cap';
   channel?: string;
+  /** W13-F2: the send was REFUSED (the human was not asked) — explicit,
+   *  not inferred from the channel string. */
+  refused?: boolean;
   delivery?: { ok: boolean; error?: string };
   disclosed?: string[]; // e.g. bad-input:packet / bad-input:evidence|attempts|force|blocker|attemptId|decisionNeeded|by|note / evidence:dropped|skipped|clipped|truncated / attempts:* / decisionNeeded:clipped / attemptId:clipped / by:clipped / note:clipped / replay:truncated / delivery:unverifiable-count (loop-c2 F2: truncated window, no local proof of the count) (delivery failure is the `delivery` FIELD — there is no delivery:failed marker; no 'scan-budget' marker — exhaustion emits '…:truncated'; docs/17 is the scan-budget doc)
 }
 
 export interface DeliverPort {
-  deliver(rec: EscalationRecord): Promise<{ channel?: string } | void>;
+  deliver(rec: EscalationRecord): Promise<DeliverResult | void>;
+}
+
+/** W13-F2: the delivery ACT result. `refused:true` is the EXPLICIT
+ *  machine-readable signal that the human was NOT asked (the port knows
+ *  it disabled/no-route — no channel name to parse). The `:disabled`
+ *  channel-name suffix is kept as a backstop for third-party ports that
+ *  predate the field. */
+export interface DeliverResult {
+  channel?: string;
+  refused?: boolean;
 }
 
 export interface EscalationDeps {
@@ -389,7 +402,7 @@ export interface EscalationDeps {
    *  an in-process fallback is wired (docs/19 §3). */
   read?(): Promise<unknown[]>;
   /** The delivery ACT (INV-1): the module builds and appends, the port sends. */
-  deliver?: (rec: EscalationRecord) => Promise<{ channel?: string } | void>;
+  deliver?: (rec: EscalationRecord) => Promise<DeliverResult | void>;
   /** REQUIRED host clock (INV-7): no Date() of its own. */
   now(): number;
   maxRedeliver?: number;
@@ -547,6 +560,21 @@ function parseResolutionLine(line: unknown): ResolutionRecord | undefined {
   };
 }
 
+/** W13-F1: parse a `deliveryRefused` correction line into its ref, or
+ *  undefined (skip). The line records "the send for `ref` was refused —
+ *  give the budget back"; nothing else on it is load-bearing, so ONLY
+ *  schema/kind/ref must hold (same minimal read as lenientResolutionRef,
+ *  same hostile-input fence: accessors never invoked, traps → undefined). */
+function parseDeliveryRefusedLine(line: unknown): string | undefined {
+  if (!isPlainObj(line)) return undefined;
+  const schemaV = ownData(line, 'schema');
+  if (schemaV.threw || schemaV.value !== ESCALATION_SCHEMA) return undefined;
+  const kindV = ownData(line, 'kind');
+  if (kindV.threw || kindV.value !== 'deliveryRefused') return undefined;
+  const ref = ownData(line, 'ref').value;
+  return isEscalationId(ref) ? ref : undefined;
+}
+
 /** Cycle-4 F4: does the line CLAIM the escalation schema (either kind)?
  *  A trap anywhere → false (it could not be read; unreadable handles it). */
 function claimsSchema(line: unknown): boolean {
@@ -554,7 +582,7 @@ function claimsSchema(line: unknown): boolean {
   try {
     const k = ownData(line, 'kind');
     if (k.threw) return true; // a trapping kind descriptor is itself unreadable
-    return k.value === 'escalation' || k.value === 'resolution';
+    return k.value === 'escalation' || k.value === 'resolution' || k.value === 'deliveryRefused';
   } catch {
     return true;
   }
@@ -934,6 +962,7 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
   const deliverAndFinish = async (p: PreparedRaise): Promise<RaiseResult> => {
     const { rec, shouldDeliver, allowedByDedup, disclosed, reason: reasonForFinish } = p;
     let delivered = false;
+    let refused = false;
     let channel: string | undefined;
     let delivery: RaiseResult['delivery'] | undefined;
     if (deps.deliver === undefined) {
@@ -956,18 +985,28 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           // throws getOwnPropertyDescriptor, or a non-object, is a defect).
           const chOwn = ownData(r, 'channel');
           const chRaw = chOwn.threw ? undefined : boundedStr(chOwn.value);
-          // W13-F2c (P16 audit, follow-up): a channel whose name ENDS in
-          // ':disabled' IS the port's documented refusal-to-send (docs/19
-          // §5) — nothing was sent, and the RESULT must say so. Before,
-          // any object return set delivered:true and the refusal reached
-          // the host only as a NAME the host happened to recognise; any
-          // other refusal-channel would have logged as dispatched. The
-          // durable count is untouched (the line was appended before the
-          // act — INV-2: the attempt stands, the success does not).
-          if (typeof chRaw === 'string' && chRaw.endsWith(':disabled')) {
-            channel = `escalation:refused:${chRaw.slice(0, 80)}`;
+          // W13-F2 (P16 audit, follow-up): the refusal decision is an
+          // EXPLICIT FIELD (`refused:true` — the port knows it did not
+          // ask the human), read through the same fence. The `:disabled`
+          // name suffix is kept as the documented backstop for ports that
+          // predate the field (docs/19 §5). Before, ANY object return set
+          // delivered:true and the refusal reached the host only as a
+          // NAME the host happened to recognise; a refusal named anything
+          // else logged as dispatched. Refusal now means: refused ===
+          // true, or a channel name ending ':disabled'. A non-boolean
+          // `refused` is untrusted-present garbage: disclosed, ignored.
+          const refusedOwn = ownData(r, 'refused');
+          if (refusedOwn.threw || refusedOwn.accessor) disclosed.push('bad-input:refused');
+          if (refusedOwn.value !== undefined && typeof refusedOwn.value !== 'boolean') disclosed.push('bad-input:refused'); // loop W13: present non-boolean is disclosed, never coerced
+          const refusedExplicit = !refusedOwn.threw && refusedOwn.value === true;
+          if (refusedExplicit || (typeof chRaw === 'string' && chRaw.endsWith(':disabled'))) {
+            // W13-F3: the namespacing is IDEMPOTENT — an already-namespaced
+            // refusal name is used as-is, never double-prefixed.
+            const name = typeof chRaw === 'string' && chRaw !== '' ? chRaw.slice(0, 80) : 'unknown';
+            channel = name.startsWith('escalation:') ? name : `escalation:refused:${name}`;
+            refused = true;
             delivered = false;
-            delivery = { ok: false, error: `deliver:refused:${chRaw.slice(0, 80)}` };
+            delivery = { ok: false, error: `deliver:refused:${name}` };
           } else {
             channel = chRaw !== undefined && chRaw !== '' ? chRaw : undefined;
             delivered = true;
@@ -979,13 +1018,56 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       } catch (e) {
         // The count stands (the durable line IS the promise — INV-2):
         // a failed attempt is disclosed, the record never vanishes.
+        // W13: a THROW stays burned (docs/19 §5) — only an explicit
+        // refusal (the port knows the human was not reachable) refunds.
         delivery = { ok: false, error: describeErr(e) };
+      }
+    }
+
+    // W13-F1 (audit MAJOR): a REFUSED send must not burn the redeliver
+    // budget. deliveredCount is written pre-act (the INV-5 reservation
+    // must commit before the release point), so the refund runs here:
+    //   - durable: a `deliveryRefused` correction line for the key —
+    //     replay subtracts refusals from the durable count, so the
+    //     budget recovers across restarts (the audit probe: 3 bridge-off
+    //     raises left counts [1,2,3,3] and MUTE-keyed the channel forever);
+    //   - in-process: the mirror + the lifetime ledger each give back
+    //     exactly this attempt's burn (a concurrent raise that reserved
+    //     past us keeps its own count — one refund per refusal).
+    // A refusal whose correction line fails to append is disclosed and
+    // stays burned (fail closed: a budget that cannot be restored must
+    // never be double-spent).
+    if (refused) {
+      let corrected = true;
+      try {
+        await deps.append({
+          schema: ESCALATION_SCHEMA,
+          kind: 'deliveryRefused',
+          id: `${rec.escalationId}#refused-${rec.id}`,
+          ref: rec.escalationId,
+          ts: safeTs(deps.now),
+        });
+      } catch {
+        corrected = false;
+        disclosed.push('refusal-correction:failed');
+      }
+      if (corrected) {
+        const cur = openMirror.get(rec.escalationId);
+        if (cur !== undefined) {
+          const restored = Math.max(0, cur.delivered - 1);
+          openMirror.set(rec.escalationId, cur.rec.id === rec.id
+            ? { rec: Object.freeze({ ...rec, deliveredCount: restored }), delivered: restored }
+            : { rec: cur.rec, delivered: restored });
+        }
+        const led = deliveryLedger.get(rec.escalationId) ?? 0;
+        if (led > 0) deliveryLedger.set(rec.escalationId, led - 1);
       }
     }
 
     const out: RaiseResult = {
       record: Object.freeze(rec) as EscalationRecord,
       delivered,
+      ...(refused ? { refused: true as const } : {}),
       ...(reasonForFinish !== undefined ? { reason: reasonForFinish } : {}),
       ...(channel !== undefined ? { channel } : {}),
       ...(delivery !== undefined ? { delivery } : {}),
@@ -1051,6 +1133,7 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const seen = new Set<string>();
     let lenientClosed = 0; // cycle-4 F4: closes the strict parse could not justify
     let unreadable = 0;    // cycle-4 F4: lines the scan saw but could not read at all
+    const refusedWindow = new Map<string, number>(); // W13-F1: refunds seen in this window
     if (deps.read === undefined) return { open: out, ok: false, truncated: false, seen, lenientClosed, unreadable };
     let copy: LineCopy | undefined;
     try {
@@ -1064,6 +1147,11 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       if (esc !== undefined) {
         seen.add(esc.escalationId);
         seenEver.add(esc.escalationId);
+        // W13-F1: a newer escalation line for the key already bakes in
+        // every refund applied when it was written — only refusals AFTER
+        // the key's LAST line are unapplied. Reset so a successful send
+        // past a refusal is never over-refunded.
+        refusedWindow.delete(esc.escalationId);
         if ((noticeFloor.get(esc.escalationId) ?? -1) < esc.reNotice) noticeFloor.set(esc.escalationId, esc.reNotice);
         if ((ledgerMaxScan.get(esc.escalationId) ?? -1) < esc.deliveredCount) ledgerMaxScan.set(esc.escalationId, esc.deliveredCount); // cycle-4 HIGH-2
         // Loop-c3 F1: a line that admits an unverifiable count keeps the
@@ -1094,6 +1182,15 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         out.delete(res.ref);
         continue;
       }
+      // W13-F1: a refusal correction line (appended by raise() when the
+      // port refused) — refunds one burn of `ref`'s durable count below.
+      // A line claiming the kind whose ref traps/fails is disclosed as
+      // unreadable (same rule as a resolution with a trapped ref).
+      const refus = parseDeliveryRefusedLine(line);
+      if (refus !== undefined) {
+        refusedWindow.set(refus, (refusedWindow.get(refus) ?? 0) + 1);
+        continue;
+      }
       // Neither parse accepted the line (foreign entry, corruption, or a
       // resolution whose ref traps). A 'kind' that claims the schema but
       // fails everything else is the concerning class — count it. MED-4:
@@ -1102,6 +1199,33 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       // isPlainObj INSIDE claimsSchema (→ false) even though the line is
       // unreadable-hostile. trapPresent names exactly that class.
       if (trapPresent(line) || claimsSchema(line)) unreadable += 1;
+    }
+    // W13-F1 (audit MAJOR): apply the window's refusal refunds. One
+    // correction line per refused send refunds one pre-act burn of that
+    // key's durable count, clamped at 0 — a refund can restore budget,
+    // never mint a negative one. The OPEN-record refund is safe in any
+    // window: presence/last-line order inside a window is authoritative,
+    // and the escalation-line reset above keeps a correction from ever
+    // refunding a count written after it. The LEDGER-SCAN refund runs
+    // ONLY on a complete window: ledgerMaxScan is process-sticky, and in
+    // a truncated window it may carry a max from an earlier scan while
+    // the escalation lines that earned it (and any later burn lines) sit
+    // outside this window — refunding then could under-state the count
+    // the cap is supposed to remember. Fail closed: a truncated window
+    // restores nothing on the lifetime ledger (the audit's review note).
+    // The correction line is host-appended only (raise() on refusal); the
+    // log is the trusted append domain (same as escalation lines).
+    if (refusedWindow.size > 0) {
+      for (const [ref, n] of refusedWindow) {
+        const rec = out.get(ref);
+        if (rec !== undefined && rec.deliveredCount > 0) {
+          out.set(ref, { ...rec, deliveredCount: Math.max(0, rec.deliveredCount - n) });
+        }
+        if (!copy.truncated) {
+          const led = ledgerMaxScan.get(ref);
+          if (led !== undefined && led > 0) ledgerMaxScan.set(ref, Math.max(0, led - n));
+        }
+      }
     }
     return { open: out, ok: true, truncated: copy.truncated, seen, lenientClosed, unreadable };
   };
@@ -1174,11 +1298,15 @@ export interface DispatcherDeps {
 }
 
 export interface EscalationDispatcher {
-  escalate(req: { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[]; [k: string]: unknown }): Promise<{ channel: string }>;
+  // W13-F4: `error` carries the delivery failure's disclosure (the
+  // refusal name, or for a throw the CLASS NAME from describeErr —
+  // never Error#message, which is untrusted port text) so the host log
+  // shows more than the refusal prefix.
+  escalate(req: { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[]; [k: string]: unknown }): Promise<{ channel: string; error?: string }>;
   // W12-F1 (P16 audit W5): park returns the SAME delivery-channel record
   // as escalate — the host must be able to tell "asked the human" from
   // "journalled only". Silent void was the B-F1 defect on the park path.
-  park(req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string }>;
+  park(req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string; error?: string }>;
 }
 
 /**
@@ -1193,7 +1321,7 @@ export interface EscalationDispatcher {
  * false ack.
  */
 export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispatcher {
-  const escalate = async (req: { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[]; [k: string]: unknown }): Promise<{ channel: string }> => {
+  const escalate = async (req: { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[]; [k: string]: unknown }): Promise<{ channel: string; error?: string }> => {
     if (!isPlainObj(req)) return { channel: 'escalation:invalid' };
     // Cycle-4 F1 (audit HIGH-1): the dispatcher must apply the channel's F1
     // identity rule BEFORE clipping — a >MAX_STR identity clipped here would
@@ -1298,10 +1426,16 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
       ...(actionId !== undefined ? { evidence: [`action:${actionId}`, ...evidenceSrc] } : { evidence: evidenceSrc }),
     });
     if (res === null) return { channel: 'escalation:invalid' };
-    return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`) };
+    // W13-F4 (audit): the host log must show more than the fact of a
+    // non-delivery. The channel's delivery disclosure (the refusal name
+    // / the throw's class name — describeErr never surfaces an
+    // untrusted message) rides home on the dispatch result; a delivered
+    // send carries none.
+    const escErr = res.delivery !== undefined && res.delivery.ok === false ? res.delivery.error : undefined;
+    return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`), ...(escErr !== undefined ? { error: escErr } : {}) };
   };
 
-  const park = async (req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string }> => {
+  const park = async (req: { episodeId?: string; taskId?: string; actionId?: string; [k: string]: unknown }): Promise<{ channel: string; error?: string }> => {
     if (!isPlainObj(req)) return { channel: 'escalation:invalid' };
     // Cycle-4 F1 (audit HIGH-1): same rule as escalate — an oversized
     // identity is refused, never clipped into a shared key.
@@ -1339,8 +1473,11 @@ export function makeEscalationDispatcher(deps: DispatcherDeps): EscalationDispat
     // W12-F1: identical delivery-record rule as escalate above — a
     // delivered send carries the port's channel name; every non-delivery
     // is namespaced 'escalation:…' for the host to disclose.
+    // W13-F4: same disclosure-threading as escalate — the log names the
+    // delivery error (class name for a throw; see escalate above).
     if (res === null) return { channel: 'escalation:invalid' };
-    return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`) };
+    const parkErr = res.delivery !== undefined && res.delivery.ok === false ? res.delivery.error : undefined;
+    return { channel: res.channel ?? (res.delivered ? 'escalation' : `escalation:${res.reason ?? 'recorded'}`), ...(parkErr !== undefined ? { error: parkErr } : {}) };
   };
 
   return { escalate, park };
