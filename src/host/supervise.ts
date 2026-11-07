@@ -119,12 +119,6 @@ export interface HostEpisodeResult {
 
 const now = () => Date.now();
 
-// W12-F2 (P16 audit W5): channels whose name itself is the documented
-// refusal-to-send (docs/19) — the port records durably but never pings
-// the human. A host log must NEVER claim "dispatched" for these; both
-// the escalate and the park disclosure consult this set.
-const F2_DISABLED_CHANNELS = new Set(["telegram:disabled"]);
-
 function assertId(v: string, what: string): string {
   if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) {
     throw new Error(`host: ${what} must be a safe, non-empty path component (got ${JSON.stringify(v)})`);
@@ -1062,13 +1056,12 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // (the B-F1 defect on the park path).
     try {
       const r = await escalationDispatcher.park({ episodeId: graph.episodeId, taskId: opts.taskId });
+      // W12-F1 + W13-F2c (P16 audit): ONE rule — the dispatcher namespaces
+      // EVERY non-delivery as 'escalation:…' (invalid/recorded/re-notice/
+      // redeliver-cap/refused:<channel>), so no channel-name matching is
+      // needed here and a new refusal channel cannot log as dispatched.
       if (r.channel.startsWith("escalation:")) {
         log(`park: question NOT delivered (${r.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
-      } else if (F2_DISABLED_CHANNELS.has(r.channel)) {
-        // W12-F2: a ':disabled' channel is the port's documented
-        // refusal-to-send (docs/19) — logging it as dispatched told the
-        // host the user was pinged when the bridge was deliberately off.
-        log(`park: question recorded but NOT delivered (${r.channel} — bridge off); see ${escalationPath}`);
       } else {
         log(`park: question dispatched via ${r.channel}`);
       }
@@ -1131,12 +1124,12 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // The dispatcher returns {channel} only: a delivered send carries
         // the port's channel name (e.g. 'telegram'); every NON-delivery
         // is namespaced 'escalation:…' (invalid/recorded/re-notice/
-        // redeliver-cap) — B-F1 demanded that distinction reach the host
-        // log instead of a bare acked.
+        // redeliver-cap/refused:<channel>) — B-F1 demanded that
+        // distinction reach the host log instead of a bare acked.
+        // W13-F2c: the refusal case is namespaced AT THE SOURCE, so this
+        // host has ONE rule and no channel-name set to maintain.
         if (res.channel.startsWith("escalation:")) {
           log(`escalate NOT delivered (${res.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
-        } else if (F2_DISABLED_CHANNELS.has(res.channel)) {
-          log(`escalate recorded but NOT delivered (${res.channel} — bridge off); see ${escalationPath}`);
         } else {
           log(`escalate dispatched via ${res.channel}`);
         }

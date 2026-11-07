@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEpisodeLayout, type EpisodeGraph } from "../src/episode/journal.js";
 import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit, fileDigest } from "../src/host/supervise.js";
+import { makeTelegramDeliver } from "../src/telegram/escalation.js";
 
 async function freshEpisode(t: { diagnostic: (m: string) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
   const root = await mkdtemp(join(tmpdir(), "tre-host-"));
@@ -1103,4 +1104,98 @@ test("W1-M7 (park door): a CORRUPT state.json is preserved untouched and the dur
   // the handler returned before the dispatcher).
   const escRaw = await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8").catch(() => "");
   assert.ok(!escRaw.includes("the task is parked"), "a skipped park raises no question — the state write is the gate");
+});
+
+// ── W13-F2c + audit row 8 (P16 follow-up audit): the refusal-to-send
+// is a FACT at the channel level, disclosed by the host for BOTH acts. ──
+
+test("W13 park+disabled bridge: the refusal logs as NOT delivered (namespaced at source), never as dispatched", async (t) => {
+  // The audit's major #2 in its FINAL form: makeTelegramDeliver's
+  // {channel:'telegram:disabled'} is a documented refusal (docs/19 §5).
+  // The channel layer now turns ANY ':disabled' return into
+  // delivered:false + 'escalation:refused:<name>', so the host's single
+  // prefix rule catches it — no channel-name set, no false "dispatched".
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  let sends = 0;
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    escalationDeliver: makeTelegramDeliver({ enabled: false, send: async () => { sends++; } }),
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  await res.parkTask();
+  assert.equal(sends, 0, "a disabled bridge sent NOTHING");
+  const parkLines = lines.filter((l) => l.startsWith("park:"));
+  assert.ok(parkLines.some((l) => l.includes("NOT delivered") && l.includes("refused:telegram:disabled") && l.includes("the human has NOT been asked")),
+    `the refusal is disclosed as NOT delivered with the refused channel named, got ${JSON.stringify(parkLines)}`);
+  assert.ok(!parkLines.some((l) => l.includes("dispatched")), "nothing may claim a dispatch the bridge refused");
+  // The question is still durable (INV-2: the record stands, the success does not).
+  const esc = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8"))
+    .trim().split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.ok(esc.some((r) => r.blocker === "repeated-strategy" && String(r.decisionNeeded).includes("parked")),
+    "the parked question is DURABLE despite the refused send");
+});
+
+test("W13 escalate+disabled bridge: the refusal logs as NOT delivered for the escalate act too", async (t) => {
+  // Same fact, other act: the loop's escalate rung with a disabled
+  // bridge. Before W13-F2c the host logged 'escalate dispatched via
+  // telegram:disabled' — a dispatch to a human who was never asked.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "false" } }, // never passes → escalate
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: [] },
+    }],
+  });
+  const worker = await exitZeroWorker(root);
+  let sends = 0;
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 8,
+    escalationDeliver: makeTelegramDeliver({ enabled: false, send: async () => { sends++; } }),
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  assert.equal(res.result.stopped, "escalation-exhausted");
+  assert.equal(sends, 0, "a disabled bridge sent NOTHING across the whole episode");
+  const escLines = lines.filter((l) => l.includes("escalate"));
+  assert.ok(escLines.length >= 1, "the escalation lines exist");
+  assert.ok(escLines.every((l) => l.includes("NOT delivered") && l.includes("refused:telegram:disabled")),
+    `every escalate is disclosed as a refused send, got ${JSON.stringify(escLines)}`);
+  assert.ok(!lines.some((l) => /escalate dispatched via/.test(l)), "nothing may claim a delivery that did not happen");
+});
+
+test("W13 park+throwing deliver (audit row 8): the park survives, the failure is disclosed, nothing escapes the seam", async (t) => {
+  // The audit's untested path: a deliver port whose SEND throws.
+  // deliverAndFinish catches it (the durable line IS the promise), the
+  // record stands, the park resolves — and the host must SEE the failure
+  // rather than silence.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    escalationDeliver: async () => { throw new Error("bridge down"); },
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  await res.parkTask(); // MUST resolve — a throwing port never crashes the seam
+  const state = JSON.parse(await readFile(join(root, graph.episodeId, "state.json"), "utf8")) as { tasks: Record<string, { status: string }> };
+  assert.equal(state.tasks.t1?.status, "parked", "the state write stands (the send failed AFTER the durable record)");
+  const esc = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8"))
+    .trim().split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+  const parkRec = esc[esc.length - 1]!;
+  assert.equal(parkRec.blocker, "repeated-strategy");
+  assert.ok(!("delivery" in parkRec),
+    "the durable line carries no delivery claim — the append precedes the act (INV-2); the failure lives in the result/host log, never as a forged success on disk");
+  const parkLines = lines.filter((l) => l.startsWith("park:"));
+  assert.ok(parkLines.some((l) => l.includes("NOT delivered")),
+    `the host log carries the failure disclosure, got ${JSON.stringify(parkLines)}`);
+  assert.ok(!parkLines.some((l) => l.includes("dispatched")), "nothing may claim a dispatch the port could not perform");
 });

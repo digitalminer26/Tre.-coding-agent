@@ -127,9 +127,14 @@ export function renderEscalation(rec: EscalationRecord): string {
 /**
  * The deliver port (docs/19 §5): render + send through the bridge seam.
  * `enabled:false` → `{ channel: 'telegram:disabled' }` and NOTHING is
- * sent (INV-2: the record stands regardless). A send throw propagates to
- * `raise`, which discloses it per INV-2 — the consumer adds no catch:
- * swallowing a failed send here would hide a human-visible failure.
+ * sent (INV-2: the record stands regardless). W13-F2c: the channel layer
+ * treats any return whose channel ends in ':disabled' as the documented
+ * refusal-to-send — the raise result comes back delivered:false with
+ * `channel: 'escalation:refused:telegram:disabled'`, so the host never
+ * logs a dispatch for a send that did not happen. A send throw
+ * propagates to `raise`, which discloses it per INV-2 — the consumer
+ * adds no catch: swallowing a failed send here would hide a
+ * human-visible failure.
  */
 export function makeTelegramDeliver(bridge: Pick<TelegramBridge, 'enabled' | 'send'>): (rec: EscalationRecord) => Promise<{ channel: string }> {
   return async (rec) => {

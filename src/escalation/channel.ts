@@ -956,9 +956,23 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           // throws getOwnPropertyDescriptor, or a non-object, is a defect).
           const chOwn = ownData(r, 'channel');
           const chRaw = chOwn.threw ? undefined : boundedStr(chOwn.value);
-          channel = chRaw !== undefined && chRaw !== '' ? chRaw : undefined;
-          delivered = true;
-          delivery = { ok: true };
+          // W13-F2c (P16 audit, follow-up): a channel whose name ENDS in
+          // ':disabled' IS the port's documented refusal-to-send (docs/19
+          // §5) — nothing was sent, and the RESULT must say so. Before,
+          // any object return set delivered:true and the refusal reached
+          // the host only as a NAME the host happened to recognise; any
+          // other refusal-channel would have logged as dispatched. The
+          // durable count is untouched (the line was appended before the
+          // act — INV-2: the attempt stands, the success does not).
+          if (typeof chRaw === 'string' && chRaw.endsWith(':disabled')) {
+            channel = `escalation:refused:${chRaw.slice(0, 80)}`;
+            delivered = false;
+            delivery = { ok: false, error: `deliver:refused:${chRaw.slice(0, 80)}` };
+          } else {
+            channel = chRaw !== undefined && chRaw !== '' ? chRaw : undefined;
+            delivered = true;
+            delivery = { ok: true };
+          }
         } else {
           delivery = { ok: false, error: 'deliver:non-record' };
         }

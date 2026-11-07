@@ -581,7 +581,13 @@ test("deliver: renders one bounded message through the bridge and reports the ch
   assert.ok(sent[0]!.length <= 1500, "render stays inside the message bound");
 });
 
-test("deliver: disabled bridge → telegram:disabled WITHOUT sending (record stands)", async () => {
+test("deliver: disabled bridge → refusal is a FACT (delivered:false, escalation:refused:…) WITHOUT sending (record stands)", async () => {
+  // W13-F2c (P16 audit follow-up): before, the disabled port's object
+  // return set delivered:true and 'telegram:disabled' reached the host as
+  // a NAME only — a host that didn't recognise it logged a dispatch to a
+  // human who was never asked. The refusal is now decided AT THE SOURCE:
+  // any port return whose channel ends in ':disabled' is delivered:false
+  // with the channel namespaced 'escalation:refused:<name>'.
   let sends = 0;
   const deliver = makeTelegramDeliver({
     enabled: false,
@@ -592,8 +598,11 @@ test("deliver: disabled bridge → telegram:disabled WITHOUT sending (record sta
   const ch = makeEscalationChannel({ append: async () => {}, deliver, now: () => 1 });
   const res = (await ch.raise(valid() as never)) as RaiseResult;
   assert.equal(sends, 0);
-  assert.equal(res.channel, "telegram:disabled");
-  assert.ok(res.record !== undefined);
+  assert.equal(res.delivered, false, "a refusal is NOT a delivery");
+  assert.equal(res.channel, "escalation:refused:telegram:disabled", "the refusal is namespaced at the source");
+  assert.equal(res.delivery?.ok, false, "the delivery fact says failed");
+  assert.match(String(res.delivery?.error), /deliver:refused:telegram:disabled/);
+  assert.ok(res.record !== undefined, "the durable record stands regardless (INV-2)");
 });
 
 test("deliver: a send throw propagates and raise discloses it (INV-2)", async () => {

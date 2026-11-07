@@ -240,8 +240,13 @@ import it):
   renders as visible text and can never forge a second command line.
   Returns `{ channel: 'telegram' }`. `enabled:false` → returns
   `{ channel: 'telegram:disabled' }` WITHOUT sending (the record still
-  stands — INV-2). A send throw propagates to `raise`, which discloses
-  it per INV-2.
+  stands — INV-2). W13-F2c: the channel layer reads any port return whose
+  channel ends in `:disabled` as the documented REFUSAL-to-send — the
+  raise RESULT becomes `delivered:false` with `channel:
+  'escalation:refused:<name>'` and `delivery:{ok:false,…}` (the durable
+  line is untouched: the append precedes the act, so the attempt count
+  stands while the success does not). A send throw propagates to `raise`,
+  which discloses it per INV-2.
 - `parseTelegramResolution(text, by)` → `null | { escalationId, decision, by, note?, noteClipped? }`:
   accepts `/resolve <esc-id> <decision>[: note]` (`by` = the message
   sender, passed by the host and bounded). Anything else parses to null —
@@ -274,9 +279,13 @@ to a blocker by the host's own `blockerOf` callback when it has one);
 `decisionNeeded: 'the task is parked — approve a new approach, rewrite it, or abort'`.
 In both paths a delivered send carries the port's channel name and every
 NON-delivery is namespaced `escalation:…` (`invalid` / `recorded` /
-`re-notice` / `redeliver-cap`); a channel named `*:disabled` (e.g.
-`telegram:disabled`) is the port's documented refusal-to-send — the host
-discloses it as "recorded but NOT delivered", never as dispatched (W12-F2).
+`re-notice` / `redeliver-cap` / `refused:<channel>`). A channel named
+`*:disabled` (e.g. `telegram:disabled`) is the port's documented
+refusal-to-send, and since W13-F2c the NAMESPACING HAPPENS AT THE SOURCE:
+`raise` turns any `:disabled` return into `delivered:false` + `channel:
+'escalation:refused:<name>'`, so the host needs ONE rule (the
+`escalation:` prefix means the human was NOT asked) and no new refusal
+channel can ever log as dispatched.
 The executor keeps its intent/outcome journaling around the dispatch call
 (docs/15 §4): the escalation record is the OUTSIDE-world artifact; the
 journal line remains the loop's own proof.
