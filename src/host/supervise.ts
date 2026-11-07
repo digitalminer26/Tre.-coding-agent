@@ -538,12 +538,15 @@ export async function collectAcceptanceEvidence(o: AcceptEvidenceOptions): Promi
   const cwd = o.worktreePath ?? o.epPath;
 
   // 1. Current artifact identity: HEAD of the working tree (authoritative
-  //    when git answers). Without an explicit worktreePath the fallback
-  //    identity is marked dirty-unknown (W1-C1): the episode dir is not
-  //    the task's tree, so claiming "clean @ baseCommit" about it — with
-  //    gate and artifact rows measured somewhere else entirely — was the
-  //    critical mislabel this closes.
-  let current: ArtifactIdentity = { sha: o.graph.policy?.baseCommit ?? "", dirty: true, dirtyDigest: createHash("sha256").update(`no-worktree:fallback=${o.worktreePath === undefined ? "episode-dir" : "given"}`).digest("hex") };
+  //    when git answers). Without a usable git tree the fallback identity
+  //    is marked dirty-unknown (W1-C1): the episode dir is not the task's
+  //    tree, so claiming "clean @ baseCommit" about it — with gate and
+  //    artifact rows measured somewhere else entirely — was the critical
+  //    mislabel this closes. The digest labels WHY there is no identity:
+  //    "episode-dir" = no worktree was given at all; "worktree-unobservable"
+  //    = a worktree was given but git could not answer for it (not a repo,
+  //    git missing, etc.) — never "given", which read like a reason.
+  let current: ArtifactIdentity = { sha: o.graph.policy?.baseCommit ?? "", dirty: true, dirtyDigest: createHash("sha256").update(`no-worktree:fallback=${o.worktreePath === undefined ? "episode-dir" : "worktree-unobservable"}`).digest("hex") };
   const head = await runShell("git rev-parse HEAD", cwd, 10, { env: GIT_ENV });
   const preIdentity: ArtifactIdentity = head.code === 0 && head.stdout.trim() !== ""
     ? await observeIdentity(cwd, head.stdout.trim())

@@ -740,3 +740,31 @@ test("W9-A3: a worker's leftover background process is REAPED by the loop", asyn
   const survivors = ps.split("\n").filter((l) => l.includes(marker) && !l.includes("grep"));
   assert.equal(survivors.length, 0, `no worker group survivor (found: ${survivors.join(" | ")})`);
 });
+
+test("W10-C1: the fallback digest labels WHY there is no identity (episode-dir vs worktree-unobservable)", async () => {
+  // The label is hashed, so the test reproduces the expected digest for
+  // each branch. These are the only two reasons identity collection can
+  // fail, and they must be distinguishable in evidence — and the second
+  // must NOT be the bare word "given", which read like a reason rather
+  // than a cause (a worktree WAS given; git just could not answer).
+  const h = (s: string) => createHash("sha256").update(s).digest("hex");
+  const graph: EpisodeGraph = {
+    schema: "tre-graph/1", episodeId: "ep-fb", goal: "g",
+    tasks: [{ id: "t1", persona: "w", promptRef: "p", dependsOn: [], acceptance: { criteria: [], requiredChecks: [], artifacts: [] } }],
+    policy: { baseCommit: "abc123" },
+  };
+  const root = await mkdtemp(join(tmpdir(), "tre-host-fb-"));
+
+  const noWorktree = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath: join(root, "eps") });
+  assert.equal(noWorktree.current.dirtyDigest, h("no-worktree:fallback=episode-dir"),
+    "no worktree supplied => episode-dir");
+
+  const wt = join(root, "not-a-repo");
+  await mkdir(wt, { recursive: true });
+  const unobservable = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath: join(root, "eps"), worktreePath: wt });
+  assert.equal(unobservable.current.dirtyDigest, h("no-worktree:fallback=worktree-unobservable"),
+    "worktree supplied but git failed => worktree-unobservable");
+  assert.notEqual(unobservable.current.dirtyDigest, noWorktree.current.dirtyDigest,
+    "the two causes must be distinguishable in evidence");
+  assert.equal(unobservable.current.dirty, true, "an unobservable worktree is still dirty-unknown, never a clean claim");
+});

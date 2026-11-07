@@ -1,5 +1,15 @@
 # HANDOFF
 
+## 2026-12-10 — W10: cosmetic fallback label fixed (follow-up to W9)
+
+- `no-worktree:fallback=given` → `no-worktree:fallback=worktree-unobservable`.
+  The old bare word read like a reason; the two fallback causes (no
+  worktree at all vs. one given that git could not answer for) are now
+  both named and distinguishable in the digest.
+- W10-C1 regression test hashes both expected digests and asserts the
+  two causes differ; proven a true regression (fails with the old
+  label, passes with the new). Gate: 2413 pass / 0 fail.
+
 ## 2026-12-10 — W9: full-loop check (worker + gate + real worktree)
 
 Climbed one more layer: `runHostEpisode` end-to-end with a REAL git
