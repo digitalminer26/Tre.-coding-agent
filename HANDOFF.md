@@ -1,5 +1,39 @@
 # HANDOFF
 
+## 2026-12-10 — audit cycle W4 fix round: capture-path truncation closed (the W3 fix's own major gap)
+
+**This session (W4)** audited the W3 commit (`761ff17`) and found the
+W3 fix itself unsound on big trees; fixes:
+- **W4-A1 (major): the 16 KiB stdout TAIL cap blinded the identity.**
+  `runShell` kept only the LAST 16 KiB of `git status`/`git diff`
+  output, so on a tree with enough dirt the FRONT was silently dropped
+  (PROVEN: 600 untracked files → status returned exactly 16384 bytes,
+  first files missing; editing the FIRST-listed untracked file or the
+  first file of a >16 KiB tracked diff did NOT move the digest — the
+  exact W3-A1 failure, re-opened at scale). The old `slice(-2MiB)`/
+  `slice(-4MiB)` "caps" in the digest line were no-ops behind it.
+  Fixed: `runShell` gains a FULL-capture mode (`opts.maxBytes`) —
+  stdout buffered from the FRONT up to the cap, then `truncated: true`
+  and drain; `runObservedGit` uses it (64 MiB). `observeIdentity`
+  FAILS CLOSED on a truncated status (dirty-unknown marker) and on a
+  truncated write-tree; a truncated diff is disclosed IN the digest
+  (64 MiB beats zero — nothing past the cap is ever digested as if
+  complete). The digest line's no-op slices are GONE (full text is
+  hashed). Gate/display callers keep the legacy 16 KiB tail unchanged
+  (a truncated LOG is a display issue; a truncated IDENTITY is a
+  soundness one — both semantics tested).
+- **W4-A2 (minor): untracked symlink retargeting was invisible.** The
+  W3 `nonfile:` marker didn't bind the link's own content (the target
+  string). Now `readlink` binds it WITHOUT following: retarget moves
+  the digest, target-byte churn still does not (tested both ways).
+Tests: W4-A1 runShell full/tail capture semantics (front-kept, exact
+cap, disclosed truncated flag, tail unchanged); W4-A1 repro (600
+untracked files, edit FIRST-listed moves the digest; >16 KiB tracked
+diff, edit FIRST-listed moves the digest); W3-A1 symlink asserts
+updated to the bind-link-not-target semantics.
+Gate: `npm run build && npm test` → **2400 / 0 fail / 14 skipped**
+(2414 total), tsc clean via the build.
+
 ## 2026-12-10 — audit cycle W3 fix round: self-audit of the W2 commit (1 major digest gap + test/commit findings closed)
 
 **This session (W3)** audited the W2 commit itself (`075a5d0`), not just

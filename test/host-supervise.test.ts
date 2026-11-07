@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -385,15 +385,67 @@ test("W3-A1: untracked file CONTENT is bound into the dirty digest (two contents
   rmSync(join(wt, "new.txt"));
   const i4 = await observeIdentity(wt, sha);
   assert.notEqual(i4.dirty, true, "tree with the untracked file removed is clean again");
-  // A symlinked untracked entry must NOT have its TARGET's bytes bound
-  // (lstat, disclosed nonfile): swapping the target moves the digest via
-  // the link itself only when the link changes — never silently follows.
+  // A symlinked untracked entry binds its OWN content — the target
+  // string via readlink (W4-A2): retargeting the link MOVES the digest,
+  // while churn in the target's bytes does NOT (never followed).
   const lnSync = (await import("node:fs")).symlinkSync;
   const outside = join(root, "outside.txt");
   await writeFile(outside, "outside-A");
   lnSync(outside, join(wt, "link"));
   const i5 = await observeIdentity(wt, sha);
-  await writeFile(outside, "outside-B");
+  await writeFile(outside, "outside-B"); // target churn: link content unchanged
   const i6 = await observeIdentity(wt, sha);
-  assert.equal(i5.dirtyDigest, i6.dirtyDigest, "a symlink's (unfollowed) target changing MUST NOT move the digest — lstat, no silent follow");
+  assert.equal(i5.dirtyDigest, i6.dirtyDigest, "target-byte churn MUST NOT move the digest — the link is never followed");
+  await unlink(join(wt, "link"));
+  lnSync(join(root, "other-target.txt"), join(wt, "link")); // retarget
+  const i7 = await observeIdentity(wt, sha);
+  assert.notEqual(i7.dirtyDigest, i6.dirtyDigest, "retargeting the symlink MUST move the digest (link content = target string, W4-A2)");
+});
+
+test("W4-A1: runShell full-capture keeps the FRONT up to maxBytes and flags truncation (tail mode unchanged)", async () => {
+  // The audit cycle W4 finding: the legacy 16KiB TAIL cap dropped the
+  // front of `git status`/`git diff` output on dirty trees, blinding
+  // the identity digest to the earliest entries. Full-capture mode
+  // (maxBytes) keeps the front and DISCLOSES a cap hit; the legacy
+  // tail mode must stay byte-for-byte unchanged for display callers.
+  const gen = "seq -w 1 2000 | while read i; do echo line-$i-padding-padding-padding-padding; done";
+  const tail = await runShell(gen, "/", 30);
+  assert.ok(tail.stdout.endsWith("line-2000-padding-padding-padding-padding\n"), `tail mode still keeps the LAST 16KiB (got: ${tail.stdout.slice(0, 24)}...)`);
+  assert.equal(tail.stdout.length, 16 * 1024, "tail mode caps at exactly 16KiB");
+  assert.equal(tail.truncated, undefined, "tail mode never reports truncated");
+  const full = await runShell(gen, "/", 30, { maxBytes: 1024 });
+  assert.ok(full.stdout.startsWith("line-0001-padding"), "full mode keeps the FRONT");
+  assert.equal(full.stdout.length, 1024, "full mode caps at maxBytes");
+  assert.equal(full.truncated, true, "a cap hit is DISCLOSED as truncated (fail-closed input upstream)");
+  const noCap = await runShell("echo small", "/", 30, { maxBytes: 1024 });
+  assert.equal(noCap.stdout.trim(), "small");
+  assert.equal(noCap.truncated, undefined, "under the cap: no truncated flag");
+});
+
+test("W4-A1: identity digests bind the FIRST-listed entry on trees big enough to have overflowed the old 16KiB cap", async () => {
+  // Exact audit reproduction, as a regression test: 600 untracked files
+  // (status -z output > 16KiB) — editing the FIRST-listed file used to
+  // leave the digest unchanged; same for a large tracked diff.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w4-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "base.txt"), "b"); g("add", "base.txt"); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  const names = Array.from({ length: 600 }, (_, i) => `untracked_file_with_long_name_${String(i).padStart(4, "0")}.txt`);
+  for (const n of names) await writeFile(join(wt, n), "x");
+  const u1 = await observeIdentity(wt, sha);
+  await writeFile(join(wt, names[0] ?? names[1] ?? "impossible.txt"), "CHANGED");
+  const u2 = await observeIdentity(wt, sha);
+  assert.notEqual(u2.dirtyDigest, u1.dirtyDigest, "edit to the FIRST-listed of 600 untracked files MUST move the digest (the W4-A1 repro)");
+  for (const n of names) await unlink(join(wt, n));
+
+  for (let i = 0; i < 40; i++) await writeFile(join(wt, `t${String(i).padStart(2, "0")}.txt`), "line\n".repeat(800));
+  g("add", "."); g("commit", "-q", "-m", "tracked");
+  const sha2 = g("rev-parse", "HEAD").trim();
+  for (let i = 0; i < 40; i++) await writeFile(join(wt, `t${String(i).padStart(2, "0")}.txt`), "changed\n".repeat(800));
+  const d1 = await observeIdentity(wt, sha2);
+  await writeFile(join(wt, "t00.txt"), "changed-AGAIN\n".repeat(800));
+  const d2 = await observeIdentity(wt, sha2);
+  assert.notEqual(d2.dirtyDigest, d1.dirtyDigest, "edit to the FIRST-listed file of a >16KiB tracked diff MUST move the digest");
 });

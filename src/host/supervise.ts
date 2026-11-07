@@ -21,7 +21,7 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, mkdir, readFile, rename, lstat, open } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, lstat, open, readlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -129,6 +129,11 @@ interface ShellResult {
   stderr: string;
   cause: "exit" | "signal" | "timeout" | "spawn-error";
   signal?: string;
+  /** W4-A1 (audit cycle W4): true when FULL-capture (opts.maxBytes) hit
+   *  the cap and STOPPED collecting — the returned stdout is NOT the
+   *  complete output. Observation paths must treat this as fail-closed;
+   *  tail-mode callers never see it (undefined). */
+  truncated?: boolean;
 }
 
 /** The git/gate execution environment (W2-M5, audit cycle W2): ONE
@@ -159,8 +164,19 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
  *  not only the timeout — a grandchild that outlives a CLEAN exit-0
  *  shell mutated the tree after the "success" was recorded just as
  *  hard as one that outlived a timeout. ESRCH (group already reaped,
- *  the normal case) is fine. */
-export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?: NodeJS.ProcessEnv }): Promise<ShellResult> {
+ *  the normal case) is fine.
+ *  W4-A1 (audit cycle W4): the 16 KiB TAIL cap silently dropped the
+ *  FRONT of `git status`/`git diff` output once a tree had enough dirt
+ *  (PROVEN: 600 untracked files → exactly 16384 bytes returned, first
+ *  files missing), so edits to files the cap had dropped never moved
+ *  the digest — a PASS could be stamped on an identity blind to them.
+ *  Observation callers now pass `maxBytes` for FULL capture: output is
+ *  kept from the FRONT up to the cap, collection stops past it, and
+ *  `truncated: true` fails the observation closed. Display/gate-log
+ *  callers keep the 16 KiB tail (a truncated LOG is a display issue;
+ *  a truncated IDENTITY is a soundness one). */
+export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?: NodeJS.ProcessEnv; maxBytes?: number }): Promise<ShellResult> {
+  const maxBytes = opts?.maxBytes; // undefined = legacy 16KiB tail mode
   return new Promise((res) => {
     let child;
     try {
@@ -171,21 +187,51 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
     }
     let stdout = "";
     let stderr = "";
+    let truncated = false;
     let done = false;
+    // W4-A1: full-capture mode buffers stdout chunks from the FRONT up
+    // to maxBytes, then sets `truncated` and drains the rest (a
+    // truncated identity fails closed upstream — nothing past the cap
+    // is ever digested as if complete). Tail mode (no maxBytes) keeps
+    // the legacy 16KiB-slice behavior for display/gate-log callers.
+    const fullChunks: Buffer[] = [];
+    let kept = 0;
+    /** Resolve-once: composes the result, adding the full-capture stdout
+     *  (and the truncated flag) in full mode, the tail string otherwise.
+     *  `partial` passes the timeout/error case through untouched; in full
+     *  mode the collected prefix is appended to it. */
+    const finish = (r: ShellResult, partial = false) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (maxBytes !== undefined && !partial) res({ ...r, stdout: Buffer.concat(fullChunks).toString("utf8"), ...(truncated ? { truncated: true } : {}) });
+      else if (maxBytes !== undefined) res({ ...r, stdout: r.stdout + Buffer.concat(fullChunks).toString("utf8"), ...(truncated ? { truncated: true } : {}) });
+      else res(r);
+    };
     const killGroup = () => {
       try { if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); }
       catch { try { child.kill("SIGKILL"); } catch { /* group already gone */ } }
     };
     const timer = setTimeout(() => {
       if (!done) {
-        done = true;
         killGroup();
-        res({ code: -1, stdout, stderr: stderr + "\n(gate timeout: process group SIGKILLed)", cause: "timeout" });
+        // Tail mode used to hand back the collected stdout on timeout;
+        // finish() reproduces that from the closure in tail mode, and
+        // prepends the collected prefix (marked truncated) in full mode.
+        finish({ code: -1, stdout: maxBytes !== undefined ? "" : stdout, stderr: stderr + "\n(gate timeout: process group SIGKILLed)", cause: "timeout" }, true);
       }
     }, Math.max(1, timeoutS) * 1000);
-    child.stdout.on("data", (d: Buffer) => { stdout = (stdout + d.toString()).slice(-16 * 1024); });
+    if (maxBytes !== undefined) {
+      child.stdout.on("data", (d: Buffer) => {
+        if (truncated) return; // drain past the cap
+        if (kept + d.length <= maxBytes) { fullChunks.push(d); kept += d.length; }
+        else { fullChunks.push(d.subarray(0, maxBytes - kept)); kept = maxBytes; truncated = true; }
+      });
+    } else {
+      child.stdout.on("data", (d: Buffer) => { stdout = (stdout + d.toString()).slice(-16 * 1024); });
+    }
     child.stderr.on("data", (d: Buffer) => { stderr = (stderr + d.toString()).slice(-16 * 1024); });
-    child.on("error", (e) => { if (!done) { done = true; clearTimeout(timer); killGroup(); res({ code: -1, stdout, stderr: String((e as Error)?.message ?? e), cause: "spawn-error" }); } });
+    child.on("error", (e) => { finish({ code: -1, stdout: maxBytes !== undefined ? "" : stdout, stderr: String((e as Error)?.message ?? e), cause: "spawn-error" }); });
     // W2-M4: the LEADER dying is the moment to reap the group — a
     // backgrounded grandchild inherits the stdout/stderr pipes, so
     // 'close' would never fire while it lives (the W1-M2 evidence
@@ -200,8 +246,6 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
     // service does not belong inside an acceptance gate.
     child.on("exit", () => { killGroup(); });
     child.on("close", (code, signal) => {
-      if (done) return;
-      done = true;
       clearTimeout(timer);
       // W2-M4: the leader exited — the GROUP may still hold survivors
       // (grandchildren, or the shell exited but a bg job lingers).
@@ -209,8 +253,8 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
       // the stdio pipes are closed, so no surviving WRITER to the
       // buffers we are about to return.
       killGroup();
-      if (code === null) res({ code: -1, stdout, stderr, cause: "signal", ...(signal != null ? { signal: String(signal) } : {}) });
-      else res({ code, stdout, stderr, cause: "exit" });
+      if (code === null) finish({ code: -1, stdout, stderr, cause: "signal", ...(signal != null ? { signal: String(signal) } : {}) });
+      else finish({ code, stdout, stderr, cause: "exit" });
     });
   });
 }
@@ -289,7 +333,7 @@ export function shellQuote(a: string): string {
  *  minimal env (`GIT_ENV`) as the policy gate — the W1-era gate and
  *  observation inherited DIFFERENT things, so they could disagree about
  *  the same tree (the "clean gate passed @ dirty identity" shape). */
-export async function runObservedGit(repo: string, args: string[], timeoutS = 30): Promise<ShellResult> {
+export async function runObservedGit(repo: string, args: string[], timeoutS = 30, maxBytes = 64 * 1024 * 1024): Promise<ShellResult> {
   const pinned = [
     "git",
     "-c", "status.untrackedFiles=all",
@@ -299,7 +343,12 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
     "-c", "core.sparseCheckoutCone=false",
     ...args,
   ];
-  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV });
+  // W4-A1: identity/observation runs use FULL capture (front-kept) —
+  // the 16 KiB display tail silently dropped the front of status/diff
+  // output on dirty trees, blinding the digest to early entries. A cap
+  // hit sets `truncated`, which observeIdentity fails CLOSED on;
+  // nothing past the cap is ever digested as if complete.
+  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, maxBytes });
 }
 
 /** Observe the working tree's identity: HEAD sha + a digest of tracked
@@ -331,8 +380,18 @@ async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<st
   for (const p of paths) {
     try {
       const st = await lstat(join(repo, p)); // lstat: never follow a hostile symlink
+      if (st.isSymbolicLink()) {
+        // W4-A2: a symlink's OWN content (as git sees it) is the target
+        // STRING — bind it via readlink, which reads the stored link
+        // without following it. Retargeting the link now moves the
+        // digest; churn in whatever it points at still does NOT (the
+        // target's bytes are not the link's content).
+        try { lines.push(`symlink:${p}:${await readlink(join(repo, p))}`); }
+        catch { lines.push(`unreadable:${p}`); }
+        continue;
+      }
       if (!st.isFile()) {
-        lines.push(`nonfile:${p}:${String(st.mode)}`); // dir/symlink/etc: path+kind, content N/A
+        lines.push(`nonfile:${p}:${String(st.mode)}`); // dir/socket/etc: path+kind, content N/A
         continue;
       }
       if (st.size > UNTRACKED_CONTENT_CAP) {
@@ -371,6 +430,11 @@ export async function observeIdentity(cwd: string, sha: string): Promise<Artifac
     // a tree whose dirt cannot be verified is treated as dirty, never clean.
     return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`status-failed:code=${dirty.cause}:${dirty.code}\x00${dirty.stderr.slice(-2048)}`).digest("hex") };
   }
+  // W4-A1 fail CLOSED: a status output that hit the capture cap is a
+  // list we cannot see the front of — treat it like a failed status.
+  if (dirty.truncated) {
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`status-truncated:${dirty.stdout.length}\x00${dirty.stderr.slice(-2048)}`).digest("hex") };
+  }
   // Clean means clean: empty porcelain (with untracked-files=all pinned
   // and excludes disabled) is the ONLY path that may stamp a tree clean —
   // every failure beyond this point yields dirty-unknown, never clean.
@@ -381,7 +445,7 @@ export async function observeIdentity(cwd: string, sha: string): Promise<Artifac
   // `core.symlinks`, `diff.ignoreSubmodules` and friends can never bend
   // it (unlike any diff OUTPUT).
   const indexTree = await runObservedGit(cwd, ["write-tree"], 10);
-  if (indexTree.code !== 0 || indexTree.stdout.trim() === "") {
+  if (indexTree.code !== 0 || indexTree.stdout.trim() === "" || indexTree.truncated) {
     // fail closed: an index we cannot hash (unmerged entries, EACCES,
     // timeout) is dirt we cannot see.
     return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`write-tree-failed:${indexTree.cause}:${indexTree.code}\x00${indexTree.stderr.slice(-2048)}`).digest("hex") };
@@ -392,8 +456,14 @@ export async function observeIdentity(cwd: string, sha: string): Promise<Artifac
   // bend `git diff --binary` bytes (experiment: same content, hostile
   // config, different digest); explicit prefixes beat both. ext-diff/
   // textconv could rewrite content wholesale; -c pins hold the rest.
+  // W4-A1: the diff runs under FULL capture now, so the old
+  // slice(-4MiB) (which sliced the FRONT off — the same bug class) is
+  // GONE: the whole captured diff (<= the 64 MiB runObservedGit cap)
+  // is hashed. A cap hit is disclosed in the digest text alongside the
+  // retained prefix (64 MiB of identity beats zero — and the marker
+  // says the observation was capped, never silently bent).
   const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 30);
-  const diffPart = diff.code === 0 ? diff.stdout : `diff-failed:code=${diff.cause}:${diff.code}`;
+  const diffPart = diff.code !== 0 ? `diff-failed:code=${diff.cause}:${diff.code}` : diff.truncated ? `diff-truncated:${diff.stdout.length}\x00${diff.stdout}` : diff.stdout;
   // W3-A1: untracked content is FOLDED IN (audit finding: two different
   // contents under the same ?? path used to share one identity, so a gate
   // PASS stamped on it could be re-used against bytes it never measured).
@@ -401,7 +471,7 @@ export async function observeIdentity(cwd: string, sha: string): Promise<Artifac
   return {
     sha,
     dirty: true,
-    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart.slice(-2 * 1024 * 1024)}\x00diff-binary-head\n${diffPart.slice(-4 * 1024 * 1024)}\x00untracked\n${untrackedPart.slice(-4 * 1024 * 1024)}`).digest("hex"),
+    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}`).digest("hex"),
   };
 }
 
