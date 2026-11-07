@@ -27,7 +27,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEpisodeLayout, type EpisodeGraph } from "../src/episode/journal.js";
-import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit } from "../src/host/supervise.js";
+import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit, fileDigest } from "../src/host/supervise.js";
 
 async function freshEpisode(t: { diagnostic: (m: string) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
   const root = await mkdtemp(join(tmpdir(), "tre-host-"));
@@ -571,4 +571,43 @@ test("W7-A3: the write-tree observation is bounded (small capture) yet still yie
   assert.equal(wt2.code, 0);
   assert.match(wt2.stdout.trim(), /^[0-9a-f]{40}$/, "write-tree output fits the small cap intact");
   assert.equal(wt2.truncated ?? false, false, "never truncated at 4096 for a tree sha");
+});
+
+test("W8-A1: a LARGE artifact is digested by streaming — exists:true, constant memory, no readFile limit", async () => {
+  // Audit of the W5/W6 streaming work, end-to-end: fileDigest still did a
+  // whole-file readFile, so a big artifact was slurped (probe: 1.5 GiB
+  // artifact → 1546 MB RSS) and anything past Node's buffer limit THREW
+  // → mapped to exists:false, i.e. a PRESENT artifact reported "proven
+  // missing" (probe: 3 GiB file that exists → exists:false → incomplete
+  // verdict). The digest must be streamed, with no size ceiling.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w8a1-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "src.txt"), "one"); g("add", "."); g("commit", "-q", "-m", "base");
+  // 256 MiB: well past what a small-buffer readFile test would tolerate,
+  // cheap enough for CI (sparse-ish, written in one go).
+  const art = join(wt, "big-artifact.bin");
+  const fh = await open(art, "w"); await fh.truncate(256 * 1024 * 1024); await fh.close();
+  const graph: EpisodeGraph = {
+    schema: "tre-graph/1", episodeId: "ep-w8", goal: "g",
+    tasks: [{ id: "t1", persona: "w", promptRef: "p", dependsOn: [], acceptance: { criteria: [], requiredChecks: [], artifacts: ["big-artifact.bin"] } }],
+    policy: { baseCommit: g("rev-parse", "HEAD").trim() },
+  };
+  const before = process.memoryUsage().rss;
+  const e = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath: join(root, "eps"), worktreePath: wt });
+  const rssMB = Math.round((process.memoryUsage().rss - before) / 1048576);
+  assert.equal(e.artifacts[0]?.exists, true, "a PRESENT large artifact must never be reported missing");
+  assert.match(e.artifacts[0]?.digest ?? "", /^[0-9a-f]{64}$/, "EV4: exists:true requires a real digest");
+  assert.ok(rssMB < 128, `digest must stream, not slurp (RSS delta ${rssMB}MB)`);
+});
+
+test("W8-A2: fileDigest agrees with a whole-file hash and rejects non-files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tre-host-w8a2-"));
+  const p = join(root, "f.bin");
+  const content = Buffer.from([0xff, 0x00, 0x41, 0x80]);
+  await writeFile(p, content);
+  assert.equal(await fileDigest(p), createHash("sha256").update(content).digest("hex"), "streamed hash == whole-buffer hash");
+  assert.equal(await fileDigest(join(root, "nope")), undefined, "missing file → undefined (unknown, never a fake digest)");
+  await mkdir(join(root, "adir"));
+  assert.equal(await fileDigest(join(root, "adir")), undefined, "a directory is not an artifact");
 });

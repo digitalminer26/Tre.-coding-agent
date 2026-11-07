@@ -21,7 +21,7 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, mkdir, readFile, rename, lstat, open, readlink } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, lstat, open, readlink, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -286,11 +286,33 @@ async function appendEvidence(epPath: string, sha: string, text: string): Promis
   return `acceptance/evidence.jsonl#${sha.slice(0, 12)}`;
 }
 
-/** SHA-256 of a file's content (the exists-true proof, EV4); undefined on IO error. */
-async function fileDigest(path: string): Promise<string | undefined> {
+/** SHA-256 of a file's content (the exists-true proof, EV4); undefined on IO error.
+ *  W8-A1 (audit of the W5/W6 streaming work): this used a whole-file
+ *  `readFile`, so a big artifact was slurped into memory (probe: a
+ *  1.5 GiB artifact took 1546 MB RSS) and anything past Node's buffer
+ *  limit THREW — which the caller mapped to `exists: false`, i.e. a
+ *  PRESENT artifact was reported "proven missing" (probe: a 3 GiB file
+ *  that exists → exists:false → incomplete verdict). Now streamed in
+ *  64 KiB chunks: constant memory, no size limit. */
+export async function fileDigest(path: string): Promise<string | undefined> {
   try {
-    const buf = await readFile(path);
-    return createHash("sha256").update(buf).digest("hex");
+    const st = await stat(path);
+    if (!st.isFile()) return undefined;
+    const h = createHash("sha256");
+    const fh = await open(path, "r");
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      let pos = 0;
+      for (;;) {
+        const { bytesRead } = await fh.read(buf, 0, Math.min(64 * 1024, Math.max(0, st.size - pos)), pos);
+        h.update(buf.subarray(0, bytesRead));
+        pos += bytesRead;
+        if (bytesRead === 0 || pos >= st.size) break;
+      }
+    } finally {
+      await fh.close();
+    }
+    return h.digest("hex");
   } catch {
     return undefined;
   }

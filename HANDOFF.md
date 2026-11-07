@@ -1,5 +1,30 @@
 # HANDOFF
 
+## 2026-12-10 — W8: end-to-end check of the acceptance path (audit of W5–W7)
+
+Ran `collectAcceptanceEvidence` against a REAL episode (mutating gate +
+artifact) rather than probing `observeIdentity` in isolation. The
+identity half held end-to-end:
+- A gate that mutates a TRACKED file is detected (`identity-changed-post-gate`).
+- A gate that writes an UNTRACKED file is also detected (W3-A1 holds e2e).
+- Artifacts are stamped at the POST-gate identity, and `current` is dirty.
+- **W8-A1 (major, FIXED): a large artifact was reported MISSING.** The
+  artifact path (`fileDigest`) still did a whole-file `readFile`: a
+  1.5 GiB artifact cost 1546 MB RSS, and past Node's buffer limit it
+  THREW, which the caller maps to `exists: false`. Probe: a 3 GiB file
+  that demonstrably exists → `exists:false` → the evaluator treats that
+  as "proven missing" → INCOMPLETE. A false FAILURE on a good artifact.
+  Now streamed in 64 KiB chunks: same 3 GiB file → `exists:true`, RSS
+  delta 3 MB. `fileDigest` is exported and refuses non-files.
+- W8-A2: guard that the streamed hash equals the whole-buffer hash for
+  binary content, and that missing files/dirs are `undefined` (unknown),
+  never a fabricated digest.
+- Note: the identity half of this codebase now streams everywhere; the
+  artifact half was the last whole-file read, which is exactly why the
+  e2e pass was worth running — the isolated `observeIdentity` probes
+  could never have seen it.
+- Gate: 2409 pass / 0 fail / 14 skipped.
+
 ## 2026-12-10 — W7: audit of the W5/W6 changes (probe-driven)
 
 Audited my own W6 diff-cap retirement. Probe results, including the parts
