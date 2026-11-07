@@ -611,3 +611,132 @@ test("W8-A2: fileDigest agrees with a whole-file hash and rejects non-files", as
   await mkdir(join(root, "adir"));
   assert.equal(await fileDigest(join(root, "adir")), undefined, "a directory is not an artifact");
 });
+
+test("W9-A1: the loop never accepts a STALE stamp — a tamper after observation is caught or not accepted", async (t) => {
+  // Full-loop probe (audit W9): the existing wiring tests use
+  // baseCommit:"abc123" with NO worktree, so they never exercise a real
+  // git tree end-to-end. Here a worker exits 0 leaving a background
+  // writer. The writer is TRIGGERED BY THE EVIDENCE FILE (not a fixed
+  // sleep — a 150ms sleep made this test flaky under suite load, because
+  // both observations could legitimately finish first).
+  //
+  // The invariant asserted is timing-independent: the loop must never
+  // end accepted-finish while the artifact on disk differs from the
+  // digest it stamped. Either it re-observes and rejects (uncertain), or
+  // it accepted a snapshot that was still true.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: ["out.txt"] },
+    }],
+  });
+  const wt = join(root, "wt");
+  await mkdir(wt, { recursive: true });
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "src.txt"), "one"); g("add", "."); g("commit", "-q", "-m", "base");
+
+  const evPath = join(root, graph.episodeId, "acceptance", "evidence.jsonl");
+  const worker = join(root, "worker-tamper.sh");
+  // good artifact, exit 0, then tamper ONLY once the first artifact
+  // observation is on disk (so the tamper lands during the loop).
+  await writeFile(worker, `#!/bin/sh
+echo good > out.txt
+(
+  i=0
+  while [ $i -lt 200 ]; do
+    if grep -q "artifact 'out.txt'" ${JSON.stringify(evPath)} 2>/dev/null; then
+      echo TAMPERED > out.txt
+      exit 0
+    fi
+    i=$((i+1)); sleep 0.01
+  done
+) &
+exit 0
+`);
+  await chmod(worker, 0o755);
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: wt, maxIterations: 3,
+    log: (line) => t.diagnostic(line),
+  });
+
+  const evidence = await readFile(evPath, "utf8");
+  const digests = [...evidence.matchAll(/artifact 'out\.txt': exists digest=([0-9a-f]{12})/g)].map((m) => m[1]);
+  assert.ok(digests.length >= 1, "the artifact must be observed at least once");
+  const stamped = digests[digests.length - 1]!;
+  const onDisk = createHash("sha256").update((await readFile(join(wt, "out.txt"), "utf8")).trim() + "\n").digest("hex").slice(0, 12);
+
+  // The tamper must actually have been exercised for this test to mean
+  // anything: either two distinct observations, or a non-accept stop.
+  const exercised = digests.length > 1 && new Set(digests).size > 1;
+  assert.ok(exercised || res.result.stopped !== "accepted-finish", "the tamper must have been exercised");
+
+  // THE INVARIANT: no accepted-finish on a stamp that no longer matches.
+  if (res.result.stopped === "accepted-finish") {
+    assert.equal(stamped, onDisk, `accepted-finish must stamp what is on disk (stamped ${stamped}, disk ${onDisk})`);
+  } else {
+    const decisions = (await readFile(join(root, graph.episodeId, "events", "decisions.jsonl"), "utf8"))
+      .trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    const verdicts = decisions.filter((d) => d.kind === "acceptance").map((d) => d.verdict);
+    assert.ok(verdicts.includes("uncertain") || decisions.some((d) => String(d.notes ?? "").includes("accept-finish rejected")),
+      `a non-accept stop must be caused by the re-observation (verdicts ${JSON.stringify(verdicts)})`);
+  }
+});
+
+test("W9-A2: a real worktree runs the whole loop green (gate + artifact + identity)", async (t) => {
+  // The control for W9-A1: same real-worktree shape WITHOUT the tamper
+  // accepts cleanly, so the rejection above is caused by the tamper and
+  // not by the worktree plumbing.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "test -f src.txt" } },
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: ["out.txt"] },
+    }],
+  });
+  const wt = join(root, "wt");
+  await mkdir(wt, { recursive: true });
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "src.txt"), "one"); g("add", "."); g("commit", "-q", "-m", "base");
+  const worker = join(root, "worker-clean.sh");
+  await writeFile(worker, `#!/bin/sh\necho changed > src.txt\necho built > out.txt\nexit 0\n`);
+  await chmod(worker, 0o755);
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: wt, maxIterations: 2,
+    log: (line) => t.diagnostic(line),
+  });
+  assert.equal(res.result.error, undefined, `no loop error: ${JSON.stringify(res.result.error)}`);
+  assert.equal(res.result.stopped, "accepted-finish", `stop=${res.result.stopped}`);
+  const evidence = await readFile(join(root, graph.episodeId, "acceptance", "evidence.jsonl"), "utf8");
+  assert.match(evidence, /gate .*exit=0/, "the policy gate ran in the real worktree");
+  assert.match(evidence, /artifact 'out.txt': exists digest=[0-9a-f]{12}/, "the artifact was digested");
+});
+
+test("W9-A3: a worker's leftover background process is REAPED by the loop", async (t) => {
+  // W2-M4 proved the GATE's group is killed; this proves the same for the
+  // WORKER spawned by the loop (probe: 0 survivors after a 60s lingerer).
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: [] },
+    }],
+  });
+  const marker = `tre-w9-reap-${process.pid}-${Date.now()}`;
+  const worker = join(root, "worker-linger.sh");
+  await writeFile(worker, `#!/bin/sh\n( sleep 60 # ${marker}\n) &\nexit 0\n`);
+  await chmod(worker, 0o755);
+  await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1, log: (line) => t.diagnostic(line),
+  });
+  await new Promise((r) => setTimeout(r, 500));
+  let ps = "";
+  try { ps = execFileSync("ps", ["-ax", "-o", "pid,command"], { encoding: "utf8" }); } catch { ps = ""; }
+  const survivors = ps.split("\n").filter((l) => l.includes(marker) && !l.includes("grep"));
+  assert.equal(survivors.length, 0, `no worker group survivor (found: ${survivors.join(" | ")})`);
+});

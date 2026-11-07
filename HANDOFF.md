@@ -1,5 +1,38 @@
 # HANDOFF
 
+## 2026-12-10 — W9: full-loop check (worker + gate + real worktree)
+
+Climbed one more layer: `runHostEpisode` end-to-end with a REAL git
+worktree, an editing worker, a policy gate and an artifact. The existing
+wiring tests use `baseCommit:"abc123"` with NO worktree, so nothing had
+ever exercised a real tree through the loop.
+- **The loop's re-observation is real and sound.** A worker that exits 0
+  and then tampers with its artifact after the first observation: the
+  loop re-observes, records BOTH digests in evidence
+  (`106675dc…` then `314cbe44…`), and either rejects its own `complete`
+  as `uncertain` (when the tamper lands before the second look) or
+  accepts stamping the FRESH digest. Probes caught it doing both. No
+  stale stamp is ever accepted.
+- **The worker's process group IS reaped** (probe: 0 survivors after a
+  60 s lingerer), same discipline W2-M4 proved for the gate.
+- **A real-worktree run goes green**: gate + artifact digest + identity,
+  `accepted-finish`, `complete` verdict.
+- MY OWN ERROR, recorded for honesty: I first read the tamper probe as a
+  "stale stamp" finding. It was not — the two artifact lines in evidence
+  are two observations, and the acceptance was rejected exactly as
+  designed. The audit finding was in my reading, not the code.
+- Test-hygiene finding (W9-A1): my first version used a fixed 150 ms
+  sleep and was FLAKY under suite load (both observations legitimately
+  finished first → accepted). Rewritten to trigger the tamper off the
+  evidence file and to assert the timing-independent invariant: a
+  `accepted-finish` must stamp what is on disk. Verified to take the
+  real two-observation branch, stable over repeat runs.
+- Minor (not fixed, cosmetic): the no-worktree fallback label is
+  `no-worktree:fallback=given` when a worktree WAS supplied but git
+  failed — it means "the worktree could not be observed", not "none
+  given". The sha is correctly not claimed as observed.
+- Gate: 2412 pass / 0 fail / 14 skipped.
+
 ## 2026-12-10 — W8: end-to-end check of the acceptance path (audit of W5–W7)
 
 Ran `collectAcceptanceEvidence` against a REAL episode (mutating gate +
