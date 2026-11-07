@@ -761,7 +761,7 @@ test("INV-8 guard: EXACTLY ONE external importer — src/telegram/escalation.ts"
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some((s) => /(^|\/)escalation\//.test(s))) importers.push(file);
   }
-  assert.deepEqual(importers, ["src/telegram/escalation.ts"], "the one allow-listed consumer (docs/19 §5/§8)");
+  assert.deepEqual(importers, ["src/host/supervise.ts", "src/telegram/escalation.ts"], "allow-listed consumers: the P16 host entry (docs/18) and the one Telegram dispatcher (docs/19 §5/§8)");
 });
 
 test("INV-8 guard: the channel module never mentions fs/process/network authority (source scan)", async () => {

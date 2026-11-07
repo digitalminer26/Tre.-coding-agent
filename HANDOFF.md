@@ -1,5 +1,107 @@
 # HANDOFF
 
+## 2026-12-10 — audit cycle W2 fix round: observation-path hardening (2 HIGH + 2 MED closed)
+
+**This session (W2 fix round)** on `src/host/supervise.ts` (state: the
+W1-closed module; auditor findings HIGH-1/HIGH-2, MED-3/4/5, LOW-6):
+- **HIGH-1 (identity digest bent by diff OUTPUT):** the dirty digest
+  hashed `git diff --binary HEAD` bytes, which a hostile repo config
+  bends (PROVEN: `diff.mnemonicPrefix`/`noprefix` flip the digest for
+  identical content). The digest is now CONTENT-bound two ways:
+  `git write-tree` (git's own content hash of the whole staged index —
+  immune to every diff-machinery config) PLUS a diff whose output
+  shaping is pinned (`--default-prefix --src-prefix=a/ --dst-prefix=b/
+  --no-ext-diff --no-textconv --no-color`, `-c diff.algorithm=myers`).
+  Clean is now ONLY empty porcelain (write-tree runs after the clean
+  check); any write-tree/diff failure lands dirty-UNKNOWN.
+- **HIGH-2 (observation env/argv not pinned):** all observation and
+  gate git invocations run under ONE unified minimal `GIT_ENV`
+  (PATH/HOME/`GIT_CONFIG_NOSYSTEM=1`/`GIT_TERMINAL_PROMPT=0`/
+  `GIT_PORCELAIN=1`) with host `-c` pins that beat the repo's own
+  config (`status.untrackedFiles=all`, `core.excludesFile=/dev/null`,
+  `diff.ignoreSubmodules=none`, sparse checkout OFF) — a repo config
+  `showUntrackedFiles=no` or ambient excludes can no longer hide files
+  from the observation. All argv goes through `shellQuote` (no
+  interpolation).
+- **MED-4 (group survivors on the SUCCESS path):** the group SIGKILL
+  now runs on EVERY exit — critically on the leader's `exit` event
+  (a bg grandchild holds the stdout pipe, so `close` never fires
+  otherwise: an exit-0 gate journalled as a 120s timeout, the
+  grandchild alive and mutating the tree). `runShell` killGroup is
+  shared; ESRCH is fine.
+- **MED-3/5 (env unification):** the policy gate and every git call
+  share `GIT_ENV` (the W1 gate had PATH-only; observation inherited
+  everything — the two could disagree about one tree).
+- LOW-6 (receiptCache cap) and W1-M7 (park preservation) verified
+  already in place.
+Tests: W2-M4 clean-exit group-reap (ps survivor scan), W2-H1 hostile
+repo diff-config digest invariance + staged-content binding, W2-M5
+gate-sees-GIT_ENV marker echo; W1-M2 timeout test reshaped to a
+never-exiting leader (the exit-0-with-survivor shape is W2-M4's).
+Gate: `npm run build && npm test` → **2397 / 0 fail / 14 skipped**,
+`tsc --noEmit` clean.
+
+## 2026-12-10 — implement-audit cycle W1 fix round: supervisor/host evidence pipeline hardened (1 Critical + 7 Major + minors closed)
+
+**This session (W1 fix round):** closed the supervisor/acceptance audit
+(state under `.tre/implement-audit/`, worker Qwen3.8-Flash-Next-Q4,
+auditor haiku 5.5). Findings and fixes, all in `src/host/supervise.ts`
+(+ `src/supervisor/compose.ts`, module-boundary test guards):
+- **W1-C1 (Critical): evidence was measured in the EPISODE dir, not the
+  worker's worktree** — identity/artifacts/gates were taken from a tree
+  the worker never edited. `worktreePath` now threads options → worker
+  spawner → `runnerPort.run()` → `cfg.worker` → `acceptPort.evaluate` →
+  `collectAcceptanceEvidence`, and compose passes it to the accept port.
+  The no-worktree fallback can no longer stamp a CLEAN `baseCommit`
+  identity: it is disclosed `dirty:true` with an explicit
+  `dirtyDigest:no-worktree` marker (fail-closed disclosure).
+- **W1-M1:** `observeIdentity` fail-OPENED on a failing `git status`
+  (stamped clean). Now a failed status yields dirty-unknown with a
+  content-bound digest; the dirty digest binds `git diff --binary HEAD`
+  content, so same-path/different-content edits can never collide
+  (minor-9).
+- **W1-M2:** `runShell` killed only the shell (grandchildren holding the
+  stdout pipe survived timeouts) and conflated signal deaths with
+  timeouts in `code`. Now `detached:true` + group `SIGKILL` (pid-guarded,
+  child-kill fallback), and the result carries `cause: "timeout" |
+  "signal" | "exit"`; the timeout message is no longer ambiguous.
+- **W1-M3:** `gate.timeoutS` is validated (safe integer, 1–3600s, else
+  default 120), the gate runs with a minimal env (PATH only), and the
+  run (cmd, exit-cause, any post-gate identity delta, truncated
+  stdout/stderr) is appended to evidence and disclosed on the gate row.
+- **W1-M4:** identity is RE-OBSERVED after the gate; a delta (sha or
+  dirtyDigest) is disclosed, and artifact digests are taken post-gate
+  and stamped with the post-gate identity.
+- **W1-M5:** the executor gate's `reserve` replayed a stripped request
+  (forced `sideEffect:"none"`, no paths/estimate) that died at the
+  ledger's field-by-field receipt binding — every non-none executor
+  action was dead at reserve. `check` now caches the FULL checked
+  `LedgerGateRequest` alongside the receipt (capped 64, FIFO) and
+  reserve replays it verbatim; the cache hit is by construction the
+  request check admitted.
+- **W1-M6:** the `taskRevision` bump now lands on the host's LIVE
+  closures (cfg/graph object identity, not just the journal copy), and
+  acceptance verdict / record rows carry `taskRevision`.
+- **W1-M7:** `park()` silently overwrote a corrupt/unreadable
+  `state.json`. It now preserves the file (`rename` →
+  `state.json.corrupt-…`), SKIPS the durable write, and logs — state is
+  never clobbered.
+- **Minors:** module-boundary grep filters pin the exact file
+  (`startsWith("src/host/supervise.ts:")` — a `.bak` sibling still trips
+  the alarm); receipt cache capped; `child.pid` undefined-guard;
+  signal-to-string fix.
+New regression tests in `test/host-supervise.test.ts` (group-kill with a
+real grandchild survivor-scan, signal cause, worktree identity+artifacts
+vs a deliberately-wrong baseCommit, no-worktree dirty-unknown fallback,
+porcelain-collision digest, status-fail-closed via `.git/index.lock`).
+Full gate green: `npm run build && npm test` → **2408 tests / 0 fail /
+14 skipped**; `tsc --noEmit` clean.
+
+**Next:** the remaining W1 report items that are contracts-not-yet-built
+(BlockerEvidence-shaped blocker construction in compose's gated path —
+the current `blockers: []` is honest-empty until a blocker source
+exists), and the next audit cycle off this round's diff.
+
 ## 2026-12-10 — P13 escalation channel implemented; 3 prior audit rounds closed; entering 5-cycle implement-audit (worker: Qwen3.8, auditor: haiku 5.5)
 
 **This session (P13):** implemented the escalation channel per

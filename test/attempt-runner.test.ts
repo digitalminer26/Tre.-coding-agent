@@ -1837,6 +1837,9 @@ test("P7 guard: nothing outside src/runner/ imports the attempt runner yet (prim
     const err = e as { status?: number };
     if (err.status !== 1) throw e;
   }
-  const offenders = hits.split("\n").filter(Boolean).filter((line) => !line.startsWith("src/runner/"));
-  assert.deepEqual(offenders, [], "the attempt runner must have no consumers outside src/runner/ until the supervisor (P9) lands");
+  const offenders = hits.split("\n").filter(Boolean).filter((line) => !line.startsWith("src/runner/"))
+    // P16: the host entry (docs/18 §0.1) is the sanctioned consumer —
+    // it opens the AttemptRunner and adapts it to the loop's RunnerPort.
+    .filter((line) => !line.startsWith("src/host/supervise.ts:")); // W1-minor: ':' pins the EXACT file (a src/host/supervise.ts.bak sibling must still trip the alarm)
+  assert.deepEqual(offenders, [], "the attempt runner's only external consumer is the P16 host entry (src/host/supervise.ts)");
 });

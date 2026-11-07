@@ -609,15 +609,16 @@ async function walkTs(dir: string): Promise<string[]> {
   return out.sort();
 }
 
-test("AC9 guard: nothing outside src/acceptance/ imports the evaluator module", async () => {
+test("AC9 guard: only src/acceptance/ and the P16 host entry import the evaluator module", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/acceptance" + "/")) continue;
+    if (file === "src/host/supervise.ts") continue; // P16: the sanctioned host wires the evaluator
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some(touchesAcceptance)) offenders.push(file);
   }
-  assert.deepEqual(offenders, [], "the evaluator stays compartmentalized until P9 wires it in: " + offenders.join(", "));
+  assert.deepEqual(offenders, [], "the evaluator stays compartmentalized (P16: sole external consumer is the host): " + offenders.join(", "));
 });
 
 test("AC9 guard: src/acceptance imports nothing in the repo at all (pure function)", async () => {

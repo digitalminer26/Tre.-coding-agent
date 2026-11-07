@@ -129,7 +129,10 @@ export interface ComposePorts {
   executorPorts: ExecutorPortsBase;
   runner?: RunnerPort;
   gate?: GatePort;
-  accept?: { evaluate(input: object): { verdict?: string; remainingWork?: string[]; reasons?: string[] } | object };
+  // P16: the host's accept port collects REAL evidence (runs the policy
+  // gate, observes artifacts) before evaluating, so it may be async —
+  // the loop awaits; a synchronous port stays valid (await on a value).
+  accept?: { evaluate(input: object): { verdict?: string; remainingWork?: string[]; reasons?: string[] } | object | Promise<{ verdict?: string; remainingWork?: string[]; reasons?: string[] } | object> };
   investigate?: (packet: object, limits: { maxToolCalls?: number; maxUsd?: number }) => Promise<object>;
   journal: JournalPort;
   steer?: SteerPort;
@@ -340,7 +343,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     let remaining: string[] = [];
     let reasons: string[] = [];
     try {
-      const a = ports.accept.evaluate({ taskId: cfg.taskId, taskRevision: cfg.taskRevision ?? 1, spec: cfg.acceptance.spec, ...(cfg.acceptance.current !== undefined ? { current: cfg.acceptance.current } : {}), gates: [], artifacts: [], claims: [], blockers: [], evidenceRefs: [...evidence], now: safeNow() });
+      const a = await ports.accept.evaluate({ taskId: cfg.taskId, taskRevision: cfg.taskRevision ?? 1, spec: cfg.acceptance.spec, ...(cfg.acceptance.current !== undefined ? { current: cfg.acceptance.current } : {}), gates: [], artifacts: [], claims: [], blockers: [], evidenceRefs: [...evidence], now: safeNow() });
       if (isObj(a)) {
         verdict = str(a['verdict'], 32);
         if (Array.isArray(a['remainingWork'])) remaining = (a['remainingWork'] as unknown[]).filter((r): r is string => typeof r === 'string');
@@ -349,7 +352,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     } catch { log('acceptance-evaluate-failed'); return; }
     if (!(VERDICTS as readonly string[]).includes(verdict ?? '') || verdict === undefined) { log('acceptance-verdict-unreadable'); return; }
     // the verdict is journalized (docs/18 §7).
-    await journalAppend({ ...envelope(), kind: 'acceptance', verdict, criteria: [], remainingWork: remaining });
+    await journalAppend({ ...envelope(), kind: 'acceptance', taskRevision: cfg.taskRevision ?? 1, verdict, criteria: [], remainingWork: remaining });
     acceptanceAssessment = { verdict, remainingWork: remaining, reasons };
   };
   const envelope = () => ({ schema: 'tre-supervisor/1', id: `d-${String((cfg as { episodeId?: unknown }).episodeId ?? 'x')}-${String((cfg as { taskId?: unknown }).taskId ?? 'x')}-${recSeq += 1}`, ts: safeNow(), episodeId: String((cfg as { episodeId?: unknown }).episodeId ?? ''), taskId: String((cfg as { taskId?: unknown }).taskId ?? '') });
@@ -632,12 +635,12 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
         let remaining: string[] = [];
         let reasons: string[] = [];
         try {
-          const a = ports.accept.evaluate({ taskId: cfg.taskId, taskRevision: cfg.taskRevision ?? 1, spec: cfg.acceptance.spec, ...(cfg.acceptance.current !== undefined ? { current: cfg.acceptance.current } : {}), gates: [], artifacts: [], claims: [], blockers: [], evidenceRefs: [...evidence], now: safeNow() });
+          const a = await ports.accept.evaluate({ taskId: cfg.taskId, taskRevision: cfg.taskRevision ?? 1, spec: cfg.acceptance.spec, ...(cfg.acceptance.current !== undefined ? { current: cfg.acceptance.current } : {}), gates: [], artifacts: [], claims: [], blockers: [], evidenceRefs: [...evidence], now: safeNow() });
           verdict = isObj(a) ? str(a['verdict'], 32) : undefined;
           remaining = isObj(a) && Array.isArray(a['remainingWork']) ? (a['remainingWork'] as unknown[]).filter((r): r is string => typeof r === 'string') : [];
           reasons = isObj(a) && Array.isArray(a['reasons']) ? (a['reasons'] as unknown[]).filter((r): r is string => typeof r === 'string') : [];
         } catch { verdict = undefined; }
-        await journalAppend({ ...envelope(), kind: 'acceptance', verdict: (VERDICTS as readonly string[]).includes(verdict ?? '') ? verdict : 'uncertain', criteria: [], remainingWork: remaining });
+        await journalAppend({ ...envelope(), kind: 'acceptance', taskRevision: cfg.taskRevision ?? 1, verdict: (VERDICTS as readonly string[]).includes(verdict ?? '') ? verdict : 'uncertain', criteria: [], remainingWork: remaining });
         if (verdict === 'complete') {
           await closeIntent(true, 'supervisor: accept-finish executed (verdict complete)');
           return await finish('accepted-finish');

@@ -776,15 +776,16 @@ test("P8 guard C2-F13: the specifier extractor catches every import shape (posit
   }
 });
 
-test("P8 guard: nothing outside src/budget/ imports the ledger module", async () => {
+test("P8 guard: only src/budget/ and the P16 host entry import the ledger module", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/budget" + "/")) continue;
+    if (file === "src/host/supervise.ts") continue; // P16: the host owns the ledger wiring (docs/18 §0.1)
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some(touchesBudget)) offenders.push(file);
   }
-  assert.deepEqual(offenders, [], `the budget authority stays compartmentalized until P9 wires it in: ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `the budget authority stays compartmentalized (P16: sole external consumer is the host): ${offenders.join(", ")}`);
 });
 
 test("P8 guard: src/budget imports nothing in the repo except node: builtins", async () => {

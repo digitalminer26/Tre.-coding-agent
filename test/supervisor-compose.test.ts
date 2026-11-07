@@ -861,15 +861,24 @@ test("guard: src/supervisor imports NOTHING — not even node: (pure-ports, docs
   }
 });
 
-test("guard: nothing outside src/supervisor imports the loop (until P16 wires it)", async () => {
+test("guard: only src/host/supervise.ts (the P16 wiring entry) imports the loop", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/supervisor/")) continue;
+    if (file === "src/host/supervise.ts") continue; // P16: the ONE sanctioned caller
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some((s) => /(^|\/)supervisor\//.test(s))) offenders.push(file);
   }
   assert.deepEqual(offenders, [], offenders.join(", "));
+});
+
+test("guard: the P16 host entry exists and imports the loop", async () => {
+  const content = await readFile(join("src", "host", "supervise.ts"), "utf-8");
+  assert.ok(
+    specifiersOf(content).some((s) => /(^|\/)supervisor\/compose/.test(s)),
+    "src/host/supervise.ts must import the composition loop",
+  );
 });
 
 test("drift guard: the loop's mirrored enums are deep-equal to the REAL exports", () => {

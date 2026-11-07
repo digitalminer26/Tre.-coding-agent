@@ -1076,11 +1076,12 @@ test("INV-9 guard: src/investigation imports NOTHING — not even node: (pure, d
   }
 });
 
-test("INV-9 guard: nothing outside src/investigation imports it (until P9 wires it)", async () => {
+test("INV-9 guard: only the P16 host entry imports investigation (wired by src/host/supervise.ts)", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/investigation/")) continue;
+    if (file === "src/host/supervise.ts") continue; // P16: the sanctioned host entry
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some((s) => /(^|\/)investigation\//.test(s))) offenders.push(file);
   }

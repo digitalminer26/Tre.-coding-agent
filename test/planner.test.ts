@@ -1177,11 +1177,12 @@ test("guard: src/planner imports NOTHING — not even node: (pure, docs/14 §0.6
   }
 });
 
-test("guard: nothing outside src/planner imports the planner (until P9 wires it)", async () => {
+test("guard: only the P16 host entry imports the planner (wired by src/host/supervise.ts)", async () => {
   const files = await walkTs("src");
   const offenders: string[] = [];
   for (const file of files) {
     if (file.startsWith("src/planner/")) continue;
+    if (file === "src/host/supervise.ts") continue; // P16: the sanctioned host entry
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some((s) => /(^|\/)planner\//.test(s))) offenders.push(file);
   }

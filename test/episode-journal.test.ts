@@ -327,7 +327,11 @@ test("episode journal files have exactly two module owners: src/episode/ + src/r
   const offenders = hits
     .split("\n")
     .filter(Boolean)
-    .filter((line) => !line.startsWith("src/episode/") && !line.startsWith("src/runner/"));
+    .filter((line) => !line.startsWith("src/episode/") && !line.startsWith("src/runner/"))
+    // P16: the host entry (docs/18 §0.1) is the ONE sanctioned external
+    // consumer — it reads/writes the episode files through src/episode's
+    // exported primitives.
+    .filter((line) => !line.startsWith("src/host/supervise.ts:")); // W1-minor: ':' pins the EXACT file (a src/host/supervise.ts.bak sibling must still trip the alarm)
   assert.deepEqual(offenders, [], `episode journal files must have exactly one module owner (src/episode/) plus the P7 attempt runner (src/runner/) — nothing else writes them`);
 });
 
