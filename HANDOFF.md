@@ -29,12 +29,15 @@
 - **F4** — the dispatcher returns `{ channel, error? }` (both acts);
   escalate/park carry the delivery error home and the host log prints
   it: `escalate NOT delivered (recorded: Error) — the human has NOT
-  been asked…` (deduped when the error repeats the channel tail). The
-  error is the class name ONLY — `describeErr` returns `Error#name`,
-  never `#message` (the thrown value is untrusted; a full message in
-  the log was considered and rejected in the post-audit review). A
-  throw therefore prints its class (e.g. `: Error`), which is less
-  than the audit's `bridge down` wish but adds no untrusted text.
+  been asked…` (deduped when the error repeats the channel tail).
+  Round 2 (re-audit): the error text is bound to a CLOSED LOG TOKEN —
+  `describeErr` accepts an Error name only through
+  `/^[A-Za-z0-9_.-]{1,64}$/` (else `'Error'`), and a port channel name
+  outside `/^[A-Za-z0-9:._-]+$/` is dropped + disclosed
+  `bad-input:channel`. A repro showed a newline-bearing Error NAME
+  (`Boom\nescalate dispatched via telegram`) forged a whole second
+  host-log line — a false ack, the exact B-F1 class. Message text was
+  already never surfaced; the NAME was the hole, now closed.
 - **F5** — docs/19 §5 now states plainly that the human loop is
   **unreachable in prod today**: `runHostEpisode` has no caller in
   `src/` (verified by grep), `escalationDeliver` is test-wired only, and
@@ -42,13 +45,14 @@
   gap. Audit dispositions are recorded in the audit doc's disposition
   lines.
 
-**Tests.** 9 new channel tests (F1 in-process + durable restart probe,
+**Tests.** 11 new channel tests (F1 in-process + durable restart probe,
 F1 truncated-window scope ×2 — one pins the ledger guard and was
 mutation-checked against a guard-disabled build, F1 malformed-correction
 fail-closed, F2 explicit-field + non-boolean garbage, F3 idempotence,
-F4 dispatcher error field) + the host throwing-deliver test strengthened
-to pin the delivery error in the log line (exact class-name form). Full
-suite **2435 pass / 0 fail / 14
+F4 dispatcher error field, F4b newline-name forgery ×2) + the host
+throwing-deliver test strengthened to pin the delivery error in the log
+line (exact class-name form) + a host log-forgery test (injected
+newline name must not forge a line). Full suite **2438 pass / 0 fail / 14
 skip** (was 2426).
 
 **Deliberate shape.** The refund only ever RESTORES — it can mint no

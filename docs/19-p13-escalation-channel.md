@@ -262,9 +262,14 @@ import it):
   the `delivery` field. W13-F4: the dispatcher returns
   `{ channel, error? }` and the host log prints the delivery error, not
   just the fact of non-delivery (`escalate NOT delivered (recorded:
-  Error) …`). Note the error for a THROW is the exception's CLASS NAME
-  only — `describeErr` never surfaces `Error#message` (untrusted port
-  text stays out of the operator log; review-round decision).
+  Error) …`). **Everything log-bound is a closed token (F4b, re-audit
+  round 2):** `describeErr` never surfaces `Error#message`, and it
+  accepts `Error#name` only through `/^[A-Za-z0-9_.-]{1,64}$/` — any
+  other name (including one carrying `\n`, which FORGED a whole
+  host-log line pre-fix) collapses to `'Error'`. A port channel name
+  must match `/^[A-Za-z0-9:._-]+$/` or it is dropped (the
+  refusal/delivery result stands; only the name dies) and disclosed
+  `bad-input:channel`.
 - **Unreachable in prod today (W13-F5, audit disposition).** The real
   production entrypoint (`src/cli` → compose loop) does not yet wire
   `escalationDeliver` / the dispatcher into the loop host: the Telegram

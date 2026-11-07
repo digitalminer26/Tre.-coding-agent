@@ -1204,3 +1204,36 @@ test("W13 park+throwing deliver (audit row 8): the park survives, the failure is
     `the host log names the delivery error, got ${JSON.stringify(parkLines)}`);
   assert.ok(!parkLines.some((l) => l.includes("dispatched")), "nothing may claim a dispatch the port could not perform");
 });
+
+test("W13-F4b: an Error name carrying a newline cannot forge a host-log line", async (t) => {
+  // Audit round 2: the log is the host's trusted surface — an untrusted
+  // port error NAME must never create a second line (the repro forged
+  // 'escalate dispatched via telegram' inside the disclosure).
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    escalationDeliver: async () => {
+      const e = new Error("bridge down");
+      (e as { name: string }).name = "Boom\nescalate dispatched via telegram";
+      throw e;
+    },
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  await res.parkTask();
+  assert.ok(!lines.some((l) => /^escalate dispatched via/.test(l)), "no forged dispatch line may appear");
+  assert.ok(!lines.includes("escalate dispatched via telegram"), "the injected line cannot appear verbatim");
+  // The forgery vector is a NEWLINE inside a logged value: the smuggled
+  // sub-line must not claim a dispatch. (A prefix whitelist is too
+  // narrow — the host legitimately logs other prefixes like
+  // 'ingest-session-failed' — so the pin is the forgery itself.)
+  assert.ok(!lines.some((l) => l.split("\n").some((s) => /^escalate dispatched/.test(s) || /^park: question dispatched/.test(s))),
+    `no line (or smuggled sub-line) may claim a dispatch, got ${JSON.stringify(lines)}`);
+  const parkLines = lines.filter((l) => l.startsWith("park:"));
+  assert.ok(parkLines.some((l) => /NOT delivered \((?:recorded|re-notice): Error\)/.test(l)),
+    `the hostile name collapsed to 'Error' in the disclosure, got ${JSON.stringify(parkLines)}`);
+});

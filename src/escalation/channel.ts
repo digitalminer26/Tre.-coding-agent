@@ -378,7 +378,7 @@ export interface RaiseResult {
    *  not inferred from the channel string. */
   refused?: boolean;
   delivery?: { ok: boolean; error?: string };
-  disclosed?: string[]; // e.g. bad-input:packet / bad-input:evidence|attempts|force|blocker|attemptId|decisionNeeded|by|note / evidence:dropped|skipped|clipped|truncated / attempts:* / decisionNeeded:clipped / attemptId:clipped / by:clipped / note:clipped / replay:truncated / delivery:unverifiable-count (loop-c2 F2: truncated window, no local proof of the count) (delivery failure is the `delivery` FIELD — there is no delivery:failed marker; no 'scan-budget' marker — exhaustion emits '…:truncated'; docs/17 is the scan-budget doc)
+  disclosed?: string[]; // e.g. bad-input:packet / bad-input:refused / bad-input:channel (W13-F4b: a port channel name outside the log-token shape is dropped, never printed) / bad-input:evidence|attempts|force|blocker|attemptId|decisionNeeded|by|note / evidence:dropped|skipped|clipped|truncated / attempts:* / decisionNeeded:clipped / attemptId:clipped / by:clipped / note:clipped / replay:truncated / refusal-correction:failed / delivery:unverifiable-count (loop-c2 F2: truncated window, no local proof of the count) (delivery failure is the `delivery` FIELD — there is no delivery:failed marker; no 'scan-budget' marker — exhaustion emits '…:truncated'; docs/17 is the scan-budget doc)
 }
 
 export interface DeliverPort {
@@ -985,6 +985,16 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           // throws getOwnPropertyDescriptor, or a non-object, is a defect).
           const chOwn = ownData(r, 'channel');
           const chRaw = chOwn.threw ? undefined : boundedStr(chOwn.value);
+          // W13-F4b (audit round 2): a port-supplied name is LOG BOUND —
+          // the host prints it after 'escalate NOT delivered (' /
+          // 'dispatched via'. A name carrying '\n' FORGES a whole log
+          // line (same class as the Error#name repro). A name outside
+          // the closed token shape is untrusted-present: disclosed and
+          // DROPPED (the act/refusal stands — only the NAME dies).
+          const chName = typeof chRaw === 'string' && chRaw !== ''
+            ? (LOG_TOKEN_RE.test(chRaw) ? chRaw : undefined)
+            : undefined;
+          if (typeof chRaw === 'string' && chRaw !== '' && chName === undefined) disclosed.push('bad-input:channel');
           // W13-F2 (P16 audit, follow-up): the refusal decision is an
           // EXPLICIT FIELD (`refused:true` — the port knows it did not
           // ask the human), read through the same fence. The `:disabled`
@@ -1002,13 +1012,15 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           if (refusedExplicit || (typeof chRaw === 'string' && chRaw.endsWith(':disabled'))) {
             // W13-F3: the namespacing is IDEMPOTENT — an already-namespaced
             // refusal name is used as-is, never double-prefixed.
-            const name = typeof chRaw === 'string' && chRaw !== '' ? chRaw.slice(0, 80) : 'unknown';
+            // W13-F4b: only the SANITIZED name rides; a hostile name is
+            // dropped to 'unknown' (disclosed above), never printed.
+            const name = chName !== undefined ? chName.slice(0, 80) : 'unknown';
             channel = name.startsWith('escalation:') ? name : `escalation:refused:${name}`;
             refused = true;
             delivered = false;
             delivery = { ok: false, error: `deliver:refused:${name}` };
           } else {
-            channel = chRaw !== undefined && chRaw !== '' ? chRaw : undefined;
+            channel = chName;
             delivered = true;
             delivery = { ok: true };
           }
@@ -1278,7 +1290,12 @@ function describeErr(e: unknown): string {
   // This runs INSIDE a catch block, so it must never throw itself (INV-4).
   try {
     if (e instanceof Error) {
-      const name = typeof e.name === 'string' && e.name.length > 0 && e.name.length <= 64 ? e.name : 'Error';
+      // W13-F4b (audit round 2): `name` is untrusted too — a port can
+      // throw an Error with ANY name (≤64 chars), and a newline in it
+      // FORGES a whole extra host-log line (repro: name
+      // 'Boom\nescalate dispatched via telegram' printed a false ack).
+      // Only a closed token survives; anything else → 'Error'.
+      const name = typeof e.name === 'string' && ERR_NAME_RE.test(e.name) ? e.name : 'Error';
       return name;
     }
   } catch {
@@ -1286,6 +1303,14 @@ function describeErr(e: unknown): string {
   }
   return 'unknown';
 }
+
+/** W13-F4b: the closed token shape a log-bound identifier may take —
+ *  NO control characters (a '\n' in an operator log is a line forge),
+ *  no spaces, no punctuation beyond `:._-`. Used for Error#name and
+ *  for port-supplied channel names. Deliberately stricter than "print
+ * able ASCII": tab, \r, and ESC are print-adjacent but still forgers. */
+const LOG_TOKEN_RE = /^[A-Za-z0-9:._-]+$/;
+const ERR_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 // ─── Dispatcher (docs/15 DispatchPorts-shaped, for the loop host) ──────────
 

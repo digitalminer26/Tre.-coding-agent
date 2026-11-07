@@ -120,3 +120,32 @@ F4). No other claim in the message is contradicted by the probes.
 | F3 | FIXED: namespacing is idempotent — a name already starting `escalation:` is used as-is. Test pins it. |
 | F4 | FIXED: `EscalationDispatcher.escalate/park` return `{ channel, error? }` (carrying `delivery.error`); both host handlers log it (`NOT delivered (recorded: Error) …`), deduped when the error repeats the channel tail (refusals). `DispatchPorts.escalate` widened to match. Host test pins the error in the log line. **Review-round correction:** `delivery.error` for a throw is `describeErr(e)` — the exception's CLASS NAME only, never its message (the thrown value is untrusted; `describeErr` is the hostile-input-safe formatter). So the log shows the class (e.g. `: Error`), not the audit's wished-for `bridge down`. Carrying the message was considered and REJECTED in review: untrusted port text in the operator log was judged not worth the extra disclosure surface. The fact + class is the shipped contract. |
 | F5 | DOCUMENTED (owner input not required for the fix, only for wiring): docs/19 §5 now carries the explicit "unreachable in prod today" note — `runHostEpisode` has no `src/` caller, `escalationDeliver` is test-wired only; F1's fix means the budget no longer mutes the channel WHEN the seam is plugged, and the wiring itself (compose loop → dispatcher + a real bridge) is a deliberate product decision, left open. |
+
+## Round-2 finding F4b (MEDIUM, found in the post-fix re-audit) — untrusted
+## Error NAME could forge a host-log line
+
+The F4 fix threads `delivery.error` (from `describeErr(e)`) into the host
+log. The MESSAGE was never surfaced — but `describeErr` returned
+`Error#name` unfiltered up to 64 chars, and a name is attacker-chosen by
+the throwing port. Repro (live, dist build):
+
+```js
+const e = new Error('x'); e.name = 'Boom\nescalate dispatched via telegram';
+// host log line produced:
+// escalate NOT delivered (recorded: Boom
+// escalate dispatched via telegram)   ← a FORGED second line (false ack)
+```
+
+Same class as B-F1 (a false dispatch claim), reached through a different
+input. The port-supplied CHANNEL name had the identical exposure on both
+the refusal path (`escalation:refused:<name>`) and the delivered path
+(`dispatched via <name>`).
+
+**Fix (shipped with this commit):** every log-bound identifier is a
+closed token. `describeErr`: `name` passes only
+`/^[A-Za-z0-9_.-]{1,64}$/`, else `'Error'`. Channel names: must match
+`/^[A-Za-z0-9:._-]+$/` or are DROPPED — the refusal/delivery outcome
+stands, only the name dies (`'unknown'` / `undefined`) — and disclosed
+`bad-input:channel`. Tests: channel-layer forgery (both paths), a
+newline-name Error test, and a host test asserting no log line starts
+with a forged prefix and the disclosure shows `: Error)`.

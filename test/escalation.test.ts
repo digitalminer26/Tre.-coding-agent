@@ -720,6 +720,54 @@ test("W13-F4: the dispatcher carries the delivery CAUSE — escalate/park return
   assert.equal(typeof p.error, "string", "park carries the cause too");
 });
 
+test("W13-F4b: a newline-bearing Error name is DROPPED to 'Error' — no forged log line", async () => {
+  // Audit round 2 (repro): a port threw `Error` with name
+  // 'Boom\nescalate dispatched via telegram' — pre-fix, describeErr
+  // returned the raw name and the host log printed a SECOND, false
+  // 'dispatched' line. The name must match the closed token shape or
+  // collapse to 'Error'; the message never rides regardless.
+  const ch = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => {
+      const e = new Error("ECONNREFUSED 10.0.0.5:443");
+      (e as { name: string }).name = "Boom\nescalate dispatched via telegram";
+      throw e;
+    },
+    now: () => 1,
+  });
+  const r = (await ch.raise(valid() as never)) as RaiseResult;
+  assert.equal(r.delivered, false);
+  assert.equal(r.delivery?.error, "Error", "a non-token name collapses to 'Error' (the message never appears either)");
+  assert.ok(!String(r.delivery?.error).includes("\n"), "no control character survives");
+});
+
+test("W13-F4b: a hostile port CHANNEL name is dropped + disclosed — both the refusal and the delivered path", async () => {
+  const forge = "tg\npark: question dispatched via evil";
+  const refuser = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: forge, refused: true }),
+    now: () => 1,
+  });
+  const rr = (await refuser.raise(valid() as never)) as RaiseResult;
+  assert.equal(rr.refused, true, "the refusal stands — only the NAME dies");
+  assert.equal(rr.delivered, false);
+  assert.equal(rr.channel, "escalation:refused:unknown", "the hostile name never rides");
+  assert.ok(!String(rr.channel).includes("\n"), "no forged line in the channel field");
+  assert.ok((rr.disclosed ?? []).includes("bad-input:channel"), "the dropped name is disclosed");
+  assert.ok(!String(rr.delivery?.error).includes("tg\n"), "the delivery error carries no hostile text");
+
+  // The DELIVERED path is log-bound too ('dispatched via <name>').
+  const sender = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: forge }),
+    now: () => 1,
+  });
+  const rd = (await sender.raise(valid() as never)) as RaiseResult;
+  assert.equal(rd.delivered, true, "the send stands — the act happened, only the name is untrusted");
+  assert.equal(rd.channel, undefined, "a hostile name drops to no-name, never to the hostile string");
+  assert.ok((rd.disclosed ?? []).includes("bad-input:channel"), "and the drop is disclosed");
+});
+
 test("W13-F1 (truncated window): the open-record refund still applies in-window; the lifetime ledger is untouched", async () => {
   // Review finding (2): the OPEN refund is safe under truncation because
   // presence and last-line order INSIDE a window are authoritative (the
