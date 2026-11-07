@@ -21,10 +21,10 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, mkdir, readFile, rename, lstat, open, readlink, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, lstat, open, readlink, stat, realpath } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import {
   check as ledgerCheck,
@@ -52,7 +52,7 @@ import { runSupervisorEpisode, type ComposePorts, type GatePort, type GateReques
 import { executeRecoveryAction } from "../executor/exec.js";
 import { planRecovery } from "../planner/plan.js";
 import { investigate as runInvestigation } from "../investigation/agent.js";
-import { makeEscalationChannel } from "../escalation/channel.js";
+import { makeEscalationChannel, makeEscalationDispatcher, type DeliverPort } from "../escalation/channel.js";
 import { AttemptRunner, type AttemptTask } from "../runner/attempt.js";
 import { FileSteeringQueue } from "../steer/file-queue.js";
 import type { TaskAcceptanceSpec } from "../acceptance/evaluator.js";
@@ -87,6 +87,15 @@ export interface HostEpisodeOptions {
   maxIterations?: number;
   /** Host sink (stderr by default). Never throws into the loop. */
   log?: (line: string) => void;
+  /** P13/B-F1 (audit cycle P16): the delivery ACT for escalations
+   *  (docs/19 §5/§6 — `makeTelegramDeliver(bridge)` is the one
+   *  consumer). Before this the channel was built WITHOUT deliver/read:
+   *  every raise returned `delivery:{ok:false,error:"port-missing:deliver"}`
+   *  while the loop journalled the escalation as acked — the human was
+   *  never asked (B-F1), and restart lost the pending view (B-F2).
+   *  Absent = records are appended and the MISSING delivery is
+   *  disclosed on the host log, never presented as delivered. */
+  escalationDeliver?: DeliverPort["deliver"];
 }
 
 export interface HostEpisodeResult {
@@ -94,6 +103,16 @@ export interface HostEpisodeResult {
   episodePath: string;
   /** Cumulative steer stats (host-reported, never authority). */
   steerStats: { linesRead: number; injected: number; malformed: number };
+  /** P16 (audit cycle, docs/19 §6): the park ACT as the loop dispatched it
+   *  — the SAME closure behind `dispatch.park` (state write + durable
+   *  escalation + disclosure), exposed so tests can pin the handler's
+   *  contract. The planner's `park` SEED fires only for a LIVE worker &&
+   *  !ownershipProvable && !ambiguousExternalEffect — a predicate the
+   *  compose loop never produces (it always sends the worker stopped
+   *  between turns), so the loop path cannot drive the handler in a test.
+   *  NEVER call while the episode is running; it is for the finished/
+   *  stopped episode and for regression tests of the park handler. */
+  parkTask: () => Promise<void>;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -127,7 +146,7 @@ interface ShellResult {
   code: number;
   stdout: string;
   stderr: string;
-  cause: "exit" | "signal" | "timeout" | "spawn-error";
+  cause: "exit" | "signal" | "timeout" | "spawn-error" | "escaped-writer";
   signal?: string;
   /** W4-A1 (audit cycle W4): true when FULL-capture (opts.maxBytes) hit
    *  the cap and STOPPED collecting — the returned stdout is NOT the
@@ -223,9 +242,24 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
       try { if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); }
       catch { try { child.kill("SIGKILL"); } catch { /* group already gone */ } }
     };
+    // W11-A3 (audit cycle P16, finding A-M3): the leader's own exit was
+    // observed but 'close' never fired (a setsid()-escaped grandchild
+    // holds the inherited pipe), so the timer used to resolve a leader
+    // that exited 0 as cause:"timeout"/code:-1 — the exact W1-M2
+    // evidence mislabel re-created through the A-M2 escape. The cause is
+    // now honest: a leader that already exited keeps ITS code/cause and
+    // is disclosed with the escaped-writer marker.
+    let leaderExit: { code: number | null; signal: string | null } | undefined;
     const timer = setTimeout(() => {
       if (!done) {
         killGroup();
+        if (leaderExit !== undefined) {
+          // Leader already exited; a pipe-holding escapee kept 'close'
+          // from firing. Journal the leader's real outcome, disclosed.
+          const le = leaderExit;
+          finish({ code: le.code ?? -1, stdout: maxBytes !== undefined ? "" : stdout, stderr: stderr + "\n(escaped-writer: leader exited but a process outside its group held the pipe open to timeout)", cause: le.signal != null ? "signal" : "escaped-writer", ...(le.signal != null ? { signal: le.signal } : {}) }, true);
+          return;
+        }
         // Tail mode used to hand back the collected stdout on timeout;
         // finish() reproduces that from the closure in tail mode, and
         // prepends the collected prefix (marked truncated) in full mode.
@@ -260,7 +294,7 @@ export function runShell(cmd: string, cwd: string, timeoutS = 60, opts?: { env?:
     // here. That is deliberate: the supervisor's tree must never have a
     // writer alive after the gate's identity was stamped — a persistent
     // service does not belong inside an acceptance gate.
-    child.on("exit", () => { killGroup(); });
+    child.on("exit", (code, signal) => { leaderExit = { code: code ?? null, signal: signal ?? null }; killGroup(); });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       // W2-M4: the leader exited — the GROUP may still hold survivors
@@ -486,10 +520,76 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   if (dirty.truncated) {
     return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`status-truncated:${dirty.stdout.length}\x00${dirty.stderr.slice(-2048)}`).digest("hex") };
   }
-  // Clean means clean: empty porcelain (with untracked-files=all pinned
-  // and excludes disabled) is the ONLY path that may stamp a tree clean —
-  // every failure beyond this point yields dirty-unknown, never clean.
-  if (dirty.stdout.trim() === "") return { sha };
+  // W11-A1/A3 (audit cycle P16, findings A-C1/A-C2): a tracked entry
+  // flagged `--assume-unchanged` (tag `h`) or `--skip-worktree` (tag
+  // `S`) makes git status BLIND to its on-disk delta — a tampered file
+  // observed byte-identically CLEAN (probe: `git update-index
+  // --assume-unchanged src.ts; echo BACKDOOR > src.ts` → empty
+  // porcelain → accepted-finish). `git ls-files -v` reads the flags
+  // straight off the index, immune to the very blindness above: ANY
+  // non-`H` entry (h, S, M/K from sparse trees, R reserved…) fails
+  // closed. It runs on EVERY observation (not only the clean branch),
+  // so flagged entries also move the dirty digest — the tree cannot be
+  // stamped "unchanged" while its index flags hide content.
+  // A-C2 variant note: the host's own `core.sparseCheckout=false` pin
+  // SUPPRESSES the out-of-cone delta on git 2.54 (the flag-stripped
+  // status sees nothing) — the ls-files check is what catches it, since
+  // the S-tagged entries are what a cone leaves behind.
+  const indexFlags = await runObservedGit(cwd, ["ls-files", "-v", "-z"], 10, { maxBytes });
+  if (indexFlags.code !== 0) {
+    // fail closed: an index we cannot read the flags of is dirt we
+    // cannot see (same rule as a failed status).
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-failed:code=${indexFlags.cause}:${indexFlags.code}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
+  }
+  if (indexFlags.truncated) {
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-truncated:${indexFlags.stdout.length}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
+  }
+  // `ls-files -v -z` records are "XY path" (X = flag letter); the bare
+  // `??`/`M ` one-char-plus-space form of a clean checkout is tag `H`.
+  const flagged: string[] = [];
+  for (const rec of indexFlags.stdout.split("\0")) {
+    if (rec === "") continue;
+    const tag = rec[0] ?? "?";
+    if (tag !== "H") flagged.push(`${tag}:${rec.slice(2)}`);
+  }
+  // W11-A3 (finding A-C3): `core.excludesFile=/dev/null` only disables
+  // the GLOBAL excludes file — `$GIT_DIR/info/exclude` is always active
+  // and lives INSIDE the tree a worker owns (probe: an entry there hid
+  // a whole payload → clean identity). `git ls-files --others` applies
+  // NO exclude sources unless asked (`--exclude-standard` or explicit
+  // `--exclude*`), so it lists every untracked file regardless of
+  // .gitignore/info/exclude. Anything it sees that porcelain did not is
+  // HIDDEN dirt: fail closed, disclosing the hidden paths' digest.
+  const othersAll = await runObservedGit(cwd, ["ls-files", "--others", "-z"], 10, { maxBytes });
+  if (othersAll.code !== 0) {
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-others-failed:code=${othersAll.cause}:${othersAll.code}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
+  }
+  if (othersAll.truncated) {
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-others-truncated:${othersAll.stdout.length}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
+  }
+  const porcelainUntracked = new Set<string>();
+  for (const rec of dirty.stdout.split("\0")) {
+    if (rec.startsWith("?? ")) porcelainUntracked.add(rec.slice(3));
+  }
+  const hidden: string[] = [];
+  for (const rec of othersAll.stdout.split("\0")) {
+    if (rec === "") continue;
+    if (!porcelainUntracked.has(rec)) hidden.push(rec);
+  }
+  hidden.sort();
+  if (hidden.length > 0) {
+    // Hidden untracked content is DIRTY by definition — and the digest
+    // binds the hidden files' PATHS *and* CONTENT (streamed), so two
+    // different payloads under one hidden path never collide either.
+    const hiddenContent = await untrackedDigestPart(cwd, hidden.map((h) => `?? ${h}`).join("\0") + "\0");
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`untracked-hidden:${String(hidden.length)}\x00${hidden.join("\n")}\x00${hiddenContent}`).digest("hex") };
+  }
+  if (flagged.length === 0 && dirty.stdout.trim() === "") return { sha };
+  // Clean means clean: empty porcelain AND a flag-free index AND an
+  // exclude-blind others list is the ONLY path that may stamp a tree
+  // clean — every failure beyond this point yields dirty-unknown.
+  // (With flags present we fall through: the digest below folds the
+  // flag list in, so a flagged tree is dirty-unknown AND discriminating.)
   // W2-H1: the index is hashed as CONTENT via `git write-tree` — the
   // returned tree sha is git's own content-addressed digest of every
   // staged path/mode/blob, so `diff.noprefix`, `diff.mnemonicPrefix`,
@@ -514,7 +614,35 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // no size-only marker). The digest is withheld on a cut-short stream
   // (timeout/signal/spawn-error) — fail closed exactly like the old
   // W5-A1 marker, but WITHOUT losing coverage on large deltas.
-  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 60, { hashStdout: true });
+  // W11-A4 (finding A-M1): clean/smudge filters convert worktree bytes
+  // BEFORE diffing, so two different tampered contents routed through a
+  // worker-authored filter collapsed to ONE digest (probe: filter
+  // `clean=cat >/dev/null; echo CONSTANT` + a .gitattributes the worker
+  // wrote). A wildcard `-c filter.*.clean=cat` does NOT defeat it (probe
+  // on git 2.54: config wildcards lose to exact keys, so the repo's own
+  // `filter.evil.clean` still won). The drivers can only be DEFINED in
+  // the repo config (GIT_CONFIG_NOSYSTEM + a closed GIT_ENV kill the
+  // other sources), so enumerate every defined driver and override each
+  // EXACT key on the command line — `-c <key>=cat` re-sets the same key
+  // with command-line precedence, and bare `cat` is the identity
+  // conversion (stdin → stdout). `core.attributesFile=/dev/null` cuts
+  // the ambient attributes file too (a tracked .gitattributes that
+  // assigns a filter survives it, but its driver is now identity).
+  // (git 2.54 has no `--no-conversion` flag on diff — probe-verified.)
+  const filterPinArgs: string[] = ["-c", "core.attributesFile=/dev/null"];
+  const filterDefs = await runObservedGit(cwd, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge)$"], 10, { maxBytes: 256 * 1024 });
+  // git config --get-regexp exits 1 for "no matches" — that IS clean.
+  if (filterDefs.code > 1 || filterDefs.truncated || (filterDefs.code !== 0 && !(filterDefs.code === 1 && filterDefs.stdout.trim() === ""))) {
+    // fail closed: drivers we cannot enumerate may all be lying.
+    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`filter-enum-failed:code=${filterDefs.cause}:${filterDefs.code}\x00${filterDefs.stderr.slice(-2048)}`).digest("hex") };
+  }
+  for (const line of filterDefs.stdout.split("\n")) {
+    // Key = everything before the LAST ".clean"/".smudge" token (quoted
+    // subsection names may contain spaces; values follow after it).
+    const m = /^(filter\..+\.(?:clean|smudge))(?=[ \t]|$)/.exec(line);
+    if (m?.[1] !== undefined) filterPinArgs.push("-c", `${m[1]}=cat`);
+  }
+  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "-c", "core.autocrlf=false", ...filterPinArgs, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 60, { hashStdout: true });
   // W5-A1 (superseded by W6): a truncated diff used to fail closed as a
   // prefix marker; now any missing digest (stream cut short) or a failed
   // diff fails closed the same way — never a partial stamp.
@@ -525,10 +653,20 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // contents under the same ?? path used to share one identity, so a gate
   // PASS stamped on it could be re-used against bytes it never measured).
   const untrackedPart = await untrackedDigestPart(cwd, dirty.stdout);
+  // W11-A1 (finding A-C1/A-C2): the diff and status are BOTH blind to
+  // h/S-flagged entries, so the flagged files' ON-DISK bytes are digested
+  // directly here (streamed via fileDigest): two different tampers under
+  // one flag must move the identity, not collide on the flag list alone.
+  const flaggedContent: string[] = [];
+  for (const f of flagged) {
+    const p = f.slice(f.indexOf(":") + 1);
+    const d = await fileDigest(join(cwd, p));
+    flaggedContent.push(`${f}=${d ?? "unreadable"}`);
+  }
   return {
     sha,
     dirty: true,
-    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}`).digest("hex"),
+    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}${flaggedContent.length > 0 ? `\x00index-flags\n${flaggedContent.sort().join("\n")}` : ""}`).digest("hex"),
   };
 }
 
@@ -599,9 +737,38 @@ export async function collectAcceptanceEvidence(o: AcceptEvidenceOptions): Promi
   //    digest as the exists-true proof; IO failure → unknown, never true).
   //    W1-M4: digests are taken AFTER the gate and stamped with the
   //    POST-gate identity — the tree they were measured on.
+  //    W11-A5 (audit cycle P16, finding A-C4): spec.artifacts is
+  //    graph-authored data, and an absolute or `../` path made
+  //    `resolve(cwd, p)` mint an exists:true + digest PROOF for a file
+  //    OUTSIDE the task's tree — probe A05/A06: a literal no-op worker
+  //    declaring one pre-existing absolute file got `accepted-finish`
+  //    with the artifact row as the sole structural constraint. Artifact
+  //    paths are now CONFINED to the observed tree twice over: lexically
+  //    (resolve must stay under the tree root) and by realpath (a symlink
+  //    inside the tree pointing out is rejected — the digest must bind
+  //    bytes that live in the tree the identity describes). A violating
+  //    declaration is journalled as a REJECTED evidence line and yields
+  //    exists:false — never a digest.
   const current2 = postGate;
+  const rootAbs = resolve(cwd);
+  let rootReal = rootAbs;
+  try { rootReal = await realpath(rootAbs); } catch { /* tree vanished: digest path fails closed below */ }
   for (const p of spec.artifacts) {
-    const digest = await fileDigest(resolve(cwd, p));
+    const full = resolve(rootAbs, p);
+    const lexInside = full === rootAbs || full.startsWith(rootAbs + sep);
+    let realInside = lexInside;
+    if (lexInside) {
+      try {
+        const real = await realpath(full);
+        realInside = real === rootReal || real.startsWith(rootReal + sep);
+      } catch { /* ENOENT etc: fileDigest reports the honest exists:false */ }
+    }
+    if (!lexInside || !realInside) {
+      const ref = await appendEvidence(o.epPath, current2.sha, `artifact '${p}': REJECTED — path escapes the observed tree (exists:false, no digest proof)`);
+      artifacts.push({ path: p, exists: false, at: current2, evidenceRef: ref });
+      continue;
+    }
+    const digest = await fileDigest(full);
     const ref = await appendEvidence(o.epPath, current2.sha, `artifact '${p}': ${digest !== undefined ? `exists digest=${digest.slice(0, 12)}` : "unreadable"}`);
     if (digest !== undefined) {
       artifacts.push({ path: p, exists: true, digest, at: current2, evidenceRef: ref });
@@ -730,11 +897,35 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   // P13: the escalation channel appends to its own durable store (the
   // decision journal validates its record kinds — escalations are not
   // supervisor records, so they live beside it).
+  // B-F1/B-F2 (audit cycle P16, docs/19 §6): the channel is built with
+  // the FULL composition — `read` (durable replay for pending()/dedup
+  // across restarts) and `deliver` (the delivery ACT). A missing port
+  // used to be silent: raises returned port-missing:deliver while the
+  // loop journalled acked escalations nobody received, and every restart
+  // re-noticed without a pending view. The deliver port is injectable;
+  // without it the MISSING delivery is disclosed on the host log below.
   const escalationPath = join(epPath, "events", "escalations.jsonl");
   const escalation = makeEscalationChannel({
     now,
     append: async (rec) => { await appendFile(escalationPath, JSON.stringify(rec) + "\n", "utf8"); },
+    read: async () => {
+      // Durable replay source (docs/19 §3): JSONL lines; missing file is
+      // an EMPTY log (fresh episode), any other failure THROWS — the
+      // channel degrades pending() honestly rather than guessing.
+      const raw = await readFile(escalationPath, "utf8").catch((e: unknown) => {
+        if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return "";
+        throw e;
+      });
+      return raw.split("\n").filter((l) => l !== "").map((l) => {
+        try { return JSON.parse(l) as unknown; } catch { return l; } // channel's own view rejects bad lines + counts them
+      });
+    },
+    ...(opts.escalationDeliver !== undefined ? { deliver: opts.escalationDeliver } : {}),
   });
+  // P13 dispatcher (docs/19 §6): conforms to the executor's DispatchPorts
+  // and discloses every non-delivery on the host log — an escalation the
+  // loop marks acked but nobody received was B-F1's exact failure mode.
+  const escalationDispatcher = makeEscalationDispatcher({ channel: escalation });
 
   // ── ports ───────────────────────────────────────────────────────────────
 
@@ -826,6 +1017,47 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     },
   };
 
+  /** P16 (audit cycle, docs/19 §6): the park ACT — ONE body, two doors.
+   *  dispatch.park drives it in the loop; parkTask is the test seam (the
+   *  planner seed `park` fires only for a LIVE worker && !ownershipProvable
+   *  && !ambiguousExternalEffect — a predicate the compose loop never
+   *  produces, which always sends the worker stopped between turns, so the
+   *  handler's contract is driven directly by tests). */
+  const runPark = async (): Promise<void> => {
+    const statePath = join(epPath, "state.json");
+    let state;
+    try {
+      state = await readEpisodeState(statePath);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") {
+        // Genuinely absent: starting fresh is the only safe case.
+        state = { schema: "tre-episode-state/1" as const, episodeId: graph.episodeId, tasks: {} };
+      } else {
+        // W1-M7 (audit cycle W1): a CORRUPT or unreadable (EACCES)
+        // state.json may hold other tasks' state — the old blind
+        // `state = fresh` overwrote it silently. Fail closed: move
+        // the bytes aside (never destroyed), skip the durable write,
+        // disclose on the host log.
+        const preserve = `${statePath}.unreadable-${String(now())}`;
+        try { await rename(statePath, preserve); log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, durable park write SKIPPED`); }
+        catch { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, durable park write SKIPPED`); }
+        return;
+      }
+    }
+    state.tasks[opts.taskId] = { status: "parked" };
+    await writeEpisodeState(statePath, state);
+    // B-F2 (audit cycle P16, docs/19 §6): a parked task is an open
+    // question — 'repeated-strategy' with the approve/rewrite/abort
+    // decision, raised through the dispatcher so it is durable AND
+    // delivered (and a missing delivery disclosed, as in escalate).
+    try {
+      await escalationDispatcher.park({ episodeId: graph.episodeId, taskId: opts.taskId });
+    } catch (e) {
+      log(`park: escalation raise failed (${String((e as Error)?.message ?? e).slice(0, 120)}) — state written, human NOT notified`);
+    }
+  };
+
   const executorPorts: ComposePorts["executorPorts"] = {
     journal: journalPort,
     // NOTE: the executor's runner arrives via the loop's wrapper
@@ -864,39 +1096,44 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         return { taskRevision: bump };
       },
       escalate: async (req: object) => {
-        const res = await escalation.raise({
+        // B-F1/F2 (audit cycle P16): route through the docs/19 §6
+        // dispatcher (closed blocker mapping, fenced copies, evidence
+        // markers) and DISCLOSE a failed delivery on the host log — the
+        // loop journalling an acked escalation nobody received was the
+        // exact defect. The executor keeps its own intent/outcome
+        // journaling around this call (docs/15 §4).
+        const r = req as { episodeId?: string; taskId?: string; actionId?: string; rationale?: string[] };
+        const res = await escalationDispatcher.escalate({
           episodeId: graph.episodeId,
-          taskId: String((req as { taskId?: string }).taskId ?? opts.taskId),
-          blocker: "unknown",
-          decisionNeeded: Array.isArray((req as { rationale?: unknown }).rationale) ? (req as { rationale: string[] }).rationale.join("; ").slice(0, 200) : undefined,
-          evidence: (req as { actionId?: string }).actionId,
+          taskId: typeof r.taskId === "string" ? r.taskId : opts.taskId,
+          ...(typeof r.actionId === "string" ? { actionId: r.actionId } : {}),
+          ...(Array.isArray(r.rationale) ? { rationale: r.rationale } : {}),
         });
-        return { channel: res?.channel };
-      },
-      park: async () => {
-        const statePath = join(epPath, "state.json");
-        let state;
-        try {
-          state = await readEpisodeState(statePath);
-        } catch (e) {
-          const code = (e as NodeJS.ErrnoException)?.code;
-          if (code === "ENOENT") {
-            // Genuinely absent: starting fresh is the only safe case.
-            state = { schema: "tre-episode-state/1" as const, episodeId: graph.episodeId, tasks: {} };
-          } else {
-            // W1-M7 (audit cycle W1): a CORRUPT or unreadable (EACCES)
-            // state.json may hold other tasks' state — the old blind
-            // `state = fresh` overwrote it silently. Fail closed: move
-            // the bytes aside (never destroyed), skip the durable write,
-            // disclose on the host log.
-            const preserve = `${statePath}.unreadable-${String(now())}`;
-            try { await rename(statePath, preserve); log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, durable park write SKIPPED`); }
-            catch { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, durable park write SKIPPED`); }
-            return;
-          }
+        // The dispatcher returns {channel} only: a delivered send carries
+        // the port's channel name (e.g. 'telegram'); every NON-delivery
+        // is namespaced 'escalation:…' (invalid/recorded/re-notice/
+        // redeliver-cap) — B-F1 demanded that distinction reach the host
+        // log instead of a bare acked.
+        if (res.channel.startsWith("escalation:")) {
+          log(`escalate NOT delivered (${res.channel.slice(11)}) — the human has NOT been asked; see ${escalationPath}`);
+        } else {
+          log(`escalate dispatched via ${res.channel}`);
         }
-        state.tasks[opts.taskId] = { status: "parked" };
-        await writeEpisodeState(statePath, state);
+        return { channel: res.channel };
+      },
+      // The in-loop park act: ONE body (runPark above) — the handler the
+      // loop's dispatch and the test seam share.
+      park: runPark,
+      // P16 test seam (audit cycle, docs/19 §6): the `park` seed fires only
+      // when the planner sees the worker LIVE (isLive: thinking|tool|warned)
+      // && !ownershipProvable && !ambiguousExternalEffect — a predicate the
+      // compose loop cannot produce (it always sends the worker stopped
+      // between turns, which is correct for the real loop). parkTask is the
+      // ONE entry that drives the real park handler (same closure as the
+      // in-loop action: state write + durable escalation + disclosure), so
+      // tests assert the handler's contract without faking the planner seed.
+      parkTask: async (): Promise<void> => {
+        await runPark();
       },
     },
   };
@@ -973,7 +1210,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
 
   try {
     const result = await runSupervisorEpisode(cfg, ports);
-    return { result, episodePath: epPath, steerStats: { linesRead: steerQueue.getStats().linesRead, injected: steerQueue.getStats().injected, malformed: steerQueue.getStats().malformed } };
+    return { result, episodePath: epPath, steerStats: { linesRead: steerQueue.getStats().linesRead, injected: steerQueue.getStats().injected, malformed: steerQueue.getStats().malformed }, parkTask: runPark };
   } finally {
     try { runner.close(true); } catch (e) { log(`runner-close: ${(e as Error)?.name ?? "error"}`); }
   }

@@ -768,3 +768,339 @@ test("W10-C1: the fallback digest labels WHY there is no identity (episode-dir v
     "the two causes must be distinguishable in evidence");
   assert.equal(unobservable.current.dirty, true, "an unobservable worktree is still dirty-unknown, never a clean claim");
 });
+
+// ─── Audit cycle W11 (x-model audit of the P16 host wiring) ───────────────
+
+test("W11-A1 (A-C1): --assume-unchanged cannot stamp a tampered tree CLEAN (and different tampers move the digest)", async () => {
+  // The confirmed exploit (auditor A, probe A02§M1/A13§I1): a worker runs
+  // `git update-index --assume-unchanged f` then overwrites f — porcelain
+  // status goes BLIND to the delta, empty porcelain stamped the tampered
+  // tree clean, and the loop accepted-finished over a BACKDOOR. The fix
+  // reads the index flags straight off `git ls-files -v -z` (immune to
+  // the blindness): any non-`H` entry fails closed, and the flagged
+  // files' ON-DISK bytes join the digest so distinct tampers discriminate.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-aum-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "a.txt"), "clean"); g("add", "."); g("commit", "-q", "-m", "base");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  const i0 = await observeIdentity(wt, sha);
+  assert.equal(i0.dirty, undefined, "control: the flag-free tree is clean");
+
+  g("update-index", "--assume-unchanged", "a.txt");
+  await writeFile(join(wt, "a.txt"), "BACKDOOR-1");
+  const i1 = await observeIdentity(wt, sha);
+  assert.equal(i1.dirty, true, "assume-unchanged + tamper MUST be dirty (regression: was stamped CLEAN)");
+  assert.ok(i1.dirtyDigest, "flagged dirt carries a digest");
+
+  await writeFile(join(wt, "a.txt"), "BACKDOOR-2-different");
+  const i2 = await observeIdentity(wt, sha);
+  assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "two different tampers under one flag MUST move the digest");
+
+  // Even a FLAG with matching content is dirt the human must see: the
+  // flag itself is a blindfold git can be asked to wear at any moment.
+  await writeFile(join(wt, "a.txt"), "clean"); // back to committed bytes
+  const i3 = await observeIdentity(wt, sha);
+  assert.equal(i3.dirty, true, "an assume-unchanged entry is dirty-unknown EVEN with content matching HEAD (the flag is the blindfold)");
+});
+
+test("W11-A2 (A-C2): --skip-worktree cannot stamp a tampered tree CLEAN (and is digest-distinguishable from assume-unchanged)", async () => {
+  // The A-C2 variant (probe A02§M2/A13§I2/A15§S): `--skip-worktree`
+  // (tag S) hides the on-disk delta the same way — and the host's own
+  // core.sparseCheckout=false pin made it WORSE (on git 2.54 the flag-
+  // stripped status sees nothing at all). Same ls-files -v catch; the
+  // tag letter (h vs S) is bound into the digest, so the two blindfolds
+  // are never conflated.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-skiwt-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "a.txt"), "clean"); g("add", "."); g("commit", "-q", "-m", "base");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  g("update-index", "--skip-worktree", "a.txt");
+  await writeFile(join(wt, "a.txt"), "BACKDOOR-1");
+  const i1 = await observeIdentity(wt, sha);
+  assert.equal(i1.dirty, true, "skip-worktree + tamper MUST be dirty (regression: was stamped CLEAN)");
+
+  await writeFile(join(wt, "a.txt"), "BACKDOOR-2-different");
+  const i2 = await observeIdentity(wt, sha);
+  assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "distinct S-flag tampers MUST move the digest");
+
+  // Same content under the OTHER blindfold → different digest (tag bound).
+  g("update-index", "--no-skip-worktree", "a.txt");
+  g("update-index", "--assume-unchanged", "a.txt");
+  await writeFile(join(wt, "a.txt"), "BACKDOOR-1");
+  const i3 = await observeIdentity(wt, sha);
+  assert.notEqual(i3.dirtyDigest, i1.dirtyDigest, "S:h and H-flagged… the SAME bytes under different flags MUST NOT collide");
+});
+
+test("W11-A3 (A-C3): .git/info/exclude (worker-authorable, inside the tree) cannot hide untracked content", async () => {
+  // The confirmed exploit (probe A12 X1/X2/X3): `core.excludesFile=
+  // /dev/null` only kills the GLOBAL excludes — $GIT_DIR/info/exclude is
+  // always active and a worker owns it. One entry there hid a whole
+  // payload and the tree observed CLEAN. The fix runs `git ls-files
+  // --others` with NO exclude sources applied: anything it sees that
+  // porcelain did not is hidden dirt — fail closed, digest binding the
+  // hidden paths AND their content.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-excl-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "base.txt"), "b"); g("add", "."); g("commit", "-q", "-m", "b");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  await writeFile(join(wt, ".git", "info", "exclude"), "payload.txt\n");
+  await writeFile(join(wt, "payload.txt"), "stolen-credentials-1");
+  const i1 = await observeIdentity(wt, sha);
+  assert.equal(i1.dirty, true, "content hidden by info/exclude MUST be dirty (regression: was stamped CLEAN)");
+
+  await writeFile(join(wt, "payload.txt"), "stolen-credentials-2");
+  const i2 = await observeIdentity(wt, sha);
+  assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "two payloads under one hidden path MUST move the digest");
+
+  // Remove the hidden file: the clean path must still be REACHABLE
+  // (the fix must not pin every tree dirty for having an exclude file).
+  const rm = (await import("node:fs")).rmSync;
+  rm(join(wt, "payload.txt"));
+  await writeFile(join(wt, ".git", "info", "exclude"), "");
+  const i3 = await observeIdentity(wt, sha);
+  assert.equal(i3.dirty, undefined, "with nothing hidden, the tree is clean again");
+});
+
+test("W11-A4 (A-M1): worker-authored clean/smudge filters cannot collapse two different contents into one digest", async () => {
+  // The confirmed collision (probe A03): a filter driver defined in the
+  // repo config (`filter.evil.clean = cat >/dev/null; echo CONSTANT`) +
+  // a tracked .gitattributes made git's diff see ONE constant for any
+  // two tampered contents — same dirtyDigest, different trees. A config
+  // WILDCARD override loses to exact keys (probe, git 2.54), so the fix
+  // ENUMERATES every defined driver and re-sets each EXACT key to `cat`
+  // (the identity filter) with command-line precedence.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-filt-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q");
+  g("config", "filter.evil.clean", "cat >/dev/null; echo CONSTANT");
+  await writeFile(join(wt, ".gitattributes"), "*.txt filter=evil\n");
+  await writeFile(join(wt, "a.txt"), "clean");
+  g("add", "."); g("commit", "-q", "-m", "base");
+  const sha = g("rev-parse", "HEAD").trim();
+
+  await writeFile(join(wt, "a.txt"), "TAMPER-ONE");
+  const i1 = await observeIdentity(wt, sha);
+  assert.equal(i1.dirty, true);
+  await writeFile(join(wt, "a.txt"), "TAMPER-TWO");
+  const i2 = await observeIdentity(wt, sha);
+  assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "two contents through a worker-authored clean filter MUST NOT collide (regression: both hashed to one CONSTANT diff)");
+});
+
+test("W11-A5 (A-C4): artifact declarations escaping the observed tree yield NO digest proof (rejected, exists:false)", async () => {
+  // The confirmed accept-fraud (probe A05/A06): spec.artifacts is
+  // graph-authored data and `resolve(cwd, p)` happily minted exists:true
+  // + a digest for an ABSOLUTE or `../` path — a literal no-op worker
+  // got accepted-finish by declaring one pre-existing file outside its
+  // tree. Artifact paths are now confined TWICE (lexically + by realpath,
+  // so an inside-symlink pointing out is rejected too) and a violating
+  // declaration is journalled as REJECTED — never a proof.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-esc-"));
+  const wt = join(root, "wt"); await mkdir(wt, { recursive: true });
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q"); await writeFile(join(wt, "real.txt"), "in-tree"); g("add", "."); g("commit", "-q", "-m", "base");
+  await writeFile(join(root, "outside-secret.txt"), "PRE-EXISTING PROOF BAIT");
+  const ln = (await import("node:fs")).symlinkSync;
+  ln(join(root, "outside-secret.txt"), join(wt, "link-out")); // inside link → outside bytes
+
+  const graph: EpisodeGraph = {
+    schema: "tre-graph/1", episodeId: "ep-esc", goal: "g",
+    tasks: [{ id: "t1", persona: "w", promptRef: "p", dependsOn: [], acceptance: { criteria: [], requiredChecks: [], artifacts: ["../outside-secret.txt", join(root, "outside-secret.txt"), "link-out", "real.txt"] } }],
+    policy: { baseCommit: "x" },
+  };
+  const epPath = join(root, "eps");
+  const ev = await collectAcceptanceEvidence({ graph, taskId: "t1", epPath, worktreePath: wt });
+  assert.equal(ev.artifacts.length, 4);
+  for (const a of ev.artifacts) {
+    if (a.path === "real.txt") { assert.equal(a.exists, true, "control: an in-tree artifact still proves"); continue; }
+    assert.equal(a.exists, false, `escaping artifact '${a.path}' must yield exists:false, never a proof`);
+  }
+  const evidence = await readFile(join(epPath, "acceptance", "evidence.jsonl"), "utf8");
+  const rejects = evidence.match(/REJECTED — path escapes the observed tree/g) ?? [];
+  assert.equal(rejects.length, 3, "all three escaping declarations are journalled as REJECTED");
+});
+
+test("W11-A6 (A-M2/A-M3): a setsid-escaped pipe holder is disclosed as escaped-writer, keeping the leader's real exit code", async () => {
+  // Confirmed (probe A-M2/A-M3): a grandchild that leaves the process
+  // group via setsid keeps the inherited stdout pipe open, so 'close'
+  // never fires; the old timer reported the ALREADY-EXITED-0 leader as
+  // cause:"timeout"/code:-1 — the W1-M2 evidence mislabel re-created.
+  // The fix keeps the leader's real outcome and discloses the escape.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-escproc-"));
+  const MARK = "tre-w11a6-escapee";
+  // Leader: spawn a session-leader sleep (escaping the group) holding
+  // our stdout pipe, then exit 0 immediately.
+  const script = `python3 -c "import os,subprocess; subprocess.Popen(['sh','-c','sleep 90 # ${MARK}'],preexec_fn=os.setsid)" && echo leader-done && exit 0`;
+  try {
+    const r = await runShell(script, root, 1);
+    assert.equal(r.code, 0, "the leader exited 0 — the CAUSE may change, the leader's CODE never becomes -1 lies");
+    assert.equal(r.cause, "escaped-writer", "the escape is disclosed by its own cause, not conflated with timeout");
+    assert.ok(r.stderr.includes("escaped-writer"), "the evidence line names the escape");
+  } finally {
+    // Reap the escapee (it is outside every group we can signal).
+    try { execFileSync("/usr/bin/pkill", ["-f", MARK], { stdio: "ignore" }); } catch { /* already gone */ }
+  }
+});
+
+test("P16 B-F1: an escalation with NO deliver port is journalled but DISCLOSED as not delivered — never presented as delivered", async (t) => {
+  // The exact defect the audit caught (B-F1): the host built the channel
+  // WITHOUT deliver/read, so every raise returned port-missing:deliver
+  // while the loop journalled the escalation ACKED — the human was never
+  // asked and nothing said so. Now the dispatcher's channel string tells
+  // the two apart and the host log says it OUT LOUD.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "false" } }, // never passes → escalate
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: [] },
+    }],
+  });
+  const worker = await exitZeroWorker(root);
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 8,
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  // The loop must actually reach the escalate rung (p16-probe shape:
+  // continue → change-approach → escalate ×2 → escalation-exhausted).
+  assert.equal(res.result.stopped, "escalation-exhausted", `probe path must end escalation-exhausted, got ${res.result.stopped}`);
+
+  const esc = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8"))
+    .trim().split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.ok(esc.length >= 1, "the escalation is DURABLE on disk (B-F2's replay source)");
+  // docs/19 §"blockerOf": the executor's escalate payload carries rationale,
+  // NOT a blocker — with no host blockerOf callback the channel floors it
+  // to 'unknown' (still a valid, actionable record; INV-3).
+  assert.ok(["unknown", "repeated-strategy"].includes(String(esc[0]!.blocker)),
+    `the blocker is from the closed set, got ${JSON.stringify(esc[0]!.blocker)}`);
+  assert.ok(esc[0]!.decisionNeeded, "a question the human can answer is recorded");
+
+  // B-F1: the host log distinguishes NOT-delivered from delivered. No
+  // deliver port here ⇒ EVERY line must be a disclosure, never a claim.
+  const escLines = lines.filter((l) => l.includes("escalate"));
+  assert.ok(escLines.length >= 1, "the host log carries the escalation line");
+  assert.ok(escLines.every((l) => l.includes("NOT delivered") && l.includes("the human has NOT been asked")),
+    `with no deliver port every escalation is disclosed un-asked, got ${JSON.stringify(escLines)}`);
+  assert.ok(!lines.some((l) => /escalate dispatched via/.test(l)), "nothing may claim a delivery that did not happen");
+});
+
+test("P16 B-F1+deliver: WITH a deliver port the escalation is SENT, the channel names it on the host log, and the record proves delivery", async (t) => {
+  // The other side of B-F1: when the host DOES wire the delivery act
+  // (HostEpisodeOptions.escalationDeliver — the telegram bridge in
+  // production), the act runs and the log says "dispatched via <channel>"
+  // — the delivered/not-delivered distinction is real, not decorative.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "false" } },
+    tasks: [{
+      id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [],
+      acceptance: { criteria: ["policy-gate"], requiredChecks: [], artifacts: [] },
+    }],
+  });
+  const worker = await exitZeroWorker(root);
+  const sent: string[] = [];
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 8,
+    escalationDeliver: async (rec) => { sent.push(String(rec.blocker)); return { channel: "test-telegram" }; },
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  assert.equal(res.result.stopped, "escalation-exhausted");
+  assert.ok(sent.length >= 1, "the delivery ACT ran — the human was actually asked");
+  assert.ok(sent.every((b) => b === "repeated-strategy" || b === "unknown"),
+    "every sent question carries a blocker from the closed set (escalate floors to 'unknown' without a host blockerOf — docs/19)");
+  assert.ok(lines.some((l) => l === "escalate dispatched via test-telegram" || /^escalate dispatched via test-telegram$/.test(l)),
+    `the host log names the delivering channel, got ${JSON.stringify(lines.filter((l) => l.includes("escalate")))}`);
+  const esc = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8"))
+    .trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.ok(esc.every((r) => r.delivery === undefined || (r.delivery as Record<string, unknown>).ok === true),
+    "no on-disk record may show a FAILED delivery while the loop journalled it acked");
+});
+
+
+test("P16 B-F2: parkTask writes the parked state AND raises the durable question with the approve/rewrite/abort decision (delivered when a port exists)", async (t) => {
+  // park is the loop's dead-end act (docs/18: STOP without accepting).
+  // The planner SEED fires only for a LIVE worker with unprovable
+  // ownership (plan.ts isLive && !ownershipProvable) — a predicate the
+  // compose loop never produces (it always sends the worker stopped
+  // between turns), so the loop can never reach the handler in a test.
+  // parkTask drives the handler's ONE body — the same closure behind
+  // dispatch.park — and B-F2 demanded its question be durable, with the
+  // open decision recorded, delivered when a deliver port exists.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  const sent: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1, // the run is scaffolding; parkTask is the subject
+    escalationDeliver: async (rec) => { sent.push(String(rec.decisionNeeded ?? "")); return { channel: "test-telegram" }; },
+    log: (l) => t.diagnostic(l),
+  });
+  const before = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter((l) => l !== "").length;
+  const sentBefore = sent.length; // the scaffolding loop may have escalated on its own
+
+  await res.parkTask();
+
+  // 1. The durable state write: the task is parked in state.json.
+  const state = JSON.parse(await readFile(join(root, graph.episodeId, "state.json"), "utf8")) as { schema: string; episodeId: string; tasks: Record<string, { status: string }> };
+  assert.equal(state.schema, "tre-episode-state/1");
+  assert.equal(state.tasks.t1?.status, "parked", "park writes the parked status");
+
+  // 2. B-F2: the park QUESTION is appended to the durable escalation log
+  //    (one new record) with the closed blocker and the open decision.
+  const esc = (await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8"))
+    .trim().split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(esc.length, before + 1, "park raises exactly one durable question");
+  const parkRec = esc[esc.length - 1]!;
+  assert.equal(parkRec.blocker, "repeated-strategy", "park is an open question under the closed repeated-strategy blocker");
+  assert.match(String(parkRec.decisionNeeded), /parked/, "the record says the task is parked");
+  assert.match(String(parkRec.decisionNeeded), /approve.*rewrite.*abort/s, "the human's decision (approve/rewrite/abort) is recorded");
+
+  // 3. The delivery act ran (a port was wired) — B-F1's delivered side.
+  assert.equal(sent.length, sentBefore + 1, "the park question was DELIVERED, not just journalled");
+  assert.match(sent[sent.length - 1]!, /parked/);
+});
+
+test("W1-M7 (park door): a CORRUPT state.json is preserved untouched and the durable park write is SKIPPED (fail closed, disclosed)", async (t) => {
+  // The same handler, the W1-M7 branch: a corrupt state.json may hold
+  // other tasks' state — overwriting it with a fresh map destroyed it.
+  // The handler now moves the bytes aside (never destroyed), skips the
+  // durable write, and says so on the host log. (parkTask reaches every
+  // branch of the ONE park body; the planner seed cannot.)
+  const { root, graph } = await freshEpisode(t, { policy: { baseCommit: "abc123", gate: { cmd: "true" } } });
+  const worker = await exitZeroWorker(root);
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  const statePath = join(root, graph.episodeId, "state.json");
+  const corrupt = '{"schema":"tre-episode-state/1","tasks":{ "t9": BROKEN';
+  await writeFile(statePath, corrupt);
+
+  await res.parkTask();
+
+  // The corrupt bytes survived — preserved, never overwritten.
+  const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+  const preserved = readdirSync(join(root, graph.episodeId)).filter((f) => f.startsWith("state.json.unreadable-"));
+  assert.equal(preserved.length, 1, `the corrupt file was moved aside exactly once (found ${JSON.stringify(preserved)})`);
+  assert.equal(readFileSync(join(root, graph.episodeId, preserved[0]!), "utf8"), corrupt, "the preserved bytes are BYTE-IDENTICAL — nothing was destroyed");
+  assert.ok(!existsSync(statePath), "the durable park write was SKIPPED — no fresh state over other tasks' state");
+  // The host log disclosed the skip.
+  assert.ok(lines.some((l) => l.startsWith("park: state.json unreadable") && l.includes("durable park write SKIPPED")),
+    `the skip is disclosed on the host log, got ${JSON.stringify(lines.filter((l) => l.startsWith("park:")))}`);
+  // And NO escalation was raised from the skipped park (state is unknown:
+  // the handler returned before the dispatcher).
+  const escRaw = await readFile(join(root, graph.episodeId, "events", "escalations.jsonl"), "utf8").catch(() => "");
+  assert.ok(!escRaw.includes("the task is parked"), "a skipped park raises no question — the state write is the gate");
+});
