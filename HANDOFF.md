@@ -45,14 +45,16 @@
   gap. Audit dispositions are recorded in the audit doc's disposition
   lines.
 
-**Tests.** 11 new channel tests (F1 in-process + durable restart probe,
+**Tests.** 12 new channel tests (F1 in-process + durable restart probe,
 F1 truncated-window scope ×2 — one pins the ledger guard and was
 mutation-checked against a guard-disabled build, F1 malformed-correction
 fail-closed, F2 explicit-field + non-boolean garbage, F3 idempotence,
-F4 dispatcher error field, F4b newline-name forgery ×2) + the host
+F4 dispatcher error field, F4b newline-name forgery ×2, F4b follow-up
+length cap on channel names — mutation-checked against an uncapped-regex
+build) + the host
 throwing-deliver test strengthened to pin the delivery error in the log
 line (exact class-name form) + a host log-forgery test (injected
-newline name must not forge a line). Full suite **2438 pass / 0 fail / 14
+newline name must not forge a line). Full suite **2439 pass / 0 fail / 14
 skip** (was 2426).
 
 **Deliberate shape.** The refund only ever RESTORES — it can mint no

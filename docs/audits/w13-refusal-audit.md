@@ -143,9 +143,15 @@ the refusal path (`escalation:refused:<name>`) and the delivered path
 
 **Fix (shipped with this commit):** every log-bound identifier is a
 closed token. `describeErr`: `name` passes only
-`/^[A-Za-z0-9_.-]{1,64}$/`, else `'Error'`. Channel names: must match
-`/^[A-Za-z0-9:._-]+$/` or are DROPPED — the refusal/delivery outcome
+`/^[A-Za-z0-9:._-]{1,64}$/`, else `'Error'`. Channel names: must match
+`/^[A-Za-z0-9:._-]{1,64}$/` (shape AND length bounded — the follow-up
+audit found the original cap had no length limit, so a 200-char
+clean-charset name still rode the line, bounded only by boundedStr's
+240-clip; the `{1,64}` closes that and matches ERR_NAME_RE) or are
+DROPPED — the refusal/delivery outcome
 stands, only the name dies (`'unknown'` / `undefined`) — and disclosed
 `bad-input:channel`. Tests: channel-layer forgery (both paths), a
-newline-name Error test, and a host test asserting no log line starts
-with a forged prefix and the disclosure shows `: Error)`.
+newline-name Error test, a host test asserting no log line starts
+with a forged prefix and the disclosure shows `: Error)`, and a
+follow-up test pinning the length cap (200-char name dropped on both
+paths, exactly-64 name passes inclusive).

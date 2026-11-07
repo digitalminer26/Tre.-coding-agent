@@ -768,6 +768,44 @@ test("W13-F4b: a hostile port CHANNEL name is dropped + disclosed — both the r
   assert.ok((rd.disclosed ?? []).includes("bad-input:channel"), "and the drop is disclosed");
 });
 
+test("W13-F4b (follow-up): a VALID-CHARSET channel name over the 64-char cap is dropped too — log-bound tokens are bounded", async () => {
+  // Round-2 audit residual: LOG_TOKEN_RE gated shape but not LENGTH, so a
+  // 200-char clean-charset name rode the log line (only boundedStr's
+  // 240-clip bounded it). Same shape test, both paths, so the refusal
+  // path and the delivered path cannot drift on the cap.
+  const long = "a".repeat(200);
+  const refuser = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: long, refused: true }),
+    now: () => 1,
+  });
+  const rr = (await refuser.raise(valid() as never)) as RaiseResult;
+  assert.equal(rr.refused, true, "the refusal stands");
+  assert.equal(rr.channel, "escalation:refused:unknown", "the over-length name never rides");
+  assert.ok(!String(rr.channel).includes("aaaa"), "no 200-char token in the channel field");
+  assert.ok((rr.disclosed ?? []).includes("bad-input:channel"), "the dropped name is disclosed");
+
+  const sender = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: long }),
+    now: () => 1,
+  });
+  const rd = (await sender.raise(valid() as never)) as RaiseResult;
+  assert.equal(rd.delivered, true);
+  assert.equal(rd.channel, undefined, "delivered path drops the over-length name too");
+  assert.ok((rd.disclosed ?? []).includes("bad-input:channel"));
+
+  // 64 is IN — the cap is inclusive, a real-world long channel id must pass.
+  const ok64 = "a".repeat(64);
+  const pass = makeEscalationChannel({
+    append: async () => {},
+    deliver: async () => ({ channel: ok64 }),
+    now: () => 1,
+  });
+  const rp = (await pass.raise(valid() as never)) as RaiseResult;
+  assert.equal(rp.channel, ok64, "exactly 64 chars is a legal token");
+});
+
 test("W13-F1 (truncated window): the open-record refund still applies in-window; the lifetime ledger is untouched", async () => {
   // Review finding (2): the OPEN refund is safe under truncation because
   // presence and last-line order INSIDE a window are authoritative (the

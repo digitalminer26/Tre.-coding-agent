@@ -1306,10 +1306,13 @@ function describeErr(e: unknown): string {
 
 /** W13-F4b: the closed token shape a log-bound identifier may take —
  *  NO control characters (a '\n' in an operator log is a line forge),
- *  no spaces, no punctuation beyond `:._-`. Used for Error#name and
- *  for port-supplied channel names. Deliberately stricter than "print
+ *  no spaces, no punctuation beyond `:._-`, and capped at 64 chars
+ *  (same bound as ERR_NAME_RE) so no log-bound identifier is unbounded
+ *  — boundedStr's 240-char clip is a backstop, not the contract.
+ *  Used for port-supplied channel names on BOTH paths (refusal &
+ *  delivered) so they cannot drift. Deliberately stricter than "print
  * able ASCII": tab, \r, and ESC are print-adjacent but still forgers. */
-const LOG_TOKEN_RE = /^[A-Za-z0-9:._-]+$/;
+const LOG_TOKEN_RE = /^[A-Za-z0-9:._-]{1,64}$/;
 const ERR_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 // ─── Dispatcher (docs/15 DispatchPorts-shaped, for the loop host) ──────────

@@ -267,9 +267,10 @@ import it):
   accepts `Error#name` only through `/^[A-Za-z0-9_.-]{1,64}$/` — any
   other name (including one carrying `\n`, which FORGED a whole
   host-log line pre-fix) collapses to `'Error'`. A port channel name
-  must match `/^[A-Za-z0-9:._-]+$/` or it is dropped (the
-  refusal/delivery result stands; only the name dies) and disclosed
-  `bad-input:channel`.
+  must match `/^[A-Za-z0-9:._-]{1,64}$/` (the same length cap as
+  `describeErr` — a log-bound token is bounded in SHAPE *and* LENGTH) or
+  it is dropped (the refusal/delivery result stands; only the name
+  dies) and disclosed `bad-input:channel`.
 - **Unreachable in prod today (W13-F5, audit disposition).** The real
   production entrypoint (`src/cli` → compose loop) does not yet wire
   `escalationDeliver` / the dispatcher into the loop host: the Telegram
