@@ -1,5 +1,38 @@
 # HANDOFF
 
+## 2026-12-11 — P16 arc closed: park reachable e2e, audit findings fixed (Waves 4–6)
+
+**What landed.** (1) Wave-4 (`61fc548`): `parkTask` test seam + `escalationDeliver`
+wiring in the supervisor, 10 regression tests (identity A-series, B-F1
+not-delivered disclosure, B-F2 durable park question, W1-M7 corrupt-state
+park door). (2) Cross-model re-audit of the Wave-4 diff (one auditor session,
+verdict: 2 major + 7 minor on the new diff). (3) Wave-5 (`bfd0199`): **W12-F1**
+— `makeEscalationDispatcher.park()` returned `void`, so the host discarded a
+delivery it could never inspect (the B-F1 defect reproduced on the park
+path); park now answers with the SAME `{ channel }` record as escalate and
+`runPark` discloses it (`dispatched via X` / `NOT delivered (reason)` /
+bridge-off variant). **W12-F2** — both escalate and park host disclosures
+treat a `*:disabled` channel (docs/19 refusal-to-send, e.g.
+`telegram:disabled`) as NOT delivered; the old log claimed "dispatched via
+telegram:disabled". (4) Wave-6 (`c6ec744`): docs/19 + docs/15 updated for the
+widened park contract and the `:disabled` rule.
+
+**Test state.** Full suite **2423 pass / 0 fail / 14 skip**; targeted
+`W11|B-F1|B-F2|W1-M7|telegram:disabled` across host-supervise + escalation
+11 pass / 0 fail. Tree clean at `c6ec744`.
+
+**Deliberately deferred (auditor minors, not fixed this arc — rationale):**
+F3 (park's fixed `repeated-strategy` blocker could take a `blockerOf`-style
+override — needs a caller-side taxonomy decision), F5 (escalate/park share
+the redeliver-cap clock — intended: one human, one throttle), F6 (park
+evidence is actionId-only, no plan rationale — the park act has no
+rationale payload by contract). Re-open with the next docs/15 revision.
+
+**Next.** Nothing blocking. The park path is proven end-to-end from the
+executor's reconcile through state write to the escalation record and the
+host log; `.scratch/p16-probe.mts` remains the manual e2e probe.
+
+
 ## 2026-12-10 — Housekeeping: repo hygiene + release tag (open items closed)
 
 - **`.tre/` scratch untracked:** 5 files were force-added before the
