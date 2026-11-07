@@ -130,7 +130,11 @@ interface ExecutorPorts {
     repair?(req): Promise<{ evidenceRefs?: string[] } | void>;
     rewriteTask?(req): Promise<{ taskRevision?: number } | void>;
     escalate?(req): Promise<{ channel?: string } | void>;
-    park?(req): Promise<void>;
+    // W12-F1 (P16 audit W5): widened from Promise<void> — park answers
+    // with the same delivery record as escalate so the host can disclose
+    // "human asked" vs "journalled only"; callers that ignore it (the
+    // executor itself) are unaffected.
+    park?(req): Promise<{ channel?: string } | void>;
   };
   delay?: (ms: number) => Promise<void>;       // timer seam for backoff (test seam)
 }

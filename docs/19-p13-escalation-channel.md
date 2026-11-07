@@ -262,13 +262,21 @@ const dispatch = makeEscalationDispatcher({ channel }); // + optional blockerOf
 // composeRun(cfg, { ...ports, executorPorts: { ...executorPorts, dispatch }, ... })
 ```
 
-`makeEscalationDispatcher` conforms EXACTLY to docs/15 `DispatchPorts`
-(`escalate(req) → { channel }`, `park(req) → void`): `escalate` raises with
+`makeEscalationDispatcher` conforms to docs/15 `DispatchPorts`
+(`escalate(req) → { channel }`, `park(req) → { channel }` — the park return
+was `void` until W12-F1: the audit found the host discarded a delivery it
+could never inspect, so park now answers with the SAME delivery record as
+escalate): `escalate` raises with
 `blocker: 'unknown'` unless the request names one (the executor's escalate
 payload carries `rationale`, not a blocker — the P10 decision detail maps
 to a blocker by the host's own `blockerOf` callback when it has one);
 `park` records a `'repeated-strategy'` escalation with
 `decisionNeeded: 'the task is parked — approve a new approach, rewrite it, or abort'`.
+In both paths a delivered send carries the port's channel name and every
+NON-delivery is namespaced `escalation:…` (`invalid` / `recorded` /
+`re-notice` / `redeliver-cap`); a channel named `*:disabled` (e.g.
+`telegram:disabled`) is the port's documented refusal-to-send — the host
+discloses it as "recorded but NOT delivered", never as dispatched (W12-F2).
 The executor keeps its intent/outcome journaling around the dispatch call
 (docs/15 §4): the escalation record is the OUTSIDE-world artifact; the
 journal line remains the loop's own proof.
