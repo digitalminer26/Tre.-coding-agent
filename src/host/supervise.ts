@@ -1060,6 +1060,13 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         //    live pid: release-if-strictly-ours (a replacement owner's
         //    lease is never touched), then throw. A failed takeover can
         //    no longer wedge the episode on our live pid, by construction.
+        //    DISCLOSED COST (cycle-5 audit, F4): when the claim is still
+        //    intact but the lock stamp hit ENOENT (a rival reclaimed the
+        //    lock dir and crashed before stamping), the sole survivor
+        //    releases its own VALID claim and this activation fails —
+        //    availability-only and self-healing (the next activation
+        //    publishes cleanly; probe-verified), and keeping the claim
+        //    instead would re-open the P20c3-F1 double-admission.
         let stampOurs = true;
         try {
           const s = await readFile(join(leaseLockPath, "owner"), "utf8");
