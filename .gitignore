@@ -102,3 +102,5 @@ test/probes/
 .tre/p14-*.log
 .tre/qg-p14*.log
 .tre/p15-reprobe.mjs
+# P18/P19 audit test-run logs (scratch; findings live in the audit .md files and named tests).
+.tre/*audit*.log

@@ -16,7 +16,7 @@
  * discipline as §13.1/session.ts), and the I2 reconcile helpers over the
  * decision records (open intents, latest attempt).
  */
-import { appendFile, mkdir, open as fsOpen, readdir, readFile, rename, rm, stat, truncate } from "node:fs/promises";
+import { appendFile, link, mkdir, open as fsOpen, readdir, readFile, rename, rm, stat, truncate } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -91,8 +91,67 @@ export async function createEpisodeLayout(root: string, episodeId: string, graph
   await mkdir(join(dir, "events"), { recursive: true });
   await mkdir(join(dir, "sessions"), { recursive: true });
   await mkdir(join(dir, "wt"), { recursive: true });
-  await writeEpisodeGraph(graphFile, seed);
+  await publishEpisodeGraph(graphFile, seed);
   return dir;
+}
+
+/**
+ * P19-F2 (audit F2 of bda9d1f): the FIRST write of graph.json is race-free.
+ * The P18-A3 compare protects an existing graph, but two concurrent first
+ * creations both saw ENOENT and both renamed — last writer silently won.
+ * Publishing now goes through a no-replace link: stage the serialized graph
+ * beside the target, `link(tmp, graph.json)` (atomic EEXIST when the target
+ * exists — never an overwrite), and on EEXIST re-read the WINNER's bytes and
+ * apply the same P18-A3 identity rule (identical seed → idempotent no-op;
+ * different → throw without touching the winner). An abandoned staging tmp
+ * (its creator died between create and link, or link failed) is reclaimed
+ * past STALE_TMP_MS by sweepStaleTmp on the next call. The full graph is
+ * written + fsynced into the staging tmp BEFORE the link, so graph.json —
+ * the commit marker — can never be observed partially published.
+ */
+async function publishEpisodeGraph(path: string, seed: EpisodeGraph): Promise<void> {
+  const serialized = serializeValidated(seed, GRAPH_JSON_SCHEMA, "graph");
+  const dir = dirname(path);
+  await sweepStaleTmp(dir);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      const handle = await fsOpen(tmp, "wx", 0o644);
+      try {
+        await handle.writeFile(serialized, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await link(tmp, path); // no-replace: EEXIST iff the marker exists
+        return; // this call published the commit marker
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Someone else's marker won — judge THEIR bytes, never overwrite.
+        const winner = await readFile(path, "utf8").catch((re: unknown) => {
+          if ((re as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw re;
+        });
+        if (winner === undefined) continue; // vanished between link and read: retry once
+        let current: unknown;
+        try {
+          current = JSON.parse(winner);
+        } catch {
+          throw new EpisodeSchemaError(`episode ${seed.episodeId}: existing graph.json is corrupt — refusing to overwrite`);
+        }
+        if (canonicalJson(current) !== canonicalJson(seed)) {
+          throw new EpisodeSchemaError(
+            `episode ${seed.episodeId} already exists with a DIFFERENT graph — refusing to overwrite live desired state (P18-A3)`,
+          );
+        }
+        return; // identical winner: idempotent success
+      }
+    } finally {
+      await rm(tmp, { force: true }).catch(() => {});
+    }
+  }
+  throw new EpisodeSchemaError("graph.json vanished mid-publish (a racing unlink) — retry the call");
 }
 
 /** Canonical JSON for identity comparison: recursively key-sorted, so two

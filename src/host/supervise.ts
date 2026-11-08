@@ -21,7 +21,7 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, mkdir, readFile, rename, lstat, open, readlink, stat, realpath, writeFile, unlink, rm } from "node:fs/promises";
+import { appendFile, link, mkdir, readdir, readFile, rename, lstat, open, readlink, stat, realpath, writeFile, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve, sep } from "node:path";
@@ -888,6 +888,19 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   // abandoned lock is only stolen after an age bound. Release requires an
   // OWNERSHIP TOKEN (per-run, written into the body) — a pid alone could
   // delete a lease re-planted by a recycled pid.
+  //
+  // P19-F1 (follow-up audit of bda9d1f, finding 1): `writeFile(wx)` makes
+  // the CREATE atomic but NOT the write that follows it — a reader could
+  // observe a partial body (`{`), parse no pid, deem the lease stale, and
+  // TAKE OVER from a live creator (reproduced: pause the original writer
+  // after `{`, second activation takes over while the first still runs).
+  // Every lease publication now goes through stage+link: the full body is
+  // written and fsynced into a sibling tmp, then `link()` publishes it —
+  // a reader sees either the COMPLETE claim or nothing, and a link never
+  // replaces an existing lease (EEXIST = contention). Unparseable fresh
+  // content (only producible by a legacy/foreign writer under this
+  // protocol) is AMBIGUOUS, never proven-dead: it is takeover-eligible
+  // only past the same mtime abandon bound as the empty case.
   const leasePath = join(epPath, "host.lease");
   const leaseLockPath = join(epPath, "host.lease.lock");
   const leaseToken = `${process.pid}.${Math.random().toString(36).slice(2, 12)}.${Date.now().toString(36)}`;
@@ -927,31 +940,85 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   const takeLease = async (): Promise<void> => {
     await mkdir(epPath, { recursive: true });
     const body = JSON.stringify({ pid: process.pid, token: leaseToken, episodeId: graph.episodeId, claimedAt: Date.now() });
-    // Fast path: no lease at all — exclusive create. This races ONLY
-    // another creation (both use wx; exactly one wins) and a recovery
-    // (which holds the lock and re-verifies before replacing).
+    // P19-F1: publish = stage a COMPLETE body (write + fsync), then
+    // link() it into place. A concurrent reader never sees a partial
+    // claim; link() is no-replace, so two racing creators get exactly
+    // one winner (the loser sees EEXIST = contention).
+    const publishLease = async (): Promise<boolean> => {
+      const tmp = `${leasePath}.tmp-${process.pid}.${leaseToken}`;
+      try {
+        const handle = await open(tmp, "wx", 0o644);
+        try {
+          await handle.writeFile(body + "\n", "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        try {
+          await link(tmp, leasePath);
+          return true;
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+          throw e;
+        }
+      } finally {
+        await unlink(tmp).catch(() => {});
+      }
+    };
+    // Takeover replacement UNDER the takeover lock (P18-C3 serialization
+    // preserved): stage the full body (write + fsync) beside the lease and
+    // rename over the stale claim — atomic, so a reader of the lease sees
+    // either the complete old claim or the complete new one, never a mix.
+    const replaceLeaseUnderLock = async (): Promise<void> => {
+      const tmp = `${leasePath}.tmp-${process.pid}.${leaseToken}.takeover`;
+      try {
+        const handle = await open(tmp, "wx", 0o644);
+        try {
+          await handle.writeFile(body + "\n", "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await rename(tmp, leasePath);
+      } finally {
+        await unlink(tmp).catch(() => {});
+      }
+    };
+    // Crash hygiene: a publisher killed between staging and linking leaves
+    // an orphaned lease tmp. Reclaim ones older than the abandon bound
+    // (a LIVE publisher stages in microseconds — none of its own is ever
+    // this old), so takeLease never accumulates garbage.
     try {
-      await writeFile(leasePath, body + "\n", { flag: "wx" });
+      const names = await readdir(epPath);
+      const nowMs = Date.now();
+      for (const n of names) {
+        if (!n.startsWith("host.lease.tmp-")) continue;
+        const full = join(epPath, n);
+        try {
+          const st = await stat(full);
+          if (nowMs - st.mtimeMs > ABANDON_AFTER_MS) await unlink(full).catch(() => {});
+        } catch { /* vanished mid-sweep */ }
+      }
+    } catch { /* unreadable dir: nothing to reclaim */ }
+    // Fast path: no lease at all — publish exclusive. This races ONLY
+    // another creation (both stage+link; exactly one wins) and a recovery
+    // (which holds the lock and re-verifies before replacing).
+    if (await publishLease()) {
       leaseHeld = true;
       return;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
     // A lease exists. Recovery loop: every decision about a STALE lease
     // is made under the takeover lock, and re-verified after it is held.
     for (let attempt = 0; attempt < 40; attempt++) {
       const { missing, raw } = await readLease();
       if (missing) {
-        // The lease vanished since the wx failure (a holder released it):
-        // claim it exclusive — races only another create, both wx.
-        try {
-          await writeFile(leasePath, body + "\n", { flag: "wx" });
+        // The lease vanished since the failed publish (a holder released
+        // it): claim it exclusive — races only another create.
+        if (await publishLease()) {
           leaseHeld = true;
           return;
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-          continue; // someone beat us: re-evaluate their lease
         }
+        continue; // someone beat us: re-evaluate their lease
       }
       if (raw === "") {
         // Empty/partial: a creation IN PROGRESS (open→write window) or a
@@ -969,8 +1036,16 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       const holderPid = leasePidOf(raw);
       if (holderPid === process.pid) refuseSameProcess();
       if (holderPid !== undefined && pidAlive(holderPid)) refuseLive(holderPid);
-      // Stale (dead pid) or unparseable non-empty content (cannot be a
-      // live holder's valid claim — take over, disclosed). Serialize.
+      if (holderPid === undefined && raw !== "" && !(await leaseAbandoned())) {
+        // P19-F1: unparseable FRESH content is AMBIGUOUS, not proven-dead.
+        // Under this protocol a complete-but-broken body can only come
+        // from a legacy/foreign writer; give it the same abandon bound as
+        // the empty case before recovery touches it.
+        await sleep(25);
+        continue;
+      }
+      // Stale (dead pid) or abandoned-ambiguous content — take over,
+      // disclosed. Serialize.
       let lockHeld = false;
       try {
         await mkdir(leaseLockPath);
@@ -995,15 +1070,13 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // (re)planted) between our check and acquiring the lock.
         const cur = await readLease();
         if (cur.missing) {
-          // Released under us: claim exclusive (races only another wx).
-          try {
-            await writeFile(leasePath, body + "\n", { flag: "wx" });
+          // Released under us: publish exclusive (races only another
+          // create — P19-F1: staged link, never a create-then-write).
+          if (await publishLease()) {
             leaseHeld = true;
             return;
-          } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-            continue;
           }
+          continue;
         }
         if (cur.raw === "") {
           // RE-JUDGE under the lock — never claim an empty lease blind
@@ -1020,16 +1093,22 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
             continue;
           }
           log(`host-lease: empty lease on ${epPath} older than ${ABANDON_AFTER_MS}ms (creator died before first write) — taking over`);
-          await writeFile(leasePath, body + "\n");
+          await replaceLeaseUnderLock();
           leaseHeld = true;
           return;
         }
         const curPid = leasePidOf(cur.raw);
         if (curPid === process.pid) refuseSameProcess();
         if (curPid !== undefined && pidAlive(curPid)) refuseLive(curPid);
+        // P19-F1: an ambiguous (unparseable) lease still needs the abandon
+        // bound under the lock too — freshness is re-judged, not assumed.
+        if (curPid === undefined && cur.raw !== "" && !(await leaseAbandoned())) {
+          await sleep(50);
+          continue;
+        }
         // Still stale under the lock — take over, disclosed.
         log(`host-lease: stale lease on ${epPath} (holder ${curPid ?? "unknown"} not alive) — taking over`);
-        await writeFile(leasePath, body + "\n");
+        await replaceLeaseUnderLock();
         leaseHeld = true;
         return;
       } finally {
