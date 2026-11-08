@@ -576,6 +576,11 @@ test("stale .tmp-* siblings: PID-AWARE sweep — dead-owner tmps swept at any ag
   // (pre-P20-F4 this needed the 60s age bound).
   const dead = join(dir, "graph.json.tmp-2147483647-" + "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
   await writeFile(dead, "garbage");
+  // A FRESH dead-owner tmp too: pre-P20-F4 age-only sweeps keep it (under
+  // 60s); the pid-aware sweep reclaims it AT ANY AGE (cycle-4 audit note:
+  // the aged fixture alone never proved the advertised at-any-age claim).
+  const deadFresh = join(dir, "meta.json.tmp-2147483646-" + "2".repeat(8) + "-0000-0000-0000-" + "2".repeat(12));
+  await writeFile(deadFresh, "garbage-fresh");
   // A tmp owned by a LIVE pid (this test process) survives even aged past
   // any bound — the P20-F4 repro: a SIGSTOP'ed publisher's stage must not
   // be unlinked under it.
@@ -586,6 +591,7 @@ test("stale .tmp-* siblings: PID-AWARE sweep — dead-owner tmps swept at any ag
   await utimes(dead, old, old); // aged too: age alone would sweep both, pid-awareness distinguishes them
   await writeEpisodeGraph(target, minimalGraph);
   assert.equal(existsSync(dead), false, "dead-owner tmp is swept at any age");
+  assert.equal(existsSync(deadFresh), false, "FRESH dead-owner tmp is swept too (age-only policies keep it — cycle-4 audit)");
   assert.equal(existsSync(liveAged), true, "live-owner tmp survives whatever its age (P20-F4)");
   await rm(liveAged, { force: true });
 });

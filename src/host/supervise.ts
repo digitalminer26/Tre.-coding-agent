@@ -949,6 +949,17 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     catch { return false; } // vanished (or unreadable): let the next read decide
   };
   let leaseHeld = false;
+  // Strict lease-body ownership: the WHOLE body parses as an object whose
+  // TOP-LEVEL token equals ours. Substring membership is NOT ownership
+  // (P20c4-F3: {pid:1,token:"foreign",previous:{token:ours}} embeds ours
+  // but belongs to the foreign writer — reproduced passing an includes()).
+  const leaseBodyIsOurs = (raw: string): boolean => {
+    try {
+      const v: unknown = JSON.parse(raw);
+      return v !== null && typeof v === "object" && !Array.isArray(v)
+        && (v as { token?: unknown }).token === leaseToken;
+    } catch { return false; }
+  };
   const refuseSameProcess = (): never => {
     throw new Error(`host: episode ${graph.episodeId} is already activated in this process (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
   };
@@ -1032,23 +1043,47 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // bound, not a mathematical impossibility result.
         const swapHoldMs = opts.leaseSwapHoldMs ?? 0;
         if (swapHoldMs > 0) await sleep(swapHoldMs);
-        // P20c3-F1 ownership fence: our takeover lock must STILL carry
-        // our stamp after the swap. A contender that rmdir'ed our lock
-        // before us and only now completed its reclaim means its claim
-        // (or ours) is in flux — we walk away rather than run believing
-        // we hold the episode (its delayed swap overwrites our lease).
+        // Post-swap verification, REWRITTEN after the cycle-4 audit.
+        // The cycle-3 version THREW on a lost/vanished stamp — (a) with
+        // our just-renamed claim still on disk, never marked held, never
+        // released: the reproduced walkaway-wedge left OUR live-pid lease
+        // until this process exits; (b) a TRANSIENT stamp-read error was
+        // reported as "vanished" and wedged the episode even with no
+        // contender (reproduced POST_SWAP_EIO_WEDGE); and (c) the claim
+        // identity test was includes(token) — a foreign body merely
+        // EMBEDDING ours passed (reproduced POST_SWAP_EMBED).
+        // New contract:
+        //  - claim STRICTLY ours (whole body parses, top-level token ===
+        //    ours) AND stamp ours (or its read errored — an error cannot
+        //    disprove the lock we won) -> proceed;
+        //  - ANY anomaly -> first ensure we leave NO claim naming our
+        //    live pid: release-if-strictly-ours (a replacement owner's
+        //    lease is never touched), then throw. A failed takeover can
+        //    no longer wedge the episode on our live pid, by construction.
+        let stampOurs = true;
         try {
-          const stillMine = (await readFile(join(leaseLockPath, "owner"), "utf8")) === leaseToken;
-          if (!stillMine) {
-            throw new Error(`host: takeover lock on ${leasePath} was reclaimed under us mid-swap (a delayed-reclaim thief won) — refusing to proceed (P20c3-F1)`);
-          }
+          const s = await readFile(join(leaseLockPath, "owner"), "utf8");
+          stampOurs = s === leaseToken;
         } catch (e) {
-          if ((e as Error)?.message?.startsWith("host:")) throw e;
-          throw new Error(`host: takeover lock on ${leasePath} vanished mid-swap (a delayed-reclaim thief won) — refusing to proceed (P20c3-F1)`);
+          // Same rule as the initial stamp read (P20c3-F2): ENOENT means
+          // the lock was torn down (and possibly re-created) under us —
+          // NOT ours. Any OTHER error (EIO, EAGAIN, ...) cannot disprove
+          // the ownership we just won with a successful wx-create, so it
+          // must not fail us — that was the reproduced self-wedge.
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") stampOurs = false;
         }
         const mine = await readFile(leasePath, "utf8").catch(() => "");
-        if (!mine.includes(leaseToken)) {
-          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (a lock-thief won) — refusing to proceed (P20c3-F1)`);
+        const claimOurs = leaseBodyIsOurs(mine);
+        if (!claimOurs || !stampOurs) {
+          // Self-release OUR claim (strict, token-verified — a
+          // replacement owner's lease is never touched) BEFORE the throw,
+          // so a failed takeover can never leave a lease naming our live
+          // pid: the reproduced walkaway-wedge cannot form. The caller's
+          // verified release then no-ops; the episode stays recoverable.
+          try {
+            if (leaseBodyIsOurs(await readFile(leasePath, "utf8"))) await unlink(leasePath);
+          } catch { /* none of ours to release */ }
+          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (claim ${claimOurs ? "intact" : "not ours"}, lock stamp ${stampOurs ? "ours/unverifiable" : "lost"}) — released our claim, refusing to proceed (P20c4-F1/F3)`);
         }
       } finally {
         await unlink(tmp).catch(() => {});
@@ -1057,10 +1092,11 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // P20c3-F1: releasing the takeover lock is STAMP-CONDITIONAL. The
     // lock's `owner` file carries our token; deleting a lock whose stamp
     // is gone or names someone else destroys a live acquirer's lock (the
-    // reproduced delayed-reclaim theft). Race window note: between the
-    // stamp read and the rmdir the stamp could be replaced — an
-    // unavoidable TOCTOU with directory locks; it is the same window the
-    // steal path already accepts, and the lease-level fences bound it.
+    // reproduced delayed-reclaim theft). DISCLOSED RESIDUAL (cycle-4
+    // audit, F4): between the stamp read and the rmdir the stamp could
+    // be replaced — an unavoidable check→act TOCTOU without an
+    // atomic-compare-delete primitive; `leaseSwapHoldMs` shifts the
+    // schedule window but is NOT a scheduler-independent bound.
     const rmIfLockOurs = async (): Promise<void> => {
       try {
         const stamp = await readFile(join(leaseLockPath, "owner"), "utf8");
