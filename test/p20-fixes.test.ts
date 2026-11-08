@@ -62,9 +62,14 @@ async function quickWorker(root: string): Promise<string> {
 
 const origLink = fs.promises.link.bind(fs.promises);
 const origRename = fs.promises.rename.bind(fs.promises);
+const origRm = fs.promises.rm.bind(fs.promises);
+const origReadFile = fs.promises.readFile.bind(fs.promises);
 function restoreFs(): void {
-  (fs.promises as { link: unknown; rename: unknown }).link = origLink;
-  (fs.promises as { link: unknown; rename: unknown }).rename = origRename;
+  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown };
+  p.link = origLink;
+  p.rename = origRename;
+  p.rm = origRm;
+  p.readFile = origReadFile;
   syncBuiltinESMExports();
 }
 const deferred = <T = void>() => {
@@ -372,4 +377,139 @@ test("P20-F3: a staged tmp removed mid-publish (by anything) is RETRIED, not a c
   assert.equal(await sawRetry.promise, true, "the yanked path was a staged tmp link");
   assert.ok(n >= 2, "the publisher retried instead of crashing at ENOENT");
   assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the run completed normally on the retried lease");
+});
+
+// ─── Cycle 3 (audit of 5ab10ea): named regressions for findings 1-4 ────────
+
+const origRmC3 = fs.promises.rm.bind(fs.promises);
+const origReadC3 = fs.promises.readFile.bind(fs.promises);
+
+test("P20c3-F1: delayed lock-reclaim does NOT double-admit — the swap winner whose lock was reclaimed under it walks away", async (t) => {
+  // Mirrors the auditor's race repro EXACTLY: A freezes inside its steal-rm;
+  // B steals (sees the aged foreign lock, no stamp), takes the lock, and
+  // freezes inside its swap-rename; A resumes — rm'ing B's fresh lock,
+  // mkdir-ing its own — and completes its takeover; B's rename then lands.
+  // Pre-P20c3 BOTH passed every lease check and both ran (2 renames, 2
+  // admissions). The fix: after the swap each contender checks its OWN
+  // lock still carries its stamp — the one whose lock was reclaimed under
+  // it refuses to proceed. At most ONE admission may complete.
+  const root = await mkdtemp(join(tmpdir(), "p20c3-f1-race-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c3-f1");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  await writeFile(leasePath, JSON.stringify({ pid: 2147483647, token: "dead" }));
+  await mkdir(lockPath);
+  await utimes(lockPath, 1, 1); // aged past every bound
+  const worker = await quickWorker(root);
+
+  const rmPaused = deferred(); let allowRm = false;
+  let rmCount = 0;
+  (fs.promises as { rm: unknown }).rm = async function (p: string | URL, opts?: unknown) {
+    if (String(p) === lockPath && ++rmCount === 1) {
+      rmPaused.resolve();
+      while (!allowRm) await new Promise((r) => setTimeout(r, 5));
+    }
+    return (origRmC3 as (p: string | URL, o?: unknown) => Promise<void>)(p, opts);
+  } as typeof fs.promises.rm;
+  const renamePaused = deferred(); let allowRename = false;
+  let renameCount = 0;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    if (String(b) === leasePath && ++renameCount === 1) {
+      renamePaused.resolve();
+      while (!allowRename) await new Promise((r) => setTimeout(r, 5));
+    }
+    return (origRename as (a: string | URL, b: string | URL) => Promise<void>)(a, b);
+  } as typeof fs.promises.rename;
+  syncBuiltinESMExports();
+
+  const aRun = runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "A", workerCommand: worker, maxIterations: 1, log: () => {} });
+  await rmPaused.promise;                       // A frozen at its steal-rm
+  const bRun = runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "B", workerCommand: worker, maxIterations: 1, log: () => {} });
+  await renamePaused.promise;                   // B frozen inside its swap
+  allowRm = true;                               // A resumes: tears B's lock, takes over
+  for (let i = 0; i < 400; i++) {               // wait for A's claim to land
+    const cur = await origReadC3(leasePath, "utf8").catch(() => "");
+    if (cur.includes("claimedAt")) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  allowRename = true;                           // B's delayed rename lands on top
+  const results = await Promise.allSettled([aRun, bRun]);
+  const admissions = results.filter((r) => r.status === "fulfilled").length;
+  assert.ok(admissions <= 1, `at most ONE takeover admission completes (observed ${admissions} — the reproduced double-admission)`);
+  assert.equal(renameCount, 2, "both contenders did swap — the fence must catch the second, not be bypassed by timing");
+  const loser = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+  if (loser !== undefined) assert.match(String(loser.reason), /mid-swap|P20c3-F1/, "the loser walks away with the named fence error");
+});
+
+test("P20c3-F2: a transient stamp READ error after a won exclusive stamp-write does NOT wedge the lock — ownership stands", async (t) => {
+  // Auditor's stamp-error repro: one injected EIO on the first owner-stamp
+  // read. Pre-P20c3 the acquirer discarded a PROVABLY-won lock (its wx
+  // create had succeeded), left the stamped lock on disk naming its own
+  // live pid — un-stealable — and every later activation wedged. Post-fix:
+  // a read error cannot disprove the exclusive create; the takeover
+  // completes and the lock is released.
+  const root = await mkdtemp(join(tmpdir(), "p20c3-f2-stamp-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c3-f2");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const stampPath = join(dir, "host.lease.lock", "owner");
+  await writeFile(leasePath, JSON.stringify({ pid: 2147483647, token: "dead" }));
+  const worker = await quickWorker(root);
+  let injected = false;
+  (fs.promises as { readFile: unknown }).readFile = async function (p: string | URL, ...args: unknown[]) {
+    if (String(p) === stampPath && !injected) {
+      injected = true;
+      throw Object.assign(new Error("transient stamp read I/O error"), { code: "EIO" });
+    }
+    return (origReadC3 as (p: string | URL, ...a: unknown[]) => Promise<unknown>)(p, ...args);
+  } as typeof fs.promises.readFile;
+  syncBuiltinESMExports();
+  const results: string[] = [];
+  for (let i = 0; i < 2; i++) {
+    results.push(await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: `probe${i}`, workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => "completed", (e: Error) => e.message));
+  }
+  restoreFs();
+  assert.equal(injected, true, "the EIO injection actually fired at the stamp verification read");
+  assert.deepEqual(results, ["completed", "completed"], `a transient stamp-read error wedges nothing — both activations run (observed ${JSON.stringify(results)})`);
+  assert.equal(await origReadC3(stampPath, "utf8").then(() => "exists", () => "gone"), "gone", "no lock survives the completed runs (released stamp-conditionally)");
+  void leasePath;
+});
+
+test("P20c3-F3: release requires the TOP-LEVEL token to match — an EMBEDDED occurrence never releases a foreign lease", async (t) => {
+  // Auditor's release-embed repro: between our claim and our release, a
+  // foreign writer replaces the lease with {pid:1, token:'foreign',
+  // previous:{token: <ours>}}. Pre-P20c3 raw.includes(token) matched the
+  // NESTED occurrence and unlinked a lease that was never ours. Post-fix:
+  // the body must parse with token === ours AT TOP LEVEL.
+  const root = await mkdtemp(join(tmpdir(), "p20c3-f3-embed-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c3-f3");
+  await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(root, epGraph.episodeId, "host.lease");
+  const worker = await quickWorker(root);
+  let planted = false;
+  let plantedBody = "";
+  (fs.promises as { readFile: unknown }).readFile = async function (p: string | URL, ...args: unknown[]) {
+    if (String(p) === leasePath && !planted) {
+      const raw = await origReadC3(leasePath, "utf8") as string;
+      const ours = (JSON.parse(raw) as { token: string }).token;
+      plantedBody = JSON.stringify({ pid: 1, token: "foreign", previous: { token: ours } });
+      await fs.promises.writeFile(leasePath, plantedBody);
+      planted = true;
+      return plantedBody;
+    }
+    return (origReadC3 as (p: string | URL, ...a: unknown[]) => Promise<unknown>)(p, ...args);
+  } as typeof fs.promises.readFile;
+  syncBuiltinESMExports();
+  await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  restoreFs();
+  assert.equal(planted, true, "the foreign lease was planted at our own release-read");
+  const survivor = await readFile(leasePath, "utf8").catch(() => "");
+  assert.equal(survivor, plantedBody, "the foreign lease SURVIVES our release despite the embedded token (reproduced violation)");
 });

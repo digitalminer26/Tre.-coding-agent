@@ -567,21 +567,27 @@ test("unserializable (BigInt) records reject with EpisodeSchemaError and leave t
   assert.deepEqual(records.map((r) => r.id), [good.id]);
 });
 
-test("stale .tmp-* siblings from a crashed writer are swept; fresh ones survive (spark-2 F6)", async (t) => {
+test("stale .tmp-* siblings: PID-AWARE sweep — dead-owner tmps swept at any age, LIVE-owner tmps survive whatever their age (spark-2 F6 + P20-F4)", async (t) => {
   const { root, dir } = await tmpEpisode();
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(dir, { recursive: true });
   const target = join(dir, "graph.json");
-  const stale = join(dir, "graph.json.tmp-999-" + "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
-  await writeFile(stale, "garbage");
+  // A tmp whose embedded owner pid is provably DEAD is garbage at any age
+  // (pre-P20-F4 this needed the 60s age bound).
+  const dead = join(dir, "graph.json.tmp-2147483647-" + "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
+  await writeFile(dead, "garbage");
+  // A tmp owned by a LIVE pid (this test process) survives even aged past
+  // any bound — the P20-F4 repro: a SIGSTOP'ed publisher's stage must not
+  // be unlinked under it.
+  const liveAged = join(dir, "state.json.tmp-" + process.pid + "-" + "1".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
+  await writeFile(liveAged, "in-flight");
   const old = new Date(Date.now() - 120_000);
-  await utimes(stale, old, old);
-  const fresh = join(dir, "state.json.tmp-999-" + "1".repeat(8) + "-0000-0000-0000-" + "0".repeat(12));
-  await writeFile(fresh, "in-flight");
+  await utimes(liveAged, old, old);
+  await utimes(dead, old, old); // aged too: age alone would sweep both, pid-awareness distinguishes them
   await writeEpisodeGraph(target, minimalGraph);
-  assert.equal(existsSync(stale), false);
-  assert.equal(existsSync(fresh), true); // under 60s: could belong to a live writer
-  await rm(fresh, { force: true });
+  assert.equal(existsSync(dead), false, "dead-owner tmp is swept at any age");
+  assert.equal(existsSync(liveAged), true, "live-owner tmp survives whatever its age (P20-F4)");
+  await rm(liveAged, { force: true });
 });
 
 test("createEpisodeLayout failure before graph.json leaves no commit marker; retry completes (spark-2 F7)", async (t) => {

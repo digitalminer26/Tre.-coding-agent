@@ -891,20 +891,40 @@ function serializeValidated(value: unknown, schema: Shape, what: string): string
 
 const STALE_TMP_MS = 60_000;
 
-/** Remove our own tmp-sibling pattern after STALE_TMP_MS — a previous writer
- *  that crashed between close() and rename() left it behind; nothing else
- *  ever names these files, so age alone is the safety bound. Best effort. */
+/** P20-F4 (audit cycle 2, finding 4): age ALONE was the sweep's safety
+ *  bound, but a LIVE-but-paused publisher (SIGSTOP, fs stall, oversubscribed
+ *  scheduler) can keep a staged tmp open past any age bound, and the sweep
+ *  would unlink it under it — the resumed writer then died at rename/link
+ *  with ENOENT. The tmp name embeds the writer's pid (`.tmp-<pid>-<uuid>`),
+ *  so the sweep is now PID-AWARE (same rule as the lease tmp sweep in
+ *  host/supervise.ts): a tmp owned by a LIVE pid is never touched; only a
+ *  tmp whose embedded owner pid is provably dead (or unparseable, falling
+ *  back to the age bound) is reclaimed. Best effort. */
+const pidAlive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === "EPERM"; }
+};
+
 async function sweepStaleTmp(dir: string): Promise<void> {
   let names: string[];
   try { names = await readdir(dir); } catch { return; }
   const now = Date.now();
   await Promise.all(names
-    .filter((n) => /^.*\.tmp-[0-9]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(n))
-    .map(async (n) => {
-      const full = join(dir, n);
+    .map((n) => {
+      const m = /^(.*)\.tmp-([0-9]+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(n);
+      return m === null ? null : { full: join(dir, n), ownerPid: Number(m[2]) };
+    })
+    .filter((e) => e !== null)
+    .map(async ({ full, ownerPid }) => {
       try {
-        const st = await stat(full);
-        if (now - st.mtimeMs > STALE_TMP_MS) await rm(full, { force: true });
+        // A live owner's stage survives whatever its age (P20-F4); an
+        // uninterpretable pid is UNKNOWN (age-bound fallback), a dead one
+        // is garbage at any age.
+        if (Number.isSafeInteger(ownerPid) && ownerPid > 0) {
+          if (pidAlive(ownerPid)) return; // live publisher: never touch
+        } else if (now - (await stat(full)).mtimeMs <= STALE_TMP_MS) {
+          return; // unknown owner, not yet aged
+        }
+        await rm(full, { force: true });
       } catch { /* racing writer or vanished */ }
     }));
 }

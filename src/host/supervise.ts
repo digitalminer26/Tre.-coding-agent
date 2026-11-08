@@ -96,6 +96,13 @@ export interface HostEpisodeOptions {
    *  Absent = records are appended and the MISSING delivery is
    *  disclosed on the host log, never presented as delivered. */
   escalationDeliver?: DeliverPort["deliver"];
+  /** P20c3-F1 (audit cycle 2, finding 1): hardening knob — hold the
+   *  takeover lock for this many ms AFTER the swap completes, so any
+   *  contender that reclaimed the lock before our swap observes the
+   *  lease's fresh bytes or the lock's bumped 30s steal window. The
+   *  primary defense is the post-swap lock-stamp ownership fence; this
+   *  is the belt. Default 0 = no hold (pre-P20c3 behavior). */
+  leaseSwapHoldMs?: number;
 }
 
 export interface HostEpisodeResult {
@@ -1009,13 +1016,56 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           await handle.close();
         }
         await rename(tmp, leasePath);
+        // P20c3-F1 (audit cycle 2, finding 1): the post-swap READ is a
+        // TOCTOU, not a fence — a contender frozen between its lock rmdir
+        // and the swap passes every read-based check on its own fresh
+        // bytes, and the delayed reclaim double-admits. A read-only fence
+        // CANNOT exist: a process that destroys our lock and publishes a
+        // fresh lease is indistinguishable (from our side) from the lease
+        // being legitimately released and re-created. So the fence is a
+        // TIME one: the takeover lock is held for leaseSwapHoldMs AFTER
+        // the swap completes (default 0 = pre-P20c3 behavior). Any
+        // contender that reclaimed the lock before our swap observes the
+        // lock's fresh mtime (bumping its 30s steal bound) or times out
+        // and re-observes our live lease. This closes the reproduced
+        // delayed-reclaim double-admission; it is a deployment-chosen
+        // bound, not a mathematical impossibility result.
+        const swapHoldMs = opts.leaseSwapHoldMs ?? 0;
+        if (swapHoldMs > 0) await sleep(swapHoldMs);
+        // P20c3-F1 ownership fence: our takeover lock must STILL carry
+        // our stamp after the swap. A contender that rmdir'ed our lock
+        // before us and only now completed its reclaim means its claim
+        // (or ours) is in flux — we walk away rather than run believing
+        // we hold the episode (its delayed swap overwrites our lease).
+        try {
+          const stillMine = (await readFile(join(leaseLockPath, "owner"), "utf8")) === leaseToken;
+          if (!stillMine) {
+            throw new Error(`host: takeover lock on ${leasePath} was reclaimed under us mid-swap (a delayed-reclaim thief won) — refusing to proceed (P20c3-F1)`);
+          }
+        } catch (e) {
+          if ((e as Error)?.message?.startsWith("host:")) throw e;
+          throw new Error(`host: takeover lock on ${leasePath} vanished mid-swap (a delayed-reclaim thief won) — refusing to proceed (P20c3-F1)`);
+        }
         const mine = await readFile(leasePath, "utf8").catch(() => "");
         if (!mine.includes(leaseToken)) {
-          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (a lock-thief won) — refusing to proceed (P20-F1)`);
+          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (a lock-thief won) — refusing to proceed (P20c3-F1)`);
         }
       } finally {
         await unlink(tmp).catch(() => {});
       }
+    };
+    // P20c3-F1: releasing the takeover lock is STAMP-CONDITIONAL. The
+    // lock's `owner` file carries our token; deleting a lock whose stamp
+    // is gone or names someone else destroys a live acquirer's lock (the
+    // reproduced delayed-reclaim theft). Race window note: between the
+    // stamp read and the rmdir the stamp could be replaced — an
+    // unavoidable TOCTOU with directory locks; it is the same window the
+    // steal path already accepts, and the lease-level fences bound it.
+    const rmIfLockOurs = async (): Promise<void> => {
+      try {
+        const stamp = await readFile(join(leaseLockPath, "owner"), "utf8");
+        if (stamp === leaseToken) await rm(leaseLockPath, { recursive: true, force: true });
+      } catch { /* vanished or unreadable: not ours to remove */ }
     };
     // Crash hygiene: a publisher killed between staging and linking leaves
     // an orphaned lease/lock tmp. Reclaim is PID-AWARE (P20-F3): our own
@@ -1123,9 +1173,29 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           const stampPath = join(leaseLockPath, "owner");
           try {
             await writeFile(stampPath, leaseToken, { flag: "wx" });
-            if ((await readFile(stampPath, "utf8")) !== leaseToken) lockHeld = false; // torn down & re-claimed under us
+            // Verification re-read. P20c3-F2 (audit cycle 2, finding 2):
+            // the old code bailed on ANY error here — a TRANSIENT read
+            // error (EIO) after a SUCCESSFUL exclusive stamp-write threw
+            // away an ownership we provably had AND left our lock (stamp:
+            // our live pid) on disk un-reclaimable (the steal path sees a
+            // live owner forever) — the reproduced self-wedge. ENOENT
+            // means the lock was torn down and re-created under us (not
+            // ours — retry); any other error cannot DISPROVE the
+            // wx-create we just won, so ownership stands and the
+            // lease-level re-verification below still fences the swap.
+            try {
+              if ((await readFile(stampPath, "utf8")) !== leaseToken) lockHeld = false;
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code === "ENOENT") lockHeld = false; // vanished: not ours
+            }
           } catch {
-            lockHeld = false; // stamp vanished/wedged: not ours — do NOT touch the lease
+            lockHeld = false; // stamp absent/occupied/failed: not ours — do NOT touch the lease
+          }
+          if (!lockHeld) {
+            // P20c3-F2: a bail must not leave OUR freshly-created lock
+            // (with our stamp, naming our live pid) wedging every future
+            // acquirer. Stamp-conditional: removes only what is ours.
+            await rmIfLockOurs();
           }
           if (lockHeld) {
             // Fence re-verification: the takeover premise must still hold.
@@ -1186,20 +1256,23 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // throw all release it (the pre-P20 code leaked the lock on the
         // throw paths, wedging recovery behind a stamp naming our own
         // live pid).
-        if (lockHeld && outcome !== "takeover") await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
+        if (lockHeld && outcome !== "takeover") await rmIfLockOurs();
       }
       if (lockHeld && outcome === "takeover") {
         // Lock still ours and fence-verified: swap the claim atomically
         // (rename — a reader never sees a mix), then release the lock.
         // replaceLeaseUnderLock re-checks after the swap that the lease is
-        // still OUR claim (P20-F1 belt: a mid-swap lock theft makes us
-        // walk away rather than proceed believing we hold the episode).
+        // still OUR claim and that our LOCK still carries our stamp
+        // (P20c3-F1: a delayed-reclaim thief makes us walk away).
+        // P20c3: release is stamp-conditional — if the lock directory was
+        // reclaimed under us, it is NOT ours to delete; the pre-P20c3
+        // unconditional rm destroyed a fresh thief lock (the F1 repro).
         try {
           await replaceLeaseUnderLock();
           leaseHeld = true;
           return;
         } finally {
-          await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
+          await rmIfLockOurs();
         }
       }
       if (outcome === "published") {
@@ -1600,10 +1673,23 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // P18-A4 / P18-C3 F2: release ONLY a lease carrying OUR ownership
     // token — a pid alone is ambiguous after pid reuse or after another
     // process's takeover.
+    // P20c3-F3 (audit cycle 2, finding 3): the old release used
+    // raw.includes(token) — a SUBSTRING match anywhere in the body. A
+    // foreign lease merely EMBEDDING our token (e.g. a forensic
+    // `{previous:{token:...}}` written by a predecessor) released the
+    // wrong lease (reproduced). Release now requires the WHOLE body to
+    // parse as an object whose TOP-LEVEL token equals ours — nested
+    // occurrences never match. (The read→unlink window is a residual
+    // TOCTOU of any check-then-unlink without a compare-and-delete
+    // primitive; the takeover side fences it by re-verifying staleness
+    // under the lock before acting.)
     if (leaseHeld) {
       try {
         const raw = await readFile(leasePath, "utf8");
-        if (raw.includes(`"token":${JSON.stringify(leaseToken)}`) || raw.includes(`"token":${leaseToken}`)) await unlink(leasePath);
+        let v: unknown;
+        try { v = JSON.parse(raw); } catch { v = undefined; }
+        if (v !== null && typeof v === "object" && !Array.isArray(v)
+          && (v as { token?: unknown }).token === leaseToken) await unlink(leasePath);
       } catch { /* best-effort: a crash leaves a stale lease, taken over with disclosure */ }
     }
   }
