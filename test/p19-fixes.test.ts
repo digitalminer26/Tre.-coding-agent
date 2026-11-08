@@ -121,22 +121,23 @@ test("P19-F1: an unparseable lease PAST the abandon bound is recovery-eligible (
   assert.notEqual(after, "legacy foreign writer, not json", "the ambiguous content never survives the recovery run");
 });
 
-test("P19-F1: an orphaned lease tmp older than the bound is swept; a fresh one survives", async (t) => {
+test("P19-F1: an orphaned lease tmp older than the bound is swept; a live-owner one survives (P20-F3: pid-aware)", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "p19f1-sweep-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const epGraph = graphA("ep-f1-sweep");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
-  const oldTmp = join(dir, "host.lease.tmp-111.crash");
-  const freshTmp = join(dir, "host.lease.tmp-222.live");
+  const oldTmp = join(dir, "host.lease.tmp-111.crash"); // pid 111: not alive
+  const freshTmp = join(dir, "host.lease.tmp-1.live"); // pid 1: alive (launchd/init)
   await writeFile(oldTmp, "{ orphan");
   await writeFile(freshTmp, "{ live-staging");
   const old = Date.now() / 1000 - 60;
   await utimes(oldTmp, old, old);
+  await utimes(freshTmp, old, old); // aged too — only its LIVE owner protects it (P20-F3)
   const worker = await quickWorker(root);
   await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
   const names = await readdir(dir);
-  assert.ok(!names.includes("host.lease.tmp-111.crash"), "the crash-leaked tmp is reclaimed");
-  assert.ok(names.includes("host.lease.tmp-222.live"), "a fresh tmp (possibly a live publisher) is never touched");
+  assert.ok(!names.includes("host.lease.tmp-111.crash"), "the crash-leaked tmp (dead owner) is reclaimed");
+  assert.ok(names.includes("host.lease.tmp-1.live"), "a tmp naming a LIVE owner is never touched, whatever its age (P20-F3)");
 });
 
 // ─── F2: the FIRST graph.json publish is a no-replace link ─────────────────

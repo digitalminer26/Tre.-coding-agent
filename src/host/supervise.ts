@@ -908,9 +908,20 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   const pidAlive = (pid: number): boolean => {
     try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
   };
+  // P20-F2 (re-audit of 58c588f, finding 2): the OLD extractor regex-scanned
+  // for `"pid":<digits>` anywhere in the bytes — an INCOMPLETE body like
+  // `{"pid":2147483647` (truncated JSON, unparseable) yielded a pid and
+  // bypassed every ambiguity guard, taking over immediately (reproduced:
+  // 245ms, not the 10s abandon bound). A pid is only trustworthy when the
+  // WHOLE claim parses as a JSON object with a positive safe-integer pid;
+  // anything else is AMBIGUOUS content, not a holder.
   const leasePidOf = (raw: string): number | undefined => {
-    const m = /"pid"\s*:\s*(\d+)/.exec(raw);
-    return m !== null ? Number(m[1]) : undefined;
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { return undefined; }
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+    const pid = (v as { pid?: unknown }).pid;
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    return pid;
   };
   // MISSING (ENOENT) is not EMPTY: an absent lease is claimable on the
   // next loop (a holder that just released), while an empty-but-present
@@ -944,31 +955,49 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // link() it into place. A concurrent reader never sees a partial
     // claim; link() is no-replace, so two racing creators get exactly
     // one winner (the loser sees EEXIST = contention).
-    const publishLease = async (): Promise<boolean> => {
-      const tmp = `${leasePath}.tmp-${process.pid}.${leaseToken}`;
-      try {
-        const handle = await open(tmp, "wx", 0o644);
+    // The staged publish as a helper (shared by the lease and the lock):
+    // full body written + fsynced into a unique tmp, then link()ed into
+    // place (no-replace). P20-F3 (re-audit of 58c588f, finding 3): a
+    // LIVE-but-paused publisher's staged tmp can age past any time bound
+    // (SIGSTOP, fs stall), and a sweeper that judges on age alone unlinks
+    // it under us — the resumed publisher died at link() with ENOENT
+    // (reproduced). A vanished staging tmp is therefore a RETRY, not a
+    // crash: relink once from a fresh stage. EEXIST is contention either
+    // way; a second ENOENT (something is racing us aggressively) is
+    // surfaced, not looped on.
+    const stagedPublish = async (target: string, suffix: string): Promise<boolean> => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const tmp = `${target}.tmp-${process.pid}.${leaseToken}${suffix}${attempt === 0 ? "" : `.${attempt}`}`;
         try {
-          await handle.writeFile(body + "\n", "utf8");
-          await handle.sync();
+          const handle = await open(tmp, "wx", 0o644);
+          try {
+            await handle.writeFile(body + "\n", "utf8");
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          try {
+            await link(tmp, target);
+            return true;
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+            if ((e as NodeJS.ErrnoException).code === "ENOENT" && attempt === 0) continue; // P20-F3: our stage was removed mid-publish — retry from fresh
+            throw e;
+          }
         } finally {
-          await handle.close();
+          await unlink(tmp).catch(() => {});
         }
-        try {
-          await link(tmp, leasePath);
-          return true;
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
-          throw e;
-        }
-      } finally {
-        await unlink(tmp).catch(() => {});
       }
+      return false;
     };
+    const publishLease = (): Promise<boolean> => stagedPublish(leasePath, "");
     // Takeover replacement UNDER the takeover lock (P18-C3 serialization
     // preserved): stage the full body (write + fsync) beside the lease and
     // rename over the stale claim — atomic, so a reader of the lease sees
     // either the complete old claim or the complete new one, never a mix.
+    // P20-F1 belt: re-verify after the swap that the lease is still OURS —
+    // a claim replaced under us mid-swap makes us walk away rather than
+    // proceed believing we hold the episode.
     const replaceLeaseUnderLock = async (): Promise<void> => {
       const tmp = `${leasePath}.tmp-${process.pid}.${leaseToken}.takeover`;
       try {
@@ -980,23 +1009,43 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           await handle.close();
         }
         await rename(tmp, leasePath);
+        const mine = await readFile(leasePath, "utf8").catch(() => "");
+        if (!mine.includes(leaseToken)) {
+          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (a lock-thief won) — refusing to proceed (P20-F1)`);
+        }
       } finally {
         await unlink(tmp).catch(() => {});
       }
     };
     // Crash hygiene: a publisher killed between staging and linking leaves
-    // an orphaned lease tmp. Reclaim ones older than the abandon bound
-    // (a LIVE publisher stages in microseconds — none of its own is ever
-    // this old), so takeLease never accumulates garbage.
+    // an orphaned lease/lock tmp. Reclaim is PID-AWARE (P20-F3): our own
+    // in-flight tmps are never touched, a tmp naming a DEAD process is
+    // garbage at any age, and only FOREIGN tmps (no pid we can judge)
+    // fall back to the age bound. An aged-but-LIVE publisher's stage now
+    // survives; if some other remover still gets it, stagedPublish retries.
     try {
       const names = await readdir(epPath);
       const nowMs = Date.now();
       for (const n of names) {
-        if (!n.startsWith("host.lease.tmp-")) continue;
+        const m = /^(?:host\.lease|host\.lease\.lock)\.tmp-(\d+)\./.exec(n);
+        if (m === null) continue;
+        const ownerPid = Number(m[1]);
+        if (ownerPid === process.pid) continue; // possibly OUR OWN in-flight stage
         const full = join(epPath, n);
+        // P20-F2/F3: the sweep is PID-AWARE. A tmp whose owner pid is
+        // ALIVE is never touched — a live-but-paused (SIGSTOP) or stalled
+        // publisher's stage can age past any time bound, and unlinking it
+        // under the publisher was the reproduced crash (link ENOENT).
+        // An owner we can prove DEAD makes its tmp garbage at any age.
+        // An uninterpretable pid (out of the safe-integer range) is
+        // UNKNOWN, not dead — reclaimed only past the age bound.
+        const interpretable = Number.isSafeInteger(ownerPid) && ownerPid > 0;
         try {
-          const st = await stat(full);
-          if (nowMs - st.mtimeMs > ABANDON_AFTER_MS) await unlink(full).catch(() => {});
+          if (interpretable) {
+            if (!pidAlive(ownerPid)) { await unlink(full).catch(() => {}); continue; } // dead owner: garbage at any age
+            continue; // live owner: its stage survives, whatever its age
+          }
+          if (nowMs - (await stat(full)).mtimeMs > ABANDON_AFTER_MS) await unlink(full).catch(() => {}); // unknown owner + aged: reclaim
         } catch { /* vanished mid-sweep */ }
       }
     } catch { /* unreadable dir: nothing to reclaim */ }
@@ -1046,74 +1095,118 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       }
       // Stale (dead pid) or abandoned-ambiguous content — take over,
       // disclosed. Serialize.
+      //
+      // P20-F1 (re-audit of 58c588f, finding 1): the OLD steal was an
+      // UNFENCED read-age→rm→mkdir. A thief that read the lock age at T0,
+      // froze (SIGSTOP), let the original holder's recovery time out and
+      // release, and a THIRD creator publish, then resumed: its stale
+      // age-read said "abandoned", rm'ed a FRESH lock, mkdir-ed its own,
+      // and it stole the takeover from under a creator that had just won
+      // (reproduced: 2 activations + 2 disclosed takeovers of one lease).
+      // An unlink that is race-free against any re-creation is impossible
+      // (no unlink-at-only-if-unmodified primitive exists), so the fence
+      // is: (1) never rm a lock whose owner stamp proves a LIVE holder;
+      // (2) after acquiring (mkdir), write an ownership stamp into the
+      // lock directory and RE-READ it, then RE-VERIFY — under the lock
+      // and before touching anything — that the lease is still exactly
+      // the claim we set out to replace AND still stale. A thief frozen
+      // between mkdir and verification finds its own lock torn down by a
+      // new acquirer (stamp gone/mismatch) or its lease re-check fail,
+      // and re-loops instead of stealing.
       let lockHeld = false;
+      let outcome: "retry" | "takeover" | "published" = "retry";
       try {
-        await mkdir(leaseLockPath);
-        lockHeld = true;
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code === "EEXIST") {
-          // Abandoned takeover lock (creator crashed mid-recovery): steal
-          // only past a generous age bound; a fresh one means a live
-          // recovery — back off and re-evaluate.
+        let mkdirErr: unknown = null;
+        try { await mkdir(leaseLockPath); } catch (e) { mkdirErr = e; }
+        if (mkdirErr === null) {
+          lockHeld = true;
+          const stampPath = join(leaseLockPath, "owner");
+          try {
+            await writeFile(stampPath, leaseToken, { flag: "wx" });
+            if ((await readFile(stampPath, "utf8")) !== leaseToken) lockHeld = false; // torn down & re-claimed under us
+          } catch {
+            lockHeld = false; // stamp vanished/wedged: not ours — do NOT touch the lease
+          }
+          if (lockHeld) {
+            // Fence re-verification: the takeover premise must still hold.
+            const cur0 = await readLease();
+            if (cur0.missing) {
+              // Released under us: claim exclusive (races only another create).
+              if (await publishLease()) outcome = "published";
+            } else if (cur0.raw !== raw) {
+              // The lease changed since our observation (a creator won or a
+              // takeover happened): our staleness premise is dead — re-decide
+              // from scratch, never act on stale bytes.
+            } else if (cur0.raw.trim() === "") {
+              if (await leaseAbandoned()) {
+                log(`host-lease: empty lease on ${epPath} older than ${ABANDON_AFTER_MS}ms (creator died before first write) — taking over`);
+                outcome = "takeover";
+              }
+            } else {
+              const curPid0 = leasePidOf(cur0.raw);
+              if (curPid0 === process.pid) refuseSameProcess(); // throws; finally releases the lock
+              if (curPid0 !== undefined && pidAlive(curPid0)) refuseLive(curPid0); // holder revived/pid-reused: refuse; finally releases
+              if (curPid0 === undefined && !(await leaseAbandoned())) {
+                // P19-F1/P20-F2: unparseable FRESH content is ambiguous —
+                // never proven dead, wait out the abandon bound.
+              } else {
+                log(`host-lease: stale lease on ${epPath} (holder ${curPid0 ?? "unknown"} not alive${curPid0 === undefined ? `, ambiguous content past ${ABANDON_AFTER_MS}ms abandon bound` : ""}) — taking over`);
+                outcome = "takeover";
+              }
+            }
+          }
+        } else {
+          const code = (mkdirErr as NodeJS.ErrnoException).code;
+          if (code !== "EEXIST") throw mkdirErr;
+          // Lock held by someone else: steal ONLY if its owner stamp proves
+          // the holder DEAD (or it carries no stamp — legacy) AND it is past
+          // the age bound. A LIVE holder — even one that froze between its
+          // age-observation and our check — is never torn down (P20-F1).
           try {
             const st = await stat(leaseLockPath);
-            if (Date.now() - st.mtimeMs > 30_000) await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
+            if (Date.now() - st.mtimeMs > 30_000) {
+              let ownerAlive = false;
+              let stamped = false;
+              try {
+                const ownerStamp = (await readFile(join(leaseLockPath, "owner"), "utf8")).trim();
+                stamped = true;
+                const ownerPid = Number(ownerStamp.split(".")[0] ?? "");
+                if (Number.isSafeInteger(ownerPid) && ownerPid > 0 && pidAlive(ownerPid)) ownerAlive = true;
+              } catch { /* no stamp: judge on age alone (legacy format) */ }
+              if (!ownerAlive) {
+                await rm(leaseLockPath, { recursive: true, force: true });
+                log(`host-lease: takeover lock abandoned ${stamped ? "(owner not alive)" : "(no owner stamp)"} past 30s — reclaimed (P20-F1)`);
+              }
+            }
           } catch { /* vanished: next attempt may take it */ }
-          await sleep(50);
-          continue;
         }
-        throw e;
+      } finally {
+        // NEVER leave our own lock on disk unless we are carrying it into
+        // the swap below: normal retry, a published return, AND a refuse
+        // throw all release it (the pre-P20 code leaked the lock on the
+        // throw paths, wedging recovery behind a stamp naming our own
+        // live pid).
+        if (lockHeld && outcome !== "takeover") await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
       }
-      try {
-        // RE-VERIFY under the lock — the claim may have been taken (or
-        // (re)planted) between our check and acquiring the lock.
-        const cur = await readLease();
-        if (cur.missing) {
-          // Released under us: publish exclusive (races only another
-          // create — P19-F1: staged link, never a create-then-write).
-          if (await publishLease()) {
-            leaseHeld = true;
-            return;
-          }
-          continue;
-        }
-        if (cur.raw === "") {
-          // RE-JUDGE under the lock — never claim an empty lease blind
-          // (P18-C3 F2, sol audit cycle 3: the old branch slept 200ms and
-          // then wrote its OWN lease even when the file stayed empty —
-          // exactly the forbidden ambiguous-present takeover). A fresh
-          // empty file is a creation in progress: loop and judge the
-          // content the writer leaves. Only mtime evidence the creator
-          // died before its first write (leaseAbandoned) licenses a
-          // takeover here; anything else eventually runs out the attempt
-          // budget and refuses activation (fail closed).
-          if (!(await leaseAbandoned())) {
-            await sleep(200);
-            continue;
-          }
-          log(`host-lease: empty lease on ${epPath} older than ${ABANDON_AFTER_MS}ms (creator died before first write) — taking over`);
+      if (lockHeld && outcome === "takeover") {
+        // Lock still ours and fence-verified: swap the claim atomically
+        // (rename — a reader never sees a mix), then release the lock.
+        // replaceLeaseUnderLock re-checks after the swap that the lease is
+        // still OUR claim (P20-F1 belt: a mid-swap lock theft makes us
+        // walk away rather than proceed believing we hold the episode).
+        try {
           await replaceLeaseUnderLock();
           leaseHeld = true;
           return;
+        } finally {
+          await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
         }
-        const curPid = leasePidOf(cur.raw);
-        if (curPid === process.pid) refuseSameProcess();
-        if (curPid !== undefined && pidAlive(curPid)) refuseLive(curPid);
-        // P19-F1: an ambiguous (unparseable) lease still needs the abandon
-        // bound under the lock too — freshness is re-judged, not assumed.
-        if (curPid === undefined && cur.raw !== "" && !(await leaseAbandoned())) {
-          await sleep(50);
-          continue;
-        }
-        // Still stale under the lock — take over, disclosed.
-        log(`host-lease: stale lease on ${epPath} (holder ${curPid ?? "unknown"} not alive) — taking over`);
-        await replaceLeaseUnderLock();
+      }
+      if (outcome === "published") {
         leaseHeld = true;
         return;
-      } finally {
-        if (lockHeld) await rm(leaseLockPath, { recursive: true, force: true }).catch(() => {});
       }
+      await sleep(50);
     }
     throw new Error(`host: episode ${graph.episodeId} lease claim stayed contended (40 attempts on ${leasePath}) — refusing to activate (P18-C3)`);
   };
