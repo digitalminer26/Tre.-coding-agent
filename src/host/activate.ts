@@ -165,56 +165,157 @@ export function exitCodeForStop(stopped: string): number {
   }
 }
 
+// ─── Log hardening (P18-A2) ───────────────────────────────────────────────
+
+/** P18-A2 (sol audit cycle 1): every operator-visible line this binary
+ *  writes crosses here FIRST. The untrusted material reaching the log is
+ *  argv verbatim (usage errors echo `--flag <value>`), filesystem paths,
+ *  and Error text from the loop — any of which can carry newlines (forging
+ *  a second, dispatch-shaped log line), ANSI/control sequences (terminal
+ *  takeover of the operator's terminal), or unbounded length. The hardening
+ *  is a single-line, control-free, length-bounded, printable-only rendering;
+ *  a log line can never execute, paginate, or fake another line. */
+export const LOG_LINE_CAP = 1000;
+export function sanitizeLogLine(line: string): string {
+  // eslint-disable-next-line no-control-regex
+  const printable = String(line).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/g, "\u2423");
+  // P18-C1 F5 (audit): bare \r survived the LF/CRLF pass and a lone CR is
+  // a terminal CURSOR-RETURN — "done ✔\r          " visually erases the
+  // line in most terminals, which is the same injection class the LF pass
+  // exists to stop. A bare CR renders as the same visible ⏎ marker.
+  const one = printable.replace(/\r\n|\n|\r/g, " ⏎ ");
+  // P18-C2 F9 (sol audit cycle 1): U+2028/U+2029 are LINE SEPARATORS for
+  // Unicode-aware viewers/JSON consumers — they must break visibly like
+  // LF did. And the bidi controls (U+202A–U+202E, U+2066–U+2069, LRM/RLM)
+  // reorder operator-visible text (a U+202E after "rm -" renders the rest
+  // of the line in the WRONG visual order). Both render as the same
+  // visible ␦ marker — no reordering, no invisible break, no forgery.
+  const flat = one
+    .replace(/[\u2028\u2029]/g, " ⏎ ")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "\u2426");
+  if (flat.length <= LOG_LINE_CAP) return flat;
+  return `${flat.slice(0, LOG_LINE_CAP - 3)}\u2026`;
+}
+
+/** Compose a sink that sanitizes each untrusted line before writing it
+ *  (P18-A2). Trusted multi-line text (USAGE) is emitted through the raw
+ *  sink by the caller; everything derived from argv/paths/errors goes
+ *  through this. */
+export function hardenedLog(log: (line: string) => void): (line: string) => void {
+  return (line: string) => log(sanitizeLogLine(line));
+}
+
 // ─── Entry ─────────────────────────────────────────────────────────────────
 
 /** Run the activation. Returns the exit code; never throws — a host
- *  setup failure (bad graph, unreadable episode) is reported as exit 1. */
-export async function activate(argv: string[], log: (line: string) => void = (l) => process.stderr.write(`${l}\n`)): Promise<number> {
-  const parsed = parseActivateArgs(argv);
-  if ("help" in parsed) {
-    log(USAGE);
-    return 0;
-  }
-  if ("error" in parsed) {
-    log(parsed.error);
-    log("");
-    log(USAGE);
-    return 2;
-  }
-  const args = parsed;
-
-  const deliver = args.telegram
-    ? (() => {
-        const bridge = makeTelegramBridge(process.cwd());
-        if (!bridge.enabled) {
-          log("telegram: bridge disabled (no machine config or helper) — escalations disclose as NOT delivered");
-        }
-        return makeTelegramDeliver(bridge);
-      })()
-    : undefined;
-
+ *  setup failure (bad graph, unreadable episode, Telegram wiring failure)
+ *  is reported as exit 1 (P18-A5: the Telegram factory is INSIDE the
+ *  never-throw boundary — before this it could reject the API or crash
+ *  the CLI as an unhandled rejection). */
+export async function activate(argv: string[], logRaw: (line: string) => void = (l) => process.stderr.write(`${l}\n`)): Promise<number> {
+  // P18-C2 F10 (sol audit cycle 1): the never-throw contract covers the
+  // WHOLE entry, including its reporting. `logRaw` is caller-supplied and
+  // may throw (a closed stderr, a hostile test double) — that must not
+  // escape as a rejection, not even while reporting a caught failure.
+  // Every sink call is individually firewalled; if even the hardened
+  // render throws, the line is dropped (the exit code still returns).
+  const log = (line: string): void => {
+    try { logRaw(sanitizeLogLine(line)); } catch { /* sink failed: drop, never escape */ }
+  };
+  const logTrusted = (line: string): void => {
+    try { logRaw(line); } catch { /* sink failed: drop, never escape */ }
+  };
   try {
-    const res = await runHostEpisode({
-      graphPath: args.graphPath,
-      taskId: args.taskId,
-      grantedBy: args.grantedBy,
-      ...(args.episodesRoot !== undefined ? { episodesRoot: args.episodesRoot } : {}),
-      ...(args.worktreePath !== undefined ? { worktreePath: args.worktreePath } : {}),
-      ...(args.workerCommand !== undefined ? { workerCommand: args.workerCommand } : {}),
-      ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
-      ...(deliver !== undefined ? { escalationDeliver: deliver } : {}),
-      log,
-    });
-    const r = res.result;
-    log(`episode ${res.episodePath} stopped: ${r.stopped}${r.detail !== undefined ? ` (${r.detail})` : ""} iterations=${r.iterations.length} investigations=${r.investigationCount} steer=${res.steerStats.linesRead}/${res.steerStats.injected}`);
-    if (r.error !== undefined) {
-      log(`loop error: ${r.error.name}: ${r.error.message}`);
+    const parsed = parseActivateArgs(argv);
+    if ("help" in parsed) {
+      logTrusted(USAGE); // trusted, built-in multi-line text
+      return 0;
     }
-    return exitCodeForStop(r.stopped);
+    if ("error" in parsed) {
+      log(parsed.error);
+      logTrusted("");
+      logTrusted(USAGE);
+      return 2;
+    }
+    const args = parsed;
+
+    let deliver: ReturnType<typeof makeTelegramDeliver> | undefined;
+    try {
+      deliver = args.telegram
+        ? (() => {
+            const bridge = makeTelegramBridge(process.cwd());
+            if (!bridge.enabled) {
+              log("telegram: bridge disabled (no machine config or helper) — escalations disclose as NOT delivered");
+            }
+            return makeTelegramDeliver(bridge);
+          })()
+        : undefined;
+    } catch (err) {
+      // P18-A5: setup (bridge construction) failed — honest exit 1, still
+      // inside the never-throw contract.
+      log(`setup failed: ${safeErrText(err)}`);
+      return 1;
+    }
+
+    try {
+      const res = await runHostEpisode({
+        graphPath: args.graphPath,
+        taskId: args.taskId,
+        grantedBy: args.grantedBy,
+        ...(args.episodesRoot !== undefined ? { episodesRoot: args.episodesRoot } : {}),
+        ...(args.worktreePath !== undefined ? { worktreePath: args.worktreePath } : {}),
+        ...(args.workerCommand !== undefined ? { workerCommand: args.workerCommand } : {}),
+        ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
+        ...(deliver !== undefined ? { escalationDeliver: deliver } : {}),
+        log,
+      });
+      const r = res.result;
+      log(`episode ${res.episodePath} stopped: ${r.stopped}${r.detail !== undefined ? ` (${r.detail})` : ""} iterations=${r.iterations.length} investigations=${r.investigationCount} steer=${res.steerStats.linesRead}/${res.steerStats.injected}`);
+      if (r.error !== undefined) {
+        log(`loop error: ${safeErrText(r.error)}`);
+      }
+      return exitCodeForStop(r.stopped);
+    } catch (err) {
+      // Host setup failure (before any loop state existed): honest exit 1.
+      log(`setup failed: ${safeErrText(err)}`);
+      return 1;
+    }
   } catch (err) {
-    // Host setup failure (before any loop state existed): honest exit 1.
-    log(`setup failed: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
+    // P18-C2 F10: the LAST firewall — argument parsing, the usage path,
+    // or anything above that throws (a trapping argv element reaching a
+    // sink) is reported through the firewalled log and exits 1. activate
+    // resolves with a code; it never rejects.
+    log(`activation error: ${safeErrText(err)}`);
     return 1;
+  }
+}
+
+/** F10: render a caught value for the log WITHOUT trusting it — `name`
+ *  and `message` are getter-attackable on a hostile Error, and a plain
+ *  value's `toString` may throw. This runs inside catch blocks, so it
+ *  must never throw itself. */
+function safeErrText(err: unknown): string {
+  try {
+    if (err instanceof Error) {
+      let name = "Error";
+      try { if (typeof err.name === "string") name = err.name; } catch { /* trapped name */ }
+      let message = "";
+      try { if (typeof err.message === "string") message = err.message; } catch { /* trapped message */ }
+      return `${name}: ${message}`;
+    }
+    if (err !== null && typeof err === "object") {
+      // A plain {name, message} pair (the loop's stop-result error shape)
+      // must render as before, with each property read through its guard.
+      let name: string | undefined;
+      let message: string | undefined;
+      try { if (typeof (err as { name?: unknown }).name === "string") name = (err as { name: string }).name; } catch { /* trapped */ }
+      try { if (typeof (err as { message?: unknown }).message === "string") message = (err as { message: string }).message; } catch { /* trapped */ }
+      if (name !== undefined || message !== undefined) return `${name ?? "error"}: ${message ?? ""}`;
+    }
+    return String(err);
+  } catch {
+    return "unprintable error";
   }
 }
 

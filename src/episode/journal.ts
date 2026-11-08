@@ -55,12 +55,53 @@ export async function createEpisodeLayout(root: string, episodeId: string, graph
   // is idempotent, so a retry completes in place, and no graph.json means
   // the episode never existed for any reader (graph presence is the commit
   // marker, §13.1 crash-scope discipline).
+  //
+  // P18-A3 (sol audit cycle 1): idempotent means SAFE-TO-REPEAT, not
+  // overwrite-in-place. If graph.json already exists, the incoming seed
+  // must be IDENTICAL desired state (canonically — key order-insensitive)
+  // or this call throws WITHOUT touching anything: a caller whose episode
+  // is already live (or who targets the wrong episode) used to replace
+  // the running episode's desired scope before its own validation failed.
+  // Legitimate evolution of a live graph (a rung-4 rewriteTask bump) goes
+  // through writeEpisodeGraph, never through re-seeding here.
+  const graphFile = join(dir, "graph.json");
+  const existing = await readFile(graphFile, "utf8").catch((e: unknown) => {
+    const err = e as NodeJS.ErrnoException;
+    if (err && err.code === "ENOENT") return undefined;
+    throw err;
+  });
+  if (existing !== undefined) {
+    let current: unknown;
+    try {
+      current = JSON.parse(existing);
+    } catch {
+      // graph.json is the commit marker; a corrupt marker is corruption,
+      // not a re-seed invitation. Fail closed — never overwrite blind.
+      throw new EpisodeSchemaError(`episode ${episodeId}: existing graph.json is corrupt — refusing to overwrite`);
+    }
+    if (canonicalJson(current) !== canonicalJson(seed)) {
+      throw new EpisodeSchemaError(
+        `episode ${episodeId} already exists with a DIFFERENT graph — refusing to overwrite live desired state (P18-A3)`,
+      );
+    }
+    // Identical seed: true idempotent no-op on the graph.
+    return dir;
+  }
   await mkdir(join(dir, "prompts"), { recursive: true });
   await mkdir(join(dir, "events"), { recursive: true });
   await mkdir(join(dir, "sessions"), { recursive: true });
   await mkdir(join(dir, "wt"), { recursive: true });
-  await writeEpisodeGraph(join(dir, "graph.json"), seed);
+  await writeEpisodeGraph(graphFile, seed);
   return dir;
+}
+
+/** Canonical JSON for identity comparison: recursively key-sorted, so two
+ *  parses of the same desired state always compare equal (P18-A3). */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
 }
 
 // ────────────────────────────── S3 — graph.json ─────────────────────────────

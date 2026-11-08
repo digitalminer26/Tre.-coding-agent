@@ -19,7 +19,7 @@
  * TUI untouched (see HANDOFF for the future consolidation).
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -47,6 +47,66 @@ export interface TelegramMessage {
   text: string;
 }
 
+/** P18-A1 (sol audit cycle 1): the outcome of one helper `send`. A zero
+ *  helper exit is NOT an acknowledgment of a fresh network send — the
+ *  installed helper's duplicate guard prints and exits 0 WITHOUT touching
+ *  the API. Callers that claim delivery (docs/19 §5: delivered vs refused)
+ *  must consume this outcome, never infer delivery from process success. */
+export interface TelegramSendOutcome {
+  /** True when the helper reported it actually sent (`sent N message(s)`). */
+  sent: boolean;
+  /** True when the helper explicitly SUPPRESSED the send (duplicate guard). */
+  skippedDuplicate: boolean;
+  /** The helper's stdout, newline-flattened + bounded — safe for logs. */
+  detail: string;
+}
+
+const HELPER_DETAIL_CAP = 200;
+
+// P18-C3 (audit cycle 2, finding 1): the grammar below is PINNED TO THE
+// INSTALLED HELPER'S REAL PRINTS (telegram.py: `telegram: sent {n}
+// message(s) to chat {chat}` and `telegram: skipped duplicate send (same
+// content sent {age}s ago < {cooldown}s cooldown; --force to override)`).
+// An earlier revision matched a SHORT HYPOTHETICAL form (`telegram: sent
+// 1 message(s)`, no destination) that the real helper never prints — so
+// every genuine send classified as unattested and every real suppression
+// burned its budget. Short forms are now NOT believed: only the full real
+// grammar, at column zero, counts. Fail-closed directions are preserved:
+// unrecognized output is unattested (no delivery claim), and a
+// contradictory transcript attests nothing at all.
+const HELPER_SENT_RE = /^telegram: sent ([1-9]\d*) message\(s\) to chat \S+\r?$/;
+const HELPER_SKIP_RE = /^telegram: skipped duplicate send \(same content sent \d+s ago < \d+s cooldown; --force to override\)\r?$/;
+
+/** Classify helper send stdout (P18-A1). Pure: no I/O. `sent:` requires
+ *  the helper's success line at COLUMN ZERO matching the complete helper
+ *  grammar with a POSITIVE message count and a destination — a hostile
+ *  line embedded in task text can't fake it (P18-C2 F8, sol audit cycle
+ *  1: an indented line, `sent 0 message(s)`, or a suffixed line used to
+ *  attest delivery; and success + suppression in one transcript is
+ *  contradictory output, so NEITHER claim stands — fail closed).
+ *  Unrecognized output is `sent:false` (no delivery claim); the escalation
+ *  consumer turns that into a failed send so it is disclosed, and an
+ *  explicit suppression refunds the redeliver budget. */
+export function classifyTelegramSendOutput(stdout: string): TelegramSendOutcome {
+  const detail = String(stdout).replace(/\s+/g, " ").trim().slice(0, HELPER_DETAIL_CAP);
+  let sent = false;
+  let skippedDuplicate = false;
+  for (const line of String(stdout).split("\n")) {
+    // Column-zero, whole-line match against the REAL helper prints (an
+    // optional trailing CR from a CRLF-spawning helper is the ONLY
+    // tolerated suffix).
+    if (HELPER_SENT_RE.test(line)) sent = true;
+    if (HELPER_SKIP_RE.test(line)) skippedDuplicate = true;
+  }
+  // F8: contradictory status output attests NOTHING — neither delivery
+  // nor an intentional suppression. Both claims fall to false (unattested).
+  if (sent && skippedDuplicate) {
+    sent = false;
+    skippedDuplicate = false;
+  }
+  return { sent, skippedDuplicate, detail };
+}
+
 /** The driver's I/O seam. `pollLong` blocks up to `timeoutSec` for a message
  *  (returning null on timeout) and MUST honor `signal` (the driver kills the
  *  in-flight poll on stop). Throws on a helper failure (the driver backs off). */
@@ -55,8 +115,13 @@ export interface TelegramBridge {
   enabled: boolean;
   /** One long-poll: block up to `timeoutSec` seconds. Null when no message. */
   pollLong(timeoutSec: number, signal?: AbortSignal): Promise<TelegramMessage[] | null>;
-  /** Send `text` to the configured chat (chunked by the helper). */
+  /** Send `text` to the configured chat (chunked by the helper). Resolves
+   *  void for driver compatibility; `sendResult` carries the classified
+   *  outcome (P18-A1) for delivery-claiming callers. */
   send(text: string): Promise<void>;
+  /** Send AND report the classified helper outcome (P18-A1). Throws only
+   *  when the helper itself failed (non-zero exit / spawn failure). */
+  sendResult?(text: string): Promise<TelegramSendOutcome>;
 }
 
 /**
@@ -106,6 +171,42 @@ export function makeTelegramBridge(
     );
     return msgs.length > 0 ? msgs : null;
   };
+  // P18-C2 F6 (sol audit cycle 1): a per-send EXCLUSIVE file, not the
+  // shared out.txt. Two concurrent sends (driver idle-reply + escalation
+  // deliver, or two episodes on one machine) used to overwrite each other
+  // before the helper read the file — A's helper could send B's body and
+  // print a legitimate success line, attesting delivery of a message the
+  // human never received. `wx` proves the name is fresh; the file is
+  // removed once the helper has returned.
+  let sendSeq = 0;
+  const sendImpl = async (text: string): Promise<TelegramSendOutcome> => {
+    // The write tool is workspace-confined, but this is the driver (not the
+    // agent under test) — a direct fs write of the message body is the same
+    // boundary the skill's send flow uses.
+    mkdirSync(outDir, { recursive: true });
+    let file = "";
+    for (let tries = 0; tries < 5; tries++) {
+      sendSeq += 1;
+      const candidate = join(outDir, `out.${process.pid}.${sendSeq}.${Math.floor(Math.random() * 2 ** 32).toString(36)}.txt`);
+      try {
+        writeFileSync(candidate, text, { encoding: "utf8", flag: "wx" });
+        file = candidate;
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // name collision (astronomically unlikely): retry with a new one
+      }
+    }
+    if (file === "") throw new Error("telegram: could not create an exclusive send file");
+    try {
+      // P18-A1: capture the helper's stdout — exit 0 alone is NOT a send
+      // (the duplicate guard prints and exits 0 without the API).
+      const out = await run(["send", file], 60_000);
+      return classifyTelegramSendOutput(out);
+    } finally {
+      try { rmSync(file, { force: true }); } catch { /* best effort */ }
+    }
+  };
   return {
     enabled,
     async pollLong(timeoutSec, signal) {
@@ -119,13 +220,10 @@ export function makeTelegramBridge(
       return parse(out);
     },
     async send(text) {
-      const file = join(outDir, "out.txt");
-      // The write tool is workspace-confined, but this is the driver (not the
-      // agent under test) — a direct fs write of the message body is the same
-      // boundary the skill's send flow uses.
-      mkdirSync(outDir, { recursive: true });
-      writeFileSync(file, text, "utf8");
-      await run(["send", file], 60_000);
+      await sendImpl(text);
+    },
+    async sendResult(text) {
+      return sendImpl(text);
     },
   };
 }

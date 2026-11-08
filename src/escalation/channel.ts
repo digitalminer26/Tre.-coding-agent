@@ -335,6 +335,14 @@ export interface EscalationRecord {
    *  budget for a later raise (the exact bypass the c3 audit found).
    *  Additive and monotone: forging it can only REFUSE delivery. */
   countUnverifiable?: true;
+  /** P18-C2 F3 (sol audit cycle 1): a per-append unique identity, distinct
+   *  across processes for two instances that derive the same `esc…#0` from
+   *  one empty log at one clock tick. Corrections bind to it (refClaim) so
+   *  a refund can only ever match the exact line its raise appended — a
+   *  merged log can no longer refund another instance's successful send.
+   *  Additive: a line without it is pre-P18-C2 and falls back to (id,ts)
+   *  binding. */
+  claim?: string;
   /** sha256 hex of the question-relevant fields (blocker|sorted evidence|
    *  attempts count|decisionNeeded) — the re-notice "is this new state?" test. */
   evidenceDigest: string;
@@ -504,6 +512,16 @@ function parseEscalationLine(line: unknown): EscalationRecord | undefined {
   const cuOwn = ownData(line, 'countUnverifiable');
   const countUnverifiable = cuOwn.threw === true || cuOwn.accessor === true
     || (cuOwn.present && cuOwn.value !== undefined && cuOwn.value !== false);
+  // P18-C2 F3: the claim identity rides through the same fence. A valid
+  // string is kept (corrections bind to it); ABSENT is a pre-P18-C2 line
+  // ((id,ts) binding). PRESENT-but-malformed (F4 fail-closed, same rule
+  // as a correction's refClaim): unreadable — skip the line, disclosed as
+  // such by the replay scan; never a silent downgrade to legacy binding.
+  const claimOwn = ownData(line, 'claim');
+  if (claimOwn.threw || claimOwn.accessor) return undefined;
+  const claimPresent = claimOwn.present && claimOwn.value !== undefined;
+  if (claimPresent && (typeof claimOwn.value !== 'string' || claimOwn.value === '' || claimOwn.value.length > 256)) return undefined;
+  const claim = claimPresent ? (claimOwn.value as string) : undefined;
   const attemptId = boundedStr(ownData(line, 'attemptId').value);
   const dn = decisionNeededRaw !== undefined && decisionNeededRaw !== '' ? decisionNeededRaw : DEFAULT_DECISION_NEEDED[blocker];
   const recOut: EscalationRecord = {
@@ -521,6 +539,7 @@ function parseEscalationLine(line: unknown): EscalationRecord | undefined {
     attempts: attCopy.attempts,
     reNotice,
     deliveredCount,
+    ...(claim !== undefined ? { claim } : {}),
     ...(countUnverifiable ? { countUnverifiable: true as const } : {}),
     // Recomputed from the RESOLVED fields — identical to what raise
     // baked in for the same line, so cross-restart dedup agrees.
@@ -560,19 +579,79 @@ function parseResolutionLine(line: unknown): ResolutionRecord | undefined {
   };
 }
 
-/** W13-F1: parse a `deliveryRefused` correction line into its ref, or
- *  undefined (skip). The line records "the send for `ref` was refused —
- *  give the budget back"; nothing else on it is load-bearing, so ONLY
- *  schema/kind/ref must hold (same minimal read as lenientResolutionRef,
- *  same hostile-input fence: accessors never invoked, traps → undefined). */
-function parseDeliveryRefusedLine(line: unknown): string | undefined {
+/** W13-F1: parse a `deliveryRefused` correction line into its ref (and
+ *  P18-A4: the id of the escalation LINE it refunds, `refId`, when the
+ *  line carries one), or undefined (skip). The line records "the send for
+ *  `ref` was refused — give the budget back"; nothing else on it is
+ *  load-bearing, so ONLY schema/kind/ref must hold (same minimal read as
+ *  lenientResolutionRef, same hostile-input fence: accessors never
+ *  invoked, traps → undefined). A missing/invalid refId is LEGACY (lines
+ *  written before P18-A4) — replay applies those to the key's latest
+ *  line, exactly the old behavior; a PRESENT refId is identity-bound. */
+export interface RefusalCorrection {
+  ref: string;
+  /** P18-C2 F3: the per-append claim identity of the escalation LINE this
+   *  refund is bound to (present on post-P18-C2 corrections; the strongest
+   *  binding — unique across processes and log merges). */
+  refClaim?: string;
+  /** The escalation-line id this refund is bound to (absent = legacy). */
+  refId?: string;
+  /** The escalation-line ts this refund is bound to (absent = legacy). */
+  refTs?: number;
+}
+function parseDeliveryRefusedLine(line: unknown): RefusalCorrection | undefined {
   if (!isPlainObj(line)) return undefined;
   const schemaV = ownData(line, 'schema');
   if (schemaV.threw || schemaV.value !== ESCALATION_SCHEMA) return undefined;
   const kindV = ownData(line, 'kind');
   if (kindV.threw || kindV.value !== 'deliveryRefused') return undefined;
   const ref = ownData(line, 'ref').value;
-  return isEscalationId(ref) ? ref : undefined;
+  if (!isEscalationId(ref)) return undefined;
+  // P18-C2 F3: the NEW binding is a claim identity (unique per append,
+  // so a merged log can never match two lines). A trap → unreadable.
+  // P18-C3 (audit cycle 2, finding 3): an ACCESSOR binding is the same
+  // hostile class as a trap (get/set fields never invoke) — it must make
+  // the line unreadable, NEVER silently downgrade to a legacy refund.
+  const refClaimV = ownData(line, 'refClaim');
+  if (refClaimV.threw || refClaimV.accessor) return undefined;
+  // P18-C3 F1 (sol audit cycle 3): the descriptor rule applies to the
+  // CLAIM binding too — a PRESENT own-data `refClaim: undefined` is
+  // present-but-invalid (in-memory hostile input), NOT absent. The old
+  // `value !== undefined` test let it fall through as a legacy-shaped
+  // correction and spend an unrestricted refund. Fail closed.
+  if (refClaimV.present && refClaimV.value === undefined) return undefined;
+  let refClaim: string | undefined;
+  if (refClaimV.present) {
+    // P18-C2 F4 (sol audit cycle 1): a PRESENT-but-malformed claim is
+    // unreadable (skip), never a silent downgrade to a legacy refund.
+    if (typeof refClaimV.value !== 'string' || refClaimV.value === '' || refClaimV.value.length > 256) return undefined;
+    refClaim = refClaimV.value;
+  }
+  const refIdV = ownData(line, 'refId');
+  // P18-A4: a PRESENT refId/refTs is identity-bound; a trap or accessor
+  // makes the line unreadable (undefined), a genuinely absent pair legacy
+  // (applied key-wise like pre-P18-A4 corrections).
+  if (refIdV.threw || refIdV.accessor) return undefined;
+  const refTsV = ownData(line, 'refTs');
+  if (refTsV.threw || refTsV.accessor) return undefined;
+  // P18-C2 F4 (sol audit cycle 1): LEGACY means genuinely ABSENT —
+  // `refId:42` or `refTs:"x"` present-and-invalid is malformed data, and
+  // must NOT restore the pre-P18-A4 unrestricted refund (that downgrade
+  // was a fail-OPEN). P18-C3 tightens "absent" to the DESCRIPTOR: a
+  // present key whose value is `undefined` (in-memory hostile input —
+  // JSON can't express it, but a live log object can) is present-but-
+  // invalid, not absent, and fails closed like any other malformed
+  // binding. Any present binding property requires the full valid pair;
+  // anything else skips the line (unreadable, no spend).
+  const refIdPresent = refIdV.present;
+  const refTsPresent = refTsV.present;
+  if (!refIdPresent && !refTsPresent) {
+    return refClaim !== undefined ? { ref, refClaim } : { ref }; // genuinely legacy (or claim-only correction)
+  }
+  const refId = typeof refIdV.value === 'string' && refIdV.value !== '' && refIdV.value.length <= 256 ? refIdV.value : undefined;
+  const refTs = typeof refTsV.value === 'number' && Number.isFinite(refTsV.value) ? refTsV.value : undefined;
+  if (refId === undefined || refTs === undefined) return undefined; // half-bound or malformed → skip (fail closed)
+  return { ref, refId, refTs, ...(refClaim !== undefined ? { refClaim } : {}) };
 }
 
 /** Cycle-4 F4: does the line CLAIM the escalation schema (either kind)?
@@ -682,6 +761,13 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
   // Cycle-3 F10: a per-process random salt makes resolution ids distinct
   // across restarts/colliding processes (resSeq resets to 0 after a restart).
   const resSalt = Math.random().toString(36).slice(2, 10);
+  // P18-C2 F3 (sol audit cycle 1): per-append claim identity. Two host
+  // processes that derive the same `${escalationId}#${reNotice}` from one
+  // shared log at one clock tick get DISTINCT claims (salt is per-process,
+  // seq per-append), so a refund can only ever be attributed to the exact
+  // line its own raise appended — never another instance's send.
+  const claimSalt = Math.random().toString(36).slice(2, 10);
+  let claimSeq = 0;
 
   const raise = (req: RaiseRequest): Promise<RaiseResult | null> =>
     enqueue(() => raisePrepare(req)).then((p) => (p === null ? null : deliverAndFinish(p)));
@@ -939,6 +1025,8 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       attempts: attCopy.attempts,
       reNotice,
       deliveredCount,
+      // P18-C2 F3: unique per append — corrections bind to it (refClaim).
+      claim: `${escalationId}#${reNotice}-${claimSalt}-${(claimSeq += 1).toString(36)}`,
       // Loop-c3 F1: an unverifiable-count refusal carries its own evidence
       // — replay must never read this line's deliveredCount as budget proof.
       ...(unverifiableKeys.has(escalationId) ? { countUnverifiable: true as const } : {}),
@@ -984,6 +1072,32 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           // succeeded, the name is just untrusted; only a proxy trap that
           // throws getOwnPropertyDescriptor, or a non-object, is a defect).
           const chOwn = ownData(r, 'channel');
+          // P18-A6 (sol audit cycle 1): a THROWING descriptor trap is a
+          // structural port defect — the port cannot even provide a safe
+          // result, so NOTHING it claims is believed: the delivery is a
+          // FAILURE (documented rule, this file §B3). Before, a trap fell
+          // through to the success branch with an undefined name — the
+          // host logged 'dispatched' for a port that could not attest
+          // anything. An ordinary ACCESSOR keeps the documented
+          // name-only drop (the act stands).
+          if (chOwn.threw) {
+            disclosed.push('port-defect:channel-descriptor-trap');
+            channel = 'escalation:refused:port-defect';
+            refused = false; // not a refundable refusal — a defect stays burned
+            delivered = false;
+            delivery = { ok: false, error: 'deliver:descriptor-trap' };
+            // Skip the refusal/refund block below by falling out with the
+            // defect facts set (delivered:false is the whole story).
+            const defectOut: RaiseResult = {
+              record: Object.freeze(rec) as EscalationRecord,
+              delivered: false,
+              ...(reasonForFinish !== undefined ? { reason: reasonForFinish } : {}),
+              channel,
+              delivery,
+              disclosed: [...disclosed],
+            };
+            return defectOut;
+          }
           const chRaw = chOwn.threw ? undefined : boundedStr(chOwn.value);
           // W13-F4b (audit round 2): a port-supplied name is LOG BOUND —
           // the host prints it after 'escalate NOT delivered (' /
@@ -1059,6 +1173,19 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
           kind: 'deliveryRefused',
           id: `${rec.escalationId}#refused-${rec.id}`,
           ref: rec.escalationId,
+          // P18-A4 (sol audit cycle 1): identity binding — the refund is
+          // tied to the escalation LINE whose pre-act burn it restores.
+          // Replay only applies a bound refund while that line is still
+          // the key's latest record, so a second instance's successful
+          // send (a newer line) can never be refunded by another
+          // instance's refusal correction.
+          refId: rec.id,
+          refTs: rec.ts,
+          // P18-C2 F3: the claim of the exact line this refund restores —
+          // replay only applies it to a record carrying the SAME claim, so
+          // a merged log can never match two lines (the A4 interleaving is
+          // closed by identity, not just by latest-line position).
+          ...(rec.claim !== undefined ? { refClaim: rec.claim } : {}),
           ts: safeTs(deps.now),
         });
       } catch {
@@ -1147,7 +1274,11 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     const seen = new Set<string>();
     let lenientClosed = 0; // cycle-4 F4: closes the strict parse could not justify
     let unreadable = 0;    // cycle-4 F4: lines the scan saw but could not read at all
-    const refusedWindow = new Map<string, number>(); // W13-F1: refunds seen in this window
+    const refusedWindow = new Map<string, number>(); // W13-F1: legacy refunds seen in this window
+    const boundWindow = new Map<string, RefusalCorrection[]>(); // P18-A4 + C2-F3: bound refunds (claim-aware)
+    const lastLineId = new Map<string, string>();    // P18-A4: key → latest escalation line id
+    const lastLineTs = new Map<string, number>();    // P18-A4: key → latest escalation line ts
+    const lastLineClaim = new Map<string, string | undefined>(); // C2-F3: key → latest line's claim (undefined = legacy line)
     if (deps.read === undefined) return { open: out, ok: false, truncated: false, seen, lenientClosed, unreadable };
     let copy: LineCopy | undefined;
     try {
@@ -1166,6 +1297,10 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
         // the key's LAST line are unapplied. Reset so a successful send
         // past a refusal is never over-refunded.
         refusedWindow.delete(esc.escalationId);
+        boundWindow.delete(esc.escalationId); // P18-A4: a newer line bakes in refunds bound to it
+        lastLineId.set(esc.escalationId, esc.id);
+        lastLineTs.set(esc.escalationId, esc.ts);
+        lastLineClaim.set(esc.escalationId, esc.claim); // C2-F3: latest line's claim for correction binding
         if ((noticeFloor.get(esc.escalationId) ?? -1) < esc.reNotice) noticeFloor.set(esc.escalationId, esc.reNotice);
         if ((ledgerMaxScan.get(esc.escalationId) ?? -1) < esc.deliveredCount) ledgerMaxScan.set(esc.escalationId, esc.deliveredCount); // cycle-4 HIGH-2
         // Loop-c3 F1: a line that admits an unverifiable count keeps the
@@ -1202,7 +1337,13 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
       // unreadable (same rule as a resolution with a trapped ref).
       const refus = parseDeliveryRefusedLine(line);
       if (refus !== undefined) {
-        refusedWindow.set(refus, (refusedWindow.get(refus) ?? 0) + 1);
+        if (refus.refId !== undefined || refus.refClaim !== undefined) {
+          const arr = boundWindow.get(refus.ref) ?? [];
+          arr.push(refus);
+          boundWindow.set(refus.ref, arr);
+        } else {
+          refusedWindow.set(refus.ref, (refusedWindow.get(refus.ref) ?? 0) + 1);
+        }
         continue;
       }
       // Neither parse accepted the line (foreign entry, corruption, or a
@@ -1229,7 +1370,71 @@ export function makeEscalationChannel(deps: EscalationDeps): EscalationChannel {
     // restores nothing on the lifetime ledger (the audit's review note).
     // The correction line is host-appended only (raise() on refusal); the
     // log is the trusted append domain (same as escalation lines).
-    if (refusedWindow.size > 0) {
+    if (refusedWindow.size > 0 || boundWindow.size > 0) {
+      // P18-A4: a BOUND refund applies only while the line it names is
+      // still the key's latest record — it can never refund a burn that
+      // a NEWER line (e.g. another instance's successful send) earned.
+      // A refund whose named line is no longer latest is dropped: the
+      // escalation line that replaced it already baked in every refund
+      // applied at its write time (same invariant the legacy window
+      // reset enforces), and cross-instance, dropping is the ONLY safe
+      // side — a refund that cannot be attributed must not spend.
+      // P18-C2 F5 (sol audit cycle 1): the DEDUPE key is the COMPLETE
+      // identity: claim when the correction carries one (collision-free
+      // across processes and merges), else (refId,refTs). Two of the
+      // pre-F3 corrections for the SAME (id,ts) from independent processes
+      // are indistinguishable — they refund ONCE (fail closed on the
+      // count: never double-spend a burn that may exist only once).
+      // P18-C3 (audit cycle 2, finding 4): the identity used to be keyed
+      // by the BINDING FORMAT, so a claimed correction and a claim-less
+      // bound correction naming the SAME append landed in two namespaces
+      // and each refunded the same burn (reproduced: count 2 -> 0). A
+      // refund is a claim on ONE TARGET APPEND, so the dedupe key is the
+      // RESOLVED TARGET IDENTITY of the append the correction applies to
+      // (its claim when the line has one, else id@ts) — every surviving
+      // correction provably targets the key's latest append, so one
+      // namespace covers them all regardless of binding format.
+      for (const [ref, corrections] of boundWindow) {
+        let rec = out.get(ref);
+        const latestId = lastLineId.get(ref);
+        const latestTs = lastLineTs.get(ref);
+        const latestClaim = lastLineClaim.get(ref);
+        // The single identity every applying correction resolves to:
+        // the key's latest append (claim-preferred; a legacy latest line
+        // falls back to id@ts). Corrections naming anything else are
+        // dropped below and never spend.
+        const targetIdentity = latestClaim !== undefined && latestClaim !== ""
+          ? `claim:${latestClaim}`
+          : `${latestId ?? ""}@${latestTs ?? ""}`;
+        // A refund applies only while the line it names is still the
+        // key's LATEST record (claim when both sides have one, else
+        // id AND ts) — cross-instance corruption of another instance's
+        // earned burn is impossible to attribute, so it is dropped.
+        const seen = new Set<string>(); // idempotent: one refund per resolved target
+        let applied = 0;
+        for (const c of corrections) {
+          if (rec === undefined || rec.deliveredCount <= 0) break;
+          if (c.refClaim !== undefined) {
+            // Claimed corrections bind to the claim ALONE (unique per
+            // append): a different claim on the latest line means this
+            // refund belongs to a line that is no longer latest → drop.
+            if (latestClaim !== c.refClaim) continue;
+            if (c.refId !== undefined && (latestId !== c.refId || rec.id !== c.refId || (c.refTs !== undefined && latestTs !== c.refTs))) continue; // claimed + mispaired (id,ts) → malformed, drop
+          } else {
+            if (latestId !== c.refId || rec.id !== c.refId) continue;
+            if (c.refTs !== undefined && latestTs !== c.refTs) continue;
+          }
+          if (seen.has(targetIdentity)) continue; // same append, other binding format → no second refund
+          seen.add(targetIdentity);
+          applied += 1;
+          rec = { ...rec, deliveredCount: rec.deliveredCount - 1 };
+        }
+        if (applied > 0 && rec !== undefined) out.set(ref, rec);
+        if (!copy.truncated && applied > 0) {
+          const led = ledgerMaxScan.get(ref);
+          if (led !== undefined && led > 0) ledgerMaxScan.set(ref, Math.max(0, led - Math.min(applied, led)));
+        }
+      }
       for (const [ref, n] of refusedWindow) {
         const rec = out.get(ref);
         if (rec !== undefined && rec.deliveredCount > 0) {

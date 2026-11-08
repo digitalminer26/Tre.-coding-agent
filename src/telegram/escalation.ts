@@ -137,10 +137,25 @@ export function renderEscalation(rec: EscalationRecord): string {
  * discloses it per INV-2 — the consumer adds no catch: swallowing a
  * failed send here would hide a human-visible failure.
  */
-export function makeTelegramDeliver(bridge: Pick<TelegramBridge, 'enabled' | 'send'>): (rec: EscalationRecord) => Promise<{ channel: string; refused?: boolean }> {
+export function makeTelegramDeliver(bridge: Pick<TelegramBridge, 'enabled' | 'send'> & Partial<Pick<TelegramBridge, 'sendResult'>>): (rec: EscalationRecord) => Promise<{ channel: string; refused?: boolean }> {
   return async (rec) => {
     if (bridge !== null && typeof bridge === 'object' && bridge.enabled === false) {
       return { channel: 'telegram:disabled', refused: true };
+    }
+    // P18-A1 (sol audit cycle 1): a helper exit 0 is NOT an acknowledgment
+    // of a fresh send — the installed helper's duplicate guard prints and
+    // exits 0 WITHOUT the API. With `sendResult` available the consumer
+    // believes only the helper's own success line. A guard-suppressed send
+    // is an explicit refusal (the human was NOT asked — the redeliver
+    // budget refunds it, W13-F1); unattested output is a FAILED delivery
+    // (throw: burned + disclosed, never a silent success).
+    if (typeof bridge.sendResult === 'function') {
+      const out = await bridge.sendResult(renderEscalation(rec));
+      if (out.sent) return { channel: 'telegram' };
+      if (out.skippedDuplicate) {
+        return { channel: 'telegram:duplicate-suppressed', refused: true };
+      }
+      throw new Error(`telegram: send unattested (helper printed no success line): ${out.detail.slice(0, 160)}`);
     }
     await bridge.send(renderEscalation(rec));
     return { channel: 'telegram' };

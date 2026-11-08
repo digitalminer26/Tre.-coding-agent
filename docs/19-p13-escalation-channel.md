@@ -255,7 +255,17 @@ import it):
   ref:<escalationId>`) and the in-process mirror/ledger each give back
   exactly this attempt's burn — replay subtracts one refund per
   correction line (clamped at 0, reset by a newer escalation line), so
-  bridge-off raises no longer MUTE a question across restarts. A
+  bridge-off raises no longer MUTE a question across restarts. A refund
+  is IDENTITY-BOUND (P18-A4 + C2-F3): every escalation line carries a
+  per-append `claim` (unique across processes), the correction carries
+  `refId`/`refTs` plus `refClaim`, and replay applies the refund only
+  while the named line is still the key's latest AND the identities
+  match — a merged log can never refund another instance's successful
+  send (the sol audit's A4 interleaving). LEGACY means genuinely ABSENT
+  (C2-F4): a present-but-malformed binding (half-pair, non-string refId,
+  malformed claim) makes the line unreadable (skipped, disclosed via
+  `complete:false`), never a silent downgrade to the unrestricted legacy
+  refund; indistinguishable claim-less duplicates refund ONCE (C2-F5). A
   correction whose append fails is disclosed `refusal-correction:failed`
   and stays burned (fail closed). A send THROW is different: it stays
   burned (the attempt may have reached the human) and is disclosed via
