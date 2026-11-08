@@ -1112,17 +1112,39 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // DISCLOSED: steps 1-2 leave a microsecond absence window; it is
         // fenced for fresh creators by the lock-aware publishLease above
         // (this path holds the takeover lock across the swap). The CRASH
-        // cost of the window is disclosed too: a mover killed between the
-        // move and its claim-link leaves the lease ABSENT with our lock
-        // (live-pid stamp) standing — fresh creators fail closed
-        // ("contended", bounded by the attempt budget) until the lock
-        // passes its 30s steal bound and a dead-stamp reclaim restores
-        // service, and the `.reclaim-` original is swept by the pid-aware
-        // sweep once we are dead. Availability-only, self-healing; the
-        // pre-P20c6 blind rename had no absence window but destroyed live
+        // cost of the window is disclosed: a mover killed between the
+        // move and its claim-link leaves the lease ABSENT with the lock
+        // stamping its pid. Once that pid is DEAD the next creator's
+        // reconcileReclaims links the `.reclaim-` original back
+        // (restore-if-vacant, P20c7-F1/F2) and service self-heals
+        // immediately — no wait for the steal bound. A mover ALIVE but
+        // frozen mid-swap keeps fresh creators fail-closed ("contended",
+        // bounded by the 30s steal bound) while its workspace survives
+        // untouched. Availability-only, self-healing; the pre-P20c6
+        // blind rename had no absence window but destroyed live
         // mid-swap claims (the reproduced OVERLAPPING_WORKERS) — a
         // correctness failure, strictly worse.
         const gone = `${leasePath}.reclaim-${process.pid}.${leaseToken}`;
+        // P20c7-F1: RE-VERIFY under the lock, immediately before the
+        // move, that the lease is still what we set out to replace. The
+        // eligibility decision above was made before mkdir-raced rivals
+        // resolved; a rival that re-admitted its LIVE claim in between
+        // must not have it moved out from under it (the reproduced
+        // OVERLAPPING_WORKERS destroyed exactly such a claim). This is a
+        // check→act narrowing, NOT a fence: a rival frozen between THIS
+        // read and the rename still gets its claim moved — the residual
+        // is the disclosed P20c3-F1 class (no atomic compare-and-swap
+        // primitive exists), and reconcileReclaims restores the moved
+        // copy if we die before the relink.
+        {
+          const pre = await readLease();
+          if (!pre.missing) {
+            const prePid = leasePidOf(pre.raw);
+            if (prePid !== undefined && prePid !== process.pid && pidAlive(prePid)) {
+              throw new Error(`host: takeover claim on ${leasePath} refused pre-move re-verify (a live pid ${prePid} holds the lease — eligibility was disproved under the lock; P20c7-F1)`);
+            }
+          }
+        }
         let movedAside = false;
         try {
           await rename(leasePath, gone);
@@ -1133,31 +1155,53 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         }
         // Shared anomaly exit: self-release our claim, restore the
         // moved-aside original iff the lease is absent, then throw. The
-        // message names the TRUE outcome of each step (P20c6-F2) —
-        // "released"/"absent"/"failed", "restored"/"absent-rival"/
-        // "vanished"/"failed" — never a blanket claim that may not hold.
+        // message names the TRUE outcome of each step (P20c6-F2,
+        // refined by P20c7-F3/F4) — "released"/"absent"/"failed",
+        // "restored"/"occupied by a live claim (pid N)"/"occupied by a
+        // stale claim"/"vanished"/"restore failed (…)" /"not-moved" —
+        // never a blanket claim that may not hold.
         // The restore is a NO-REPLACE link of exactly what we moved (a
         // replacement owner's live lease is never overwritten: EEXIST
-        // means a rival holds the lease and we leave it alone), so it is
-        // a true undo of our move whatever body it carries.
+        // means the lease path holds a claim and we leave it alone), so
+        // it is a true undo of our move whatever body it carries.
+        // P20c7-F3: `gone` is unlinked ONLY once it is provably garbage
+        // (the restore linked it back, the occupant outranks it, or it
+        // vanished). A FAILED restore keeps it: `gone` is the sole
+        // recovery source and the pid-aware reconcile re-links it after
+        // we exit.
         const anomaly = async (why: string): Promise<never> => {
           const release = await releaseOursClaim();
-          let restore: "restored" | "absent-rival" | "vanished" | "failed" = "failed";
-          if (movedAside) {
+          let restore: string;
+          if (!movedAside) {
+            restore = "not-moved"; // nothing was moved aside; nothing to restore
+          } else {
             try {
-              await link(gone, leasePath); // no-replace: EEXIST = a rival holds the lease now
+              await link(gone, leasePath); // no-replace: EEXIST = the lease path holds a claim now
               restore = "restored";
             } catch (e) {
               const code = (e as NodeJS.ErrnoException).code;
-              if (code === "EEXIST") restore = "absent-rival";
-              else if (code === "ENOENT") restore = "vanished"; // the moved original was removed under us
+              if (code === "EEXIST") {
+                // P20c7-F4: classify the OCCUPANT instead of guessing.
+                const occ = await readFile(leasePath, "utf8").catch(() => "");
+                const occPid = leasePidOf(occ);
+                restore = occPid !== undefined && pidAlive(occPid)
+                  ? `occupied by a live claim (pid ${occPid})`
+                  : occ === "" ? "occupied (occupant unreadable)" : "occupied by a stale claim";
+              } else if (code === "ENOENT") {
+                restore = "vanished"; // the moved original was removed under us
+              } else {
+                restore = `restore failed (${code ?? (e as Error).message}) — recovery source preserved for reconcile`;
+              }
             }
           }
-          // The gone name is garbage once the lease path holds a live
-          // claim again (restore linked the same inode; a rival's lease
-          // outranks a moved-aside stale claim) — best-effort cleanup.
-          await unlink(gone).catch(() => {});
-          throw new Error(`host: takeover claim on ${leasePath} anomaly (${why}) — self-release ${release}, moved-aside original ${restore} (P20c6-F1/F2)`);
+          // `gone` is garbage ONLY when the lease path holds a claim
+          // again (the restore linked the same inode back, or an
+          // occupant outranks the moved copy) or it vanished. A FAILED
+          // restore keeps it: it is the recovery source (P20c7-F3).
+          if (restore === "restored" || restore === "vanished" || restore.startsWith("occupied")) {
+            await unlink(gone).catch(() => {});
+          }
+          throw new Error(`host: takeover claim on ${leasePath} anomaly (${why}) — self-release ${release}, moved-aside original ${restore} (P20c6-F1/F2, P20c7-F3/F4)`);
         };
         try {
           await link(tmp, leasePath);
@@ -1235,6 +1279,12 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           // stays recoverable.
           await anomaly(`replaced mid-swap (claim ${claimOurs ? "intact" : "not ours"}, lock stamp ${stampOurs ? "ours/unverifiable" : "lost"})`);
         }
+        // Admission complete: the lease path holds OUR verified claim, so
+        // the moved-aside copy is definitively garbage (P20c7: even if
+        // this unlink fails, the pid-aware reconcile reclaims it once we
+        // exit — a dead mover's artifact with an occupied lease path is
+        // unlink-only).
+        if (movedAside) await unlink(gone).catch(() => {});
       } finally {
         await unlink(tmp).catch(() => {});
       }
@@ -1259,18 +1309,72 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // garbage at any age, and only FOREIGN tmps (no pid we can judge)
     // fall back to the age bound. An aged-but-LIVE publisher's stage now
     // survives; if some other remover still gets it, stagedPublish retries.
+    // P20c7: `.reclaim-` artifacts are handled by reconcileReclaims BELOW
+    // (run first) — they are potential recovery sources, not blind
+    // garbage — so this sweep is staged-tmp names only.
+    // ── P20c7 (audit cycle 4, F1/F2): reconcile crashed-mover artifacts. ──
+    // A takeover's `.reclaim-<pid>` file IS the previous owner's claim
+    // between the move and the relink. While a LIVE mover holds it the
+    // artifact is its workspace (never touched); once its owner is dead
+    // or uninterpretable it is EITHER the recovery source (lease path
+    // vacant → restore it: a no-replace link, so a racing owner or a
+    // concurrent restorer always wins) OR garbage (the lease path holds a
+    // claim → the moved copy is stale). Restoring BEFORE discarding is
+    // what makes a mover crash self-healing: the old cycle's pid-aware
+    // sweep unlinked a dead mover's artifact sight-unseen, which — with
+    // the lease absent — destroyed the only recovery source and left the
+    // episode wedged (reproduced wedge: next creator "contended" until
+    // the lock's steal bound).
+    const isReclaimName = (n: string): boolean => n.startsWith("host.lease.reclaim-");
+    const reclaimOwnerPid = (n: string): number | null => {
+      const m = /^host\.lease\.reclaim-(\d+)\./.exec(n);
+      if (m === null) return null;
+      const pid = Number(m[1]);
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+    };
+    // Restore every DEAD/UNKNOWN-owner artifact whose lease path is
+    // vacant; the artifact name becomes garbage either way. Returns the
+    // number of claims restored.
+    const reconcileReclaims = async (): Promise<number> => {
+      let restored = 0;
+      let names: string[];
+      try {
+        names = await readdir(epPath);
+      } catch {
+        return 0; // dir unreadable: nothing to reconcile
+      }
+      for (const n of names) {
+        if (!isReclaimName(n)) continue;
+        const ownerPid = reclaimOwnerPid(n);
+        if (ownerPid === process.pid) continue; // our OWN in-flight swap
+        const full = join(epPath, n);
+        if (ownerPid === null) {
+          // Uninterpretable owner: UNKNOWN, not dead — same age bound as
+          // the tmp sweep before touching it.
+          try {
+            if (Date.now() - (await stat(full)).mtimeMs <= ABANDON_AFTER_MS) continue;
+          } catch { continue; } // vanished mid-reconcile
+        } else if (pidAlive(ownerPid)) {
+          continue; // live mover's workspace
+        }
+        // no-replace link: vacant → we restore it; occupied (EEXIST or a
+        // read race) → the occupant outranks a moved-aside copy.
+        try {
+          await link(full, leasePath);
+          restored++;
+        } catch { /* occupied or errored */ }
+        await unlink(full).catch(() => {});
+      }
+      return restored;
+    };
+    await reconcileReclaims();
     try {
       const names = await readdir(epPath);
       const nowMs = Date.now();
       for (const n of names) {
-        // Covers staged tmps AND P20c6-F1 moved-aside originals
-        // (`host.lease.reclaim-<pid>.<token>`): a takeover killed
-        // between its move and its claim-link leaves the previous
-        // owner's claim under that name. It never wedges anything (an
-        // absent lease fast-paths), but it is exactly the garbage class
-        // this sweep exists for — reclaim it with the same pid-aware
-        // rules once its mover is dead.
-        const m = /^(?:host\.lease(?:\.lock)?\.tmp|host\.lease\.reclaim)-(\d+)\./.exec(n);
+        // Staged tmps ONLY (P20c7): `.reclaim-` originals are reconciled
+        // above (restore-if-vacant) before any unlink is considered.
+        const m = /^host\.lease(?:\.lock)?\.tmp-(\d+)\./.exec(n);
         if (m === null) continue;
         const ownerPid = Number(m[1]);
         if (ownerPid === process.pid) continue; // possibly OUR OWN in-flight stage
@@ -1295,6 +1399,9 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // Fast path: no lease at all — publish exclusive. This races ONLY
     // another creation (both stage+link; exactly one wins) and a recovery
     // (which holds the lock and re-verifies before replacing).
+    // P20c7-F2: the reconcile ran BEFORE this path, so a crashed mover's
+    // restored claim is judged normally below (live → refuse; stale →
+    // re-take under the lock) instead of leaving the path falsely vacant.
     if (await publishLease()) {
       leaseHeld = true;
       return;
@@ -1305,7 +1412,11 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       const { missing, raw } = await readLease();
       if (missing) {
         // The lease vanished since the failed publish (a holder released
-        // it): claim it exclusive — races only another create.
+        // it): first undo any crashed mover's pending swap (P20c7-F2 —
+        // restore-if-vacant, so a falsely-vacant path is judged on the
+        // restored claim), then claim exclusive — races only another
+        // create.
+        await reconcileReclaims();
         if (await publishLease()) {
           leaseHeld = true;
           return;
