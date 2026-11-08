@@ -169,11 +169,15 @@ test("P20-F1: a takeover paused past the steal bound does NOT lose its lock to a
   const worker = await quickWorker(root);
 
   // C: the first recovery takes the lock and freezes INSIDE the swap.
+  // P20c6-F1 REPAIR: the swap is no longer a rename OVER the lease — it
+  // moves the stale claim ASIDE (`leasePath.reclaim-*`) then links its
+  // claim with no-replace. The freeze lands inside the move step, so C
+  // holds the takeover lock the whole freeze window exactly as before.
   const parked = deferred();
   let resumed = false;
   let renames = 0;
   (fs.promises as { rename: unknown }).rename = async function (a: string | Uint8Array | null, b: string | Uint8Array | null) {
-    if (String(b) === leasePath && ++renames === 1) {
+    if (String(b).startsWith(leasePath + ".reclaim-") && ++renames === 1) {
       await parked.promise; // freeze INSIDE the swap — the lock is held the whole time
       return origRename(a as string, b as string);
     }
@@ -263,16 +267,19 @@ test("P20-F1: a claim replaced under us MID-SWAP makes the taker walk away (iden
   const leasePath = join(dir, "host.lease");
   await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n");
   const worker = await quickWorker(root);
-  // Simulate a lock-thief winning mid-swap: after OUR rename installs our
-  // claim, a foreign claim is renamed over it before we re-read.
+  // Simulate a lock-thief winning mid-swap. P20c6-F1 REPAIR: the swap
+  // no longer renames OVER the lease — it moves the stale claim aside
+  // then no-replace link()s its own. The thief strikes in that window:
+  // after our move-aside (lease absent) it re-presents a foreign claim,
+  // so our link must fail EEXIST and the taker walks away.
   const foreign = join(dir, "thief-claim");
   await writeFile(foreign, JSON.stringify({ pid: 112, token: "thief" }) + "\n");
   let did = false;
   (fs.promises as { rename: unknown }).rename = async function (a: string | Uint8Array | null, b: string | Uint8Array | null) {
     const r = await origRename(a as string, b as string);
-    if (!did && String(b) === leasePath) {
+    if (!did && String(b).startsWith(leasePath + ".reclaim-")) {
       did = true;
-      await origRename(foreign, leasePath); // the stomp: our claim is replaced after the swap
+      await origRename(foreign, leasePath); // the thief re-presents before our link lands
     }
     return r;
   };
@@ -280,7 +287,7 @@ test("P20-F1: a claim replaced under us MID-SWAP makes the taker walk away (iden
   await assert.rejects(
     () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }),
     /replaced mid-swap/,
-    "the taker detects it no longer owns the lease and refuses to proceed believing it holds the episode",
+    "the taker detects the re-presented lease (no-replace link EEXIST) and refuses to proceed believing it holds the episode",
   );
   assert.equal(JSON.parse(await readFile(leasePath, "utf8")).token, "thief", "the run walked away; the foreign claim stands untouched (the loser does not fight back)");
 });
@@ -414,8 +421,11 @@ test("P20c3-F1: delayed lock-reclaim does NOT double-admit — the swap winner w
   } as typeof fs.promises.rm;
   const renamePaused = deferred(); let allowRename = false;
   let renameCount = 0;
+  // P20c6-F1 REPAIR: the swap's first step is now the MOVE-ASIDE of the
+  // stale claim (`leasePath` -> `leasePath.reclaim-*`), not a rename
+  // OVER the lease — freeze there to hold B inside its swap.
   (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
-    if (String(b) === leasePath && ++renameCount === 1) {
+    if (String(b).startsWith(leasePath + ".reclaim-") && ++renameCount === 1) {
       renamePaused.resolve();
       while (!allowRename) await new Promise((r) => setTimeout(r, 5));
     }
@@ -541,8 +551,10 @@ test("P20c4-F1: a failed post-swap admission self-releases — no abandoned live
     return (origRmC3 as (p: string | URL, o?: unknown) => Promise<void>)(p, o);
   } as typeof fs.promises.rm;
   const renPaused = deferred(); let allowRen = false; let renCount = 0;
+  // P20c6-F1 REPAIR: freeze B inside its swap at the MOVE-ASIDE step
+  // (lease -> lease.reclaim-*), the first rename the new swap performs.
   (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
-    if (String(b) === leasePath && ++renCount === 1) { renPaused.resolve(); while (!allowRen) await new Promise((r) => setTimeout(r, 5)); }
+    if (String(b).startsWith(leasePath + ".reclaim-") && ++renCount === 1) { renPaused.resolve(); while (!allowRen) await new Promise((r) => setTimeout(r, 5)); }
     return (origRename as (a: string | URL, b: string | URL) => Promise<void>)(a, b);
   } as typeof fs.promises.rename;
   syncBuiltinESMExports();
@@ -624,15 +636,18 @@ test("P20c4-F3: post-swap identity is STRICT — a foreign body embedding our to
   await writeFile(leasePath, JSON.stringify({ pid: 2147483647, token: "dead" }));
   const worker = await quickWorker(root);
   let planted = false;
-  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
-    const r = await origRename(a as string, b as string);
-    if (String(b) === leasePath && !planted) {
+  // P20c6-F1 REPAIR: the swap's claim lands via a no-replace link of the
+  // `.takeover`-suffixed stage (the fast-path stage has a different
+  // suffix, so the plant fires ONLY on the takeover claim).
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    const r = await origLink(a as string, b as string);
+    if (String(b) === leasePath && String(a).endsWith(".takeover") && !planted) {
       const ours = JSON.parse(await origReadC3(leasePath, "utf8") as string).token as string;
       await fs.promises.writeFile(leasePath, JSON.stringify({ pid: 1, token: "foreign", previous: { token: ours } }));
       planted = true;
     }
     return r;
-  } as typeof fs.promises.rename;
+  } as typeof fs.promises.link;
   syncBuiltinESMExports();
   await assert.rejects(
     () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }),
@@ -643,4 +658,137 @@ test("P20c4-F3: post-swap identity is STRICT — a foreign body embedding our to
   const survivor = JSON.parse(await readFile(leasePath, "utf8"));
   assert.equal(survivor.token, "foreign", "the foreign lease survives untouched");
   assert.equal(planted, true, "the embed actually fired after our swap");
+});
+
+// ─── Cycle 6 (R4 audit of 1c64566): named regressions for findings 1-2 ─────
+
+const origUnlink = fs.promises.unlink.bind(fs.promises);
+
+test("P20c6-F1: a fresh publish NEVER runs ahead of a live takeover lock (reproduced OVERLAPPING_WORKERS)", async (t) => {
+  // The auditor's overlap: a recovery holds the takeover lock mid-swap
+  // (its swap has removed/replaced the lease view), and a second process
+  // fast-pathed an exclusive claim against the ABSENT lease — two workers
+  // admitted. Post-fix the fast path (and every under-lock re-publish
+  // from the loop top) yields while the lock dir exists: with the lease
+  // absent but the lock LIVE (fresh stamp naming a live pid), a creator
+  // fails closed at the attempt budget and never publishes.
+  const root = await mkdtemp(join(tmpdir(), "p20c6-f1-lockfast-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  restoreFs();
+  const epGraph = graphA("ep-c6-f1-lockfast");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  // Lease ABSENT (a swap in flight removed it); takeover lock held by a
+  // LIVE acquirer with a fresh stamp.
+  await mkdir(lockPath);
+  await writeFile(join(lockPath, "owner"), `${process.pid}.recovering`);
+  const worker = await quickWorker(root);
+  await assert.rejects(
+    () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }),
+    /contended/,
+    "the creator waits out the live takeover lock and fails closed (40 attempts) instead of publishing under it",
+  );
+  let leaseThere = true;
+  try { await stat(leasePath); } catch { leaseThere = false; }
+  assert.equal(leaseThere, false, "NO claim was published while the takeover lock was live (the reproduced second admission cannot form)");
+  const stampNow = await readFile(join(lockPath, "owner"), "utf8");
+  assert.equal(stampNow, `${process.pid}.recovering`, "the recovery's lock survived untouched");
+});
+
+test("P20c6-F1/F2: a takeover whose claim-link FAILS mid-swap restores the moved-aside original — the previous owner's claim never strands", async (t) => {
+  // New swap shape: move the stale claim aside, no-replace link our own.
+  // Inject a TRANSIENT link failure on the takeover stage (not EEXIST):
+  // the shared anomaly exit must (a) self-release (nothing of ours is
+  // linked -> "absent"), (b) link the moved-aside ORIGINAL back (FIFO
+  // order guarantees the lease is absent), and (c) leave NO `.reclaim-`
+  // garbage — the episode keeps the exact claim that existed before.
+  const root = await mkdtemp(join(tmpdir(), "p20c6-f1-restore-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c6-f1-restore");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const stale = JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n";
+  await writeFile(leasePath, stale);
+  const worker = await quickWorker(root);
+  let fired = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    // ONLY the takeover claim-link (its stage carries the .takeover
+    // suffix); fail it once with a non-EEXIST errno.
+    if (String(b) === leasePath && String(a).endsWith(".takeover") && !fired) {
+      fired = true;
+      throw Object.assign(new Error("simulated mid-swap link EIO"), { code: "EIO" });
+    }
+    return origLink(a as string, b as string);
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} })
+    .then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(err !== null && /anomaly \(claim link failed/.test(err), `the takeover fails with the named anomaly error (got: ${String(err).slice(0, 120)})`);
+  assert.match(err, /self-release absent/, "the self-release outcome is reported honestly (nothing of ours was linked)");
+  assert.match(err, /moved-aside original restored/, "the ORIGINAL claim was linked back (no-replace) — the lease is never left absent by our failure");
+  assert.equal(await readFile(leasePath, "utf8"), stale, "the episode holds EXACTLY the previous owner's claim again (byte-identical, so its abandon-bound eligibility survives)");
+  const names = await readdir(dir);
+  assert.ok(!names.some((n) => n.includes(".reclaim-")), "no moved-aside garbage survives the anomaly exit");
+  assert.ok(!names.some((n) => n.endsWith(".takeover")), "the failed takeover stage is cleaned up");
+});
+
+test("P20c6-F2: a TRANSIENT error on the final release is RETRIED — the claim is released and nothing is disclosed", async (t) => {
+  // Pre-P20c6 the outer-finally release was a single read+unlink in one
+  // swallow-everything catch: ONE transient unlink EIO silently left our
+  // claim (naming our LIVE pid) on disk — the next activation in this
+  // process refused "already activated" until exit (reproduced
+  // CLEANUP_UNLINK_EIO). The shared release primitive retries: the
+  // second attempt lands and the episode ends lease-free and silent.
+  const root = await mkdtemp(join(tmpdir(), "p20c6-f2-retry-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c6-f2-retry");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const worker = await quickWorker(root);
+  let n = 0;
+  (fs.promises as { unlink: unknown }).unlink = async function (p: string | URL) {
+    if (String(p) === leasePath && ++n === 1) {
+      throw Object.assign(new Error("simulated release EIO"), { code: "EIO" });
+    }
+    return origUnlink(p as string);
+  } as typeof fs.promises.unlink;
+  syncBuiltinESMExports();
+  const lines: string[] = [];
+  const r = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: (l) => lines.push(l) });
+  restoreFs();
+  assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the episode completed normally");
+  assert.ok(n >= 2, "the release actually retried past the injected EIO");
+  assert.ok(!lines.some((l) => /release FAILED/.test(l)), "a RETRIED release discloses nothing — it succeeded");
+  let gone = false;
+  try { await stat(leasePath); } catch { gone = true; }
+  assert.ok(gone, "the claim is GONE — a transient error no longer strands a live-pid lease");
+});
+
+test("P20c6-F2: a PERSISTENT release failure is DISCLOSED on the log — never a silent swallow", async (t) => {
+  // The honest-message half of F2: when every retry fails, the outcome
+  // is "failed" and the outer finally MUST say so (the pre-P20c6 code
+  // reported nothing — the caller believed the release was a no-op).
+  const root = await mkdtemp(join(tmpdir(), "p20c6-f2-persist-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c6-f2-persist");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const worker = await quickWorker(root);
+  (fs.promises as { unlink: unknown }).unlink = async function (p: string | URL) {
+    if (String(p) === leasePath) throw Object.assign(new Error("persistent release EIO"), { code: "EIO" });
+    return origUnlink(p as string);
+  } as typeof fs.promises.unlink;
+  syncBuiltinESMExports();
+  const lines: string[] = [];
+  const r = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: (l) => lines.push(l) });
+  restoreFs();
+  assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the episode itself still completes (release is post-result)");
+  assert.ok(lines.some((l) => /P20c6-F2: lease release FAILED/.test(l)), "the persistent failure is surfaced honestly on the log");
+  const leftover = JSON.parse(await readFile(leasePath, "utf8"));
+  assert.equal(leftover.pid, process.pid, "the claim persists (naming our pid) — exactly the state the disclosure describes; takeover reclaims it with disclosure after we exit");
 });

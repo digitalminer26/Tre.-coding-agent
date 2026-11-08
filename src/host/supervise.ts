@@ -960,6 +960,48 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         && (v as { token?: unknown }).token === leaseToken;
     } catch { return false; }
   };
+  // P20c6-F2 (R4 audit, finding 2): ONE release primitive for every path
+  // that drops OUR claim, with DISTINCT, RETRIED outcomes. Pre-P20c6 the
+  // takeover anomaly self-release and the outer-finally release each made
+  // a SINGLE read + SINGLE unlink wrapped in one swallow-everything
+  // catch: one transient EIO on either read (the identity check AND the
+  // self-release re-read — reproduced CLEANUP_READ_EIO) or on the unlink
+  // (reproduced CLEANUP_UNLINK_EIO) abandoned the release, and the outer
+  // finally never re-considered it because `leaseHeld` was still false —
+  // the episode kept a lease naming our LIVE pid until process exit.
+  // New contract:
+  //  - "released"   — our claim was there and is gone;
+  //  - "absent"     — nothing to release (ENOENT / a holder already
+  //                   released it); treated as done, never an error;
+  //  - "failed"     — STILL OURS after the retry bound (a persistent
+  //                   read/unlink error). The caller MUST disclose it:
+  //                   it is a live-pid lease owned by this process, not
+  //                   a silent no-op.
+  // A transient error burns a retry (three bounded attempts — retries
+  // beat a wedge; a claim we cannot prove ours is never touched, so the
+  // P20c3-F3 foreign-lease rule stands unchanged).
+  type LeaseReleaseOutcome = "released" | "absent" | "failed";
+  const releaseOursClaim = async (): Promise<LeaseReleaseOutcome> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let raw: string;
+      try {
+        raw = await readFile(leasePath, "utf8");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent"; // vanished: nothing to release
+        continue; // P20c6-F2: transient read error — retry (reproduced CLEANUP_READ_EIO)
+      }
+      if (!leaseBodyIsOurs(raw)) return "absent"; // not ours (replacement owner / embed) — never touched (P20c3-F3)
+      try {
+        await unlink(leasePath);
+        return "released";
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent"; // raced a release: fine
+        // P20c6-F2: transient unlink error — retry while the claim is still ours.
+      }
+    }
+    // exhausted: the claim may still be ours on disk — caller must disclose, not swallow.
+    return "failed";
+  };
   const refuseSameProcess = (): never => {
     throw new Error(`host: episode ${graph.episodeId} is already activated in this process (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
   };
@@ -1008,7 +1050,25 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       }
       return false;
     };
-    const publishLease = (): Promise<boolean> => stagedPublish(leasePath, "");
+    // P20c6-F1 (R4 audit, finding 1): the takeover lock is the single
+    // serialization point for every decision about an EXISTING lease, so
+    // a fresh EXCLUSIVE publish must yield while it exists. Pre-P20c6 the
+    // fast path link()ed a claim against an absent lease even when a
+    // recovery was mid-takeover (its swap had removed/replaced the lease
+    // view): the reproduced OVERLAPPING_WORKERS schedule admitted a second
+    // worker while the first was still running. EEXIST semantics already
+    // race only another CREATE; the lock check adds "never ahead of a
+    // recovery". An UNREADABLE lock dir is treated as existing (fail
+    // closed). The takeover path passes underLock=true: it already holds
+    // (and stamped) the lock, so it must not self-block.
+    const takeoverLockActive = async (): Promise<boolean> => {
+      try { await stat(leaseLockPath); return true; }
+      catch (e) { return (e as NodeJS.ErrnoException).code !== "ENOENT"; }
+    };
+    const publishLease = async (underLock = false): Promise<boolean> => {
+      if (!underLock && (await takeoverLockActive())) return false;
+      return stagedPublish(leasePath, "");
+    };
     // Takeover replacement UNDER the takeover lock (P18-C3 serialization
     // preserved): stage the full body (write + fsync) beside the lease and
     // rename over the stale claim — atomic, so a reader of the lease sees
@@ -1026,7 +1086,82 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         } finally {
           await handle.close();
         }
-        await rename(tmp, leasePath);
+        // P20c6-F1 (R4 audit, finding 1 — reproduced OVERLAPPING_WORKERS):
+        // the swap is NO LONGER a blind rename over the lease. A blind
+        // overwrite destroyed a live claim installed mid-swap by a lock
+        // thief, and the P20c4 self-release then removed the replaced
+        // lease — leaving the episode lease-less (absent) while the
+        // thief's worker still ran, so a third process fast-pathed a
+        // SECOND concurrent activation. New conditional swap:
+        //  1. MOVE the fenced claim aside (rename lease -> .reclaim-*).
+        //     ENOENT here = the lease was released under us: claim
+        //     exclusive with a no-replace link instead.
+        //  2. link() our staged claim in (no-replace): EEXIST means a
+        //     rival re-presented the lease mid-swap — an ANOMALY, never
+        //     an overwrite.
+        //  3. On ANY anomaly after the move (a failed/errored claim-link
+        //     or a failed post-swap admission): drop our claim (strict,
+        //     retried — P20c6-F2), then link the moved-aside ORIGINAL
+        //     back iff the lease is absent (hardlink preserves the old
+        //     inode's mtime, so recovery eligibility survives). The
+        //     lease never stays absent or ours when we walk away — the
+        //     concurrent-activation window closes. A restore that fails
+        //     persistently is SURFACED (a lease we moved away must never
+        //     vanish silently); an original that was foreign or vanished
+        //     is disclosed via `movedBody` for an honest error message.
+        // DISCLOSED: steps 1-2 leave a microsecond absence window; it is
+        // fenced for fresh creators by the lock-aware publishLease above
+        // (this path holds the takeover lock across the swap) and is the
+        // same check-then-act TOCTOU class disclosed for release.
+        const gone = `${leasePath}.reclaim-${process.pid}.${leaseToken}`;
+        let movedAside = false;
+        try {
+          await rename(leasePath, gone);
+          movedAside = true;
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+          // Released under us (nothing to move): claim exclusive below.
+        }
+        // Shared anomaly exit: self-release our claim, restore the
+        // moved-aside original iff the lease is absent, then throw. The
+        // message names the TRUE outcome of each step (P20c6-F2) —
+        // "released"/"absent"/"failed", "restored"/"absent-rival"/
+        // "vanished"/"failed" — never a blanket claim that may not hold.
+        // The restore is a NO-REPLACE link of exactly what we moved (a
+        // replacement owner's live lease is never overwritten: EEXIST
+        // means a rival holds the lease and we leave it alone), so it is
+        // a true undo of our move whatever body it carries.
+        const anomaly = async (why: string): Promise<never> => {
+          const release = await releaseOursClaim();
+          let restore: "restored" | "absent-rival" | "vanished" | "failed" = "failed";
+          if (movedAside) {
+            try {
+              await link(gone, leasePath); // no-replace: EEXIST = a rival holds the lease now
+              restore = "restored";
+            } catch (e) {
+              const code = (e as NodeJS.ErrnoException).code;
+              if (code === "EEXIST") restore = "absent-rival";
+              else if (code === "ENOENT") restore = "vanished"; // the moved original was removed under us
+            }
+          }
+          // The gone name is garbage once the lease path holds a live
+          // claim again (restore linked the same inode; a rival's lease
+          // outranks a moved-aside stale claim) — best-effort cleanup.
+          await unlink(gone).catch(() => {});
+          throw new Error(`host: takeover claim on ${leasePath} anomaly (${why}) — self-release ${release}, moved-aside original ${restore} (P20c6-F1/F2)`);
+        };
+        try {
+          await link(tmp, leasePath);
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === "EEXIST") {
+            // A rival re-presented the lease mid-swap: not ours to touch
+            // or restore over; drop our staged claim and walk away.
+            await unlink(gone).catch(() => {}); // not ours to restore over a live lease
+            throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (a rival re-presented the lease before our no-replace link landed) — refusing to proceed (P20c6-F1)`);
+          }
+          await anomaly(`claim link failed (${code ?? (e as Error).message})`);
+        }
         // P20c3-F1 (audit cycle 2, finding 1): the post-swap READ is a
         // TOCTOU, not a fence — a contender frozen between its lock rmdir
         // and the swap passes every read-based check on its own fresh
@@ -1082,15 +1217,14 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         const mine = await readFile(leasePath, "utf8").catch(() => "");
         const claimOurs = leaseBodyIsOurs(mine);
         if (!claimOurs || !stampOurs) {
-          // Self-release OUR claim (strict, token-verified — a
-          // replacement owner's lease is never touched) BEFORE the throw,
-          // so a failed takeover can never leave a lease naming our live
-          // pid: the reproduced walkaway-wedge cannot form. The caller's
-          // verified release then no-ops; the episode stays recoverable.
-          try {
-            if (leaseBodyIsOurs(await readFile(leasePath, "utf8"))) await unlink(leasePath);
-          } catch { /* none of ours to release */ }
-          throw new Error(`host: takeover claim on ${leasePath} was replaced mid-swap (claim ${claimOurs ? "intact" : "not ours"}, lock stamp ${stampOurs ? "ours/unverifiable" : "lost"}) — released our claim, refusing to proceed (P20c4-F1/F3)`);
+          // Same shared anomaly exit (P20c6-F1/F2): self-release OUR
+          // claim (strict, token-verified, RETRIED) and restore the
+          // moved-aside original iff the lease is absent, so a failed
+          // takeover leaves NEITHER a lease naming our live pid NOR the
+          // previous owner's claim stranded under the gone name. The
+          // message names the actual per-step outcomes; the episode
+          // stays recoverable.
+          await anomaly(`replaced mid-swap (claim ${claimOurs ? "intact" : "not ours"}, lock stamp ${stampOurs ? "ours/unverifiable" : "lost"})`);
         }
       } finally {
         await unlink(tmp).catch(() => {});
@@ -1120,7 +1254,14 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       const names = await readdir(epPath);
       const nowMs = Date.now();
       for (const n of names) {
-        const m = /^(?:host\.lease|host\.lease\.lock)\.tmp-(\d+)\./.exec(n);
+        // Covers staged tmps AND P20c6-F1 moved-aside originals
+        // (`host.lease.reclaim-<pid>.<token>`): a takeover killed
+        // between its move and its claim-link leaves the previous
+        // owner's claim under that name. It never wedges anything (an
+        // absent lease fast-paths), but it is exactly the garbage class
+        // this sweep exists for — reclaim it with the same pid-aware
+        // rules once its mover is dead.
+        const m = /^(?:host\.lease(?:\.lock)?\.tmp|host\.lease\.reclaim)-(\d+)\./.exec(n);
         if (m === null) continue;
         const ownerPid = Number(m[1]);
         if (ownerPid === process.pid) continue; // possibly OUR OWN in-flight stage
@@ -1244,8 +1385,10 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
             // Fence re-verification: the takeover premise must still hold.
             const cur0 = await readLease();
             if (cur0.missing) {
-              // Released under us: claim exclusive (races only another create).
-              if (await publishLease()) outcome = "published";
+              // Released under us: claim exclusive (races only another
+              // create). underLock=true: WE hold the takeover lock, so
+              // the P20c6-F1 lock check must not self-block here.
+              if (await publishLease(true)) outcome = "published";
             } else if (cur0.raw !== raw) {
               // The lease changed since our observation (a creator won or a
               // takeover happened): our staleness premise is dead — re-decide
@@ -1727,13 +1870,19 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // primitive; the takeover side fences it by re-verifying staleness
     // under the lock before acting.)
     if (leaseHeld) {
-      try {
-        const raw = await readFile(leasePath, "utf8");
-        let v: unknown;
-        try { v = JSON.parse(raw); } catch { v = undefined; }
-        if (v !== null && typeof v === "object" && !Array.isArray(v)
-          && (v as { token?: unknown }).token === leaseToken) await unlink(leasePath);
-      } catch { /* best-effort: a crash leaves a stale lease, taken over with disclosure */ }
+      // P20c6-F2: the release is the SAME strict, token-verified,
+      // RETRIED path as the takeover anomaly self-release. The old
+      // single-shot read+unlink in one swallow-everything catch could
+      // leave our claim on disk on a transient I/O error with NO
+      // evidence anywhere — the next activation then faced (and could
+      // wedge on) a lease naming our live pid until exit. A failed
+      // release is now surfaced on the log; it stays recoverable (the
+      // lease holds a real pid: takeover refuses while we live,
+      // reclaims with disclosure after we exit).
+      const outcome = await releaseOursClaim();
+      if (outcome === "failed") {
+        log(`P20c6-F2: lease release FAILED after 3 attempts on ${leasePath} — our claim may persist until this process exits (recoverable: takeover reclaims a dead-pid lease with disclosure)`);
+      }
     }
   }
 }
