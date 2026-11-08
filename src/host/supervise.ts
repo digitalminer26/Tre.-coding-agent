@@ -911,6 +911,17 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   const leasePath = join(epPath, "host.lease");
   const leaseLockPath = join(epPath, "host.lease.lock");
   const leaseToken = `${process.pid}.${Math.random().toString(36).slice(2, 12)}.${Date.now().toString(36)}`;
+  // P20c8-F3 (R5 audit): pid EQUALS ownership only within one process
+  // INCARNATION. The OS recycles pids, so an artifact whose mtime PREDATES
+  // this process's start cannot be ours — it belongs to a long-dead
+  // namesake. Every "skip — our own in-flight work" test below (reconcile,
+  // the tmp sweep, the dead-stamped-lock fast path, the pre-move re-verify)
+  // requires mtimeMs >= procStartMs; an older same-pid artifact is an
+  // ABANDONED workspace (disk mtimes vs a wall-clock start carry the
+  // disclosed clock-skew residual — a namesake booted with the clock
+  // BEHIND ours could have newer mtimes; bounded, and the claim body
+  // itself is still pid+token judged at every acquisition).
+  const procStartMs = Date.now();
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
   const pidAlive = (pid: number): boolean => {
     try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
@@ -1125,23 +1136,32 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // mid-swap claims (the reproduced OVERLAPPING_WORKERS) — a
         // correctness failure, strictly worse.
         const gone = `${leasePath}.reclaim-${process.pid}.${leaseToken}`;
-        // P20c7-F1: RE-VERIFY under the lock, immediately before the
-        // move, that the lease is still what we set out to replace. The
-        // eligibility decision above was made before mkdir-raced rivals
-        // resolved; a rival that re-admitted its LIVE claim in between
-        // must not have it moved out from under it (the reproduced
-        // OVERLAPPING_WORKERS destroyed exactly such a claim). This is a
-        // check→act narrowing, NOT a fence: a rival frozen between THIS
-        // read and the rename still gets its claim moved — the residual
-        // is the disclosed P20c3-F1 class (no atomic compare-and-swap
-        // primitive exists), and reconcileReclaims restores the moved
-        // copy if we die before the relink.
+        // P20c7-F1, hardened by P20c8-F4 (R5 audit): RE-VERIFY under the
+        // lock, immediately before the move, that the lease holds no
+        // LIVE claim — INCLUDING one naming THIS process. The eligibility
+        // decision above was made before mkdir-raced rivals resolved; a
+        // rival that re-admitted its LIVE claim in between must not have
+        // it moved out from under it (the reproduced OVERLAPPING_WORKERS
+        // destroyed exactly such a claim). P20c8: the pre-P20c8 version
+        // skipped `prePid === process.pid`, but a second invocation of
+        // THIS process takes over via the disclosed delayed-lock-removal
+        // race and gets ADMITTED between our eligibility read and this
+        // re-verify — its live claim moved aside anyway violated INV-B
+        // before any check→act window. A live-pid holder is refused
+        // regardless of whose pid it is (a same-pid body with a foreign
+        // token is pid REUSE onto us: refuse that too; the F3 incarnation
+        // rule never mistakes it for our own claim). This is a check→act
+        // narrowing, NOT a fence: a rival frozen between THIS read and
+        // the rename still gets its claim moved — the residual is the
+        // disclosed P20c3-F1 class (no atomic compare-and-swap primitive
+        // exists), and reconcileReclaims restores the moved copy if we
+        // die before the relink.
         {
           const pre = await readLease();
           if (!pre.missing) {
             const prePid = leasePidOf(pre.raw);
-            if (prePid !== undefined && prePid !== process.pid && pidAlive(prePid)) {
-              throw new Error(`host: takeover claim on ${leasePath} refused pre-move re-verify (a live pid ${prePid} holds the lease — eligibility was disproved under the lock; P20c7-F1)`);
+            if (prePid !== undefined && pidAlive(prePid)) {
+              throw new Error(`host: takeover claim on ${leasePath} refused pre-move re-verify (a live pid ${prePid} holds the lease — eligibility was disproved under the lock; P20c7-F1/P20c8-F4)`);
             }
           }
         }
@@ -1172,36 +1192,67 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         const anomaly = async (why: string): Promise<never> => {
           const release = await releaseOursClaim();
           let restore: string;
+          let goneIsGarbage: boolean;
           if (!movedAside) {
             restore = "not-moved"; // nothing was moved aside; nothing to restore
+            goneIsGarbage = false; // the gone name was never created
           } else {
             try {
               await link(gone, leasePath); // no-replace: EEXIST = the lease path holds a claim now
               restore = "restored";
+              goneIsGarbage = true;
             } catch (e) {
               const code = (e as NodeJS.ErrnoException).code;
               if (code === "EEXIST") {
-                // P20c7-F4: classify the OCCUPANT instead of guessing.
-                const occ = await readFile(leasePath, "utf8").catch(() => "");
-                const occPid = leasePidOf(occ);
-                restore = occPid !== undefined && pidAlive(occPid)
-                  ? `occupied by a live claim (pid ${occPid})`
-                  : occ === "" ? "occupied (occupant unreadable)" : "occupied by a stale claim";
+                // P20c7-F4, refined by P20c8-F5 (R5 audit, MEDIUM): the
+                // occupant is classified ONLY from what this observation
+                // proves. Pre-P20c8, malformed nonempty content was
+                // reported as definitively "stale" (the protocol treats
+                // it as AMBIGUOUS elsewhere) and an ENOENT on the
+                // occupant read — the path is ABSENT now — was reported
+                // as "occupied". `gone` is deleted only on outcomes that
+                // prove a superseding state (restored, or an occupant
+                // observed present); an occupant that vanished or is
+                // unreadable keeps the source for reconcile, which
+                // re-judges it against the lease path then.
+                let occ: string | undefined;
+                let occErr: string | undefined;
+                try { occ = await readFile(leasePath, "utf8"); }
+                catch (oe) { occErr = (oe as NodeJS.ErrnoException).code ?? "error"; }
+                if (occ === undefined) {
+                  restore = occErr === "ENOENT"
+                    ? "the occupant vanished after EEXIST (lease path absent at observation) — recovery source preserved"
+                    : `occupant unreadable (${occErr}) — recovery source preserved`;
+                  goneIsGarbage = false;
+                } else {
+                  const occPid = leasePidOf(occ);
+                  if (occPid !== undefined) {
+                    restore = pidAlive(occPid)
+                      ? `occupied by a live claim (pid ${occPid})`
+                      : `occupied by a stale claim (dead pid ${occPid})`;
+                  } else if (occ === "") {
+                    restore = "occupied by an empty partial claim (a writer mid-create)";
+                  } else {
+                    restore = "occupied by ambiguous content (no trustworthy pid)";
+                  }
+                  goneIsGarbage = true; // the occupant was OBSERVED present — it outranks the moved copy
+                }
               } else if (code === "ENOENT") {
                 restore = "vanished"; // the moved original was removed under us
+                goneIsGarbage = true; // the name is already gone; unlink is a no-op
               } else {
                 restore = `restore failed (${code ?? (e as Error).message}) — recovery source preserved for reconcile`;
+                goneIsGarbage = false;
               }
             }
           }
-          // `gone` is garbage ONLY when the lease path holds a claim
-          // again (the restore linked the same inode back, or an
-          // occupant outranks the moved copy) or it vanished. A FAILED
-          // restore keeps it: it is the recovery source (P20c7-F3).
-          if (restore === "restored" || restore === "vanished" || restore.startsWith("occupied")) {
-            await unlink(gone).catch(() => {});
-          }
-          throw new Error(`host: takeover claim on ${leasePath} anomaly (${why}) — self-release ${release}, moved-aside original ${restore} (P20c6-F1/F2, P20c7-F3/F4)`);
+          // `gone` is garbage ONLY when a superseding state was PROVEN
+          // (the restore linked the same inode back, or an occupant was
+          // observed at the lease path) or it vanished. A FAILED or
+          // UNPROVEN restore keeps it: it is the recovery source
+          // (P20c7-F3, P20c8-F5).
+          if (goneIsGarbage) await unlink(gone).catch(() => {});
+          throw new Error(`host: takeover claim on ${leasePath} anomaly (${why}) — self-release ${release}, moved-aside original ${restore} (P20c6-F1/F2, P20c7-F3/F4, P20c8-F5)`);
         };
         try {
           await link(tmp, leasePath);
@@ -1303,6 +1354,38 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         if (stamp === leaseToken) await rm(leaseLockPath, { recursive: true, force: true });
       } catch { /* vanished or unreadable: not ours to remove */ }
     };
+    // P20c8-F2 (R5 audit, finding 2): a takeover lock whose `owner`
+    // stamp names a provably DEAD pid is HELD BY NOBODY — no live
+    // process carries that token. The 30s steal bound exists to fence a
+    // thief frozen mid-acquisition, but a frozen thief's stamp names a
+    // LIVE pid (SIGSTOP keeps it alive); a dead stamper can never
+    // finish, and with the lease absent/vacant the episode sat wedged
+    // for the whole bound (reproduced R5-F2: fresh dead-stamped lock +
+    // reconcile-restored claim → "contended" for 30s despite the
+    // disclosure claiming immediate self-heal). Clear it NOW: re-read
+    // the stamp immediately before the rm to narrow the check→act
+    // window, and disclose the residual (a lock recreated between the
+    // re-read and the rm loses it — the same P20c4-F4 class already
+    // accepted for rmIfLockOurs, and the swap's own no-replace/pre-move
+    // checks still hold INV-A). An UNSTAMPED or uninterpretable-stamp
+    // lock keeps the age bound; a stamp naming a REUSED live pid is
+    // judged alive (conservative, disclosed).
+    const clearDeadStampedLock = async (): Promise<boolean> => {
+      let stampRaw: string;
+      try { stampRaw = (await readFile(join(leaseLockPath, "owner"), "utf8")).trim(); }
+      catch { return false; } // no/unreadable stamp: age bound decides
+      if (stampRaw === leaseToken) return false; // OUR OWN lock: never self-steal
+      const stampPid = Number(stampRaw.split(".")[0] ?? "");
+      if (!Number.isSafeInteger(stampPid) || stampPid <= 0) return false;
+      if (pidAlive(stampPid)) return false; // live (or reused-pid live): never torn down
+      try {
+        const recheck = (await readFile(join(leaseLockPath, "owner"), "utf8")).trim();
+        if (recheck !== stampRaw) return false; // stamp changed under us: a new acquirer holds it
+        await rm(leaseLockPath, { recursive: true, force: true });
+        log(`host-lease: takeover lock stamped by dead pid ${stampPid} held by nobody — cleared immediately, no 30s steal wait (P20c8-F2)`);
+        return true;
+      } catch { return false; } // vanished/errored: next attempt decides
+    };
     // Crash hygiene: a publisher killed between staging and linking leaves
     // an orphaned lease/lock tmp. Reclaim is PID-AWARE (P20-F3): our own
     // in-flight tmps are never touched, a tmp naming a DEAD process is
@@ -1333,8 +1416,17 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
     };
     // Restore every DEAD/UNKNOWN-owner artifact whose lease path is
-    // vacant; the artifact name becomes garbage either way. Returns the
-    // number of claims restored.
+    // vacant. P20c8 (R5 audit, findings 1 & 3):
+    //  - the source is unlinked ONLY after a PROVEN superseding outcome
+    //    (restore linked; an occupant OBSERVED at the lease path). A
+    //    transient link error (EIO, EAGAIN, ...) PRESERVES the source —
+    //    pre-P20c8 an errored link fell through to unlink and destroyed
+    //    the only recovery source (reproduced R5-F1: two reconcilers
+    //    both failing their links with EIO lost the wedge permanently);
+    //  - own-pid artifacts are OURS only if they postdate this process
+    //    (incarnation rule, P20c8-F3): a pre-start same-pid artifact is
+    //    a dead namesake's abandoned workspace and IS reconciled.
+    // Returns the number of claims restored.
     const reconcileReclaims = async (): Promise<number> => {
       let restored = 0;
       let names: string[];
@@ -1346,24 +1438,42 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       for (const n of names) {
         if (!isReclaimName(n)) continue;
         const ownerPid = reclaimOwnerPid(n);
-        if (ownerPid === process.pid) continue; // our OWN in-flight swap
         const full = join(epPath, n);
-        if (ownerPid === null) {
+        if (ownerPid === process.pid) {
+          // P20c8-F3: pid EQUALS ownership only within one incarnation.
+          let mine: boolean;
+          try { mine = (await stat(full)).mtimeMs >= procStartMs; }
+          catch { continue; } // vanished mid-reconcile
+          if (mine) continue; // our OWN in-flight swap (this incarnation)
+          // pre-start same-pid artifact: dead namesake's workspace.
+        } else if (ownerPid !== null && pidAlive(ownerPid)) {
+          continue; // live mover's workspace (namesake-reuse of a FOREIGN live pid is the disclosed residual — no portable start-time probe)
+        } else if (ownerPid === null) {
           // Uninterpretable owner: UNKNOWN, not dead — same age bound as
           // the tmp sweep before touching it.
           try {
             if (Date.now() - (await stat(full)).mtimeMs <= ABANDON_AFTER_MS) continue;
           } catch { continue; } // vanished mid-reconcile
-        } else if (pidAlive(ownerPid)) {
-          continue; // live mover's workspace
         }
-        // no-replace link: vacant → we restore it; occupied (EEXIST or a
-        // read race) → the occupant outranks a moved-aside copy.
+        // no-replace link: vacant → we restore it. On EEXIST the occupant
+        // is judged by OBSERVATION before the source is removed
+        // (P20c8-F5 discipline): occupant present → the moved copy is
+        // superseded garbage; occupant vanished/unreadable → the source
+        // survives for the next reconcile. Any other link error preserves
+        // the source (P20c8-F1).
+        let proven: boolean;
         try {
           await link(full, leasePath);
           restored++;
-        } catch { /* occupied or errored */ }
-        await unlink(full).catch(() => {});
+          proven = true;
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === "ENOENT") continue; // the source vanished under us: nothing left either way
+          if (code !== "EEXIST") continue; // transient/other error: source preserved
+          try { await readFile(leasePath, "utf8"); proven = true; }
+          catch { proven = false; } // occupant vanished/unreadable: preserve source
+        }
+        if (proven) await unlink(full).catch(() => {});
       }
       return restored;
     };
@@ -1377,7 +1487,6 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         const m = /^host\.lease(?:\.lock)?\.tmp-(\d+)\./.exec(n);
         if (m === null) continue;
         const ownerPid = Number(m[1]);
-        if (ownerPid === process.pid) continue; // possibly OUR OWN in-flight stage
         const full = join(epPath, n);
         // P20-F2/F3: the sweep is PID-AWARE. A tmp whose owner pid is
         // ALIVE is never touched — a live-but-paused (SIGSTOP) or stalled
@@ -1386,6 +1495,13 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // An owner we can prove DEAD makes its tmp garbage at any age.
         // An uninterpretable pid (out of the safe-integer range) is
         // UNKNOWN, not dead — reclaimed only past the age bound.
+        // P20c8-F3: our own pid skips only POST-START tmps (incarnation
+        // rule) — a pre-start same-pid tmp is a dead namesake's stage.
+        if (ownerPid === process.pid) {
+          try {
+            if ((await stat(full)).mtimeMs >= procStartMs) continue; // possibly OUR OWN in-flight stage
+          } catch { continue; } // vanished mid-sweep
+        }
         const interpretable = Number.isSafeInteger(ownerPid) && ownerPid > 0;
         try {
           if (interpretable) {
@@ -1412,10 +1528,14 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       const { missing, raw } = await readLease();
       if (missing) {
         // The lease vanished since the failed publish (a holder released
-        // it): first undo any crashed mover's pending swap (P20c7-F2 —
+        // it): a takeover lock stamped by a DEAD pid is held by nobody —
+        // clear it first (P20c8-F2), or the lock-aware publish would
+        // yield to a claim nobody owns until the 30s steal bound. Then
+        // undo any crashed mover's pending swap (P20c7-F2 —
         // restore-if-vacant, so a falsely-vacant path is judged on the
         // restored claim), then claim exclusive — races only another
         // create.
+        await clearDeadStampedLock();
         await reconcileReclaims();
         if (await publishLease()) {
           leaseHeld = true;
@@ -1534,10 +1654,20 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         } else {
           const code = (mkdirErr as NodeJS.ErrnoException).code;
           if (code !== "EEXIST") throw mkdirErr;
+          // P20c8-F2: a stamp naming a provably DEAD pid is held by
+          // nobody — clear it immediately (any age), re-loop, and take
+          // over on the next iteration. Pre-P20c8 a fresh dead-stamped
+          // lock (crashed acquirer) forced the full 30s steal bound even
+          // though no live process could ever resume it (reproduced
+          // R5-F2 wedge with a reconcile-restored claim).
+          if (await clearDeadStampedLock()) continue;
           // Lock held by someone else: steal ONLY if its owner stamp proves
           // the holder DEAD (or it carries no stamp — legacy) AND it is past
           // the age bound. A LIVE holder — even one that froze between its
           // age-observation and our check — is never torn down (P20-F1).
+          // (The dead-stamp case no longer needs the bound — see
+          // clearDeadStampedLock above; this legacy path now covers
+          // UNSTAMPED locks and stamps with an uninterpretable pid.)
           try {
             const st = await stat(leaseLockPath);
             if (Date.now() - st.mtimeMs > 30_000) {

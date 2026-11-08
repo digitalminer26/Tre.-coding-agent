@@ -65,6 +65,7 @@ const origRename = fs.promises.rename.bind(fs.promises);
 const origRm = fs.promises.rm.bind(fs.promises);
 const origReadFile = fs.promises.readFile.bind(fs.promises);
 const origUnlink = fs.promises.unlink.bind(fs.promises);
+const origOpen = fs.promises.open.bind(fs.promises);
 const origKill = process.kill.bind(process) as typeof process.kill;
 function restoreFs(): void {
   const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown };
@@ -965,4 +966,305 @@ test("P20c7-F3: a restore that ERRORED keeps the recovery source — `gone` is N
   const kept = names.filter((n) => n.includes(".reclaim-"));
   assert.equal(kept.length, 1, "the recovery source SURVIVED the failed restore (P20c7-F3)");
   assert.equal(await readFile(join(dir, kept[0]!), "utf8"), stale, "byte-identical previous owner's claim — reconcile can restore it");
+});
+// ─── Cycle 8 (R5 audit of 43faec0): named regressions for findings 1-5 ─────
+
+test("P20c8-F1: a reconcile restore whose link ERRORED (EIO) PRESERVES the recovery source — never a fall-through unlink", async (t) => {
+  // The reproduced R5-F1: the lease is ABSENT, a dead mover's
+  // `.reclaim-` artifact is the sole recovery source, and the
+  // restore-if-vacant link hits a transient EIO. Pre-P20c8 the
+  // reconcile swallowed the link error and UNCONDITIONALLY unlinked
+  // the source — the wedge became permanent (reproduced: two
+  // reconcilers both failing their links lost the previous owner's
+  // claim forever). New contract: an unexpected link errno preserves
+  // the source byte-intact; the next reconcile (same run, loop 2) or
+  // the next activation re-links it.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f1-eio-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f1-eio");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const dead = await deadPid();
+  const moved = JSON.stringify({ pid: 111, token: "prev-owner" });
+  const artifact = join(dir, `host.lease.reclaim-${dead}.frozentoken`);
+  await writeFile(artifact, moved); // lease ABSENT: the wedge state
+  const worker = await quickWorker(root);
+  let eioUsed = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    // Only the reconcile's restore link (source -> lease path) errors.
+    if (!eioUsed && String(a).includes(".reclaim-") && String(b) === leasePath) {
+      eioUsed = true;
+      throw Object.assign(new Error("simulated reconcile EIO"), { code: "EIO" });
+    }
+    return origLink(a as string, String(b));
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const r = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  restoreFs();
+  assert.ok(eioUsed, "the reconcile's restore link really ran and errored (the test drove the intended path)");
+  assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the activation still completes — an errored reconcile is not a crash");
+  const names = await readdir(dir);
+  const kept = names.filter((n) => n.includes(".reclaim-"));
+  assert.equal(kept.length, 1, "the recovery source SURVIVED the errored restore (pre-P20c8: unlinked sight-unseen — the wedge was permanent)");
+  assert.equal(await readFile(join(dir, kept[0]!), "utf8"), moved, "byte-identical previous owner's claim preserved for a later reconcile");
+});
+
+test("P20c8-F2: a FRESH takeover lock stamped by a dead pid is cleared immediately — no 30s steal-bound wedge", async (t) => {
+  // The reproduced R5-F2 wedge: lease ABSENT, takeover lock standing
+  // with a stamp naming a provably DEAD acquirer, created YOUNGER than
+  // the 30s steal bound (no aging here — determinism must not lean on
+  // it), plus a dead-owner `.reclaim-` source. Pre-P20c8 the reconcile
+  // restored the claim, then the creator yielded to the lock for the
+  // FULL steal bound (the disclosure promised immediate self-heal and
+  // lied) — the activation failed "contended". A dead-stamped lock is
+  // held by NOBODY (a frozen thief's stamp names a LIVE pid): it is
+  // cleared on sight and the episode self-heals at once.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f2-lock-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f2-lock");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  const dead = await deadPid();
+  const artifact = join(dir, `host.lease.reclaim-${dead}.frozentoken`);
+  await writeFile(artifact, JSON.stringify({ pid: 111, token: "prev-owner" }));
+  await mkdir(lockPath); // FRESH lock — pre-P20c8: 30s of "contended"
+  await writeFile(join(lockPath, "owner"), `${dead}.dead-mover.dead`);
+  const worker = await quickWorker(root);
+  const lines: string[] = [];
+  const r = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: (l) => lines.push(l) });
+  assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the wedge self-heals through the dead-stamped lock with NO age (pre-P20c8: failed 'contended')");
+  assert.ok(lines.some((l) => /stamped by dead pid/.test(l) && /cleared immediately/.test(l)), `the dead-stamped lock was cleared on sight (logs: ${lines.filter((l) => /lock/.test(l)).join(" | ").slice(0, 200)})`);
+  const names = await readdir(dir);
+  assert.ok(!names.some((n) => n.includes(".reclaim-")), "the restored-then-superseded artifact was reclaimed");
+  const cur = await readFile(leasePath, "utf8").catch(() => "");
+  assert.ok(cur === "" || JSON.parse(cur).pid === process.pid, "the lease ended vacant or held by this process — never a foreign claim");
+});
+
+test("P20c8-F3: a same-pid artifact that PREDATES this process is an ABANDONED namesake workspace — reconciled, not skipped", async (t) => {
+  // Pid reuse onto OUR OWN pid: the OS recycles pids, so a
+  // `.reclaim-<our pid>` artifact with an mtime BEFORE this process
+  // started cannot be our in-flight swap — it is a long-dead namesake's
+  // abandoned workspace. Pre-P20c8 reconcile skipped every own-pid
+  // artifact, so the wedge (lease absent + the CURRENT owner's claim
+  // frozen in the artifact) persisted forever. New incarnation rule:
+  // own-pid artifacts are ours only when mtime >= procStartMs. Here the
+  // pre-start artifact carries the LIVE current owner's claim: restoring
+  // it makes the truth visible — activation must refuse the live holder
+  // (fail closed), never publish over it.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f3-incarnation-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f3-incarnation");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const rivalProc = spawn("/bin/sh", ["-c", "sleep 30"]); // a genuinely LIVE pid
+  t.after(() => { try { rivalProc.kill("SIGKILL"); } catch { /* gone */ } });
+  await new Promise((r) => setTimeout(r, 50));
+  const rival = JSON.stringify({ pid: rivalProc.pid, token: "current-owner" });
+  const artifact = join(dir, `host.lease.reclaim-${process.pid}.namesake-token`); // OUR pid, foreign workspace
+  await writeFile(artifact, rival);
+  await utimes(artifact, 1, 1); // mtime 1970: provably PRE-START
+  const worker = await quickWorker(root);
+  await assert.rejects(
+    () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }),
+    /already activated by pid \d+/,
+    "the restored live claim is refused fail-closed (pre-P20c8: own pid skipped the artifact forever — the wedge persisted AND a publish raced the hidden live owner)",
+  );
+  assert.equal(await readFile(leasePath, "utf8"), rival, "the current owner's restored claim stands at the lease path, untouched");
+});
+
+test("P20c8-F4: the pre-move re-verify refuses a LIVE claim naming THIS process — no own-pid exemption", async (t) => {
+  // A second invocation of THIS process admitted through the disclosed
+  // delayed-lock-removal race holds a live claim naming our pid. The
+  // pre-P20c8 pre-move re-verify skipped `prePid === process.pid`, so a
+  // takeover admitted earlier moved that live same-pid claim aside
+  // anyway (INV-B violated before any check→act narrowing). Injection:
+  // a foreign-token, same-pid claim appears between the under-lock
+  // eligibility verdict and the pre-move re-verify (staged takeover tmp
+  // opened = the exact point after the eligibility decision). The move
+  // must be REFUSED and the claim left byte-intact.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f4-premove-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f4-premove");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  await writeFile(leasePath, stale);
+  const worker = await quickWorker(root);
+  const recycled = JSON.stringify({ pid: process.pid, token: "recycled-namesake-live" }); // same pid, FOREIGN token: live namesake claim
+  const origOpen = fs.promises.open.bind(fs.promises);
+  let injected = false;
+  (fs.promises as { open: unknown }).open = async function (...args: Parameters<typeof fs.promises.open>) {
+    if (!injected && String(args[0]).includes(".takeover")) {
+      injected = true; // eligibility decided; we are past the under-lock re-verify, before the move
+      await writeFile(leasePath, recycled); // the second invocation's live claim appears
+    }
+    return origOpen(...args);
+  } as typeof fs.promises.open;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(injected, "the injection ran (the takeover reached the pre-move window)");
+  assert.ok(err !== null, "the takeover is refused");
+  assert.match(err as string, /refused pre-move re-verify \(a live pid \d+ holds the lease/, `the refusal names the live holder (got: ${String(err).slice(0, 180)})`);
+  assert.equal(await readFile(leasePath, "utf8"), recycled, "the live same-pid claim was NEVER moved aside");
+  const names = await readdir(dir);
+  assert.ok(!names.some((n) => n.includes(".reclaim-")), "nothing was moved: no artifact was created");
+});
+
+test("P20c8-F5a: an occupant that VANISHED after the restore's EEXIST is disclosed honestly — `gone` is preserved, never deleted on an unproven supersede", async (t) => {
+  // The restore-link races the path occupied (EEXIST), but by the time
+  // the occupant is read the path is ABSENT again. Pre-P20c8 the
+  // occupant read's fallback treated ANY read error as "occupied" and
+  // unlinked the moved original — destroying the recovery source on an
+  // outcome that proves NO superseding state (a release leaves the path
+  // vacant; the moved claim is its last copy). New contract: honest
+  // disclosure ("lease path absent at observation") and the source
+  // survives for reconcile.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f5a-vanished-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f5a-vanished");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  await writeFile(leasePath, stale);
+  const worker = await quickWorker(root);
+  let lockStolen = false;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    const res = await (origRename as (a: string | URL, b: string | URL) => Promise<void>)(a, b);
+    if (!lockStolen && String(b).startsWith(leasePath + ".reclaim-")) {
+      lockStolen = true;
+      await origRm(lockPath, { recursive: true, force: true }); // force the post-swap stamp loss -> anomaly path
+    }
+    return res;
+  } as typeof fs.promises.rename;
+  let restoreHit = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    const d = String(b);
+    if (d === leasePath && String(a).includes(".reclaim-") && !restoreHit) {
+      restoreHit = true;
+      await writeFile(leasePath, JSON.stringify({ pid: 222, token: "brief-rival" })); // an occupant existed at link time...
+      await origUnlink(leasePath); // ...and vanished before the classification read
+      throw Object.assign(new Error("simulated EEXIST"), { code: "EEXIST" });
+    }
+    return origLink(a as string, d);
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(restoreHit, "the anomaly restore actually ran (the test drove the intended path)");
+  assert.ok(err !== null, "the takeover failed (stamp lost mid-swap)");
+  assert.match(err as string, /moved-aside original the occupant vanished after EEXIST \(lease path absent at observation\) — recovery source preserved/, `honest vanished-occupant disclosure (got: ${String(err).slice(0, 200)})`);
+  const names = await readdir(dir);
+  const kept = names.filter((n) => n.includes(".reclaim-"));
+  assert.equal(kept.length, 1, "`gone` SURVIVED the unproven supersede (pre-P20c8: deleted on a blanket 'occupied')");
+  assert.equal(await readFile(join(dir, kept[0]!), "utf8"), stale, "byte-identical moved original — reconcile or the next owner can still use it");
+});
+
+test("P20c8-F5b: an UNREADABLE occupant (EIO) is disclosed and keeps `gone` — an error cannot prove a supersede", async (t) => {
+  // Same anomaly, but the occupant read itself errors: an EIO cannot
+  // establish that ANY claim outranks the moved original. Pre-P20c8
+  // reported it as "occupied" and deleted the source. New contract:
+  // "occupant unreadable (EIO) — recovery source preserved".
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f5b-unreadable-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f5b-unreadable");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  await writeFile(leasePath, stale);
+  const worker = await quickWorker(root);
+  let lockStolen = false;
+  let armed = false;
+  let unreadableHit = false;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    const res = await (origRename as (a: string | URL, b: string | URL) => Promise<void>)(a, b);
+    if (!lockStolen && String(b).startsWith(leasePath + ".reclaim-")) {
+      lockStolen = true;
+      armed = true; // every later lease-path read is the occupant classification
+      await origRm(lockPath, { recursive: true, force: true });
+    }
+    return res;
+  } as typeof fs.promises.rename;
+  (fs.promises as { readFile: unknown }).readFile = async function (p: string | URL, ...rest: unknown[]) {
+    if (armed && String(p) === leasePath) {
+      unreadableHit = true;
+      throw Object.assign(new Error("simulated occupant EIO"), { code: "EIO" });
+    }
+    return (origReadFile as (p: string | URL, ...r: unknown[]) => Promise<unknown>)(p, ...rest);
+  } as typeof fs.promises.readFile;
+  let restoreHit = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    const d = String(b);
+    if (d === leasePath && String(a).includes(".reclaim-") && !restoreHit) {
+      restoreHit = true;
+      throw Object.assign(new Error("simulated EEXIST"), { code: "EEXIST" }); // an occupant exists at link time
+    }
+    return origLink(a as string, d);
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(restoreHit && unreadableHit, "the anomaly restore ran and the occupant read errored (intended path driven)");
+  assert.ok(err !== null, "the takeover failed (stamp lost mid-swap)");
+  assert.match(err as string, /moved-aside original occupant unreadable \(EIO\) — recovery source preserved/, `honest unreadable-occupant disclosure (got: ${String(err).slice(0, 200)})`);
+  const names = await readdir(dir);
+  const kept = names.filter((n) => n.includes(".reclaim-"));
+  assert.equal(kept.length, 1, "`gone` preserved — an unreadable occupant proves no supersede");
+  assert.equal(await readFile(join(dir, kept[0]!), "utf8"), stale, "byte-identical moved original survives");
+});
+
+test("P20c8-F5c: malformed occupant content is classified AMBIGUOUS — never a definitive 'stale'", async (t) => {
+  // The occupant observed at the lease path is nonempty but unparseable:
+  // the protocol calls such content AMBIGUOUS everywhere else (P20-F2),
+  // so the classification must not report it as definitively "stale"
+  // (pre-P20c8). The occupant IS observed present, so `gone` is still
+  // superseded garbage — the fix is honesty in the message.
+  const root = await mkdtemp(join(tmpdir(), "p20c8-f5c-ambiguous-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c8-f5c-ambiguous");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const lockPath = join(dir, "host.lease.lock");
+  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  await writeFile(leasePath, stale);
+  const worker = await quickWorker(root);
+  const ambiguous = `{"pid":${process.pid}`; // the P20-F2 truncated body
+  let lockStolen = false;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    const res = await (origRename as (a: string | URL, b: string | URL) => Promise<void>)(a, b);
+    if (!lockStolen && String(b).startsWith(leasePath + ".reclaim-")) {
+      lockStolen = true;
+      await origRm(lockPath, { recursive: true, force: true });
+    }
+    return res;
+  } as typeof fs.promises.rename;
+  let restoreHit = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    const d = String(b);
+    if (d === leasePath && String(a).includes(".reclaim-") && !restoreHit) {
+      restoreHit = true;
+      await writeFile(leasePath, ambiguous);
+      throw Object.assign(new Error("simulated EEXIST"), { code: "EEXIST" });
+    }
+    return origLink(a as string, d);
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(restoreHit, "the anomaly restore actually ran (the test drove the intended path)");
+  assert.ok(err !== null, "the takeover failed (stamp lost mid-swap)");
+  assert.match(err as string, /moved-aside original occupied by ambiguous content \(no trustworthy pid\)/, `ambiguous content classified honestly (got: ${String(err).slice(0, 200)})`);
+  assert.equal(await readFile(leasePath, "utf8"), ambiguous, "the ambiguous occupant was left untouched");
+  const names = await readdir(dir);
+  assert.ok(!names.some((n) => n.includes(".reclaim-")), "an OBSERVED occupant outranks the moved copy: `gone` reclaimed");
 });
