@@ -1111,8 +1111,17 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         //     is disclosed via `movedBody` for an honest error message.
         // DISCLOSED: steps 1-2 leave a microsecond absence window; it is
         // fenced for fresh creators by the lock-aware publishLease above
-        // (this path holds the takeover lock across the swap) and is the
-        // same check-then-act TOCTOU class disclosed for release.
+        // (this path holds the takeover lock across the swap). The CRASH
+        // cost of the window is disclosed too: a mover killed between the
+        // move and its claim-link leaves the lease ABSENT with our lock
+        // (live-pid stamp) standing — fresh creators fail closed
+        // ("contended", bounded by the attempt budget) until the lock
+        // passes its 30s steal bound and a dead-stamp reclaim restores
+        // service, and the `.reclaim-` original is swept by the pid-aware
+        // sweep once we are dead. Availability-only, self-healing; the
+        // pre-P20c6 blind rename had no absence window but destroyed live
+        // mid-swap claims (the reproduced OVERLAPPING_WORKERS) — a
+        // correctness failure, strictly worse.
         const gone = `${leasePath}.reclaim-${process.pid}.${leaseToken}`;
         let movedAside = false;
         try {
