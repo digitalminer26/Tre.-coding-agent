@@ -2072,17 +2072,25 @@ export function defaultCommandExists(command: string): boolean {
  *    — I3: absence of evidence is not evidence of absence). */
 export async function defaultPidProbe(pid: number): Promise<PidStatus | undefined> {
   if (!Number.isInteger(pid) || pid <= 0 || pid > 99_999_999) return undefined; // not a judgeable pid (conservative)
+  // Kill-based probe (no exec dependency — `ps` is blocked under
+  // sandboxed hosts, and an exec-based probe turns EVERY liveness check
+  // into inconclusive, deadlocking the fence on a journalled pid).
+  // kill(pid,0) semantics: success ⇒ the process exists and is ours to
+  // signal; ESRCH ⇒ it does not exist (the honest negative the fence
+  // needs — same miss-class evidence a `ps` no-such-pid answer gave);
+  // EPERM ⇒ it EXISTS under another uid (positive existence, foreign
+  // ownership — exactly the {running:true, sameUid:false} shape the
+  // ps path produced). Any other errno is undeterminable: undefined.
   try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "uid=,stat="]);
-    const line = stdout.trim();
-    if (!line) return { running: false, sameUid: false }; // ps answered: no such pid
-    const uid = Number.parseInt(line.split(/\s+/)[0] ?? "", 10);
-    if (!Number.isInteger(uid)) return undefined;
+    process.kill(pid, 0);
     const me = typeof process.getuid === "function" ? process.getuid() : undefined;
-    return { running: true, sameUid: me === undefined ? false : uid === me };
+    // Our own reaped children: node reaps them, so ESRCH answers after
+    // exit; a success here is a live (or zombie-unreaped) process.
+    return { running: true, sameUid: me === undefined ? false : true };
   } catch (e) {
-    const err = e as { code?: unknown; stdout?: unknown };
-    if (err && err.code === 1 && typeof err.stdout === "string" && err.stdout.trim() === "") return { running: false, sameUid: false };
+    const code = (e as { code?: string })?.code;
+    if (code === "ESRCH") return { running: false, sameUid: false };
+    if (code === "EPERM") return { running: true, sameUid: false };
     return undefined;
   }
 }

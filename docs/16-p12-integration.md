@@ -65,6 +65,32 @@ Boundary rules:
 6. **Compartment:** `src/integration/merge.ts` imports only `node:`
    builtins (the P6 pattern). Nothing outside tests imports it until P9
    wires the merge port. Journal and gate arrive as injected ports.
+   **WIRED (P9, 2026-11-06):** `src/host/supervise.ts` is the sanctioned
+   importer — `HostEpisodeOptions.episodeBranch` (CLI: `tre.-episode
+   --episode-branch <name>`) injects the compose loop's `merge` port,
+   routing the planner's `merge` action to `integrateTestedCandidate`
+   with the host's REAL DecisionJournal and a gate adapter that runs the
+   graph policy gate in a detached git worktree against the exact
+   candidate sha (M2). Absent the flag the executor's `merge-unwired`
+   refusal (docs/15 §3) stays the whole story. Pinned by
+   test/host-merge-port.test.ts; the thinness guard on activate.ts is
+   unchanged (the import sits in supervise.ts, the host layer).
+   **Audit cycle-1 (F2–F5, wired):** the gate adapter re-observes HEAD
+   AND a clean tracked tree AFTER the gate command and fails closed on
+   any mutation the gate performed (F2); its worktree dir is unique per
+   invocation with cleanup covering the `worktree add` failure path (F3);
+   the loop's actionIds carry an activation-unique `intentScope` (the
+   lease token) so a restarted activation never reissues an orphaned id
+   (F4, compose.ts `idScope`); and the operator's `integration:
+   { trigger: 'on-finish' }` declaration dispatches the merge ACT inside
+   the loop on a COMPLETE acceptance verdict — journaled intent + paired
+   outcome + `accepted-finish` `'integrated'` (F5). The host bumps P12's
+   `executionSeq` from the count of ACKED merge outcomes so a second
+   complete-verdict activation gets a fresh terminal identity instead
+   of colliding with the spent one. Compose-boundary matrix (port
+   status mapping, executor bypass, throw handling, trigger
+   eligibility, intentScope isolation) pinned by
+   test/supervisor-compose.test.ts §"P9 audit cycle-1 F6".
 
 ## 1. The one call
 

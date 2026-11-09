@@ -917,3 +917,139 @@ test("§7/R2: an executed act between two finish rejections breaks the consecuti
   assert.equal(res.stopped, "hold", "reject#1 → executed act RESETS the counter → reject#2 stands alone, the loop keeps going (docs §3)");
   assert.equal(f.jrec.filter((r) => r.kind === "acceptance" && r.verdict === "incomplete").length, 2);
 });
+
+// ── P9 audit cycle-1 F6: compose-level merge-intercept matrix ──────────────
+// The docs/16 §0.6 port intercept (planner route) and the operator's
+// on-finish integration trigger (F5) share ONE act body (doMergeAct);
+// the port result is treated as hostile DATA at every sink. These tests
+// pin the matrix at the COMPOSE boundary — the host real-route pins
+// (git refs, the P12 journal) live in test/host-merge-port.test.ts.
+
+type MergeRes = { status: string; actionId?: string; stage?: string; reason?: string; evidenceRefs?: string[]; outcomeDurable?: boolean };
+
+function mergePortFn(results: MergeRes[], calls: object[] = []) {
+  let i = 0;
+  return {
+    calls,
+    port: { integrate: async (req: object) => { calls.push(req); const r = results[i] ?? { status: "failed", reason: "exhausted-stub" }; i += 1; return r; } },
+  };
+}
+
+test("F6 matrix: planner-route merge 'merged' → executed, intent paired acked, executor BYPASSED", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const m = mergePortFn([{ status: "merged", actionId: "p12-1", evidenceRefs: ["sha:abc"], outcomeDurable: true }], []);
+  const s = scripted(planOf("merge", { sideEffect: "external", rung: 4 }), planOf("hold"));
+  const res = await run(cfgBase(), f, s.planner, { merge: m.port });
+  assert.equal(res.stopped, "hold", "merge executes and the loop continues");
+  assert.equal(m.calls.length, 1, "the port was called exactly once");
+  assert.deepEqual({ episodeId: (m.calls[0] as Rec).episodeId, taskId: (m.calls[0] as Rec).taskId }, { episodeId: "ep-1", taskId: "t1" });
+  assert.equal(f.execCaptured.length, 0, "the executor was NEVER invoked for the merge act (docs/16 §0.6)");
+  const mi = f.jrec.find((r) => r.kind === "decision-intent" && r.action === "merge");
+  assert.ok(mi, "merge intent journaled");
+  assert.equal((mi as Rec).rung, 4);
+  assert.equal(((mi as Rec).authority as Rec)?.sideEffect, "external");
+  const mo = f.jrec.find((r) => r.kind === "decision-outcome" && r.actionId === (mi as Rec).actionId);
+  assert.ok(mo && (mo as Rec).acked === true, "paired outcome under the SAME actionId, acked");
+  assert.equal(openIntents(f.jrec as never).length, 0, "no intent left open");
+});
+
+test("F6 matrix: 'conflict' maps to refused (acked:false), loop continues", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const m = mergePortFn([{ status: "conflict", stage: "act", reason: "merge-conflict", outcomeDurable: true }]);
+  const s = scripted(planOf("merge", { sideEffect: "external", rung: 4 }), planOf("hold"));
+  const res = await run(cfgBase(), f, s.planner, { merge: m.port });
+  assert.equal(res.stopped, "hold");
+  const mi = f.jrec.find((r) => r.kind === "decision-intent" && r.action === "merge") as Rec;
+  const mo = f.jrec.find((r) => r.kind === "decision-outcome" && r.actionId === mi.actionId);
+  assert.ok(mo && mo.acked === false && /conflict/.test(String(mo.notes)), "refusal paired, unacked, reason carried");
+  assert.equal(openIntents(f.jrec as never).length, 0);
+});
+
+test("F6 matrix: an unshapeable port status fails CLOSED to 'failed' and is logged — never laundered to executed", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const m = mergePortFn([{ status: "totally-merged-i-swear" }]);
+  const logs: string[] = [];
+  const s = scripted(planOf("merge", { sideEffect: "external", rung: 4 }), planOf("hold"));
+  const res = await run(cfgBase(), f, s.planner, { merge: m.port, log: (l: string) => logs.push(l) });
+  assert.equal(res.stopped, "hold");
+  assert.ok(logs.some((l) => l.startsWith("merge-status-unshapeable:")), "the garbage status is logged, not trusted");
+  const mo = f.jrec.find((r) => r.kind === "decision-outcome" && String(r.notes).startsWith("supervisor: merge"));
+  assert.ok(mo && mo.acked === false);
+});
+
+test("F6 matrix: a THROWING merge port is a host-contract failure — intent closed, loop-error stop, never a reject into the host", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const s = scripted(planOf("merge", { sideEffect: "external", rung: 4 }));
+  const res = await run(cfgBase(), f, s.planner, { merge: { integrate: async () => { throw new Error("adapter-boom"); } } });
+  assert.equal(res.stopped, "loop-error");
+  assert.equal(res.error?.name, "merge-port-Error");
+  assert.equal(openIntents(f.jrec as never).length, 0, "the merge intent was closed before the stop");
+});
+
+test("F5 trigger: complete verdict + cfg.integration on-finish + port ⇒ merge ACT in the loop, accepted-finish 'integrated'", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const accept = { evaluate: () => ({ verdict: "complete", remainingWork: [], reasons: [] }) };
+  const calls: object[] = [];
+  const m = mergePortFn([{ status: "merged", actionId: "p12-1", outcomeDurable: true }], calls);
+  const res = await run(cfgBase({ acceptance: { spec: { dod: "done" } }, integration: { trigger: "on-finish" }, intentScope: "lease/A 1" }), f,
+    { planRecovery: planRecovery as (i: object) => object }, { accept, merge: m.port });
+  assert.equal(res.stopped, "accepted-finish");
+  assert.equal(res.detail, "integrated");
+  assert.equal(calls.length, 1, "the operator's trigger dispatched exactly one merge");
+  const mi = f.jrec.find((r) => r.kind === "decision-intent" && r.action === "merge" && r.strategyId === "integration:on-finish:v1");
+  assert.ok(mi, "journaled under the loop's id namespace with the canonical strategy id");
+  assert.match(String((mi as Rec).actionId), /^sup-lease_A_1-ep-1-t1-i\d+m$/, "intent id carries the sanitized activation scope AND the m-suffix");
+  const mo = f.jrec.find((r) => r.kind === "decision-outcome" && r.actionId === (mi as Rec).actionId);
+  assert.ok(mo && (mo as Rec).acked === true, "paired outcome");
+  assert.equal(openIntents(f.jrec as never).length, 0);
+});
+
+test("F5 trigger: a refused merge HALTS with integration-<status> — the finish is not honored over a failed integration", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const accept = { evaluate: () => ({ verdict: "complete", remainingWork: [], reasons: [] }) };
+  const m = mergePortFn([{ status: "gate-failed", stage: "gate", reason: "policy-gate", outcomeDurable: true }]);
+  const res = await run(cfgBase({ acceptance: { spec: { dod: "done" } }, integration: { trigger: "on-finish" } }), f,
+    { planRecovery: planRecovery as (i: object) => object }, { accept, merge: m.port });
+  assert.equal(res.stopped, "halt");
+  assert.equal(res.detail, "integration-refused");
+  const mi = f.jrec.find((r) => r.kind === "decision-intent" && r.action === "merge") as Rec;
+  const mo = f.jrec.find((r) => r.kind === "decision-outcome" && r.actionId === mi.actionId);
+  assert.ok(mo && mo.acked === false);
+  assert.equal(openIntents(f.jrec as never).length, 0);
+});
+
+test("F5 trigger: eligibility is fail-closed — NO port or a trigger-less declaration passes through to plain accepted-finish", async () => {
+  const f = mkFakes({ exitCode: 0 });
+  const accept = { evaluate: () => ({ verdict: "complete", remainingWork: [], reasons: [] }) };
+  const res = await run(cfgBase({ acceptance: { spec: { dod: "done" } }, integration: { trigger: "on-finish" } }), f,
+    { planRecovery: planRecovery as (i: object) => object }, { accept });
+  assert.equal(res.stopped, "accepted-finish");
+  assert.equal(res.detail, undefined, "unintegrated — no merge happened");
+  assert.equal(f.jrec.filter((r) => r.kind === "decision-intent" && r.action === "merge").length, 0);
+  // integration declared with NO trigger value: never fires even WITH a port
+  const f2 = mkFakes({ exitCode: 0 });
+  const m2 = mergePortFn([{ status: "merged" }]);
+  const res2 = await run(cfgBase({ acceptance: { spec: { dod: "done" } }, integration: {} }), f2,
+    { planRecovery: planRecovery as (i: object) => object }, { accept, merge: m2.port });
+  assert.equal(res2.stopped, "accepted-finish");
+  assert.equal(m2.calls.length, 0, "an integration block without trigger:'on-finish' merges NOTHING");
+});
+
+test("F4 isolation: intentScope namespaces actionIds — sanitized, and two activations never collide", async () => {
+  const sA = scripted(planOf("nudge"), planOf("hold"));
+  const fA = mkFakes({ exitCode: 1 });
+  await run(cfgBase({ intentScope: "lease/A 1" }), fA, sA.planner);
+  const sB = scripted(planOf("nudge"), planOf("hold"));
+  const fB = mkFakes({ exitCode: 1 });
+  await run(cfgBase({ intentScope: "lease/B 2" }), fB, sB.planner);
+  const idA = String(fA.jrec.find((r) => r.kind === "decision-intent")!.actionId);
+  const idB = String(fB.jrec.find((r) => r.kind === "decision-intent")!.actionId);
+  // Separator/unsafe characters are sanitized to '_' — an id component
+  // never gains '/' or ' ' aliases from a host-supplied scope.
+  assert.match(idA, /^sup-lease_A_1-ep-1-t1-i\d+$/, `sanitized scoped id, got ${idA}`);
+  assert.notEqual(idA, idB, "two activations can never reissue the same actionId");
+  // absent scope keeps the legacy unscoped shape
+  const f0 = mkFakes({ exitCode: 1 });
+  await run(cfgBase(), f0, scripted(planOf("nudge"), planOf("hold")).planner);
+  assert.match(String(f0.jrec.find((r) => r.kind === "decision-intent")!.actionId), /^sup-ep-1-t1-i\d+$/);
+});

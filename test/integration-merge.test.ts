@@ -1548,7 +1548,10 @@ test("P12 C4-F4: killed writer (no reported exit) + head reverted to the OLD val
   const body = [
     "#!/bin/sh", `REAL="${real}"`, `MARKER="${marker}"`, `OLDREF="${oldRef}"`, `REPO="${fx.dir}"`,
     'sub=""; for a in "$@"; do case "$a" in update-ref|rev-parse) sub="$a";; esac; done',
-    'if [ "$sub" = update-ref ]; then printf "%s" "$4" > "$OLDREF"; "$REAL" "$@"; rc=$?; [ $rc -eq 0 ] && touch "$MARKER"; kill -9 $$; fi',
+    // Position-independent old-value capture: the P12 CAS call prepends
+    // --no-replace-objects (cycle-3 F1), so fixed $n positions would
+    // drift. Ask the REAL git what ep1 holds BEFORE landing.
+    'if [ "$sub" = update-ref ]; then "$REAL" -C "$REPO" rev-parse --verify refs/heads/ep1 > "$OLDREF" 2>/dev/null; "$REAL" "$@"; rc=$?; [ $rc -eq 0 ] && touch "$MARKER"; kill -9 $$; fi',
     'if [ "$sub" = rev-parse ] && [ -f "$MARKER" ] && [ ! -f "$MARKER.done" ]; then',
     '  "$REAL" -C "$REPO" update-ref refs/heads/ep1 "$(cat "$OLDREF")" 2>/dev/null; touch "$MARKER.done"',
     "fi",

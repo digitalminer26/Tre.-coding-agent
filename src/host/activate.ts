@@ -41,6 +41,15 @@ export interface ActivateArgs {
   worktreePath?: string;
   /** Worker spawn command override (default `tre.`). */
   workerCommand?: string;
+  /** P9 merge port (docs/16 §0.6): integration branch the merge advances
+   *  (a single git branch-name ELEMENT matching ^[A-Za-z0-9][A-Za-z0-9._-]*$
+   *  — P12's SAFE_ID grammar; slash-containing names are refused at parse,
+   *  P9 audit cycle-2 F4). Absent = the merge port stays unwired (docs/15 §3). */
+  episodeBranch?: string;
+  /** P9 audit cycle-2 F3: operator-raised baseline for the integration
+   *  executionSeq (recovery after reconciling an act-unknown terminal —
+   *  docs/16 §2). Absent = derived from the journal. */
+  integrationSeqBump?: number;
   /** Loop-structure cap (docs/18 §3). */
   maxIterations?: number;
   /** Wire the Telegram escalation delivery ACT (docs/19 §5/§6). */
@@ -58,6 +67,8 @@ const USAGE = [
   "  --episodes-root <dir>   episodes root (default: $HOME/.tre/episodes)",
   "  --worktree <dir>        the task's working tree (worker cwd + identity)",
   "  --worker <cmd>          worker spawn command (default: tre.)",
+  "  --episode-branch <name>  integration branch for the P9 merge port (single branch-name element; absent = merge stays unwired)",
+  "  --integration-seq-bump <n>  operator-raised integration seq (act-unknown recovery AFTER reconciling; docs/16 §2)",
   "  --max-iterations <n>    loop-structure cap (default: the loop's own)",
   "  --telegram              wire the Telegram escalation delivery (docs/19 §6)",
   "  --help                  this text",
@@ -74,6 +85,8 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
   let episodesRoot: string | undefined;
   let worktreePath: string | undefined;
   let workerCommand: string | undefined;
+  let episodeBranch: string | undefined;
+  let integrationSeqBump: number | undefined;
   let maxIterations: number | undefined;
   let telegram = false;
 
@@ -107,6 +120,31 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
       const err = needValue(a, argv[i + 1]);
       if (err !== undefined) return { error: err };
       workerCommand = argv[++i];
+    } else if (a === "--episode-branch") {
+      const err = needValue(a, argv[i + 1]);
+      if (err !== undefined) return { error: err };
+      episodeBranch = argv[++i];
+      // P9 audit cycle-2 F4: the OLD guard was ref-shaped but ADMITTED
+      // slash-containing names (`integrate/ep1`), which P12's context
+      // validator (SAFE_ID — a SINGLE path element) categorically
+      // refuses: the operator ran the whole worker episode only to
+      // halt at integration with `context:episodeBranch`. The guard is
+      // now the EXACT grammar P12 admits, so a name that would be
+      // refused at integration never starts a worker. git's
+      // check-ref-format stays the downstream authority for everything
+      // this grammar admits (P12 re-checks per call); the policy guards
+      // (never `main`, never the `agent` namespace) stay P12's alone.
+      if (episodeBranch === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(episodeBranch)) {
+        return { error: "--episode-branch must be a single git branch-name element matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (P12's grammar — no '/', no '..', must start alphanumeric)" };
+      }
+    } else if (a === "--integration-seq-bump") {
+      const raw = argv[i + 1];
+      const err = needValue(a, raw);
+      if (err !== undefined) return { error: err };
+      const n = Number(raw);
+      if (!Number.isSafeInteger(n) || n < 0) return { error: "--integration-seq-bump must be a non-negative integer" };
+      integrationSeqBump = n;
+      i++;
     } else if (a === "--max-iterations") {
       const raw = argv[i + 1];
       const err = needValue(a, raw);
@@ -131,6 +169,8 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
     ...(episodesRoot !== undefined ? { episodesRoot } : {}),
     ...(worktreePath !== undefined ? { worktreePath } : {}),
     ...(workerCommand !== undefined ? { workerCommand } : {}),
+    ...(episodeBranch !== undefined ? { episodeBranch } : {}),
+    ...(integrationSeqBump !== undefined ? { integrationSeqBump } : {}),
     ...(maxIterations !== undefined ? { maxIterations } : {}),
     telegram,
   };
@@ -266,6 +306,8 @@ export async function activate(argv: string[], logRaw: (line: string) => void = 
         ...(args.episodesRoot !== undefined ? { episodesRoot: args.episodesRoot } : {}),
         ...(args.worktreePath !== undefined ? { worktreePath: args.worktreePath } : {}),
         ...(args.workerCommand !== undefined ? { workerCommand: args.workerCommand } : {}),
+        ...(args.episodeBranch !== undefined ? { episodeBranch: args.episodeBranch } : {}),
+        ...(args.integrationSeqBump !== undefined ? { integrationSeqBump: args.integrationSeqBump } : {}),
         ...(args.maxIterations !== undefined ? { maxIterations: args.maxIterations } : {}),
         ...(deliver !== undefined ? { escalationDeliver: deliver } : {}),
         log,

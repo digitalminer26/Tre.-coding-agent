@@ -51,6 +51,11 @@ import type { GateResult, ArtifactEvidence, ArtifactIdentity, EvaluateInput, Acc
 import { runSupervisorEpisode, type ComposePorts, type GatePort, type GateRequestLike, type RunnerPort, type SupervisorConfig, type SupervisorResult } from "../supervisor/compose.js";
 import { executeRecoveryAction } from "../executor/exec.js";
 import { planRecovery } from "../planner/plan.js";
+// P9 merge-port wiring (docs/16 §0.6): the host is the ONE sanctioned
+// importer of the integration module — the seam opened when the compose
+// loop grew its merge port. The executor's `merge-unwired` refusal
+// (docs/15 §3) stays intact for every other caller.
+import { integrateTestedCandidate, type IntegrationJournalPort, type IntegrationGatePort } from "../integration/merge.js";
 import { investigate as runInvestigation } from "../investigation/agent.js";
 import { makeEscalationChannel, makeEscalationDispatcher, type DeliverPort } from "../escalation/channel.js";
 import { AttemptRunner, type AttemptTask } from "../runner/attempt.js";
@@ -83,6 +88,29 @@ export interface HostEpisodeOptions {
    *  Absent = the loop still runs, but the identity is disclosed as
    *  dirty-unknown: the episode dir is not the task's tree. */
   worktreePath?: string;
+  /** P9 merge port (docs/16 §0.6): the integration branch the merge
+   *  advances — a SINGLE git branch-name element matching
+   *  ^[A-Za-z0-9][A-Za-z0-9._-]*$ (P12's SAFE_ID grammar — the SAME
+   *  shape P12's context validator admits; slash-containing names like
+   *  `integrate/ep1` are refused up front, NEVER a worker started for
+   *  an integration that can only halt at `context:episodeBranch` —
+   *  P9 audit cycle-2 F4). PRESENT = the
+   *  host injects the compose loop's merge port: the planner's `merge`
+   *  action routes to integrateTestedCandidate against `worktreePath`
+   *  (which must be the git repo holding both the episode branch and
+   *  the agent/** task branches). ABSENT = the port is not injected and
+   *  the executor's `merge-unwired` refusal remains the behavior
+   *  (docs/15 §3 — an un-wired merge is still a hard refusal). */
+  episodeBranch?: string;
+  /** P9 audit cycle-2 F3: operator-raised baseline for the integration
+   *  executionSeq. A terminal act-unknown outcome SPENDS its seq forever
+   *  (P12 refuses to replay it — docs/16 §2 the recovery is a NEW
+   *  identity), so a journal-derived count alone can never reach past a
+   *  stuck terminal. The host logs the exact remedy per activation;
+   *  setting this field is the operator's authorization to start above
+   *  the spent seq (e.g. after reconciling whether the CAS landed).
+   *  ABSENT = derived from the journal (count of acked merge outcomes). */
+  integrationSeqBump?: number;
   /** Loop-structure cap (docs/18 §3). */
   maxIterations?: number;
   /** Host sink (stderr by default). Never throws into the loop. */
@@ -118,7 +146,16 @@ export interface HostEpisodeResult {
    *  compose loop never produces (it always sends the worker stopped
    *  between turns), so the loop path cannot drive the handler in a test.
    *  NEVER call while the episode is running; it is for the finished/
-   *  stopped episode and for regression tests of the park handler. */
+   *  stopped episode and for regression tests of the park handler.
+   *
+   *  P9 audit cycle-1 F1 REMOVED the `mergeTask` seam this field used to
+   *  sit beside: the closure acted AFTER the episode lease was released
+   *  (the outer `finally` runs before the caller receives the result),
+   *  stayed callable after parked/escalation-exhausted, and bypassed the
+   *  loop's intent protocol. Integration now dispatches IN the loop via
+   *  the operator-declared `integration: { trigger: 'on-finish' }`
+   *  config (docs/16 §0.6) — under the lease, with the loop's intent
+   *  pairing — and test/host-merge-port.test.ts drives that real route. */
   parkTask: () => Promise<void>;
 }
 
@@ -185,6 +222,12 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_TERMINAL_PROMPT: "0",
   GIT_PORCELAIN: "1",
+  // P9 audit cycle-2 F1: replacement refs silently REDIRECT object
+  // interpretation (`git replace <cand> <safe>` made every observation
+  // describe substituted content while the raw candidate stayed
+  // different — proven). Every git run in this module resolves RAW
+  // objects only; runObservedGit pins the CLI flag too.
+  GIT_NO_REPLACE_OBJECTS: "1",
 };
 
 /** Run a command capturing output; never rejects (exit code + tails).
@@ -425,6 +468,12 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
   const o: { maxBytes?: number; hashStdout?: boolean } = typeof opts === "number" ? { maxBytes: opts } : (opts ?? {});
   const pinned = [
     "git",
+    // P9 audit cycle-2 F1: replacement refs (refs/replace/*) REDIRECT
+    // object interpretation — `git replace <cand-blob> <safe-blob>` made
+    // `rev-parse HEAD`, `status`, and `ls-files` all describe the
+    // SUBSTITUTED content while the raw candidate stayed UNSAFE (proven).
+    // Every observed run resolves RAW objects only.
+    "--no-replace-objects",
     "-c", "status.untrackedFiles=all",
     "-c", "core.excludesFile=/dev/null",
     "-c", "diff.ignoreSubmodules=none",
@@ -891,6 +940,19 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   assertId(graph.episodeId, "episodeId");
   assertId(opts.taskId, "taskId");
   assertId(opts.grantedBy, "grantedBy");
+  // P9 audit cycle-2 F4: the merge-port branch is validated against
+  // P12's EXACT grammar (SAFE_ID — a single path element) BEFORE any
+  // worker starts, so a name P12 would refuse at integration (e.g.
+  // `integrate/ep1`) fails fast at activation instead of burning a
+  // whole episode into `context:episodeBranch`. The policy guards
+  // (never `main` — case-folded, never the `agent` namespace) stay
+  // P12's own per-call authority; this is only the contract alignment.
+  if (opts.episodeBranch !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(opts.episodeBranch)) {
+    throw new Error(`host: episodeBranch must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (P12's SAFE_ID grammar — a single git branch-name element, e.g. "episode-${graph.episodeId}")`);
+  }
+  if (opts.integrationSeqBump !== undefined && (!Number.isSafeInteger(opts.integrationSeqBump) || opts.integrationSeqBump < 0)) {
+    throw new Error("host: integrationSeqBump must be a non-negative safe integer");
+  }
   const root = opts.episodesRoot ?? join(process.env["HOME"] ?? "/tmp", ".tre", "episodes");
   const epPath = episodeDir(root, graph.episodeId);
   const epId = await epPathIdentity(epPath);
@@ -2142,7 +2204,245 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     },
   };
 
+  // ── P9 merge port (docs/16 §0.6 seam — "nothing outside … imports
+  // [merge] UNTIL P9 wires the merge port"; the host is that wiring) ────
+  // Injected ONLY when the operator declared the integration branch:
+  // absent, the executor's `merge-unwired` refusal stays the whole story
+  // (docs/15 §3). The journal adapter feeds the SAME DecisionJournal the
+  // loop appends to (P12's record shapes mirror P4 §14.3 and validate),
+  // so dedup and the sticky terminals are durable across restarts.
+  // The gate adapter must test the EXACT candidate (M2): P12 builds a
+  // merge commit that no ref points at yet, so the honest way to run the
+  // graph gate on it is to materialize the candidate in a detached git
+  // worktree under the episode dir, run the gate command THERE under the
+  // same minimal env the acceptance gate uses, and report the sha the
+  // worktree actually checked out — never the requested one unchecked.
+  // The repo the merge acts on: the SAME tree the worker runs in must
+  // hold both refs/heads/<episodeBranch> and the agent/** task branch —
+  // P12's resolve stage re-verifies this per call and refuses honestly
+  // when the cwd fallback is not a git repo (never a silent elsewhere).
+  const repoForMerge = opts.worktreePath ?? epPath;
+  const integrationJournal: IntegrationJournalPort = {
+    append: async (record) => { await journal.append(record as SupervisorRecord); },
+    read: async () => journal.read(),
+  };
+  const integrationGate: IntegrationGatePort = {
+    run: async (greq) => {
+      const runId = `host-gate:${greq.actionId}`.slice(0, 256);
+      const shaOk = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(greq.candidateSha);
+      const gateCmd = graph.policy?.gate?.cmd;
+      if (!shaOk) return { pass: false, runId, sha: "", detail: "candidate-sha-invalid" };
+      if (typeof gateCmd !== "string" || gateCmd.trim() === "") return { pass: false, runId, sha: greq.candidateSha, detail: "no-gate-cmd" };
+      const rawT = graph.policy?.gate?.timeoutS;
+      const timeoutS = typeof rawT === "number" && Number.isSafeInteger(rawT) && rawT >= 1 && rawT <= 3600 ? rawT : 120;
+      // P9 audit cycle-1 F3: the directory is UNIQUE per invocation (was
+      // actionId-derived: a failed/partial `worktree add` left a
+      // deterministic path behind and the RETRY collided with its own
+      // residue instead of starting clean). mkdir with the exclusive
+      // default (no recursive) proves we own the directory BEFORE git
+      // ever sees it, and the retry loop re-rolls on the (astronomical)
+      // name collision.
+      const parent = join(epPath, "merge-gate");
+      await mkdir(parent, { recursive: true });
+      let dir = "";
+      for (let attempt = 0; attempt < 8 && dir === ""; attempt++) {
+        const cand = join(parent, `g-${greq.actionId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)}-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
+        try { await mkdir(cand); dir = cand; } catch (e) {
+          if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") {
+            return { pass: false, runId, sha: greq.candidateSha, detail: `gate-dir:${(e as NodeJS.ErrnoException)?.code ?? "mkdir-error"}`.slice(0, 512) };
+          }
+        }
+      }
+      if (dir === "") return { pass: false, runId, sha: greq.candidateSha, detail: "gate-dir:collision-exhausted" };
+      // OWNERSHIP-COVERED CLEANUP (F3): the add attempt itself is inside
+      // the try — git can register a worktree and fail DURING checkout,
+      // and a timeout/kill after successful add leaves the same residue.
+      // The first `git worktree add` into a mkdir-owned empty dir fails
+      // if a registration for that path exists (fresh unique names make
+      // that impossible in the normal case), so cleanup is ours on EVERY
+      // path: removal is best-effort (a half-added path may answer neither
+      // `remove` nor need it) and prune closes the registration window.
+      let added = false;
+      try {
+        // The candidate objects exist in the repo (P12 commit-tree'd them
+        // moments ago) even though no ref names them — a detached worktree
+        // materializes them without touching the task's tree.
+        const add = await runObservedGit(repoForMerge, ["worktree", "add", "--detach", dir, greq.candidateSha], Math.min(timeoutS, 120));
+        added = add.code === 0;
+        if (!added) {
+          return { pass: false, runId, sha: greq.candidateSha, detail: `worktree-add:${(add.stderr.trim() !== "" ? add.stderr : add.stdout).slice(-384)}`.slice(0, 512) };
+        }
+        const head = await runObservedGit(dir, ["rev-parse", "HEAD"], 30);
+        const tested = head.code === 0 ? head.stdout.trim().toLowerCase() : "";
+        if (tested !== greq.candidateSha) return { pass: false, runId, sha: tested, detail: "identity-mismatch-materialized" };
+        const r = await runShell(gateCmd, dir, timeoutS, { env: GIT_ENV });
+        // P9 audit cycle-1 F2: a PASSING command only measures the
+        // candidate if what was tested IS the candidate. `rev-parse HEAD`
+        // is a commit POINTER, not the bytes under it: a gate that mutates
+        // tracked content, restages, or checks out a different commit
+        // before exiting zero would have its verdict stamped on a sha it
+        // never tested. Re-observe AFTER the command: HEAD must still be
+        // the candidate, and the tracked state must still be the
+        // candidate's checkout. UNTRACKED additions are tolerated — the
+        // integration candidate is built from COMMITTED content, so files
+        // a build step created (dist/) do not change what merges — but a
+        // modified/staged/deleted TRACKED path (or any other state we
+        // cannot read) fails closed: the tested bytes are no longer the
+        // candidate's bytes.
+        let mutated = "";
+        if (r.cause === "exit" && r.code === 0) {
+          const headAfter = await runObservedGit(dir, ["rev-parse", "HEAD"], 30);
+          const shaAfter = headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : "";
+          if (shaAfter !== greq.candidateSha) {
+            mutated = `head-moved-post-gate:${shaAfter.slice(0, 12) || "unreadable"}`;
+          } else {
+            const st = await runObservedGit(dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes: 4 * 1024 * 1024 });
+            if (st.code !== 0 || st.truncated) {
+              mutated = "tree-state-unreadable-post-gate";
+            } else {
+  for (const entry of st.stdout.split("\0")) {
+                if (entry === "") continue;
+                const xy = entry.slice(0, 2);
+                // "??" untracked additions are tolerated (see above);
+                // "!!" cannot appear (--untracked-files shows them).
+                if (xy !== "??") { mutated = `tracked-mutation-post-gate:${xy}`; break; }
+              }
+            }
+            // P9 audit cycle-2 F1: `git status` is BLIND to on-disk deltas
+            // of entries flagged `--assume-unchanged` (tag h) or
+            // `--skip-worktree` (tag S) — probe: a gate that flags the
+            // file, rewrites it, and exits 0 had its PASS stamped on the
+            // candidate (accepted-finish/integrated with forged content
+            // NEVER tested). Same blindness observeIdentity already fails
+            // closed on (W11-A1/A3): read the index tags straight off with
+            // `ls-files -v`; any non-`H` entry means the tested bytes are
+            // not the candidate's bytes. The read itself failing or
+            // truncating is the same blindness class — fail closed.
+            if (mutated === "") {
+              const flags = await runObservedGit(dir, ["ls-files", "-v", "-z"], 10, { maxBytes: 4 * 1024 * 1024 });
+              if (flags.code !== 0 || flags.truncated) {
+                mutated = `index-flags-unreadable-post-gate:${flags.code}`;
+              } else {
+                for (const rec of flags.stdout.split("\0")) {
+                  if (rec === "") continue;
+                  if ((rec[0] ?? "?") !== "H") { mutated = `index-flag-post-gate:${rec[0]}:${rec.slice(2, 128)}`; break; }
+                }
+              }
+            }
+            // P9 audit cycle-2 F1: replacement refs survive EVERY
+            // observation honest-looking if the objects are substituted
+            // (proven: HEAD, status, and ls-files all described the
+            // SAFE substitute while the raw candidate stayed UNSAFE).
+            // --no-replace-objects pins our OWN reads to raw objects, but
+            // the refs' mere existence means the repository's shared
+            // state was tampered with during the gate — any consumer
+            // without the pin (a later operator, a tool on the repo)
+            // resolves the substitute. Fail CLOSED: the presence of ANY
+            // refs/replace entry after a candidate gate disqualifies it.
+            if (mutated === "") {
+              const rep = await runObservedGit(repoForMerge, ["for-each-ref", "--format=%(refname)%09%(objectname)", "refs/replace"], 10, { maxBytes: 256 * 1024 });
+              if (rep.code !== 0 || rep.truncated) {
+                mutated = "replace-refs-unreadable-post-gate";
+              } else if (rep.stdout.trim() !== "") {
+                mutated = "replacement-refs-post-gate";
+              }
+            }
+          }
+        }
+        const pass = r.cause === "exit" && r.code === 0 && mutated === "";
+        try {
+          const ref = await appendEvidence(epPath, greq.candidateSha, `merge-gate ${JSON.stringify(gateCmd)} exit=${r.cause === "exit" ? r.code : r.cause}${mutated !== "" ? ` [${mutated}]` : ""}\n${r.stdout.slice(-2048)}\n${r.stderr.slice(-2048)}`);
+          return { pass, runId, sha: tested, detail: `exit=${r.cause === "exit" ? r.code : r.cause}${mutated !== "" ? `;${mutated}` : ""}; evidence=${ref}`.slice(0, 512) };
+        } catch {
+          // Evidence append failed — the verdict stands (the sha binding
+          // is the worktree identity, not the evidence file), disclosed.
+          return { pass, runId, sha: tested, detail: `exit=${r.cause === "exit" ? r.code : r.cause}${mutated !== "" ? `;${mutated}` : ""}; evidence-append-failed`.slice(0, 512) };
+        }
+      } finally {
+        // NEVER leave a worktree registration or directory behind on ANY
+        // path — including a failed or half-completed add (F3).
+        if (added) await runObservedGit(repoForMerge, ["worktree", "remove", "--force", dir], 60).catch(() => undefined);
+        try { await rm(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+        await runObservedGit(repoForMerge, ["worktree", "prune"], 60).catch(() => undefined);
+      }
+    },
+  };
+  const mergePort: ComposePorts["merge"] | undefined = opts.episodeBranch !== undefined
+    ? {
+        integrate: async (mreq) => {
+          // P12's dedup identity is (repoRoot, episodeId, taskId,
+          // episodeBranch, executionSeq) — WITHOUT a bumped seq a second
+          // activation replays the first's terminal identity and P12
+          // honestly answers already-executed (docs/16 §2: "recovery is a
+          // NEW identity (bumped executionSeq)"). The host derives the
+          // seq from the journal: the count of ACKED merge outcomes is
+          // exactly the number of terminal identities already spent, so
+          // the next integration gets the next unused seq — and a
+          // restart with an OPEN (unacked) intent recomputes the SAME
+          // seq the open intent carries, keeping recovery reachable.
+          // P9 audit cycle-2 F2: the OLD count matched actionId by
+          // PREFIX `a-${taskId}-merge-` — `t1-merge-x` outcomes embed
+          // that prefix and bumped `t1`'s seq (skipping its recovery
+          // identity). Count now requires the EXACT P12 action-id
+          // grammar (`a-<taskId>-merge-<16 hex>`, the idDigest width)
+          // AND the record's OWN episodeId/taskId identity — never
+          // another task's terminal.
+          // P9 audit cycle-2 F3: a terminal act-unknown outcome spends
+          // the seq forever (never counted: counting it would authorize
+          // a second external act under a fresh identity blindly). The
+          // documented recovery is a NEW identity after reconciliation —
+          // so the operator can raise the baseline explicitly via
+          // opts.integrationSeqBump, and every act-unknown terminal is
+          // DISCLOSED with that remedy on every activation.
+          let executionSeq = opts.integrationSeqBump ?? 0;
+          try {
+            const { records } = await integrationJournal.read();
+            const exactMergeId = new RegExp(`^a-${(mreq.taskId as string).replace(/[^A-Za-z0-9._-]/g, "\\$&")}-merge-[0-9a-f]{16}$`);
+            let actUnknown = 0;
+            for (const r of records) {
+              if (typeof r !== "object" || r === null) continue;
+              const rec = r as { kind?: unknown; acked?: unknown; actionId?: unknown; episodeId?: unknown; taskId?: unknown; notes?: unknown };
+              if (rec.kind !== "decision-outcome" || typeof rec.actionId !== "string" || !exactMergeId.test(rec.actionId)) continue;
+              if (rec.episodeId !== mreq.episodeId || rec.taskId !== mreq.taskId) continue;
+              // P9 audit cycle-3 F2: mirror P12's OWN sticky rule
+              // (merge.ts dedup scan): an unacked outcome is a terminal
+              // act-unknown ONLY when its notes do not start with
+              // "no-effect:" — a PROVABLY effect-free refusal (clean CAS
+              // rejection, stale-lock refusal) stays replayable under the
+              // SAME identity and must never be announced as stranded.
+              if (rec.acked === true) executionSeq++;
+              else if (typeof rec.notes !== "string" || !rec.notes.startsWith("no-effect:")) actUnknown++;
+            }
+            if (actUnknown > 0) {
+              log(`integration-act-unknown: ${actUnknown} merge terminal(s) with unverified side effect at/below the current seq — P12 refuses replay (not-replayable, docs/16 §2); after RECONCILING observed reality (did the CAS land?), an operator-authorized recovery runs with --integration-seq-bump ${String(executionSeq + 1)}`);
+            }
+          } catch { /* a read failure falls back to the bumped baseline;
+                      P12's own journal guards still refuse a replay honestly */ }
+          return integrateTestedCandidate(
+            {
+              repoRoot: repoForMerge,
+              episodeId: mreq.episodeId,
+              taskId: mreq.taskId,
+              episodeBranch: opts.episodeBranch as string,
+              now: mreq.now,
+              grantedBy: mreq.grantedBy,
+              executionSeq,
+            },
+            { journal: integrationJournal, gate: integrationGate },
+          );
+        },
+      }
+    : undefined;
+  if (mergePort !== undefined) {
+    // Disclosure, not policy: the operator sees WHAT the merge acts on.
+    // Without an explicit worktree the declared repo is the process cwd
+    // and P12's own resolve stage refuses honestly (never a silent
+    // merge somewhere else) — that is disclosed too.
+    log(`merge-port:injected branch=${opts.episodeBranch} repo=${repoForMerge}${opts.worktreePath === undefined ? " (cwd fallback: merges will resolve-refuse)" : ""}`);
+  }
+
   const ports: ComposePorts = {
+    ...(mergePort !== undefined ? { merge: mergePort } : {}),
     planner: { planRecovery: (input) => planRecovery(input as Parameters<typeof planRecovery>[0]) },
     executor: { executeRecoveryAction: (plan, ctx, p) => executeRecoveryAction(plan, ctx as never, p as never) },
     executorPorts,
@@ -2178,11 +2478,30 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     acceptance: { spec: acceptanceSpecFrom(task.acceptance), ...(graph.policy?.baseCommit !== undefined ? { current: { sha: graph.policy.baseCommit } } : {}) },
     ...(graph.policy?.recoveryBudget !== undefined ? { recoveryBudget: { ...graph.policy.recoveryBudget } } : {}),
     ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
+    // P9 audit cycle-1 F4: activation-unique intent namespace. The lease
+    // token is exactly the activation's ownership identity; deriving the
+    // scope from it means a restarted activation can never reissue the
+    // previous one's intent ids (and thus never mask its orphaned merge).
+    intentScope: leaseToken,
+    // P9 audit cycle-1 F5: the operator's declared branch IS the
+    // integration trigger — a COMPLETE verdict dispatches the merge act
+    // inside the loop under the lease (no post-run seam exists anymore).
+    ...(mergePort !== undefined ? { integration: { trigger: "on-finish" as const } } : {}),
   };
 
   try {
     const result = await runSupervisorEpisode(cfg, ports);
-    return { result, episodePath: epPath, steerStats: { linesRead: steerQueue.getStats().linesRead, injected: steerQueue.getStats().injected, malformed: steerQueue.getStats().malformed }, parkTask: runPark };
+    return {
+      result,
+      episodePath: epPath,
+      steerStats: { linesRead: steerQueue.getStats().linesRead, injected: steerQueue.getStats().injected, malformed: steerQueue.getStats().malformed },
+      parkTask: runPark,
+      // P9 audit cycle-1 F1: NO post-run merge seam — integration
+      // dispatches IN the loop (cfg.integration.trigger, docs/16 §0.6)
+      // while the lease is held. A closure returned here would act
+      // outside our ownership (the release above runs before the caller
+      // receives this object).
+    };
   } finally {
     try { runner.close(true); } catch (e) { log(`runner-close: ${(e as Error)?.name ?? "error"}`); }
   }

@@ -94,21 +94,42 @@ const GIT_ENV_STRIP = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESP
 // trust boundary — docs/16 §9 C3-F3).
 function gitEnv(): NodeJS.ProcessEnv {
   const e: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C",
-    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    // P9 audit cycle-3 F1: replacement refs (refs/replace/*) REDIRECT
+    // object interpretation — an ancestor shortcut computed over
+    // SUBSTITUTED objects answered already-merged while the RAW task
+    // work was absent from the raw head (reproduced end-to-end against
+    // the host route). EVERY git call in this module (ancestry,
+    // construct, recovery, re-verify, CAS) resolves RAW objects only;
+    // the CLI flag is additionally pinned in execCapture so a
+    // repo-local config or a stripped/rewritten env cannot re-enable
+    // substitution.
+    GIT_NO_REPLACE_OBJECTS: "1" };
   for (const k of GIT_ENV_STRIP) delete e[k];
   // Re-apply AFTER the strip: GIT_CONFIG_GLOBAL/SYSTEM are in the strip
   // list (an inherited one must not win), but here they are the PIN, set
-  // post-delete so they survive it.
+  // post-delete so they survive it. GIT_NO_REPLACE_OBJECTS is re-applied
+  // too (an inherited "0"/empty value must not defeat the pin).
   e.GIT_CONFIG_GLOBAL = "/dev/null";
   e.GIT_CONFIG_SYSTEM = "/dev/null";
+  e.GIT_NO_REPLACE_OBJECTS = "1";
   return e;
 }
 
 type GitFail = Error & { code?: number | string; stderr?: string; stdout?: string };
 
 function execCapture(cwd: string, args: string[]): Promise<{ stdout: string }> {
+  // P9 audit cycle-3 F1: CLI-side pin of the replacement-ref suppression
+  // (belt to gitEnv's braces): a TOP-LEVEL git option must precede the
+  // subcommand, and every call in this module funnels through HERE — so
+  // construction (merge-tree/commit-tree), ancestry (merge-base via
+  // rev-list/ancestor probes), recovery, re-verify, and the CAS all
+  // resolve RAW objects even if the environment is rewritten or a
+  // config-level re-enabler exists. An ancient git without the flag
+  // fails its own argument parsing → hard error → fail closed.
+  const pinned = args[0] === "--no-replace-objects" ? args : ["--no-replace-objects", ...args];
   return new Promise((resolve, reject) => {
-    execFile("git", args, { cwd, env: gitEnv(), timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
+    execFile("git", pinned, { cwd, env: gitEnv(), timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
       (err, stdout, stderr) => {
         if (err) {
           // The callback error does NOT reliably carry .stdout/.stderr —

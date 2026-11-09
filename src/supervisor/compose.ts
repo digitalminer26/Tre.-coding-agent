@@ -134,6 +134,16 @@ export interface ComposePorts {
   // the loop awaits; a synchronous port stays valid (await on a value).
   accept?: { evaluate(input: object): { verdict?: string; remainingWork?: string[]; reasons?: string[] } | object | Promise<{ verdict?: string; remainingWork?: string[]; reasons?: string[] } | object> };
   investigate?: (packet: object, limits: { maxToolCalls?: number; maxUsd?: number }) => Promise<object>;
+  /** P12 seam (docs/16 §0.6 — "nothing outside … imports [merge] UNTIL P9
+   *  wires the merge port"): the host-injected integration port. When
+   *  present the loop routes the `merge` action HERE instead of the
+   *  executor (which keeps `merge-unwired` by contract, docs/15 §3 — the
+   *  refusal is the executor's own guard against an un-audited act, and
+   *  the loop never bypasses it: the intercept happens INSTEAD of the
+   *  executor call, and the port result is treated as port-returned
+   *  DATA, sanitized to the closed ExecResultLike shape). Absent = the
+   *  executor refusal remains the behavior. */
+  merge?: { integrate(req: { episodeId: string; taskId: string; grantedBy: string; now: number }): Promise<unknown> };
   journal: JournalPort;
   steer?: SteerPort;
   now: () => number;
@@ -172,6 +182,19 @@ export interface SupervisorConfig {
   /** docs/18 §6 local enforcement (the planner's diagnostic budget still
    *  gates what the PLAN may propose; these bound the loop's own offers). */
   investigation?: { sameSignatureMax?: number; episodeMax?: number; limits?: { maxToolCalls?: number; maxUsd?: number } };
+  /** P9 audit cycle-1 F4: activation-unique scope mixed into every
+   *  `sup-…` actionId (host passes a leaseToken-derived value). Without
+   *  it a restarted activation's loop sequence numbers can REUSE a
+   *  previous activation's orphaned intent id and accidentally mask it
+   *  (openIntents keys on episodeId+taskId+actionId). Sanitized to
+   *  [A-Za-z0-9._-]; absent/empty keeps the pre-F4 format. */
+  intentScope?: string;
+  /** P9 audit cycle-1 F5: the operator-declared integration trigger.
+   *  `on-finish` = a COMPLETE acceptance verdict dispatches the merge
+   *  ACT inside the loop (canonical plan, journaled intent, paired
+   *  outcome) before the finish — the only production merge route.
+   *  Requires a callable merge port; absent either, nothing merges. */
+  integration?: { trigger?: 'on-finish' };
 }
 
 export const STOP_REASONS = [
@@ -262,6 +285,10 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
   let investigationCount = 0;
   let consecutiveEscalate = 0;
   let finishRejects = 0;
+  // P9 audit cycle-1 F5: the integration trigger fires at most ONCE per
+  // activation — a second complete verdict must not re-dispatch the act
+  // from the loop (P12's own dedup is the backstop, not the design).
+  let mergeTriggerFired = false;
   let seq = 0;
   let lastSignal: LoopSignal | undefined;
   let lastAttemptId: string | undefined;
@@ -330,6 +357,41 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: id, acked, progress: 'none', notes: notes.slice(0, 4096) });
   };
 
+  // P9 audit cycle-1 F5: the merge ACT, extracted from the intercept so
+  // the planner route AND the operator's integration trigger share ONE
+  // body. The port result stays port-returned DATA: only re-sanitized
+  // values reach the journal. A throwing port closes the pending intent
+  // and stops the loop (returned as { stopped }); the caller pairs the
+  // outcome via closeIntent when this returns a result.
+  const doMergeAct = async (): Promise<{ res: ExecResultLike } | { stopped: SupervisorResult }> => {
+    let mergeRes: unknown;
+    try {
+      mergeRes = await ports.merge!.integrate({ episodeId: cfg.episodeId, taskId: cfg.taskId, grantedBy: cfg.grantedBy, now: safeNow() });
+    } catch (e) {
+      // A throwing host merge port is a host-contract failure, not
+      // a merge outcome: the intent closes, the loop stops. (The
+      // real P12 module NEVER rejects — docs/16 §1 — so reaching
+      // here means the adapter itself is broken.)
+      await closeIntent(false, `supervisor: merge port threw (${(e as Error)?.name ?? 'error'})`);
+      return { stopped: await finish('loop-error', undefined, { name: `merge-port-${(e as Error)?.name ?? 'error'}`, message: str((e as Error)?.message) ?? 'merge port threw' }) };
+    }
+    const mStatusRaw = str(isObj(mergeRes) ? mergeRes['status'] : undefined, 32);
+    const mReason = str(isObj(mergeRes) ? mergeRes['reason'] : undefined, 120);
+    const mapped = mStatusRaw === 'merged' || mStatusRaw === 'already-merged' || mStatusRaw === 'recovered' ? 'executed'
+      : mStatusRaw === 'conflict' || mStatusRaw === 'gate-failed' || mStatusRaw === 'refused' ? 'refused'
+      : 'failed'; // unknown/garbage status fails closed to 'failed' (never 'executed')
+    if (mapped === 'failed' && mStatusRaw !== 'failed') log(`merge-status-unshapeable: ${mStatusRaw ?? 'missing'}`);
+    if (isObj(mergeRes) && mergeRes['outcomeDurable'] === false) log('merge-outcome-not-durable (reconcile, never re-run)');
+    return {
+      res: {
+        ...(str(isObj(mergeRes) ? mergeRes['actionId'] : undefined) !== undefined ? { actionId: str(isObj(mergeRes) ? mergeRes['actionId'] : undefined) } : {}),
+        action: 'merge', status: mapped, stage: str(isObj(mergeRes) ? mergeRes['stage'] : undefined, 32),
+        ...(mReason !== undefined ? { reason: mReason } : {}),
+        evidenceRefs: isObj(mergeRes) && Array.isArray(mergeRes['evidenceRefs']) ? (mergeRes['evidenceRefs'] as unknown[]).filter((r): r is string => typeof r === 'string').slice(0, 32) : [],
+      },
+    };
+  };
+
   // docs/18 §7: the planner's L1 rule (its ONLY path to `finish`) fires
   // only on a live `complete` assessment in ITS input — so M1 runs
   // evaluateCompletion on the clean-exit trigger and feeds the verdict
@@ -356,6 +418,17 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     acceptanceAssessment = { verdict, remainingWork: remaining, reasons };
   };
   const envelope = () => ({ schema: 'tre-supervisor/1', id: `d-${String((cfg as { episodeId?: unknown }).episodeId ?? 'x')}-${String((cfg as { taskId?: unknown }).taskId ?? 'x')}-${recSeq += 1}`, ts: safeNow(), episodeId: String((cfg as { episodeId?: unknown }).episodeId ?? ''), taskId: String((cfg as { taskId?: unknown }).taskId ?? '') });
+
+  // P9 audit cycle-1 F4: activation-unique id namespace. `sup-…` ids are
+  // scoped (`sup-<scope>-…`) when the host supplies cfg.intentScope, so
+  // a restarted loop can never reissue an actionId a previous activation
+  // orphaned. The scope is sanitized to the journal-safe character set —
+  // an id component must never gain `.`/`..` or separator aliases from a
+  // host-supplied value.
+  const idScope = (() => {
+    const raw = typeof cfg.intentScope === 'string' ? cfg.intentScope.replace(/[^A-Za-z0-9._-]/g, '_') : '';
+    return raw.length > 0 ? `${raw}-` : '';
+  })();
 
   const finish = async (stopped: StopReason, detail?: string, error?: { name: string; message: string }): Promise<SupervisorResult> => {
     // step D (docs/18): close the episode wall — best-effort, always.
@@ -387,7 +460,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     // ── step B: initial run under the gate (docs/18 §2.1) ───────────────
     if (ports.runner && cfg.worker) {
       const task = { episodeId: cfg.episodeId, taskId: cfg.taskId, session: cfg.worker.session, ...(cfg.worker.attemptId ? { attemptId: cfg.worker.attemptId } : {}), ...(cfg.worker.model ? { model: cfg.worker.model } : {}), ...(cfg.worker.worktreePath ? { worktreePath: cfg.worker.worktreePath } : {}) };
-      const req: GateRequestLike = { action: 'run', actionId: `sup-${cfg.episodeId}-${cfg.taskId}-start-0`, taskId: cfg.taskId, authority: { grantedBy: cfg.grantedBy, sideEffect: 'none' }, ...(cfg.worker.model ? { model: cfg.worker.model } : {}), strategyId: 'start:initial:v1' };
+      const req: GateRequestLike = { action: 'run', actionId: `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-start-0`, taskId: cfg.taskId, authority: { grantedBy: cfg.grantedBy, sideEffect: 'none' }, ...(cfg.worker.model ? { model: cfg.worker.model } : {}), strategyId: 'start:initial:v1' };
       let refId: string | undefined;
       let reserved = false;
       // R4/F19 (docs/18 §0.2): an absent port is a recorded refusal, never
@@ -481,7 +554,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
       // R3/F18 (docs/18 §3: "No stop may ever skip step 7 (journalize)"):
       // every stop that returns writes a decision-outcome first.
       if (seq > maxIterations) {
-        await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${cfg.episodeId}-${cfg.taskId}-stop-${seq}`, acked: false, progress: 'none', notes: `supervisor: stop max-iterations cap-${maxIterations}` });
+        await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-stop-${seq}`, acked: false, progress: 'none', notes: `supervisor: stop max-iterations cap-${maxIterations}` });
         return await finish('max-iterations', `cap-${maxIterations}`);
       }
       const signal = lastSignal;
@@ -495,7 +568,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
         let steered: { texts?: string[]; shutdown?: boolean } | void;
         try { steered = await ports.steer.poll(); } catch { steered = undefined; }
         if (steered?.shutdown === true) {
-          await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-shutdown-${seq}`, acked: false, progress: 'none', notes: 'supervisor: shutdown requested via steering' });
+          await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}shutdown-${seq}`, acked: false, progress: 'none', notes: 'supervisor: shutdown requested via steering' });
           return await finish('shutdown');
         }
         for (const t of steered?.texts ?? []) {
@@ -503,7 +576,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
           // R4/F21: a superseded override is recorded, never silently lost.
           if (m) {
             if (overrideModel !== undefined) {
-              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-steer-${seq}-${overrideModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${overrideModel} superseded by a later model override` });
+              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-${overrideModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${overrideModel} superseded by a later model override` });
             }
             overrideModel = m[1];
           }
@@ -603,7 +676,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
       const rungRaw = typeof plan['rung'] === 'number' ? Math.min(5, Math.max(0, Math.trunc(plan['rung']))) : 1;
       const rationaleJoined = Array.isArray(plan['rationale']) ? plan['rationale'].filter((r): r is string => typeof r === 'string').join('\n').slice(0, 4096) : undefined;
       if (isJournalAction) {
-        const intentId = `sup-${cfg.episodeId}-${cfg.taskId}-i${seq}`;
+        const intentId = `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-i${seq}`;
         pendingIntentId = intentId;
         await journalAppend({
           ...envelope(), kind: 'decision-intent',
@@ -616,7 +689,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
           authority: { grantedBy: cfg.grantedBy, sideEffect: (str(plan['sideEffect'], 32) === 'external' || str(plan['sideEffect'], 32) === 'worktree-local') ? str(plan['sideEffect'], 32) as 'worktree-local' | 'external' : 'none' },
         });
       } else {
-        await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${cfg.episodeId}-${cfg.taskId}-i${seq}`, acked: false, progress: 'none', notes: `supervisor: non-action ${action} (decision ${decision})` });
+        await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-i${seq}`, acked: false, progress: 'none', notes: `supervisor: non-action ${action} (decision ${decision})` });
       }
 
       // 5/6. execute / stops.
@@ -643,6 +716,32 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
         await journalAppend({ ...envelope(), kind: 'acceptance', taskRevision: cfg.taskRevision ?? 1, verdict: (VERDICTS as readonly string[]).includes(verdict ?? '') ? verdict : 'uncertain', criteria: [], remainingWork: remaining });
         if (verdict === 'complete') {
           await closeIntent(true, 'supervisor: accept-finish executed (verdict complete)');
+          // P9 audit cycle-1 F5: the OPERATOR'S integration trigger.
+          // Declaring cfg.integration (host: --episode-branch present)
+          // makes a COMPLETE verdict dispatch the merge ACT in the loop
+          // — canonical plan, journaled intent under the loop's id
+          // namespace, paired outcome, then the finish. Eligibility is
+          // fail-closed: no callable port or a prior trigger attempt in
+          // this activation, and nothing merges (the finish stands).
+          if (cfg.integration?.trigger === 'on-finish' && ports.merge !== undefined && typeof ports.merge.integrate === 'function' && !mergeTriggerFired) {
+            mergeTriggerFired = true;
+            const mergeIntentId = `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-i${seq}m`;
+            pendingIntentId = mergeIntentId;
+            await journalAppend({
+              ...envelope(), kind: 'decision-intent',
+              actionId: mergeIntentId, rung: 4, action: 'merge',
+              strategyId: 'integration:on-finish:v1',
+              rationale: 'operator-declared integration trigger: acceptance verdict complete — integrate the task branch into the episode branch',
+              observation: { signals: [{ kind: signal.kind }], context: {} },
+              authority: { grantedBy: cfg.grantedBy, sideEffect: 'external' },
+            });
+            const m = await doMergeAct();
+            if ('stopped' in m) return m.stopped;
+            const merged = m.res.status === 'executed';
+            await closeIntent(merged, `supervisor: integration merge ${str(m.res.status, 32) ?? 'unknown'}${m.res.reason !== undefined ? ` (${m.res.reason})` : ''}`);
+            if (!merged) return await finish('halt', `integration-${m.res.status ?? 'unknown'}`);
+            return await finish('accepted-finish', 'integrated');
+          }
           return await finish('accepted-finish');
         }
         finishRejects += 1;
@@ -728,7 +827,22 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
       };
       let res: ExecResultLike;
       try {
+        if (action === 'merge' && ports.merge !== undefined && typeof ports.merge.integrate === 'function') {
+          // P12 merge-port intercept (docs/16 §0.6): the host injected the
+          // integration module's caller. The executor's `merge-unwired`
+          // refusal (docs/15 §3) is BYPASSED BY NEITHER policy nor
+          // accident — the loop never calls the executor for this action,
+          // so its contract guard stays intact for every other caller —
+          // and the port result is treated as port-returned DATA: only
+          // values re-sanitized in doMergeAct reach the journal pairing
+          // below (audit cycle-1 F5: the SAME body the integration
+          // trigger dispatches).
+          const m = await doMergeAct();
+          if ('stopped' in m) return m.stopped;
+          res = m.res;
+        } else {
         res = await ports.executor.executeRecoveryAction(plan, { episodeId: cfg.episodeId, taskId: cfg.taskId, now: safeNow(), authority: { grantedBy: cfg.grantedBy }, ...(lastAttemptId !== undefined ? { attemptId: lastAttemptId } : {}), ...(lastSession !== undefined ? { session: lastSession } : {}) }, { ...ports.executorPorts, journal: ports.journal, ...(execRunner !== undefined ? { runner: execRunner } : {}), ...(execGate !== undefined ? { gate: execGate } : {}) });
+        }
       } catch (e) {
         // R3/F17: an executor throw skips the pairing site below — close
         // the intent before this stop too (the outer catch is the backstop
@@ -817,7 +931,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
       lastOutcome = { action, strategyId, progress: 'none' };
       lastSignal = signalFromExec(res, exit);
     }
-    await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${cfg.episodeId}-${cfg.taskId}-stop-end`, acked: false, progress: 'none', notes: 'supervisor: stop no-initial-signal' });
+    await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-stop-end`, acked: false, progress: 'none', notes: 'supervisor: stop no-initial-signal' });
     return await finish('no-initial-signal');
   } catch (e) {
     const error = { name: str((e as Error)?.name, 128) ?? 'loop-error', message: str((e as Error)?.message) ?? 'unknown' };
@@ -825,7 +939,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
     // the park call) must not leave the iteration's intent open.
     await closeIntent(false, `supervisor: loop error before outcome (${error.name})`).catch(() => undefined);
     seq += 1;
-    await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${cfg.episodeId}-${cfg.taskId}-looperr-${seq}`, acked: false, progress: 'none', notes: `supervisor-loop-error: ${error.name} ${error.message}`.slice(0, 4096) });
+    await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}${cfg.episodeId}-${cfg.taskId}-looperr-${seq}`, acked: false, progress: 'none', notes: `supervisor-loop-error: ${error.name} ${error.message}`.slice(0, 4096) });
     return await finish('loop-error', undefined, error);
   }
 }
