@@ -68,9 +68,10 @@ const origUnlink = fs.promises.unlink.bind(fs.promises);
 const origOpen = fs.promises.open.bind(fs.promises);
 const origReaddir = fs.promises.readdir.bind(fs.promises);
 const origRealpath = fs.promises.realpath.bind(fs.promises);
+const origStat = fs.promises.stat.bind(fs.promises);
 const origKill = process.kill.bind(process) as typeof process.kill;
 function restoreFs(): void {
-  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown; readdir: unknown; open: unknown; realpath: unknown };
+  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown; readdir: unknown; open: unknown; realpath: unknown; stat: unknown };
   p.link = origLink;
   p.rename = origRename;
   p.rm = origRm;
@@ -83,6 +84,8 @@ function restoreFs(): void {
   // P20c11: the realpath patch (canonical-identity tests) must unwind the
   // same way — restoreFs is the t.after safety net for them too.
   p.realpath = origRealpath;
+  // P20c11 audit: the F4 sweep-stat probe must unwind the same way.
+  p.stat = origStat;
   syncBuiltinESMExports();
 }
 const deferred = <T = void>() => {
@@ -1580,6 +1583,19 @@ test("P20c11-F4: a paused publisher's LIVE stage survives a later activation's s
   // sweep rule ("pre-start same-pid tmp = dead namesake") would unlink
   // it — except the in-memory ACTIVE_STAGE_PATHS set (canonical episode
   // dir + basename, registered before the stage is opened) protects it.
+  // P20c11 audit (F4 flakiness): the FIRST version released A on a fixed
+  // 150ms sleep after B's FIRST readdir of the episode dir — but that
+  // readdir is reconcile's, not the sweep's, and the sleep was no proof
+  // B had decided about the stage: a slow B could still be pre-sweep when
+  // the gate opened, or already hold a published lease when A resumed.
+  // Deterministic contract now: (1) the gate opens only after B's SWEEP
+  // has evaluated A's stage — proven by the sweep's stat() of that exact
+  // stage (the ACTIVE_STAGE_PATHS guard `continue`s BEFORE the stat, so
+  // a protected stage yields sweepStats === 0 and we wait for B's
+  // decision by other means); (2) B's outcome is judged on WHO owns the
+  // lease at the end, so B's legitimate same-process refusal after A won
+  // is accepted, and (3) no sleep stands between B's decision and A's
+  // release.
   const root = await mkdtemp(join(tmpdir(), "p20c11-f4-livestage-"));
   t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
   restoreFs();
@@ -1593,7 +1609,9 @@ test("P20c11-F4: a paused publisher's LIVE stage survives a later activation's s
   const createdP = new Promise<void>((r) => { created = r; });
   let gateOpen!: () => void;
   const gateP = new Promise<void>((r) => { gateOpen = r; });
-  let sweepSeen = false;
+  let sweepSeen = false; // B's SECOND readdir (the sweep's own inspection)
+  let dirReaddirCalls = 0;
+  let sweepStats = 0; // the sweep judged A's stage (its stat of the stage)
   let gatePassed = false;
   const unlinkAttempts: string[] = [];
   (fs.promises as { open: unknown }).open = async function (p: string | URL, ...rest: unknown[]) {
@@ -1608,9 +1626,21 @@ test("P20c11-F4: a paused publisher's LIVE stage survives a later activation's s
   } as typeof fs.promises.open;
   (fs.promises as { readdir: unknown }).readdir = async function (p: string | URL, ...rest: unknown[]) {
     const r = await origReaddir(p as Parameters<typeof origReaddir>[0], ...(rest as Parameters<typeof origReaddir> extends [unknown, ...infer R] ? R : never)) as Awaited<ReturnType<typeof origReaddir>>;
-    if (!sweepSeen && opened && resolve(String(p)) === resolve(dir)) sweepSeen = true; // B has begun inspecting this episode dir
+    if (opened && resolve(String(p)) === resolve(dir)) {
+      dirReaddirCalls++;
+      if (dirReaddirCalls >= 2) sweepSeen = true; // reconcile's readdir came first; this one is the sweep's
+    }
     return r as never;
   } as typeof fs.promises.readdir;
+  (fs.promises as { stat: unknown }).stat = async function (p: string | URL, ...rest: unknown[]) {
+    const r = await origStat(p as Parameters<typeof origStat>[0], ...(rest as Parameters<typeof origStat> extends [unknown, ...infer R] ? R : never)) as Awaited<ReturnType<typeof origStat>>;
+    // The sweep stats each candidate tmp it does NOT guard; a stat of
+    // OUR stage after B's sweep-readdir means B reached (and did not
+    // protect) the stage — the mutation signal, and the proof B's
+    // decision is final.
+    if (sweepSeen && !gatePassed && stagePath !== "" && resolve(String(p)) === stagePath) sweepStats++;
+    return r as never;
+  } as typeof fs.promises.stat;
   (fs.promises as { unlink: unknown }).unlink = async function (p: string | URL) {
     // Record only DURING B's sweep window: after gateOpen(), A's own
     // staged-publish finally unlinks its stage as normal cleanup.
@@ -1622,15 +1652,30 @@ test("P20c11-F4: a paused publisher's LIVE stage survives a later activation's s
   const a = runHostEpisode(runOpts()).then(() => "ok", (e: Error) => e.message);
   await createdP;
   const b = runHostEpisode(runOpts()); // B starts AFTER A's stage was created
-  // wait for B to pass the inspection, then give its sweep its decisions
-  for (let i = 0; i < 400 && !sweepSeen; i++) await new Promise((r) => setTimeout(r, 25));
-  assert.ok(sweepSeen, "invocation B reached the episode-directory inspection");
-  await new Promise((r) => setTimeout(r, 150)); // B's sweep window
+  // Wait until B's sweep has DECIDED about the stage: either it guarded
+  // it (sweep ran, no stat — protected), or it statted it (the mutation
+  // path, now proven decided), or B resolved early (its own lease view
+  // decided before touching the dir). Bounded poll, no fixed sleeps.
+  let bSettled = false;
+  b.then(() => { bSettled = true; }, () => { bSettled = true; });
+  for (let i = 0; i < 400; i++) {
+    if (bSettled || unlinkAttempts.length > 0 || sweepStats > 0) break;
+    await new Promise((r) => setTimeout(r, 25)); // bounded poll — no fixed sleep stands in for the decision signal
+  }
+  assert.ok(sweepSeen || bSettled || unlinkAttempts.length > 0, "invocation B reached the episode-directory inspection (or resolved before it)");
   gatePassed = true;
-  gateOpen();
+  gateOpen(); // release A — only NOW, after B's decision (or B settling)
   const aResult = await a;
-  await b;
+  const bResult = await b.then(() => "ok", (e: Error) => String((e as Error).message));
   restoreFs();
-  assert.equal(unlinkAttempts.length, 0, `B never tried to unlink A's live stage (attempts: ${unlinkAttempts.join(",")})`);
+  assert.equal(unlinkAttempts.length, 0, `B never tried to unlink A's live stage (attempts: ${unlinkAttempts.join(",")}${sweepStats > 0 ? `; sweep stats of the stage: ${sweepStats}` : ""})`);
   assert.ok(aResult === "ok" || String(aResult).includes("contended"), `A resolves cleanly either way (won or disclosed contention), got: ${String(aResult).slice(0, 120)}`);
+  // B's legitimate terminal outcomes: it completed, OR it refused A's
+  // live lease (same-process/live-holder refusal once A resumed and won
+  // the link race), OR it disclosed contention — never a silent wedge.
+  const bOk = bResult === "ok"
+    || bResult.includes("already activated in this process")
+    || bResult.includes("contended")
+    || bResult.includes("refusing");
+  assert.ok(bOk, `B resolves to a disclosed outcome (won, or refused A's live claim), got: ${bResult.slice(0, 160)}`);
 });

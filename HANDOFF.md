@@ -1,5 +1,43 @@
 # HANDOFF
 
+## 2026-11-08 — P20 cycle 11a (audit of cf4ff04): F4 flakiness fixed, mutation claims re-verified honestly
+
+A read-only audit of cf4ff04 found one MAJOR test defect and one
+overclaim (production code held):
+
+- **F4 (test, MAJOR — fixed)**: the cycle-11 F4 released paused
+  publisher A on a fixed 150 ms sleep after B's FIRST readdir — but
+  that readdir is reconcile's, not the sweep's, and the sleep proved
+  nothing about B's decision. Reproduced: on UNMODIFIED production
+  code, delaying B's second readdir made B win the lease after A
+  resumed and legitimately refuse (`refuseSameProcess`) through
+  `await b` as an unhandled failure — 1 failure in 5 runs. New
+  contract: the gate opens only after B's sweep has DECIDED about A's
+  stage (proven by the sweep's stat of the exact stage — the
+  ACTIVE_STAGE_PATHS guard continues before the stat, so a protected
+  stage yields zero stats) or B settles, and B's outcome is judged
+  on WHO legitimately owns the lease: completing, refusing A's live
+  claim, or disclosed contention are all accepted. No fixed sleep
+  remains between B's decision and A's release. 10/10 runs green.
+- **Backoff**: `readLease`'s 3 retries were BACK-TO-BACK syscalls —
+  they only clear an instantaneous error. Added a 50 ms sleep between
+  attempts (parity with the takeover loop's 25 ms poll).
+- **Mutation matrix re-run against the NEW tests, with the failing
+  assertion inspected (correcting the cycle-11 entry's claim, which
+  was based on failure count only — the M4 "kill" then came from
+  `refuseSameProcess` through `await b`, not from the stage
+  assertion):**
+  - M1 (readLease swallows non-ENOENT → empty): kills F1 on the
+    exact assertion "a persistent lease-read error refuses
+    activation rather than guessing EMPTY" — CONFIRMED.
+  - M2 (sweep readdir → blind `[]`): kills F2 on the exact assertion
+    "the sweep fails closed on its own inspection error" — CONFIRMED.
+  - M4 (ACTIVE_STAGE_PATHS guard removed): kills the NEW F4 on the
+    exact assertion "B never tried to unlink A's live stage" — the
+    recorded attempt names A's stage and sweep-stats-the-stage = 1,
+    proving the test drives the protection — CONFIRMED.
+- `restoreFs()` now also restores `stat` (the new sweep-stat probe).
+
 ## 2026-11-08 — P20 cycle 11: unreadable-lease takeover fix + test-quality closure
 
 Cycle 11 was an independent read-only reviewer pass (`.tre/audits/

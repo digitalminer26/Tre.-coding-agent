@@ -989,6 +989,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         if (attempt === 2) {
           throw new Error(`host: cannot read the lease at ${leasePath} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}) — ownership is unreadable, refusing activation rather than guessing (P20c11-F1)`);
         }
+        await sleep(50); // P20c11 audit: backoff — three BACK-TO-BACK syscalls clear only an instantaneous error; 50ms spans a millisecond-scale transient (parity with the takeover loop's 25ms poll)
       }
     }
     throw new Error("unreachable: the readLease retry bound always returns or throws");
