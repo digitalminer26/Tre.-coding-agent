@@ -1,5 +1,61 @@
 # HANDOFF
 
+## 2026-11-08 — P20 cycle 10: aliased-root, directory-read, and identity audit fixes
+
+Fixed the remaining audit findings in uncommitted `src/host/supervise.ts`:
+
+- In-process live-swap protection is keyed by CANONICAL episode identity
+  (realpath, resolved after mkdir) plus filename, so absolute, relative,
+  and symlink spellings of the same episode share the protection key.
+- If the canonical identity cannot be established, activation FAILS CLOSED
+  ("cannot establish a canonical identity") — no fallback key, because a
+  fallback could differ from a later successful realpath and split the
+  in-process protection identity (the reproduced identity-split let a
+  second invocation destroy a live mover's recovery source).
+- Directory inspection failures (readdir of the recovery dir or the
+  tmp-stage scan) now throw instead of being treated as empty, so
+  reconciliation and tmp cleanup fail closed over unreadable ownership.
+- Added `P20c10-F1d` (symlink-aliased root cannot evade active-recovery
+  protection), `P20c10-F1e` (transient realpath EIO fails activation
+  closed; a later attempt succeeds), and `P20c10-F2` (directory EIO:
+  no sweep, no fresh lease) to `test/p20-fixes.test.ts`. `restoreFs()`
+  now also restores `open` (a P20c8-F4 mock was leaking across tests).
+- Comments around `procStartMs` and `reconcileReclaims` corrected: the
+  mtime incarnation rule applies to STAGED TMPS only; `.reclaim-`
+  artifacts are judged by the in-memory active set (rename preserves the
+  source lease's old mtime), and `procStartMs` is the ACTIVATION start,
+  not the OS process start.
+
+Verification: `npm run build` passed; `node --test dist/test/p20-fixes.test.js`
+passed 38/38; full `npm test` run three times — 2528 pass / 0 fail / 14
+skipped on runs 1 and 3, and run 2 had ONE unrelated flake
+(`P12 C3-F1 in-flight` in `integration-merge.test.js`, a 600 s timing-
+sensitive merge-gate test that passes 3/3 in isolation and does not touch
+the lease code). Mutation check: reverting the identity to a raw path makes
+P20c10-F1d/F1e fail — both regressions guard the fix. Independent probes:
+relative-root mover race protects the recovery source; directory EIO and
+realpath EIO both refuse activation with no lease and no worker; a symlink
+root does not expose a live old-mtime stage. Reports:
+`.tre/audits/p20-cycle10-review.md`, `.tre/audits/p20-cycle10-reaudit.md`.
+Changes remain uncommitted; review `git diff` before the next increment.
+
+## 2026-11-08 — P20 cycle 9: lease recovery audit fixes
+
+Fixed three cycle-8 lease/recovery findings in `src/host/supervise.ts` and
+added regressions in `test/p20-fixes.test.ts`: reconciliation now fails
+closed when a recovery source cannot be restored or its occupant cannot be
+read, so it cannot publish a fresh lease over a potentially live hidden
+claim; live in-process reclaim artifacts are tracked by exact path rather
+than inferred from their inherited mtime; old same-pid staged temps are
+actually reclaimed, while active in-process staging paths remain protected.
+
+Verification: `npm run build` passed; `node --test dist/test/p20-fixes.test.js`
+passed 35/35; full `npm test` passed 2525/2539 (14 skipped), twice after
+the fixes. Independent audit repro confirms: restore EIO fails closed and
+preserves the source, old same-pid tmp is removed, and a concurrent
+same-process reconciliation does not restore an active mover's artifact.
+Changes are uncommitted; review `git diff` before the next increment.
+
 ## 2026-11-07 — P17: `tre.-episode` — the activation entry point (`src/host/activate.ts`)
 
 **What landed.** A second production binary for the repo: `tre.-episode`

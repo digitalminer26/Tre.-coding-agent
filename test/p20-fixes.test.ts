@@ -40,7 +40,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, writeFile, chmod, utimes, readdir, rm, mkdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { createEpisodeLayout } from "../src/episode/journal.js";
 import { runHostEpisode } from "../src/host/supervise.js";
@@ -66,13 +66,16 @@ const origRm = fs.promises.rm.bind(fs.promises);
 const origReadFile = fs.promises.readFile.bind(fs.promises);
 const origUnlink = fs.promises.unlink.bind(fs.promises);
 const origOpen = fs.promises.open.bind(fs.promises);
+const origReaddir = fs.promises.readdir.bind(fs.promises);
 const origKill = process.kill.bind(process) as typeof process.kill;
 function restoreFs(): void {
-  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown };
+  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown; readdir: unknown; open: unknown };
   p.link = origLink;
   p.rename = origRename;
   p.rm = origRm;
   p.readFile = origReadFile;
+  p.readdir = origReaddir;
+  p.open = origOpen;
   // P20c7: the unlink patch (release-retry tests) leaked into later
   // tests without this — restore it.
   p.unlink = origUnlink;
@@ -183,7 +186,7 @@ test("P20-F1: a takeover paused past the steal bound does NOT lose its lock to a
   let renames = 0;
   (fs.promises as { rename: unknown }).rename = async function (a: string | Uint8Array | null, b: string | Uint8Array | null) {
     if (String(b).startsWith(leasePath + ".reclaim-") && ++renames === 1) {
-      await parked.promise; // freeze INSIDE the swap — the lock is held the whole time
+      await parked.promise; // freeze before the move: lock remains held
       return origRename(a as string, b as string);
     }
     return origRename(a as string, b as string);
@@ -192,7 +195,8 @@ test("P20-F1: a takeover paused past the steal bound does NOT lose its lock to a
 
   const cRun = runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "C", workerCommand: worker, maxIterations: 1, log: () => {} });
   // Wait until C is parked: it has acquired the lock (stamp written) and
-  // reached the rename interception inside replaceLeaseUnderLock.
+  // reached the rename interception inside replaceLeaseUnderLock; the
+  // move itself is held until the contender has completed.
   let lockSeen = false;
   for (let i = 0; i < 400 && !lockSeen; i++) {
     try { await stat(lockPath); lockSeen = true; } catch { await new Promise((r) => setTimeout(r, 10)); }
@@ -1000,14 +1004,59 @@ test("P20c8-F1: a reconcile restore whose link ERRORED (EIO) PRESERVES the recov
     return origLink(a as string, String(b));
   } as typeof fs.promises.link;
   syncBuiltinESMExports();
-  const r = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
   restoreFs();
   assert.ok(eioUsed, "the reconcile's restore link really ran and errored (the test drove the intended path)");
-  assert.ok(["accepted-finish", "max-iterations"].includes(r.result.stopped), "the activation still completes — an errored reconcile is not a crash");
+  assert.ok(err !== null, "activation fails closed while the recovery source cannot be reconciled");
+  assert.match(err as string, /cannot reconcile recovery source.*restore link failed: EIO/);
   const names = await readdir(dir);
   const kept = names.filter((n) => n.includes(".reclaim-"));
   assert.equal(kept.length, 1, "the recovery source SURVIVED the errored restore (pre-P20c8: unlinked sight-unseen — the wedge was permanent)");
   assert.equal(await readFile(join(dir, kept[0]!), "utf8"), moved, "byte-identical previous owner's claim preserved for a later reconcile");
+});
+
+test("P20c9-F1: reconciliation EIO fails closed instead of publishing over a hidden live claim", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c9-f1-live-hidden-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c9-f1-live-hidden");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const dead = await deadPid();
+  const artifact = join(dir, `host.lease.reclaim-${dead}.source`);
+  const live = JSON.stringify({ pid: process.pid, token: "hidden-live-owner" });
+  await writeFile(artifact, live);
+  const worker = await quickWorker(root);
+  let eioUsed = false;
+  (fs.promises as { link: unknown }).link = async function (a: string | URL, b: string | URL) {
+    if (!eioUsed && String(a) === artifact && String(b) === leasePath) {
+      eioUsed = true;
+      throw Object.assign(new Error("simulated restore EIO"), { code: "EIO" });
+    }
+    return origLink(a as string, String(b));
+  } as typeof fs.promises.link;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(eioUsed, "restore EIO was injected");
+  assert.match(err ?? "", /cannot reconcile recovery source.*restore link failed: EIO/);
+  assert.equal(await readFile(artifact, "utf8"), live, "the only live-holder claim remains intact");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "no fresh lease may be published over an unresolved live recovery source");
+});
+
+test("P20c9-F2: an old same-pid staged tmp is reclaimed; a current tmp remains protected", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c9-f2-old-tmp-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c9-f2-old-tmp");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const oldTmp = `${leasePath}.tmp-${process.pid}.old-token`;
+  await writeFile(oldTmp, "abandoned stage");
+  await utimes(oldTmp, 1, 1);
+  const worker = await quickWorker(root);
+  await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  await assert.rejects(readFile(oldTmp, "utf8"), { code: "ENOENT" }, "pre-start same-pid tmp is cleaned, not preserved by pidAlive(process.pid)");
 });
 
 test("P20c8-F2: a FRESH takeover lock stamped by a dead pid is cleared immediately — no 30s steal-bound wedge", async (t) => {
@@ -1041,6 +1090,141 @@ test("P20c8-F2: a FRESH takeover lock stamped by a dead pid is cleared immediate
   assert.ok(!names.some((n) => n.includes(".reclaim-")), "the restored-then-superseded artifact was reclaimed");
   const cur = await readFile(leasePath, "utf8").catch(() => "");
   assert.ok(cur === "" || JSON.parse(cur).pid === process.pid, "the lease ended vacant or held by this process — never a foreign claim");
+});
+
+test("P20c9-F3: a same-process live mover's old-mtime recovery source is never stolen by a second reconcile", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c9-f3-active-mover-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c9-f3-active-mover");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const leaseBody = JSON.stringify({ pid: 111, token: "stale-original" });
+  await writeFile(leasePath, leaseBody);
+  await utimes(leasePath, 1, 1); // rename preserves this OLD mtime
+  const worker = await quickWorker(root);
+  let moved!: string;
+  const movedPause = deferred();
+  const resume = deferred();
+  let paused = false;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    if (!paused && String(a) === leasePath && String(b).includes(".reclaim-")) {
+      paused = true;
+      moved = String(b);
+      const result = await origRename(a as string, String(b));
+      movedPause.resolve();
+      await resume.promise;
+      return result;
+    }
+    return origRename(a as string, String(b));
+  } as typeof fs.promises.rename;
+  syncBuiltinESMExports();
+  const run = () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  const first = run().then(() => null, (e: Error) => e.message);
+  await movedPause.promise;
+  assert.equal((await stat(moved)).mtimeMs, 1000, "renamed artifact inherited source mtime");
+  const second = await run().then(() => null, (e: Error) => e.message);
+  assert.ok(second !== null, "second activation is refused while first mover is live");
+  assert.ok(await stat(moved).then(() => true, () => false), "the in-flight mover's recovery source was not restored or removed");
+  resume.resolve();
+  const firstErr = await first;
+  restoreFs();
+  assert.equal(firstErr, null, `first recovery completes (got ${String(firstErr)})`);
+});
+
+test("P20c10-F1d: aliased episodes roots cannot evade active recovery protection", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c10-f1-alias-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c10-f1-alias");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const leaseBody = JSON.stringify({ pid: 111, token: "stale-original" });
+  await writeFile(leasePath, leaseBody);
+  await utimes(leasePath, 1, 1);
+  const worker = await quickWorker(root);
+  let moved!: string;
+  const movedPause = deferred();
+  const resume = deferred();
+  let paused = false;
+  (fs.promises as { rename: unknown }).rename = async function (a: string | URL, b: string | URL) {
+    if (!paused && String(a) === leasePath && String(b).includes(".reclaim-")) {
+      paused = true;
+      moved = String(b);
+      const result = await origRename(a as string, String(b));
+      movedPause.resolve();
+      await resume.promise;
+      return result;
+    }
+    return origRename(a as string, String(b));
+  } as typeof fs.promises.rename;
+  syncBuiltinESMExports();
+  const first = runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  await movedPause.promise;
+  // A genuine symlink alias: a different path string for the same directory.
+  const aliasParent = await mkdtemp(join(tmpdir(), "p20c10-alias-link-"));
+  t.after(() => rm(aliasParent, { recursive: true, force: true }));
+  const alias = join(aliasParent, "episodes-alias");
+  await fs.promises.symlink(root, alias);
+  assert.notEqual(alias, root, "the supplied root differs as a string");
+  const second = await runHostEpisode({ episodesRoot: alias, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  assert.ok(second !== null, "a symlinked root resolves to the same in-process protection identity");
+  assert.ok(await stat(moved).then(() => true, () => false), "the live mover's recovery source was not restored or removed through an aliased root");
+  resume.resolve();
+  const firstErr = await first;
+  restoreFs();
+  assert.equal(firstErr, null, `first recovery completes (got ${String(firstErr)})`);
+});
+
+test("P20c10-F1e: a transient realpath failure fails the activation closed — no incompatible identity, no worker, no lease", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c10-f1e-realpath-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c10-f1e-realpath");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const worker = await quickWorker(root);
+  const origRealpath = fs.promises.realpath.bind(fs.promises);
+  let injected = false;
+  (fs.promises as { realpath: unknown }).realpath = async function (p: string | URL, ...rest: unknown[]) {
+    if (!injected && resolve(String(p)) === resolve(dir)) {
+      injected = true;
+      throw Object.assign(new Error("simulated realpath EIO"), { code: "EIO" });
+    }
+    return origRealpath(p as string, ...(rest as []));
+  };
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  (fs.promises as { realpath: unknown }).realpath = origRealpath;
+  syncBuiltinESMExports();
+  assert.ok(injected, "the realpath failure was injected");
+  assert.match(err ?? "", /canonical identity/, "the activation refuses rather than keying protection on a fallback");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "no lease published under an unresolved identity");
+});
+
+test("P20c10-F2: directory inspection failures fail closed — no sweep and no fresh lease on unreadable ownership", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "p20c10-f2-readdir-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c10-f2-readdir");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const source = join(dir, "host.lease.reclaim-2147483647.dead");
+  await writeFile(source, JSON.stringify({ pid: process.pid, token: "hidden-live" }));
+  const worker = await quickWorker(root);
+  let readdirErrors = 0;
+  (fs.promises as { readdir: unknown }).readdir = async function (p: string | URL, ...rest: unknown[]) {
+    if (resolve(String(p)) === resolve(dir) && readdirErrors++ === 0) {
+      throw Object.assign(new Error("simulated directory EIO"), { code: "EIO" });
+    }
+    return origReaddir(p as Parameters<typeof origReaddir>[0], ...(rest as Parameters<typeof origReaddir> extends [unknown, ...infer R] ? R : never)) as never;
+  } as typeof fs.promises.readdir;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.match(err ?? "", /cannot inspect/, "an unreadable recovery directory fails closed before publishing");
+  assert.ok(await stat(source).then(() => true, () => false), "no sweep may destroy an uninspected recovery source");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "no fresh lease may be published over uninspected ownership");
 });
 
 test("P20c8-F3: a same-pid artifact that PREDATES this process is an ABANDONED namesake workspace — reconciled, not skipped", async (t) => {

@@ -24,7 +24,7 @@
 import { appendFile, link, mkdir, readdir, readFile, rename, lstat, open, readlink, stat, realpath, writeFile, unlink, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { join, resolve, sep } from "node:path";
+import { join, resolve, sep, basename, relative } from "node:path";
 
 import {
   check as ledgerCheck,
@@ -856,6 +856,25 @@ function toLedgerRequest(req: GateRequestLike, taskIdDefault: string): LedgerGat
  *  closed recovery loop (docs/18 §1). Never throws for a recoverable
  *  cause — the loop itself never re-throws; host setup failures (bad
  *  graph, unreadable episode) do throw, before any loop state exists. */
+const ACTIVE_RECLAIM_PATHS = new Set<string>();
+const ACTIVE_STAGE_PATHS = new Set<string>();
+/** Canonical same-episode key across caller spellings of the same directory.
+ *  Protection sets above recognize one process's own live swap across
+ *  separate runHostEpisode invocations, so every invocation must derive the
+ *  SAME key for the same directory. The directory is created first (takeLease
+ *  creates it anyway) so realpath always has a target; if the canonical path
+ *  cannot be established the activation fails closed. No fallback key is
+ *  used: a fallback could differ from a later successful realpath and split
+ *  the in-process protection identity. */
+const epPathIdentity = async (epPath: string): Promise<string> => {
+  try {
+    await mkdir(epPath, { recursive: true });
+    return await realpath(epPath);
+  } catch (e) {
+    throw new Error(`host: cannot establish a canonical identity for ${epPath} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); refusing activation until the episode directory is resolvable`);
+  }
+};
+
 export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpisodeResult> {
   const log = opts.log ?? ((line: string) => { process.stderr.write(`supervisor-host: ${line}\n`); });
   const episodeId = opts.graph?.episodeId ?? "unknown";
@@ -874,6 +893,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   assertId(opts.grantedBy, "grantedBy");
   const root = opts.episodesRoot ?? join(process.env["HOME"] ?? "/tmp", ".tre", "episodes");
   const epPath = episodeDir(root, graph.episodeId);
+  const epId = await epPathIdentity(epPath);
 
   // P18-A4 (sol audit cycle 1, the "enforce the exclusion" half): ONE
   // supervisor per episode. The channel's dedup/cap machinery assumes a
@@ -913,15 +933,22 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   const leaseToken = `${process.pid}.${Math.random().toString(36).slice(2, 12)}.${Date.now().toString(36)}`;
   // P20c8-F3 (R5 audit): pid EQUALS ownership only within one process
   // INCARNATION. The OS recycles pids, so an artifact whose mtime PREDATES
-  // this process's start cannot be ours — it belongs to a long-dead
-  // namesake. Every "skip — our own in-flight work" test below (reconcile,
-  // the tmp sweep, the dead-stamped-lock fast path, the pre-move re-verify)
-  // requires mtimeMs >= procStartMs; an older same-pid artifact is an
-  // ABANDONED workspace (disk mtimes vs a wall-clock start carry the
-  // disclosed clock-skew residual — a namesake booted with the clock
-  // BEHIND ours could have newer mtimes; bounded, and the claim body
-  // itself is still pid+token judged at every acquisition).
+  // this activation cannot be ours — it belongs to a long-dead namesake.
+  // NOTE: procStartMs is this ACTIVATION's start (runHostEpisode may run
+  // several times in one process), not the OS process start. It drives
+  // the STAGED-TMP incarnation rule in the sweep below (a pre-start
+  // same-pid tmp is a dead namesake's stage; disk mtimes vs a wall-clock
+  // start carry the disclosed clock-skew residual — bounded, and the
+  // claim body itself is still pid+token judged at every acquisition).
+  // It is NOT used for `.reclaim-` artifacts: a rename preserves the
+  // SOURCE lease's old mtime, so an in-flight moved-aside claim cannot be
+  // classified from its timestamp. Reclaim ownership is instead the
+  // in-memory set below, keyed by canonical episode identity + basename
+  // (added before the move, removed when the swap completes), so a live
+  // swap is recognized whatever mtime its artifact inherited — and
+  // equivalent path spellings of the same episode share the key.
   const procStartMs = Date.now();
+  const activeReclaims = ACTIVE_RECLAIM_PATHS;
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
   const pidAlive = (pid: number): boolean => {
     try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
@@ -1039,6 +1066,8 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     const stagedPublish = async (target: string, suffix: string): Promise<boolean> => {
       for (let attempt = 0; attempt < 2; attempt++) {
         const tmp = `${target}.tmp-${process.pid}.${leaseToken}${suffix}${attempt === 0 ? "" : `.${attempt}`}`;
+        const protection = `${epId}:${basename(tmp)}`;
+        ACTIVE_STAGE_PATHS.add(protection);
         try {
           const handle = await open(tmp, "wx", 0o644);
           try {
@@ -1056,6 +1085,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
             throw e;
           }
         } finally {
+          ACTIVE_STAGE_PATHS.delete(protection);
           await unlink(tmp).catch(() => {});
         }
       }
@@ -1081,14 +1111,19 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       return stagedPublish(leasePath, "");
     };
     // Takeover replacement UNDER the takeover lock (P18-C3 serialization
-    // preserved): stage the full body (write + fsync) beside the lease and
-    // rename over the stale claim — atomic, so a reader of the lease sees
-    // either the complete old claim or the complete new one, never a mix.
+    // preserved): stage the full body (write + fsync) beside the lease,
+    // move the stale claim aside, then link our complete body with
+    // no-replace. Readers see complete claims or the brief disclosed gap;
+    // a reader never sees a partial body.
     // P20-F1 belt: re-verify after the swap that the lease is still OURS —
     // a claim replaced under us mid-swap makes us walk away rather than
     // proceed believing we hold the episode.
     const replaceLeaseUnderLock = async (): Promise<void> => {
       const tmp = `${leasePath}.tmp-${process.pid}.${leaseToken}.takeover`;
+      const gone = `${leasePath}.reclaim-${process.pid}.${leaseToken}`;
+      const protection = `${epId}:${basename(gone)}`;
+      activeReclaims.add(protection); // publish in-memory protection before staging/rename
+      ACTIVE_STAGE_PATHS.add(`${epId}:${basename(tmp)}`);
       try {
         const handle = await open(tmp, "wx", 0o644);
         try {
@@ -1170,6 +1205,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           await rename(leasePath, gone);
           movedAside = true;
         } catch (e) {
+          activeReclaims.delete(protection);
           if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
           // Released under us (nothing to move): claim exclusive below.
         }
@@ -1337,6 +1373,8 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // unlink-only).
         if (movedAside) await unlink(gone).catch(() => {});
       } finally {
+        activeReclaims.delete(protection);
+        ACTIVE_STAGE_PATHS.delete(`${epId}:${basename(tmp)}`);
         await unlink(tmp).catch(() => {});
       }
     };
@@ -1423,29 +1461,35 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     //    pre-P20c8 an errored link fell through to unlink and destroyed
     //    the only recovery source (reproduced R5-F1: two reconcilers
     //    both failing their links with EIO lost the wedge permanently);
-    //  - own-pid artifacts are OURS only if they postdate this process
-    //    (incarnation rule, P20c8-F3): a pre-start same-pid artifact is
-    //    a dead namesake's abandoned workspace and IS reconciled.
+    //  - an own-pid artifact is skipped ONLY while it is in this
+    //    process's active-reclaim set (an in-flight swap of this very
+    //    invocation, registered by canonical episode identity +
+    //    basename before the move). It is never judged by mtime: rename
+    //    preserves the SOURCE lease's old mtime, so a live swap's
+    //    artifact can look arbitrarily old. A same-pid artifact NOT in
+    //    the set belongs to a dead namesake incarnation and IS
+    //    reconciled (P20c8-F3).
     // Returns the number of claims restored.
     const reconcileReclaims = async (): Promise<number> => {
       let restored = 0;
       let names: string[];
       try {
         names = await readdir(epPath);
-      } catch {
-        return 0; // dir unreadable: nothing to reconcile
+      } catch (e) {
+        // Recovery cannot be judged if it cannot be observed. Fail closed:
+        // a durable source may hold the only copy of a live claim.
+        throw new Error(`host: cannot inspect recovery sources in ${epPath} (readdir failed: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); refusing activation until ownership is resolved`);
       }
       for (const n of names) {
         if (!isReclaimName(n)) continue;
         const ownerPid = reclaimOwnerPid(n);
         const full = join(epPath, n);
         if (ownerPid === process.pid) {
-          // P20c8-F3: pid EQUALS ownership only within one incarnation.
-          let mine: boolean;
-          try { mine = (await stat(full)).mtimeMs >= procStartMs; }
-          catch { continue; } // vanished mid-reconcile
-          if (mine) continue; // our OWN in-flight swap (this incarnation)
-          // pre-start same-pid artifact: dead namesake's workspace.
+          // A rename preserves the original lease mtime, so only the
+          // in-memory active set can identify this process's live swap.
+          // The identity is the canonical episode directory plus the
+          // basename, so equivalent path spellings cannot evade it.
+          if (activeReclaims.has(`${epId}:${basename(n)}`)) continue;
         } else if (ownerPid !== null && pidAlive(ownerPid)) {
           continue; // live mover's workspace (namesake-reuse of a FOREIGN live pid is the disclosed residual — no portable start-time probe)
         } else if (ownerPid === null) {
@@ -1469,17 +1513,31 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         } catch (e) {
           const code = (e as NodeJS.ErrnoException).code;
           if (code === "ENOENT") continue; // the source vanished under us: nothing left either way
-          if (code !== "EEXIST") continue; // transient/other error: source preserved
+          if (code !== "EEXIST") {
+            // A failed restore does not establish that the lease is vacant.
+            // Fail closed: do not continue to the fresh-publish path while
+            // a recovery source may hold the sole copy of a live claim.
+            throw new Error(`host: cannot reconcile recovery source ${full} (restore link failed: ${code ?? (e as Error).message}); refusing activation until ownership is resolved`);
+          }
           try { await readFile(leasePath, "utf8"); proven = true; }
-          catch { proven = false; } // occupant vanished/unreadable: preserve source
+          catch (oe) {
+            if ((oe as NodeJS.ErrnoException).code === "ENOENT") {
+              throw new Error(`host: cannot reconcile recovery source ${full} (lease path vanished after EEXIST); refusing activation until ownership is resolved`);
+            }
+            throw new Error(`host: cannot reconcile recovery source ${full} (lease occupant unreadable: ${(oe as NodeJS.ErrnoException).code ?? "error"}); refusing activation until ownership is resolved`);
+          }
         }
         if (proven) await unlink(full).catch(() => {});
       }
       return restored;
     };
     await reconcileReclaims();
-    try {
-      const names = await readdir(epPath);
+    const names = await readdir(epPath).catch((e) => {
+      // Staged tmp cleanup is best-effort, but an unreadable directory is
+      // inspected ownership — fail closed rather than sweeping blind.
+      throw new Error(`host: cannot inspect tmp stages in ${epPath} (readdir failed: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); refusing activation until ownership is resolved`);
+    });
+    {
       const nowMs = Date.now();
       for (const n of names) {
         // Staged tmps ONLY (P20c7): `.reclaim-` originals are reconciled
@@ -1488,6 +1546,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         if (m === null) continue;
         const ownerPid = Number(m[1]);
         const full = join(epPath, n);
+        if (ACTIVE_STAGE_PATHS.has(`${epId}:${basename(n)}`)) continue; // another live activation in this process owns this exact stage
         // P20-F2/F3: the sweep is PID-AWARE. A tmp whose owner pid is
         // ALIVE is never touched — a live-but-paused (SIGSTOP) or stalled
         // publisher's stage can age past any time bound, and unlinking it
@@ -1499,8 +1558,11 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // rule) — a pre-start same-pid tmp is a dead namesake's stage.
         if (ownerPid === process.pid) {
           try {
-            if ((await stat(full)).mtimeMs >= procStartMs) continue; // possibly OUR OWN in-flight stage
-          } catch { continue; } // vanished mid-sweep
+            if ((await stat(full)).mtimeMs < procStartMs) {
+              await unlink(full).catch(() => {}); // old same-pid stage: dead namesake
+            }
+          } catch { /* vanished mid-sweep */ }
+          continue; // a live stage from this pid is never touched
         }
         const interpretable = Number.isSafeInteger(ownerPid) && ownerPid > 0;
         try {
@@ -1511,7 +1573,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           if (nowMs - (await stat(full)).mtimeMs > ABANDON_AFTER_MS) await unlink(full).catch(() => {}); // unknown owner + aged: reclaim
         } catch { /* vanished mid-sweep */ }
       }
-    } catch { /* unreadable dir: nothing to reclaim */ }
+    }
     // Fast path: no lease at all — publish exclusive. This races ONLY
     // another creation (both stage+link; exactly one wins) and a recovery
     // (which holds the lock and re-verifies before replacing).
