@@ -617,6 +617,36 @@ async function runMergeOnce(
     if (!(await probeExit0(repo, ["check-ref-format", `refs/heads/${taskBranch}`]))) {
       return refused("resolve", "resolve:taskBranch-illegal", actionId);
     }
+    // p12c5 cycle-1 audit F1: a SYMBOLIC ref under refs/heads bypasses the
+    // main-guard. `refs/heads/ep1 -> refs/heads/main` passes every NAME
+    // check, resolution reads main's commit, and a plain `update-ref`
+    // FOLLOWS the symbolic ref — the CAS then checks main's old value and
+    // a matching advance MOVES main. Neither the replacement-object pin
+    // (object layer) nor the name guards (string layer) cover ref
+    // REDIRECTION. Two-layer defense: (a) refuse any symbolic-ref operand
+    // here (clear early error; exit 1 is the documented "not symbolic"
+    // negative — anything else is a hard error, the probeExit0 rule), and
+    // (b) make the CAS itself deref-proof with `--no-deref` at advance:
+    // the old-value compare runs against the ref's RAW value, so a
+    // symbolic destination (whose raw value is the "ref: …" line, never a
+    // sha) can never satisfy the CAS and is never followed — closing the
+    // resolve→advance TOCTOU window where an operand could be swapped to
+    // a symref after the early probe passed.
+    const isSymbolic = async (refPath: string): Promise<boolean> => {
+      try {
+        await git(repo, ["symbolic-ref", "--quiet", refPath]);
+        return true; // exit 0: it IS a symbolic ref
+      } catch (e) {
+        if ((e as GitFail)?.code === 1) return false; // documented negative
+        throw e; // 128+ / timeout / corrupt repo: hard error, fail closed
+      }
+    };
+    if (await isSymbolic(`refs/heads/${snap.episodeBranch}`)) {
+      return refused("resolve", "resolve:episodeBranch-symbolic-ref", actionId);
+    }
+    if (await isSymbolic(`refs/heads/${taskBranch}`)) {
+      return refused("resolve", "resolve:taskBranch-symbolic-ref", actionId);
+    }
     const resolveSha = async (branch: string): Promise<string> => {
       // `--verify --quiet` answers exit 1 for a missing ref (documented
       // negative → ""). Anything else (timeout, EPERM, corrupt repo) is a
@@ -708,8 +738,17 @@ async function runMergeOnce(
     let candidateSha = "";
     let conflictedPaths: string[] = [];
     try {
+      // p12c5 cycle-1 audit F4 (ABA via mutable refs): the operands are the
+      // CAPTURED SHA STRINGS, never the ref names. With ref names, a writer
+      // could move the task branch to B after resolve, let merge-tree fold
+      // B's content into the candidate, restore A, and the reverify (which
+      // only compares the TIP) would pass — commit-tree then records A as
+      // the task parent, stamping the candidate with a parent it does not
+      // contain. Object ids are immutable: constructing from the captured
+      // SHAs makes the candidate provably a function of the resolved
+      // parents, and the replacement-object pin keeps those SHAs raw.
       const out = await execFileCapture(repo, ["-c", "user.name=tre-supervisor", "-c", "user.email=tre@localhost",
-        "merge-tree", "--write-tree", "--name-only", `refs/heads/${snap.episodeBranch}`, `refs/heads/${taskBranch}`]);
+        "merge-tree", "--write-tree", "--name-only", episodeHead, taskTip]);
       candidateSha = out.trim().split("\n")[0]?.trim().toLowerCase() ?? "";
       if (!isSha(candidateSha)) {
         return { actionId, status: "failed", stage: "construct", reason: "git:merge-tree:output", episodeHead, taskTip, evidenceRefs: [], outcomeDurable: true };
@@ -849,8 +888,16 @@ async function runMergeOnce(
     // later claimed provable no-effect off the re-read alone — a killed
     // writer plus an unrelated later reset read as "nothing happened".
     let casRejectedClean = true; // exited 0 → never consulted; stays true only for a clean report
+    // p12c5 cycle-1 audit F1 (defense in depth): `--no-deref` makes the
+    // CAS deref-PROOF — git compares the old value against the ref's RAW
+    // content and refuses to write through a symbolic ref. If the operand
+    // became a symref after the resolve-stage probe (or via any path the
+    // probe missed), the raw value is a "ref: …" line that can never equal
+    // the sha old-value → clean numeric rejection (exit 1, the rename
+    // never ran → provable no-effect), where a plain update-ref would have
+    // followed the link and advanced main.
     try {
-      await git(repo, ["update-ref", `refs/heads/${snap.episodeBranch}`, candidateSha, episodeHead]);
+      await git(repo, ["update-ref", "--no-deref", `refs/heads/${snap.episodeBranch}`, candidateSha, episodeHead]);
     } catch (e) {
       const code = (e as GitFail)?.code;
       casRejectedClean = typeof code === "number" && Number.isFinite(code) && code !== 0;

@@ -510,12 +510,28 @@ export interface AttemptRecord extends RecordEnvelope {
   confirmation?: boolean;
 }
 
+/** p12c5 cycle-1 audit F3: durable seq HIGH-WATER record — the allocator's
+ *  answer to "which integration seqs are already SPENT" that survives the
+ *  loss of the counted outcomes. The host derives executionSeq from the
+ *  count of ACKED merge outcomes; that derivation forgets a seq whose
+ *  terminal sits above the count (e.g. spent under an operator-raised
+ *  recovery bump). Reverting to a plain activation then RE-DERIVES a spent
+ *  identity — P12 answers already-executed and refuses to integrate new
+ *  work forever. One record per allocation at a NEW high-water durably
+ *  allocates the seq: the allocator takes max(count, bump, records) and
+ *  never re-issues a seq any record shows as spent. */
+export interface SeqHighWaterRecord extends RecordEnvelope {
+  kind: "seq-high-water";
+  seq: number;
+}
+
 export type SupervisorRecord =
   | DecisionIntentRecord
   | DecisionOutcomeRecord
   | AcceptanceRecord
   | DiagnosisRecord
-  | AttemptRecord;
+  | AttemptRecord
+  | SeqHighWaterRecord;
 
 export type SupervisorRecordKind = SupervisorRecord["kind"];
 
@@ -558,6 +574,8 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
     spawnEvidence: bool, // A (audit): failed-resolve from the spawn machinery itself (see AttemptRecord)
     confirmation: bool, // A (audit): resolve written by confirmStopped — never spawn evidence (see AttemptRecord)
   }, ["attemptId", "sessionPath"]),
+  "seq-high-water": recordShape({ kind: choice("seq-high-water"), seq: count, // ≥0: seq 0 is a real allocation
+  }, ["seq"]),
 };
 
 /** Validate one record against its kind schema. Throws on violation. */

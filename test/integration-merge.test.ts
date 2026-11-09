@@ -1221,16 +1221,24 @@ test("P12 C3-F1 in-flight: a concurrent duplicate identity is refused, lock rele
   const fx = makeRepo(t);
   const j = memJournal();
   let releaseGate: () => void = () => {};
+  let gateEntered = false; // the test's ONLY view into "first is parked"
   const holdGate: IntegrationPorts["gate"] = {
-    run: (r2) => new Promise((res) => { releaseGate = () => res({ pass: true, runId: "g1", sha: r2.candidateSha }); }),
+    run: (r2) => { gateEntered = true; return new Promise((res) => { releaseGate = () => res({ pass: true, runId: "g1", sha: r2.candidateSha }); }); },
   };
   const p = ports(j, holdGate);
   const first = integrateTestedCandidate(req(fx, { now: 1700000888010 }), p);
   t.after(() => { releaseGate(); });
-  // Yield until the first call is parked in its gate (same-identity calls
-  // would otherwise both sit in the microtask queue). 60ms is generous
-  // for the pre-gate git plumbing on a loaded runner.
-  await new Promise((r) => setTimeout(r, 60));
+  // Wait until the first call is ACTUALLY parked in its gate. The old
+  // fixed 60ms sleep raced: under full-suite load the pre-gate git
+  // plumbing outlived it, releaseGate() fired as a noop BEFORE the gate
+  // was entered, and the first call then timed out at the 600s gate
+  // deadline (flake: fail 1/4 full-suite runs, pass in isolation).
+  // Bounded polling on the entry flag is deterministic either way:
+  // entered → proceed; never entered in 10s → the premise is broken and
+  // the dup assertion below fails loudly, not silently.
+  for (let waited = 0; waited < 400 && !gateEntered; waited++) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
   const dup = await integrateTestedCandidate(req(fx, { now: 1700000888011 }), ports(j));
   assert.equal(dup.status, "refused", `duplicate dispatch must not double-execute: ${JSON.stringify(dup)}`);
   assert.equal(dup.reason, "in-flight");

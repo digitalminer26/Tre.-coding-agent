@@ -506,6 +506,25 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
  *  file's content (W3-A1).
  *  W2-H1: EVERY argv is scrubbed and env-unified; a failed observation
  *  fails CLOSED (dirty with the failure in the digest, never clean). */
+/** p12c5 cycle-1 audit F2: enumerate every clean/smudge filter driver
+ *  defined in the repo and return argv that NEUTRALIZES conversion —
+ *  `-c <driver>=cat` (identity, command-line precedence beats the exact
+ *  repo key; the W11-A4 probe showed wildcards lose) plus
+ *  `core.attributesFile=/dev/null`. Returns null when the driver set is
+ *  UNOBSERVABLE (failed/truncated enumeration): drivers we cannot
+ *  enumerate may all be lying, so the caller must fail closed. Same
+ *  policy observeIdentity applies to its diff digest. */
+async function filterNeutralizeArgs(repo: string): Promise<string[] | null> {
+  const filterDefs = await runObservedGit(repo, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge)$"], 10, { maxBytes: 256 * 1024 });
+  if (filterDefs.code > 1 || filterDefs.truncated || (filterDefs.code !== 0 && filterDefs.stdout.trim() !== "")) return null;
+  const args: string[] = ["-c", "core.attributesFile=/dev/null"];
+  for (const line of filterDefs.stdout.split("\n")) {
+    const m = /^(filter\..+\.(?:clean|smudge))(?=[ \t]|$)/.exec(line);
+    if (m?.[1] !== undefined) args.push("-c", `${m[1]}=cat`);
+  }
+  return args;
+}
+
 /** Fold every `??` (untracked) path from a `status -z --untracked-files=all`
  *  run into the digest as path + size + content sha256 (streamed, so any
  *  size is fully bound at constant memory; a path that cannot be statted or read
@@ -2263,11 +2282,23 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // path: removal is best-effort (a half-added path may answer neither
       // `remove` nor need it) and prune closes the registration window.
       let added = false;
+      // p12c5 cycle-1 audit F2: a clean filter that maps altered bytes
+      // back to the committed blob makes a REWRITTEN worktree read clean
+      // (and a pre-existing smudge driver would convert the checkout
+      // itself). The candidate is defined by RAW blob content (merge-tree/
+      // commit-tree never applied filters), so the gate worktree is
+      // materialized with every conversion neutralized — the on-disk
+      // bytes are the candidate's bytes. An unobservable driver set
+      // fails closed BEFORE the worktree is even added.
+      const preGateFilterArgs = await filterNeutralizeArgs(repoForMerge);
+      if (preGateFilterArgs === null) {
+        return { pass: false, runId, sha: greq.candidateSha, detail: "filter-neutralize-unobservable-pre-gate" };
+      }
       try {
         // The candidate objects exist in the repo (P12 commit-tree'd them
         // moments ago) even though no ref names them — a detached worktree
         // materializes them without touching the task's tree.
-        const add = await runObservedGit(repoForMerge, ["worktree", "add", "--detach", dir, greq.candidateSha], Math.min(timeoutS, 120));
+        const add = await runObservedGit(repoForMerge, [...preGateFilterArgs, "worktree", "add", "--detach", dir, greq.candidateSha], Math.min(timeoutS, 120));
         added = add.code === 0;
         if (!added) {
           return { pass: false, runId, sha: greq.candidateSha, detail: `worktree-add:${(add.stderr.trim() !== "" ? add.stderr : add.stdout).slice(-384)}`.slice(0, 512) };
@@ -2296,7 +2327,24 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           if (shaAfter !== greq.candidateSha) {
             mutated = `head-moved-post-gate:${shaAfter.slice(0, 12) || "unreadable"}`;
           } else {
-            const st = await runObservedGit(dir, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes: 4 * 1024 * 1024 });
+            // p12c5 cycle-1 audit F2: a gate can DEFINE a clean filter
+            // during its own run (the linked worktree shares the common
+            // .git/config), map rewritten bytes back to the committed
+            // blob, assign it via .git/info/attributes, and exit 0 with
+            // UNSAFE bytes on disk while `status` reads clean — the exact
+            // W11-A4 class observeIdentity already neutralizes for its
+            // diff. So the re-observation enumerates the driver set
+            // FRESH (the config may have changed during the gate — a
+            // pre-gate enumeration would be stale) and runs `status`
+            // with every conversion pinned to identity: a rewrite can
+            // only hide behind a filter, and a neutralized status can
+            // only report clean when the ON-DISK bytes really are the
+            // candidate's blobs. Unobservable driver set → fail closed.
+            const postFilterArgs = await filterNeutralizeArgs(dir);
+            if (postFilterArgs === null) {
+              mutated = "filter-neutralize-unobservable-post-gate";
+            } else {
+            const st = await runObservedGit(dir, [...postFilterArgs, "status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes: 4 * 1024 * 1024 });
             if (st.code !== 0 || st.truncated) {
               mutated = "tree-state-unreadable-post-gate";
             } else {
@@ -2347,6 +2395,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
                 mutated = "replacement-refs-post-gate";
               }
             }
+            }
           }
         }
         const pass = r.cause === "exit" && r.code === 0 && mutated === "";
@@ -2395,6 +2444,20 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
           // opts.integrationSeqBump, and every act-unknown terminal is
           // DISCLOSED with that remedy on every activation.
           let executionSeq = opts.integrationSeqBump ?? 0;
+          // p12c5 cycle-1 audit F3 (durable allocation): the count alone
+          // LOSES spent seqs — a merge that ran under an operator-raised
+          // bump leaves its terminal ABOVE the count, and the next plain
+          // activation re-derives that spent identity: P12 honestly answers
+          // already-executed and the task can never integrate new work.
+          // Two-part fix: (a) the allocator takes max(bump, count, every
+          // persisted seq-high-water record) — a LOWER bump can no longer
+          // re-expose a spent seq; (b) each allocation at a NEW high-water
+          // appends a seq-high-water record BEFORE the act (log-then-act),
+          // so recovery no longer depends on the operator remembering the
+          // historical bump flag. Re-deriving the SAME seq across a restart
+          // stays reachable (max is idempotent): open-intent recovery under
+          // an unchanged journal head computes the identical seq.
+          let highWater = 0;
           try {
             const { records } = await integrationJournal.read();
             const exactMergeId = new RegExp(`^a-${(mreq.taskId as string).replace(/[^A-Za-z0-9._-]/g, "\\$&")}-merge-[0-9a-f]{16}$`);
@@ -2415,6 +2478,35 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
             }
             if (actUnknown > 0) {
               log(`integration-act-unknown: ${actUnknown} merge terminal(s) with unverified side effect at/below the current seq — P12 refuses replay (not-replayable, docs/16 §2); after RECONCILING observed reality (did the CAS land?), an operator-authorized recovery runs with --integration-seq-bump ${String(executionSeq + 1)}`);
+            }
+            // F3 (a): a persisted high-water beats a stale/lower bump —
+            // spent seqs are remembered DURABLY, not by operator flag.
+            for (const r of records) {
+              if (typeof r !== "object" || r === null) continue;
+              const rec = r as { kind?: unknown; episodeId?: unknown; taskId?: unknown; seq?: unknown };
+              if (rec.kind !== "seq-high-water" || rec.episodeId !== mreq.episodeId || rec.taskId !== mreq.taskId) continue;
+              if (typeof rec.seq === "number" && Number.isSafeInteger(rec.seq) && rec.seq >= 0 && rec.seq + 1 > highWater) highWater = rec.seq + 1;
+            }
+            if (highWater > executionSeq) executionSeq = highWater;
+            // F3 (b): log-then-act. Record the allocation BEFORE the
+            // merge runs (id-stable per (episode, task, seq), so a retry
+            // after a failed append re-records the same tuple). An append
+            // failure DEGRADES to the pre-fix derivation — the CAS and
+            // P12's dedup still refuse a double act — and is disclosed.
+            // Re-deriving the SAME seq across a restart re-appends the
+            // same value: max is idempotent, open-intent recovery under
+            // an unchanged journal head still computes the identical seq.
+            if (executionSeq >= highWater) {
+              try {
+                await integrationJournal.append({
+                  schema: "tre-supervisor/1", kind: "seq-high-water",
+                  id: `seqhw-${mreq.episodeId}-${mreq.taskId}-${String(executionSeq)}`,
+                  ts: Math.floor(mreq.now), episodeId: mreq.episodeId, taskId: mreq.taskId,
+                  seq: executionSeq,
+                });
+              } catch (e) {
+                log(`integration-seq-high-water:append-failed seq=${String(executionSeq)} ${(e as Error)?.name ?? "error"} (spent-seq memory degraded for this allocation)`);
+              }
             }
           } catch { /* a read failure falls back to the bumped baseline;
                       P12's own journal guards still refuse a replay honestly */ }
