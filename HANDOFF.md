@@ -1,5 +1,51 @@
 # HANDOFF
 
+## 2026-11-08 — P20 cycle 11: unreadable-lease takeover fix + test-quality closure
+
+Cycle 11 was an independent read-only reviewer pass (`.tre/audits/
+p20-cycle11-review.md`, verdict REJECT on one confirmed defect) plus
+test-coverage closure of its minor findings:
+
+- **F1 (MAJOR, fixed)**: `readLease()` converted ANY non-ENOENT read error
+  into `raw:""` — an EMPTY lease. An aged (past ABANDON_AFTER — the lease
+  mtime is never refreshed, so every long hold is aged) lease carrying a
+  LIVE claim was then classified abandoned-empty and TAKEN OVER: the
+  reviewer's fault-injection probe displaced a live holder's claim and
+  admitted a second worker under it. New contract: a non-ENOENT read error
+  retries a bounded 3x (parity with releaseOursClaim) and then THROWS —
+  ownership that cannot be read cannot be judged, so activation fails
+  closed and the claim on disk is left exactly as found. All three call
+  sites sit under `finally` blocks that release the takeover lock and the
+  in-memory stage/reclaim protections, so the throw leaves no residue.
+- **Test-quality closures** (the reviewer's minors):
+  - `P20c11-F2` drives the SECOND readdir's fail-closed branch (the tmp
+    sweep's own inspection) — previously the branch had no coverage.
+  - `P20c11-F3` re-drives the P20c10 realpath failure and closes its two
+    gaps: proves NO worker started, and that the episode is not wedged
+    (the next activation claims and completes).
+  - `P20c11-F4` finally drives the P20c9-F2 scenario its title always
+    claimed: a CONCURRENT paused publisher — invocation A freezes inside
+    its staged-publish `open()`, invocation B's sweep runs against A's
+    pre-start, now()-old stage — and asserts the in-process
+    ACTIVE_STAGE_PATHS protection (canonical episode dir + basename)
+    keeps B from unlinking it. (Its unlink probe records only during
+    B's sweep window; A's own finally-cleanup is legitimate.)
+  - `restoreFs()` now restores `realpath` — the P20c10 realpath mocks
+    previously unwound only inside their own tests.
+- Tests: `P20c11-F1` proves a persistent injected lease EIO refuses
+  activation, starts no worker, and preserves the live claim verbatim
+  (mutation-verified: swallow→empty fails it). Mutation matrix: M1
+  (swallow) kills F1, M2 (blind sweep) kills F2, M4 (stage protection
+  removed) kills F4.
+- Disclosed residual unchanged: the lock check→act (no atomic
+  compare-and-swap) class from P20c3-F1 — deliberate, documented.
+
+Verification: `npm run build` passed; `node --test dist/test/p20-fixes.
+test.js` 42/42; full `npm test` twice — 2532 pass / 0 fail / 14 skipped
+both times. With cycle 11 committed the audit loop (8→11) has closed its
+last confirmed defect; findings narrowed each cycle and F1 was the only
+must-fix left.
+
 ## 2026-11-08 — P20 cycle 10: aliased-root, directory-read, and identity audit fixes
 
 Fixed the remaining audit findings in uncommitted `src/host/supervise.ts`:
@@ -37,7 +83,7 @@ relative-root mover race protects the recovery source; directory EIO and
 realpath EIO both refuse activation with no lease and no worker; a symlink
 root does not expose a live old-mtime stage. Reports:
 `.tre/audits/p20-cycle10-review.md`, `.tre/audits/p20-cycle10-reaudit.md`.
-Changes remain uncommitted; review `git diff` before the next increment.
+Committed as `3e1c09a` after this entry was drafted.
 
 ## 2026-11-08 — P20 cycle 9: lease recovery audit fixes
 

@@ -971,9 +971,27 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
   // MISSING (ENOENT) is not EMPTY: an absent lease is claimable on the
   // next loop (a holder that just released), while an empty-but-present
   // file is a creation IN PROGRESS and must never be claimed blind.
+  // P20c11-F1 (R6 audit): an UNREADABLE lease is neither missing nor
+  // empty — pre-P20c11 a non-ENOENT read error returned raw:"" , and an
+  // aged (past ABANDON_AFTER) lease carrying a LIVE claim was then
+  // classified abandoned-empty and taken over (reproduced: a live
+  // holder's claim displaced and a second worker admitted while the
+  // first ran). New contract: retry a transient failure a bounded 3x
+  // (parity with releaseOursClaim); a persistent non-ENOENT error
+  // THROWS — ownership that cannot be read is ownership that cannot be
+  // judged, so the activation fails closed and the claim on disk is
+  // left exactly as found.
   const readLease = async (): Promise<{ missing: boolean; raw: string }> => {
-    try { return { missing: false, raw: await readFile(leasePath, "utf8") }; }
-    catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? { missing: true, raw: "" } : { missing: false, raw: "" }; }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return { missing: false, raw: await readFile(leasePath, "utf8") }; }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return { missing: true, raw: "" };
+        if (attempt === 2) {
+          throw new Error(`host: cannot read the lease at ${leasePath} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}) — ownership is unreadable, refusing activation rather than guessing (P20c11-F1)`);
+        }
+      }
+    }
+    throw new Error("unreachable: the readLease retry bound always returns or throws");
   };
   // P18-C3 F2 (sol audit cycle 3): an empty-but-present lease is a
   // creation IN PROGRESS — never claimable — UNLESS its mtime proves the

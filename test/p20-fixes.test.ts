@@ -67,9 +67,10 @@ const origReadFile = fs.promises.readFile.bind(fs.promises);
 const origUnlink = fs.promises.unlink.bind(fs.promises);
 const origOpen = fs.promises.open.bind(fs.promises);
 const origReaddir = fs.promises.readdir.bind(fs.promises);
+const origRealpath = fs.promises.realpath.bind(fs.promises);
 const origKill = process.kill.bind(process) as typeof process.kill;
 function restoreFs(): void {
-  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown; readdir: unknown; open: unknown };
+  const p = fs.promises as { link: unknown; rename: unknown; rm: unknown; readFile: unknown; unlink: unknown; readdir: unknown; open: unknown; realpath: unknown };
   p.link = origLink;
   p.rename = origRename;
   p.rm = origRm;
@@ -79,6 +80,9 @@ function restoreFs(): void {
   // P20c7: the unlink patch (release-retry tests) leaked into later
   // tests without this — restore it.
   p.unlink = origUnlink;
+  // P20c11: the realpath patch (canonical-identity tests) must unwind the
+  // same way — restoreFs is the t.after safety net for them too.
+  p.realpath = origRealpath;
   syncBuiltinESMExports();
 }
 const deferred = <T = void>() => {
@@ -1451,4 +1455,182 @@ test("P20c8-F5c: malformed occupant content is classified AMBIGUOUS — never a 
   assert.equal(await readFile(leasePath, "utf8"), ambiguous, "the ambiguous occupant was left untouched");
   const names = await readdir(dir);
   assert.ok(!names.some((n) => n.includes(".reclaim-")), "an OBSERVED occupant outranks the moved copy: `gone` reclaimed");
+});
+
+// ─── P20c11 (R6 audit): an UNREADABLE lease is not an EMPTY lease ───────────
+
+test("P20c11-F1: persistent lease-read failure fails closed — an aged LIVE claim is never taken over", async (t) => {
+  // The reproduced takeover: a live holder's claim ages past ABANDON
+  // (lease mtime is never refreshed), a contender's readLease hits a
+  // persistent non-ENOENT error, the old code classified the lease
+  // abandoned-EMPTY, took over, and admitted a SECOND worker under the
+  // live holder. New contract: a read error that outlives 3 bounded
+  // retries THROWS — ownership that cannot be read cannot be judged.
+  const root = await mkdtemp(join(tmpdir(), "p20c11-f1-readEIO-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c11-f1-readEIO");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const liveClaim = JSON.stringify({ pid: process.pid, token: "live-original", episodeId: "ep-c11-f1-readEIO", claimedAt: Date.now() - 60_000 });
+  await writeFile(leasePath, liveClaim);
+  const old = Date.now() / 1000 - 60; // past the 10s abandon bound — the exact pre-condition of the takeover
+  await utimes(leasePath, old, old);
+  const marker = join(root, "worker-started");
+  const worker = join(root, "worker.sh");
+  await writeFile(worker, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+  await chmod(worker, 0o755);
+  let injectedReads = 0;
+  (fs.promises as { readFile: unknown }).readFile = async function (p: string | URL, ...rest: unknown[]) {
+    const raw = await origReadFile(p as Parameters<typeof origReadFile>[0], ...(rest as Parameters<typeof origReadFile> extends [unknown, ...infer R] ? R : never)) as string;
+    if (resolve(String(p)) === resolve(leasePath) && raw === liveClaim) {
+      injectedReads++; // ONLY the original live claim is unreadable; a replacement claim would read fine
+      throw Object.assign(new Error("simulated lease EIO"), { code: "EIO" });
+    }
+    return raw;
+  } as typeof fs.promises.readFile;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(injectedReads >= 3, `the error outlived the bounded retries (got ${injectedReads} injected reads)`);
+  assert.match(err ?? "", /ownership is unreadable/, "a persistent lease-read error refuses activation rather than guessing EMPTY");
+  assert.ok(!fs.existsSync(marker), "the second worker NEVER started under the live holder");
+  assert.equal(await readFile(leasePath, "utf8"), liveClaim, "the unreadable live claim is left EXACTLY as found");
+});
+
+test("P20c11-F2: the tmp-stage sweep's own directory read fails closed — no sweep and no publish on the second readdir", async (t) => {
+  // P20c10-F2 fails the FIRST readdir (reconcile). The second readdir
+  // (the tmp sweep's inspection) is a separate fail-closed decision with
+  // its own branch — removing it must be caught here: the sweep would
+  // otherwise run blind and the fresh publish would proceed over
+  // uninspected ownership.
+  const root = await mkdtemp(join(tmpdir(), "p20c11-f2-readdir2-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c11-f2-readdir2");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  // A dead-owner staged tmp: a BLIND sweep (the mutation this test
+  // kills) would unlink it, and the activation would proceed to publish.
+  const deadStage = join(dir, "host.lease.tmp-99999999.deadstage");
+  await writeFile(deadStage, "partial");
+  const worker = await quickWorker(root);
+  let readdirCalls = 0;
+  (fs.promises as { readdir: unknown }).readdir = async function (p: string | URL, ...rest: unknown[]) {
+    if (resolve(String(p)) === resolve(dir) && readdirCalls++ === 1) {
+      // the SECOND readdir of the episode dir (the first is reconcile's)
+      throw Object.assign(new Error("simulated sweep-inspection EIO"), { code: "EIO" });
+    }
+    return origReaddir(p as Parameters<typeof origReaddir>[0], ...(rest as Parameters<typeof origReaddir> extends [unknown, ...infer R] ? R : never)) as never;
+  } as typeof fs.promises.readdir;
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(readdirCalls >= 2, "the test actually reached the sweep's readdir (got " + readdirCalls + " calls)");
+  assert.match(err ?? "", /cannot inspect tmp stages/, "the sweep fails closed on its own inspection error");
+  assert.ok(await stat(deadStage).then(() => true, () => false), "no sweep destroys an uninspected stage");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "no fresh lease is published over an uninspected directory");
+});
+
+test("P20c11-F3: the realpath failure (P20c10-F1e) starts NO worker, and the NEXT activation succeeds cleanly", async (t) => {
+  // P20c10-F1e asserted the refusal and no lease; this closes its two
+  // remaining gaps: independently proving no WORKER ran, and that the
+  // fail-closed was transient-safe (the episode is not wedged — the
+  // next activation claims and completes).
+  const root = await mkdtemp(join(tmpdir(), "p20c11-f3-realpath-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c11-f3-realpath");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const marker1 = join(root, "worker1-started");
+  const worker1 = join(root, "worker1.sh");
+  await writeFile(worker1, `#!/bin/sh\ntouch '${marker1}'\nexit 0\n`);
+  await chmod(worker1, 0o755);
+  const origRealpath = fs.promises.realpath.bind(fs.promises);
+  let injected = false;
+  (fs.promises as { realpath: unknown }).realpath = async function (p: string | URL, ...rest: unknown[]) {
+    if (!injected && resolve(String(p)) === resolve(dir)) {
+      injected = true;
+      throw Object.assign(new Error("simulated realpath EIO"), { code: "EIO" });
+    }
+    return origRealpath(p as string, ...(rest as []));
+  };
+  syncBuiltinESMExports();
+  const err = await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker1, maxIterations: 1, log: () => {} }).then(() => null, (e: Error) => e.message);
+  restoreFs();
+  assert.ok(injected, "the realpath failure was injected");
+  assert.match(err ?? "", /canonical identity/, "the activation refuses to key protection on an unresolved identity");
+  assert.ok(!fs.existsSync(marker1), "the failed activation started NO worker");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "no lease published under an unresolved identity");
+  // Not wedged: the next activation (no injection) claims and completes.
+  const marker2 = join(root, "worker2-started");
+  const worker2 = join(root, "worker2.sh");
+  await writeFile(worker2, `#!/bin/sh\ntouch '${marker2}'\nexit 0\n`);
+  await chmod(worker2, 0o755);
+  await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker2, maxIterations: 1, log: () => {} });
+  assert.ok(fs.existsSync(marker2), "the next activation ran its worker");
+  await assert.rejects(readFile(leasePath, "utf8"), { code: "ENOENT" }, "and released cleanly");
+});
+
+test("P20c11-F4: a paused publisher's LIVE stage survives a later activation's sweep (in-process stage protection)", async (t) => {
+  // P20c9-F2 (despite its title) only deleted an orphan; it never drove a
+  // CONCURRENT stage. Here invocation A pauses inside its staged-publish
+  // open(): its tmp predates invocation B's procStart, so B's own-pid
+  // sweep rule ("pre-start same-pid tmp = dead namesake") would unlink
+  // it — except the in-memory ACTIVE_STAGE_PATHS set (canonical episode
+  // dir + basename, registered before the stage is opened) protects it.
+  const root = await mkdtemp(join(tmpdir(), "p20c11-f4-livestage-"));
+  t.after(() => { restoreFs(); return rm(root, { recursive: true, force: true }); });
+  restoreFs();
+  const epGraph = graphA("ep-c11-f4-livestage");
+  const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
+  const leasePath = join(dir, "host.lease");
+  const worker = await quickWorker(root);
+  let stagePath = "";
+  let opened = false;
+  let created!: () => void;
+  const createdP = new Promise<void>((r) => { created = r; });
+  let gateOpen!: () => void;
+  const gateP = new Promise<void>((r) => { gateOpen = r; });
+  let sweepSeen = false;
+  let gatePassed = false;
+  const unlinkAttempts: string[] = [];
+  (fs.promises as { open: unknown }).open = async function (p: string | URL, ...rest: unknown[]) {
+    const handle = await origOpen(p as Parameters<typeof origOpen>[0], ...(rest as Parameters<typeof origOpen> extends [unknown, ...infer R] ? R : never)) as Awaited<ReturnType<typeof origOpen>>;
+    if (!opened && resolve(String(p)).startsWith(resolve(leasePath) + ".tmp-")) {
+      opened = true;
+      stagePath = resolve(String(p));
+      created();          // the stage exists with a now()-old mtime…
+      await gateP;        // …and A freezes before writing/linking
+    }
+    return handle;
+  } as typeof fs.promises.open;
+  (fs.promises as { readdir: unknown }).readdir = async function (p: string | URL, ...rest: unknown[]) {
+    const r = await origReaddir(p as Parameters<typeof origReaddir>[0], ...(rest as Parameters<typeof origReaddir> extends [unknown, ...infer R] ? R : never)) as Awaited<ReturnType<typeof origReaddir>>;
+    if (!sweepSeen && opened && resolve(String(p)) === resolve(dir)) sweepSeen = true; // B has begun inspecting this episode dir
+    return r as never;
+  } as typeof fs.promises.readdir;
+  (fs.promises as { unlink: unknown }).unlink = async function (p: string | URL) {
+    // Record only DURING B's sweep window: after gateOpen(), A's own
+    // staged-publish finally unlinks its stage as normal cleanup.
+    if (sweepSeen && !gatePassed && stagePath !== "" && resolve(String(p)) === stagePath) unlinkAttempts.push(String(p));
+    return origUnlink(p as Parameters<typeof origUnlink>[0]) as never;
+  } as typeof fs.promises.unlink;
+  syncBuiltinESMExports();
+  const runOpts = () => ({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
+  const a = runHostEpisode(runOpts()).then(() => "ok", (e: Error) => e.message);
+  await createdP;
+  const b = runHostEpisode(runOpts()); // B starts AFTER A's stage was created
+  // wait for B to pass the inspection, then give its sweep its decisions
+  for (let i = 0; i < 400 && !sweepSeen; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(sweepSeen, "invocation B reached the episode-directory inspection");
+  await new Promise((r) => setTimeout(r, 150)); // B's sweep window
+  gatePassed = true;
+  gateOpen();
+  const aResult = await a;
+  await b;
+  restoreFs();
+  assert.equal(unlinkAttempts.length, 0, `B never tried to unlink A's live stage (attempts: ${unlinkAttempts.join(",")})`);
+  assert.ok(aResult === "ok" || String(aResult).includes("contended"), `A resolves cleanly either way (won or disclosed contention), got: ${String(aResult).slice(0, 120)}`);
 });
