@@ -509,6 +509,18 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
     "-c", "diff.ignoreSubmodules=none",
     "-c", "core.sparseCheckout=false",
     "-c", "core.sparseCheckoutCone=false",
+    // R6-B1 (round-6 audit, repro .tre/review-probes/r6-observation-window.mjs):
+    // `core.fsmonitor` is a repo-config-selected EXECUTABLE that every
+    // index-touching command runs — it is NOT under core.hooksPath and
+    // `--no-optional-locks` does not stop it. A helper that rewrites a
+    // tracked file and answers "no changes" let the REAL-index reads that
+    // follow the fresh status scan (ls-files, the staged check, write-tree)
+    // observe a clean index over freshly modified bytes. The per-status/-diff
+    // pins existed; every OTHER observed command was the open window. Pin
+    // both caches off for EVERY runObservedGit invocation (cmd-line beats
+    // config; the per-call duplicates are harmless).
+    "-c", "core.fsmonitor=false",
+    "-c", "core.untrackedCache=false",
     // MG-C4 (audit cycle-4, INCONCLUSIVE #1): the supervisor-side git
     // runs shared no hook pin, unlike merge.ts — a repo-local (or
     // gate-written) core.hooksPath made post-checkout/reference-
@@ -963,6 +975,135 @@ async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<st
   return lines.join("\n");
 }
 
+/* ---------------------------------------------------------------------
+ * R6-B2 / R6-B3 (round-6 audit): submodule child state is part of what
+ * the tree IS, but the parent's status/diff only ever describe a child
+ * in aggregate — never its bytes (B2: two distinct child content states
+ * digested IDENTICALLY, so evidence stamped at S1 stayed "current" over
+ * S2), and the child's OWN index can hide content behind `h`/`S` flags
+ * or staged divergence the parent's porcelain never shows (B3: bare
+ * {sha} over modified child bytes). Both close here: a raw content walk
+ * of each populated child folds the child bytes into the dirty digest,
+ * and a child blindness check (flags + staged-vs-HEAD, recursively)
+ * guards the clean return. Names/paths only bound the failure markers;
+ * caps bound the walk and fail closed. */
+const SUBMODULE_CHECK_MAX_DEPTH = 3;
+const SUBMODULE_WALK_MAX_ENTRIES = 20000;
+
+/** gitlink (mode 160000) paths straight off the index — the authoritative
+ *  submodule set (config-independent, unlike .gitmodules). */
+async function listGitlinks(repo: string): Promise<{ ok: true; paths: string[] } | { ok: false; reason: string }> {
+  const r = await runObservedGit(repo, ["ls-files", "-s", "-z"], 10, { maxBytes: 4 * 1024 * 1024 });
+  if (r.code !== 0 || r.truncated) return { ok: false, reason: `code=${r.cause}:${r.code}` };
+  const paths: string[] = [];
+  for (const rec of r.stdout.split("\0")) {
+    if (rec === "") continue;
+    const tab = rec.indexOf("\t"); // "<mode> <sha> <stage>\t<path>"
+    if (tab < 0) continue;
+    if (rec.slice(0, tab).startsWith("160000 ")) paths.push(rec.slice(tab + 1));
+  }
+  paths.sort();
+  return { ok: true, paths };
+}
+
+/** Raw worktree walk of a submodule child (content the parent's diff
+ *  never binds). Deterministic (sorted, no git, no conversion), `.git`
+ *  entries skipped at every level, symlinks bound as target strings,
+ *  files streamed at constant memory. `partial` on ANY unreadable or a
+ *  cap hit — the caller marks the identity unobservable. */
+async function walkChildEntries(root: string, rel: string, lines: string[], state: { count: number; partial: boolean }): Promise<void> {
+  if (state.partial) return;
+  let names: string[];
+  try { names = (await readdir(root === "" ? rel : join(root, rel), { withFileTypes: true })).map((e) => e.name).sort(); }
+  catch { lines.push(`unreadable:${rel || "."}`); state.partial = true; return; }
+  for (const name of names) {
+    if (state.partial) return;
+    if (name === ".git") continue; // the child's own repo dir / gitfile
+    const relp = rel === "" ? name : `${rel}/${name}`;
+    const abs = join(root, relp);
+    state.count += 1;
+    if (state.count > SUBMODULE_WALK_MAX_ENTRIES) { state.partial = true; return; }
+    let st: Awaited<ReturnType<typeof lstat>>;
+    try { st = await lstat(abs); } catch { lines.push(`unreadable:${relp}`); state.partial = true; return; }
+    if (st.isSymbolicLink()) {
+      try { lines.push(`sym:${relp}:${await readlink(abs)}`); }
+      catch { lines.push(`unreadable:${relp}`); state.partial = true; }
+      continue;
+    }
+    if (st.isDirectory()) { await walkChildEntries(root, relp, lines, state); continue; }
+    if (!st.isFile()) { lines.push(`nonfile:${relp}`); continue; }
+    try {
+      const h = createHash("sha256");
+      const fh = await open(abs, "r");
+      let total = 0;
+      try {
+        const buf = Buffer.alloc(64 * 1024);
+        let pos = 0;
+        for (;;) {
+          const { bytesRead } = await fh.read(buf, 0, 64 * 1024, pos);
+          h.update(buf.subarray(0, bytesRead));
+          pos += bytesRead; total += bytesRead;
+          if (bytesRead === 0) break;
+        }
+      } finally { await fh.close(); }
+      lines.push(`f:${relp}:${total}:${h.digest("hex")}`);
+    } catch { lines.push(`unreadable:${relp}`); state.partial = true; }
+  }
+}
+
+/** Fold every gitlink child's state (its HEAD sha + a raw walk of its
+ *  worktree) into digest input. Unpopulated children are recorded as a
+ *  stable marker (no content exists to bind). */
+async function submoduleStatePart(cwd: string, gitlinkPaths: string[]): Promise<{ part: string; partial: boolean }> {
+  const chunks: string[] = [];
+  let partial = false;
+  for (const p of gitlinkPaths) {
+    const child = join(cwd, p);
+    let populated = false;
+    try { await stat(join(child, ".git")); populated = true; } catch { populated = false; }
+    if (!populated) { chunks.push(`child-unpopulated:${p}`); continue; }
+    const head = await runObservedGit(child, ["rev-parse", "HEAD"], 10, { maxBytes: 64 });
+    const headSha = head.code === 0 && !head.truncated && head.stdout.trim() !== "" ? head.stdout.trim() : "";
+    if (headSha === "") partial = true;
+    const lines: string[] = [];
+    const state = { count: 0, partial: false };
+    await walkChildEntries(child, "", lines, state);
+    if (state.partial) partial = true;
+    chunks.push(`child:${p}:head=${headSha === "" ? "unreadable" : headSha}\n${lines.join("\n")}`);
+  }
+  return { part: chunks.join("\x00"), partial };
+}
+
+/** Clean-branch guard: a child whose OWN index hides content (h/S flags)
+ *  or diverges staged-vs-HEAD is invisible to the parent's porcelain and
+ *  staged checks — dirt we cannot see from the parent, so the caller
+ *  fails closed. "" = every populated child observable and consistent;
+ *  any other string is the discriminator. Recurses (bounded depth). */
+async function submoduleBlindnessCheck(root: string, depth = 0): Promise<string> {
+  if (depth > SUBMODULE_CHECK_MAX_DEPTH) return "submodule-depth-exceeded";
+  const gl = await listGitlinks(root);
+  if (!gl.ok) return `gitlink-enum-failed:${gl.reason}`;
+  for (const p of gl.paths) {
+    const child = join(root, p);
+    let populated = false;
+    try { await stat(join(child, ".git")); populated = true; } catch { populated = false; }
+    if (!populated) continue; // no checkout -> nothing to hide
+    const flags = await runObservedGit(child, ["ls-files", "-v", "-z"], 10, { maxBytes: 4 * 1024 * 1024 });
+    if (flags.code !== 0 || flags.truncated) return `child-flags-unreadable:${p}:${flags.cause}:${flags.code}`;
+    for (const rec of flags.stdout.split("\0")) {
+      if (rec === "") continue;
+      if ((rec[0] ?? "?") !== "H") return `child-index-flag:${p}:${rec[0]}:${rec.slice(2, 128)}`;
+    }
+    const staged = await runObservedGit(child, ["--no-optional-locks", "diff-index", "--cached", "--quiet", "--ignore-submodules=none", "--no-ext-diff", "HEAD", "--"], 15, { maxBytes: 1024 * 1024 });
+    if (staged.code !== 0 && staged.code !== 1) return `child-staged-check-failed:${p}:${staged.cause}:${staged.code}`;
+    if (staged.truncated) return `child-staged-check-truncated:${p}`;
+    if (staged.code === 1) return `child-staged-divergence:${p}`;
+    const nested = await submoduleBlindnessCheck(child, depth + 1);
+    if (nested !== "") return nested;
+  }
+  return "";
+}
+
 /** R4-B1 (round-4 audit, repro .tre/review-probes/r4-false-clean.mjs):
  *  a plain `git status` trusts the REPO's own conversion settings on a
  *  STAT-CACHED index — a tracked `.gitattributes` `filter=evil` whose
@@ -1185,6 +1326,17 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
       // `write-tree` of the REAL index, so distinct staged states get
       // distinct digests and never collide with a clean {sha}.
     } else {
+      // R6-B3 (round-6 audit): the parent's porcelain is BLIND to what a
+      // submodule child hides in its OWN index — an `h`/`S` flag inside
+      // the child, or staged divergence there, leaves the parent reading
+      // byte-equal clean over real content delta (probe: `cd sub && git
+      // update-index --assume-unchanged f; echo X > f` → parent clean).
+      // A child we cannot fully observe is dirt-we-cannot-see: fail
+      // closed with the discriminator, never {sha}.
+      const subBlind = await submoduleBlindnessCheck(cwd);
+      if (subBlind !== "") {
+        return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`submodule-blind-clean:${subBlind}\x00${sha}`).digest("hex") };
+      }
       return { sha };
     }
   }
@@ -1278,6 +1430,25 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
     const d = await fileDigest(join(cwd, p));
     flaggedContent.push(`${f}=${d ?? "unreadable"}`);
   }
+  // R6-B2 (round-6 audit): the parent's status/diff describe a submodule
+  // child only in AGGREGATE — never its bytes — so two distinct child
+  // content states (e.g. child HEAD unmoved, worktree edited and
+  // reverted between observations while another channel went dirty)
+  // could digest IDENTICALLY, letting a PASS stamped on one state
+  // certify the other. Fold a deterministic raw walk of every populated
+  // child (its HEAD sha + every entry's path/size/content, `.git`
+  // skipped) into the digest: child bytes are now part of the identity.
+  const gitlinks = await listGitlinks(cwd);
+  let subPart = "";
+  let subPartial = false;
+  if (gitlinks.ok) {
+    const r = await submoduleStatePart(cwd, gitlinks.paths);
+    subPart = r.part;
+    subPartial = r.partial;
+  } else {
+    subPart = `gitlink-enum-failed:${gitlinks.reason}`;
+    subPartial = true;
+  }
   // R3-F2 (audit round-3): PARTIAL measurement is unmeasured measurement.
   // A digest built with a failed diff, an unreadable untracked file, or an
   // unreadable flagged file binds everything it COULD read but silently
@@ -1289,12 +1460,13 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   const partialMeasurement =
     diffPart.startsWith("diff-failed:") ||
     untrackedPart.split("\n").some((l) => l.startsWith("unreadable:")) ||
-    flaggedContent.some((f) => f.endsWith("=unreadable"));
+    flaggedContent.some((f) => f.endsWith("=unreadable")) ||
+    subPartial;
   return {
     sha,
     dirty: true,
     ...(partialMeasurement ? { unobservable: true as const } : {}),
-    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.porcelain}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}${flaggedContent.length > 0 ? `\x00index-flags\n${flaggedContent.sort().join("\n")}` : ""}`).digest("hex"),
+    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.porcelain}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}${flaggedContent.length > 0 ? `\x00index-flags\n${flaggedContent.sort().join("\n")}` : ""}${subPart !== "" ? `\x00submodule-state\n${subPart}` : ""}`).digest("hex"),
   };
   } finally {
     await rm(fresh.dir, { recursive: true, force: true }).catch(() => {});
