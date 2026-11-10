@@ -104,3 +104,20 @@ test/probes/
 .tre/p15-reprobe.mjs
 # P18/P19 audit test-run logs (scratch; findings live in the audit .md files and named tests).
 .tre/*audit*.log
+# Round-2/4/5 observation-hardening audit scratch (probe harnesses, kick logs,
+# findings memos): findings are pinned as named regression tests
+# (test/audit-round*.test.ts); the harnesses and notes stay local — same
+# policy as .tre/audits/ and .probe/.
+.tre/review-probes/
+.tre/review-*.log
+.tre/review-*.diff
+.tre/review-diff.txt
+.tre/fix-*.log
+.tre/targeted.log
+.tre/looplogs/
+.tre/audit-changes.md
+.tre/audit-current.md
+.tre/audit-fixes-followup.md
+.tre/audit-round2*.md
+.tre/current-audit-diff.txt
+.tre/r4-*.log

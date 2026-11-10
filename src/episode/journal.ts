@@ -438,7 +438,7 @@ export interface AcceptanceRecord extends RecordEnvelope {
   staleEvidenceRefs?: string[];
   /** P14 amendment (docs/13 §1): the artifact identity the verdict binds
    *  to — the staleness anchor for stored assessments. */
-  artifact?: { sha: string; dirty?: boolean; dirtyDigest?: string };
+  artifact?: { sha: string; dirty?: boolean; dirtyDigest?: string; unobservable?: true };
 }
 
 export interface DiagnosisRecord extends RecordEnvelope {
@@ -558,7 +558,7 @@ const RECORD_SCHEMAS: Record<SupervisorRecordKind, Shape> = {
     remainingWork: strings, invalidatedBy: nullable(id),
     modelAdvisory: nullable(obj({ judge: id, quote: str, confidence: num }, ["judge", "quote", "confidence"])),
     staleEvidenceRefs: strings, // P14 amendment (docs/13)
-    artifact: obj({ sha: id, dirty: bool, dirtyDigest: id }, ["sha"]), // P14 amendment (docs/13 §1); C2-F3 (cycle 2): NOT nullable — the TS interface declares the field optional-but-non-null and an explicit null carried no meaning (an absent field is the "no identity" case)
+    artifact: obj({ sha: id, dirty: bool, dirtyDigest: id, unobservable: boolTrue }, ["sha"]), // P14 amendment (docs/13 §1); C2-F3 (cycle 2): NOT nullable — the TS interface declares the field optional-but-non-null and an explicit null carried no meaning (an absent field is the "no identity" case); R3-F2 (round-3): `unobservable` is literal true (boolTrue) — an unmeasured identity rides through the durable record and refuses comparison on replay
   }, ["verdict", "criteria"]),
   diagnosis: recordShape({ kind: choice("diagnosis"), attemptId: id,
     causeClass: choice("transient-endpoint", "premature-stop", "task-defect", "environment-blocker", "approval-boundary", "unknown"),

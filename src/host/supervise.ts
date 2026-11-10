@@ -21,9 +21,10 @@
  * (P10), and the executor's revalidation (P11).
  */
 
-import { appendFile, link, mkdir, readdir, readFile, rename, lstat, open, readlink, stat, realpath, writeFile, unlink, rm } from "node:fs/promises";
+import { appendFile, link, mkdir, readdir, readFile, rename, lstat, open, readlink, stat, realpath, writeFile, unlink, rm, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve, sep, basename, relative } from "node:path";
 
 import {
@@ -220,6 +221,16 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
   PATH: process.env["PATH"] ?? "/usr/bin:/bin",
   ...(process.env["HOME"] !== undefined ? { HOME: process.env["HOME"] } : {}),
   GIT_CONFIG_NOSYSTEM: "1",
+  // MG-C4 (audit cycle-4, scenario global-config): NOSYSTEM alone still
+  // reads $HOME/.gitconfig (and its include.path chain) — a gate that
+  // mutates the invoking user's global config bends the effective
+  // semantics of every observed command AND the gate itself while the
+  // layout digest (which binds only repo-local files) never moves.
+  // Pin the global slot to /dev/null: the observation runs with repo-
+  // local config as the ONLY config source (same contract as merge.ts).
+  // GIT_CONFIG_GLOBAL is honoured by git >= 2.32; NOSYSTEM covers the
+  // system slot on all versions.
+  GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_TERMINAL_PROMPT: "0",
   GIT_PORCELAIN: "1",
   // P9 audit cycle-2 F1: replacement refs silently REDIRECT object
@@ -229,6 +240,25 @@ export const GIT_ENV: NodeJS.ProcessEnv = {
   // objects only; runObservedGit pins the CLI flag too.
   GIT_NO_REPLACE_OBJECTS: "1",
 };
+
+/** MG-C4-A3 (A3 BUG-tracked-eol): the empty tree's well-known OID.
+ *  `GIT_ATTR_SOURCE` points git's attribute interpreter at a TREE
+ *  object instead of the working tree's .gitattributes chain — the
+ *  EMPTY tree carries no attributes, so every built-in conversion
+ *  (text/eol/ident/export-ignore, no filter pin touches those) is
+ *  pinned to identity FOR THAT COMMAND. Probe (git 2.54, this cycle):
+ *  a candidate commit containing `base.txt text eol=crlf` made
+ *  `worktree add` materialize CRLF bytes (≠ the raw blob), and post
+ *  that, `status` read gate-rewritten CRLF bytes as CLEAN — exactly
+ *  the stale-certification channel the A3 tracked-eol scenario rode.
+ *  With GIT_ATTR_SOURCE=<empty tree> `worktree add` writes the RAW
+ *  blob bytes and `status` compares raw (probe: " M base.txt"
+ *  reappears). The empty tree is synthesised by git itself (cat-file
+ *  -e succeeds on a fresh repo with no mktree), so no fixture is
+ *  needed; a repo where it somehow cannot resolve fails the command
+ *  — fail closed. An EMPTY env value is NOT a valid attr source
+ *  (exit 128), hence the OID pin. */
+export const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /** Run a command capturing output; never rejects (exit code + tails).
  *  W1-M2: the child is spawned detached as its OWN process group and a
@@ -457,7 +487,7 @@ export function shellQuote(a: string): string {
  *  minimal env (`GIT_ENV`) as the policy gate — the W1-era gate and
  *  observation inherited DIFFERENT things, so they could disagree about
  *  the same tree (the "clean gate passed @ dirty identity" shape). */
-export async function runObservedGit(repo: string, args: string[], timeoutS = 30, opts?: { maxBytes?: number; hashStdout?: boolean } | number): Promise<ShellResult> {
+export async function runObservedGit(repo: string, args: string[], timeoutS = 30, opts?: { maxBytes?: number; hashStdout?: boolean; envExtra?: Record<string, string> } | number): Promise<ShellResult> {
   // W7-A1 (audit of W6): the 4th param USED to be a bare `maxBytes`
   // number. A stale/untyped JS caller still passing a number would have
   // it treated as an OPTIONS OBJECT — i.e. `maxBytes` silently undefined
@@ -465,7 +495,7 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
   // the W4-A1 blindness (PROVEN: 27300-byte status came back as 16384,
   // with `truncated` NOT set, so nothing failed closed). Coerce instead:
   // a numeric 4th arg is a maxBytes request, never a silent downgrade.
-  const o: { maxBytes?: number; hashStdout?: boolean } = typeof opts === "number" ? { maxBytes: opts } : (opts ?? {});
+  const o: { maxBytes?: number; hashStdout?: boolean; envExtra?: Record<string, string> } = typeof opts === "number" ? { maxBytes: opts } : (opts ?? {});
   const pinned = [
     "git",
     // P9 audit cycle-2 F1: replacement refs (refs/replace/*) REDIRECT
@@ -479,6 +509,14 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
     "-c", "diff.ignoreSubmodules=none",
     "-c", "core.sparseCheckout=false",
     "-c", "core.sparseCheckoutCone=false",
+    // MG-C4 (audit cycle-4, INCONCLUSIVE #1): the supervisor-side git
+    // runs shared no hook pin, unlike merge.ts — a repo-local (or
+    // gate-written) core.hooksPath made post-checkout/reference-
+    // transaction hooks fire INSIDE observed commands (worktree add
+    // checks files out; a reference-transaction hook sees every ref
+    // operation). No observed command here consumes hook output, so
+    // the hook surface is pinned closed for every invocation.
+    "-c", "core.hooksPath=/dev/null",
     ...args,
   ];
   // W4-A1: identity/observation runs use FULL capture (front-kept) —
@@ -496,7 +534,12 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
   if (o.maxBytes !== undefined && o.hashStdout === true) {
     throw new Error("host: runObservedGit maxBytes and hashStdout are mutually exclusive (a capped copy and a full digest cannot both be requested)");
   }
-  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env: GIT_ENV, ...o });
+  // MG-C3-2 (cycle-3 audit): callers may add env vars (e.g.
+  // GIT_INDEX_FILE for a throwaway observation index) on TOP of the
+  // minimal GIT_ENV — the base stays minimal, only the named extras
+  // are appended.
+  const env = o.envExtra !== undefined ? { ...GIT_ENV, ...o.envExtra } : GIT_ENV;
+  return runShell(pinned.map(shellQuote).join(" "), repo, timeoutS, { env, ...(o.maxBytes !== undefined ? { maxBytes: o.maxBytes } : {}), ...(o.hashStdout !== undefined ? { hashStdout: o.hashStdout } : {}) });
 }
 
 /** Observe the working tree's identity: HEAD sha + a digest of tracked
@@ -506,21 +549,361 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
  *  file's content (W3-A1).
  *  W2-H1: EVERY argv is scrubbed and env-unified; a failed observation
  *  fails CLOSED (dirty with the failure in the digest, never clean). */
-/** p12c5 cycle-1 audit F2: enumerate every clean/smudge filter driver
- *  defined in the repo and return argv that NEUTRALIZES conversion —
- *  `-c <driver>=cat` (identity, command-line precedence beats the exact
+/** p12c5 cycle-1 audit F2 (extended by cycle-2 audit F1): enumerate
+ *  every filter driver defined in the repo — clean AND smudge AND
+ *  `process` — and return argv that NEUTRALIZES conversion: `-c
+ *  <driver>=cat` (identity, command-line precedence beats the exact
  *  repo key; the W11-A4 probe showed wildcards lose) plus
- *  `core.attributesFile=/dev/null`. Returns null when the driver set is
- *  UNOBSERVABLE (failed/truncated enumeration): drivers we cannot
+ *  `core.attributesFile=/dev/null`.
+ *  C2-F1: git's `process` driver REPLACES clean+smudge when set (real
+ *  git 2.54 probe: a process-only driver answered the clean query and
+ *  a clean/smudge override left it standing), so enumerating only
+ *  clean|smudge let a process driver keep rewriting bytes under a
+ *  "neutralized" status. The regex covers all three; any driver we can
+ *  observe gets pinned to identity. Returns null when the driver set
+ *  is UNOBSERVABLE (failed/truncated enumeration): drivers we cannot
  *  enumerate may all be lying, so the caller must fail closed. Same
  *  policy observeIdentity applies to its diff digest. */
-async function filterNeutralizeArgs(repo: string): Promise<string[] | null> {
-  const filterDefs = await runObservedGit(repo, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge)$"], 10, { maxBytes: 256 * 1024 });
+/** MG-C3-1 (cycle-3 audit, probe `gitdir-redirect` + `alternates-invalid`
+ *  on real git 2.54): the gitdir and the object-store layout are part of
+ *  what the gate MEASURED. A gate could `rm .git; ln -s <shadow>/.git
+ *  .git` — every post-gate read then resolves against a shadow store
+ *  that merely CONTAINS the candidate (rev-parse HEAD matched, status
+ *  read clean, integration accepted bytes that were never tested in the
+ *  certified worktree) — or write `objects/info/alternates` (the local
+ *  object dir is ALWAYS consulted, so a bogus entry is a silent warning
+ *  and a real one is an object-confusion door for every later consumer).
+ *  Snapshot the layout content (streamed, bounded memory, fail-closed
+ *  on unreadable-vs-missing flips) pre-gate and re-verify post-gate:
+ *  ANY change disqualifies the verdict. */
+async function gitLayoutDigest(gitdir: string, common: string, worktreeDir: string): Promise<string> {
+  const h = createHash("sha256");
+  // MG-C4-1 (cycle-2 verifier, repros/A2): the OBJECT LAYOUT alone is
+  // not the whole interpretation state. Probe evidence: a gate writing
+  // `git config core.symlinks false` (or extensions.worktreeConfig, or
+  // core.hooksPath for the CAS in merge.ts) into the SHARED common
+  // config passed the digest and retargeted/neutralized the
+  // post-gate observation (symlink→regular-file swap read clean), and a
+  // `reference-transaction` hook under a gate-installed core.hooksPath
+  // fired DURING the CAS update-ref and forged the merged branch. The
+  // digest therefore binds every file that can change what a git read
+  // MEANS: pointers, alternates, HEAD, config (worktree AND common —
+  // repo-local config is the trust boundary but it must be the SAME
+  // trust boundary pre- and post-gate), info/exclude + info/attributes
+  // (conversion inputs), and every worktree admin dir (config,
+  // config.worktree, gitdir) under the common dir.
+  // MG-C4-A3 (cycle-3 A3 audit) extends the path set with the four
+  // interpretation files the A3 probe showed were NOT bound:
+  //  - common/config.worktree (scenario `main-config-worktree`: with
+  //    extensions.worktreeConfig on, the PRIMARY worktree reads
+  //    <common>/config.worktree, which only linked worktrees' copies
+  //    were covered before — a write there bent merge.ts's semantics
+  //    under an unmoving digest);
+  //  - shallow (scenario `shallow`: writing <common>/shallow grafts
+  //    history traversal — merge-base/ancestor answers change while
+  //    HEAD/tree/digest stay identical);
+  //  - objects/info/commit-graph (the cached history graph redirects
+  //    traversal just like shallow);
+  //  - the MATERIALIZED dot-git pointer in the gate worktree (scenario
+  //    `dotgit-symlink`: `rm .git; ln -s <copy> .git` kept every
+  //    resolved path equal; the pointer file itself was bound nowhere).
+  const files = [
+    join(worktreeDir, ".git"),
+    join(gitdir, "HEAD"),
+    join(gitdir, "objects", "info", "alternates"),
+    join(common, "objects", "info", "alternates"),
+    join(gitdir, "objects", "info", "commit-graph"),
+    join(common, "objects", "info", "commit-graph"),
+    join(gitdir, "commondir"),
+    join(gitdir, "gitdir"),
+    join(gitdir, "config"),
+    join(common, "config"),
+    join(gitdir, "config.worktree"),
+    join(common, "config.worktree"),
+    join(gitdir, "shallow"),
+    join(common, "shallow"),
+    join(gitdir, "info", "exclude"),
+    join(common, "info", "exclude"),
+    join(gitdir, "info", "attributes"),
+    join(common, "info", "attributes"),
+  ];
+  // MG-C4-A3 (scenario `object-symlink`): the OBJECT STORE's own
+  // topology is part of the identity — copying the objects aside and
+  // replacing `objects` with a symlink to the copy left every read
+  // answering normally (initially identical bytes) while severing the
+  // store from its hash-path: a later in-place write to the copy
+  // forges content under unchanged OIDs. Bind directory-vs-symlink
+  // (and the link target string) for both object dirs.
+  for (const d of [join(gitdir, "objects"), join(common, "objects")]) {
+    try {
+      const lst = await lstat(d);
+      if (lst.isSymbolicLink()) {
+        let tgt = "unreadable";
+        try { tgt = await readlink(d); } catch { /* fail-stable marker */ }
+        h.update(`dirlink:${d}->${tgt}\n`);
+      } else if (lst.isDirectory()) {
+        h.update(`dir:${d}\n`);
+      } else {
+        h.update(`nondir:${d}:${String(lst.mode)}\n`);
+      }
+    } catch {
+      h.update(`dir-missing:${d}\n`);
+    }
+  }
+  // Worktree admin dirs: enumerated through readdir so a NEWLY created
+  // worktree registration also moves the digest (its absence-then-
+  // presence sequence is caught by the per-entry digest below; the
+  // directory listing itself is folded in first).
+  let wtNames: string[] = [];
+  try { wtNames = (await readdir(join(common, "worktrees"))).sort(); } catch { wtNames = []; }
+  h.update(`worktrees:${wtNames.join(",")}\n`);
+  for (const wt of wtNames) {
+    files.push(
+      join(common, "worktrees", wt, "gitdir"),
+      join(common, "worktrees", wt, "config"),
+      join(common, "worktrees", wt, "config.worktree"),
+      join(common, "worktrees", wt, "HEAD"),
+    );
+  }
+  for (const f of files) {
+    // MG-C4-A3 (scenario `config-symlink`): binding CONTENT alone let a
+    // gate replace a digested file with a SYMLINK to an identical copy —
+    // open() follows the link, the digest never moved, and the file
+    // became a mutable interpretation dependency pointing wherever the
+    // gate likes. Bind the lstat TYPE first: a regular file's content,
+    // a symlink's TARGET STRING (never read through a link), anything
+    // else its mode. Regular→symlink (or symlink retarget) moves the
+    // digest even when the bytes behind it are identical.
+    let lst: Awaited<ReturnType<typeof lstat>> | null = null;
+    try { lst = await lstat(f); } catch { lst = null; }
+    if (lst === null) {
+      h.update(`missing\0:${f}\0`); // a vanished file MUST move the digest
+      continue;
+    }
+    if (lst.isSymbolicLink()) {
+      let tgt = "unreadable";
+      try { tgt = await readlink(f); } catch { /* fail-stable marker */ }
+      // MG-C5-A2 (round-2 audit, repros/A3/audit-existing-attr-link.mjs):
+      // binding the link TEXT alone let a pre-existing `.git/info/attributes
+      // -> <external>` symlink keep its text while the GATE rewrote the
+      // external target to `base.txt text eol=crlf` — same digest, bent
+      // interpretation (info/attributes wins over GIT_ATTR_SOURCE and the
+      // CRLF-mask forgery integrated). A digested symlink is CONSUMED
+      // through its target, so fingerprint the CONSUMED bytes: resolve the
+      // full indirection (realpath — ancestor indirection included) and
+      // hash the target's bytes, folding in the link text (retargeting
+      // still moves the digest) and the resolved path. Unresolvable
+      // (dangling/ELOOP/unreadable target) is its OWN marker — never the
+      // same value a readable target hashes to, so an unreadable-vs-
+      // readable flip always moves the digest (fail closed). RESIDUAL:
+      // the target racing back-and-forth BETWEEN the two digests is the
+      // documented single-late-writer window, not new exposure here.
+      h.update(`link\0${tgt}\0`);
+      let real: string | null = null;
+      try { real = await realpath(f); } catch { real = null; }
+      if (real === null) {
+        h.update("unresolvable");
+      } else {
+        try {
+          const rl = await lstat(real);
+          if (!rl.isFile()) {
+            h.update(`nonreal:${String(rl.mode)}`);
+          } else {
+            const fh = await open(real, "r");
+            try {
+              const buf = Buffer.alloc(64 * 1024);
+              for (;;) {
+                const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+                if (bytesRead === 0) break;
+                h.update(buf.subarray(0, bytesRead));
+              }
+            } finally {
+              await fh.close();
+            }
+            h.update(`real:${real}`);
+          }
+        } catch {
+          h.update("unreadable-target"); // fail closed on open/read races
+        }
+      }
+      h.update(`\0:${f}\0`);
+      continue;
+    }
+    if (!lst.isFile()) {
+      h.update(`nonfile\0${String(lst.mode)}\0:${f}\0`);
+      continue;
+    }
+    try {
+      const fh = await open(f, "r");
+      try {
+        const buf = Buffer.alloc(64 * 1024);
+        for (;;) {
+          const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+          if (bytesRead === 0) break;
+          h.update(buf.subarray(0, bytesRead));
+        }
+        h.update(`\0:${f}\0`);
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      h.update(`missing\0:${f}\0`); // fail closed on open/read races
+    }
+  }
+  // MG-C4-A3 (scenario `include-config`): a gate editing a file PULLED
+  // IN by `include.path`/`includeIf` changed the EFFECTIVE config while
+  // every on-disk digested path stayed byte-identical — path-binding
+  // cannot close a transitive dependency it cannot enumerate. Bind the
+  // EFFECTIVE values of every setting that bends observation or the CAS:
+  // hooks, ignore-case, eol/symlinks/sparse, fsmonitor, worktreeConfig,
+  // attributesFile/excludesFile, partial clone (promisor re-fetches
+  // "missing" objects), unpacked limit, and the index/version knobs.
+  // The read uses the SAME pinned argv (runObservedGit) and fails
+  // closed: an unreadable effective config is never "unchanged".
+  const effKeys = [
+    "core.hooksPath", "core.ignoreCase", "core.symlinks", "core.sparseCheckout",
+    "core.sparseCheckoutCone", "core.fsmonitor", "core.untrackedCache",
+    "core.worktree", "core.excludesFile", "core.attributesFile", "core.eol",
+    "core.autocrlf", "core.logAllRefUpdates", "core.repositoryFormatVersion",
+    "core.preferSymlinkDirs",
+    "extensions.worktreeConfig", "extensions.partialClone", "extensions.objectFormat",
+    "core.packedGitLimit", "core.packedGitWindowSize", "core.bigFileThreshold",
+    "gc.auto", "fetch.fsckObjects", "receive.fsckObjects", "uploadpack.allowFilter",
+    "index.recordExpandedIndex",
+  ];
+  for (const k of effKeys) {
+    // `--get-all`: exit 0 = value(s), exit 1 = unset, exit >1 = a
+    // genuinely unreadable/invalid config → the marker moves the digest
+    // and the post-gate comparison fails the verdict closed.
+    const q = await runObservedGit(worktreeDir, ["config", "--get-all", k], 10, { maxBytes: 8192 });
+    if (q.code === 0 && !q.truncated) h.update(`eff\0${k}=${q.stdout.trim()}\n`);
+    else if (q.code === 1 && q.stdout.trim() === "") h.update(`eff\0${k}=(unset)\n`); // exit 1: no matching key
+    else h.update(`eff\0${k}=unreadable:${q.code}\n`); // fail closed: digest moves
+  }
+  return h.digest("hex");
+}
+
+// MG-C5-A1 (round-2 audit, repros/A3/audit-autocrlf.mjs): the same
+// `git config` write channel that installed filters also reaches every
+// config-level transform that decides how checked-out bytes compare
+// with the staged identity — `core.autocrlf` (a gate-set `true` made
+// CRLF working bytes read CLEAN against the LF blob and corrupted the
+// bytes on checkout), `core.eol`, `core.safecrlf`, `core.symlinks`
+// (force-checkout plain files where symlinks are recorded — the
+// fingerprint consumed then is NOT what the blob says), and
+// `core.ident`. These pins ride on EVERY filterNeutralizeArgs consumer
+// (checkout, both status scans, the diff) and are unconditional: they
+// cost nothing when unset, and a conditional read would add an
+// unfalsifiable path. A value predating the episode is caught by the
+// layout digest (the effective-config key list includes autocrlf/eol/
+// symlinks) and a mid-gate flip fails the post-gate re-observation.
+// RESIDUAL closure note: the observed git runs all execute under the
+// minimal GIT_ENV (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null),
+// so a value set ONLY in the system gitconfig or the user's global
+// config cannot bend any observed content — it is invisible to the
+// digest read AND inert in every observation. The repo/local layer
+// (the attacker-reachable one, via `git config` inside the episode)
+// is covered twice over: pinned here and hashed in the layout digest.
+export const PINNED_NEUTRALIZING_CONFIG: ReadonlyArray<readonly [string, string]> = [
+  ["core.autocrlf", "false"],
+  ["core.eol", "native"],
+  ["core.safecrlf", "false"],
+  ["core.symlinks", "true"],
+  ["core.ident", "false"],
+];
+
+// MG-C5-F1 (round-2 audit cycle 1, repro confirmed on git 2.54): the
+// A2 fix fingerprints the info/attributes TARGET so a mid-episode
+// rewrite moves the digest — but the deeper hole stays open: the repo's
+// OWN `$GIT_DIR/info/attributes` OVERRIDES `GIT_ATTR_SOURCE` with a
+// PRE-EXISTING conversion rule that never changes. A plain (or
+// symlink-backed) `info/attributes` containing `base.txt text eol=crlf`
+// seeded BEFORE the episode bent materialization AND both status scans
+// identically — unchanged bytes sail through the digest while the
+// worktree holds CRLF where the candidate has LF (`accepted-finish /
+// integrated`, reproduced). `core.attributesFile` CANNOT help: the
+// docs scope it to $XDG, and the XDG file ranks BELOW info/attributes.
+// No `-c` pin re-ranks the source list (nor may the digest be trusted
+// to "wait for a change" — the attack needs no change). Close it the
+// only honest way: the interpretation of candidate bytes depends on
+// this highest-precedence, per-repo, unoverridable source, so the
+// gate requires it to be EMPTY/ABSENT or it refuses. Dangling symlink:
+// git falls back to reading the LINK TEXT AS CONTENT (an attributes
+// grammar error is a hard git error, not silently empty) — so only
+// readable targets qualify; unresolvable/ELOOP/unreadable is "not
+// observable" (fail closed). The path argument is a module constant,
+// so no option-terminator is needed.
+export async function attributesObservable(worktreeDir: string): Promise<boolean> {
+  const r = await runObservedGit(worktreeDir, ["rev-parse", "--git-path", "info/attributes"], 10, { maxBytes: 4096 });
+  if (r.code !== 0 || r.truncated || r.stdout.trim() === "") return false;
+  const p = resolve(worktreeDir, r.stdout.trim());
+  // F1 (audit round 2 follow-up): CONSERVATIVE emptiness. Git's own
+  // comment rule is "a line whose FIRST character is #" — the old
+  // blanket strip of `#…` anywhere plus JS `\s` (which includes NBSP)
+  // treated `\u00a0# text eol=crlf` as empty while git applied it to
+  // the path `\u00a0#`. Only a line that is wholly blank, or whose
+  // first character is `#`, is ignorable; ANY other byte makes the
+  // source a real rule (or unknown), so it is not observable.
+  const effectiveEmpty = (buf: Buffer): boolean => {
+    // Git's tokenizer (attr.c: `if (*line == '#' || !*line) continue`)
+    // ignores ONLY a zero-byte line or one whose FIRST byte is `#`.
+    // An empty line to git is "no bytes before the newline" — NOT
+    // JS \s (which matches NBSP), and stripping `#…` anywhere turns
+    // the real rule path `\u00a0#` into a fake comment. Work on
+    // BYTES (latin1 round-trips every byte 1:1): split on \n, strip
+    // one optional trailing \r, then require the first byte to be
+    // SP-free... precisely: only "" or first char '#' is ignorable.
+    const lines = buf.toString("latin1").split("\n");
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    for (const line of lines) {
+      const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (body === "" || body.charCodeAt(0) === 0x23) continue;
+      if (/^[ \t]*$/.test(body)) continue; // git trims leading blanks: blanks-only = no pattern
+      return false; // NBSP-prefixed, an indented rule, a trailing-# rule: content
+    }
+    return true;
+  };
+  const MAX = 1024 * 1024; // a larger file is non-empty by construction
+  try {
+    const lst = await lstat(p);
+    if (lst.isSymbolicLink()) {
+      let real: string;
+      try { real = await realpath(p); } catch { return false; }
+      const rl = await lstat(real);
+      if (!rl.isFile() || rl.size > MAX) return false;
+      return effectiveEmpty(await readFile(real));
+    }
+    if (!lst.isFile() || lst.size > MAX) return false;
+    return effectiveEmpty(await readFile(p));
+  } catch (e) {
+    // Absent is empty (nothing to interpret bytes with). Any OTHER
+    // error (EACCES, ELOOP, race) means the highest-precedence
+    // attribute source is NOT observable -> fail closed.
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
+}
+
+export async function filterNeutralizeArgs(repo: string): Promise<string[] | null> {
+  const filterDefs = await runObservedGit(repo, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge|process)$"], 10, { maxBytes: 256 * 1024 });
   if (filterDefs.code > 1 || filterDefs.truncated || (filterDefs.code !== 0 && filterDefs.stdout.trim() !== "")) return null;
   const args: string[] = ["-c", "core.attributesFile=/dev/null"];
+  for (const [k, v] of PINNED_NEUTRALIZING_CONFIG) args.push("-c", `${k}=${v}`);
   for (const line of filterDefs.stdout.split("\n")) {
-    const m = /^(filter\..+\.(?:clean|smudge))(?=[ \t]|$)/.exec(line);
-    if (m?.[1] !== undefined) args.push("-c", `${m[1]}=cat`);
+    const m = /^(filter\..+\.)(clean|smudge|process)(?=[ \t]|$)/.exec(line);
+    if (m?.[1] !== undefined) {
+      // C2-F1b (probe, git 2.54): a `process` driver MUST be pinned to
+      // the EMPTY value — git's documented "disable this filter". The
+      // naive `=cat` is WRONG for process keys: git SPAWNS `cat` as the
+      // filter server, the handshake dies ("expected git-filter-server",
+      // "cat died of signal 15") and `status` STILL EXITS 0 REPORTING
+      // CLEAN — a false-clean oracle. An empty value disables the
+      // driver outright; the (also-pinned) clean/smudge identity then
+      // governs, or raw bytes are compared. clean/smudge keep `=cat`
+      // (identity) — an empty value there would also disable, but `cat`
+      // is the proven-neutral identity for the one-way conversion we
+      // take through the index.
+      args.push("-c", m[2] === "process" ? `${m[1]}${m[2]}=` : `${m[1]}${m[2]}=cat`);
+    }
   }
   return args;
 }
@@ -580,20 +963,137 @@ async function untrackedDigestPart(repo: string, porcelainZ: string): Promise<st
   return lines.join("\n");
 }
 
+/** R4-B1 (round-4 audit, repro .tre/review-probes/r4-false-clean.mjs):
+ *  a plain `git status` trusts the REPO's own conversion settings on a
+ *  STAT-CACHED index — a tracked `.gitattributes` `filter=evil` whose
+ *  clean driver maps any bytes to the committed blob made mutated bytes
+ *  compare equal to HEAD, and a plain status run (the gate, a prior
+ *  observation) refreshing the stat cache hid the change even after the
+ *  filter was neutralized later. Acceptance verdicts (`complete`) were
+ *  minted over forged bytes. This is the SAME attack class the
+ *  integration gate already closed (supervise.ts fresh-index block):
+ *  build a THROWAWAY index with `read-tree HEAD` under
+ *  `GIT_ATTR_SOURCE=<empty tree>` + the pinned neutralizing drivers
+ *  (filterNeutralizeArgs), so `status` has NO stat cache and no
+ *  conversion path — it re-reads and re-hashes every tracked file raw
+ *  and mutated bytes can only report as modified (probe r5: forged
+ *  bytes report " M base.txt" where the poisoned chain said clean).
+ *  Failure anywhere returns a reason — the caller marks the identity
+ *  dirty+unobservable (never clean, never comparable). */
+export type FreshObservationIndex = { dir: string; envExtra: { GIT_INDEX_FILE: string; GIT_ATTR_SOURCE: string } };
+
+/** R5-F1 (round-4 audit flake hunt, probe .tre/review-probes/r5-flake-full.mjs):
+ *  the fresh index is built ONCE per observation and SHARED by status AND
+ *  the `diff HEAD` step. It used to be status-only, and the diff kept
+ *  running against the REAL index's stat cache: a forged worktree file of
+ *  the SAME SIZE as the committed blob (EVIL\n vs base\n) whose stat was
+ *  stamped by a poisoned plain `git status` (evil clean filter mapped the
+ *  bytes to the blob, so git recorded the stat as "unchanged") made
+ *  `git diff HEAD` skip the content comparison ENTIRELY — empty diff on a
+ *  tree porcelain called modified, i.e. two observations of one state
+ *  digested differently (non-comparable dirty deltas) and a diff channel a
+ *  stat-stamp can still blind. A pristine (stat-cleared) throwaway index
+ *  forces every tracked file to be re-read and re-hashed raw: the diff is
+ *  deterministic and stat-stamp-proof. Caller owns `dir` and MUST rm -rf
+ *  it when done (observeIdentity does, in a finally). */
+async function buildFreshObservationIndex(cwd: string): Promise<{ ok: true; fresh: FreshObservationIndex } | { ok: false; reason: string }> {
+  const filterArgs = await filterNeutralizeArgs(cwd);
+  if (filterArgs === null) return { ok: false, reason: "filter-neutralize-failed" };
+  const envExtra = { GIT_INDEX_FILE: "", GIT_ATTR_SOURCE: EMPTY_TREE_OID };
+  let idxDir: string;
+  try {
+    idxDir = await mkdtemp(join(tmpdir(), "tre-obs-idx-"));
+  } catch {
+    return { ok: false, reason: "index-dir-uncreatable" };
+  }
+  const idxPath = join(idxDir, "idx");
+  envExtra.GIT_INDEX_FILE = idxPath;
+  try {
+    const tree = await runObservedGit(cwd, [...filterArgs, "read-tree", "HEAD"], 30, { maxBytes: 4 * 1024 * 1024, envExtra });
+    if (tree.code !== 0 || tree.truncated) {
+      await rm(idxDir, { recursive: true, force: true }).catch(() => {});
+      return { ok: false, reason: `fresh-index-build-failed:code=${tree.cause}:${tree.code}` };
+    }
+    // The index MUST exist and be non-empty: a read-tree that wrote
+    // nothing would hand status an empty index whose answer ("every
+    // file deleted+untracked") is noise, and an unwritten file is how
+    // the integration gate catches a silently-failed build too.
+    let idxStat: Awaited<ReturnType<typeof lstat>> | null = null;
+    try { idxStat = await lstat(idxPath); } catch { /* fail closed below */ }
+    if (idxStat === null || idxStat.size === 0) {
+      await rm(idxDir, { recursive: true, force: true }).catch(() => {});
+      return { ok: false, reason: "fresh-index-unwritten" };
+    }
+    return { ok: true, fresh: { dir: idxDir, envExtra } };
+  } catch (e) {
+    await rm(idxDir, { recursive: true, force: true }).catch(() => {});
+    return { ok: false, reason: `fresh-index-build-threw:${String(e)}` };
+  }
+}
+
+async function observeStatusFresh(cwd: string, maxBytes: number, fresh: FreshObservationIndex): Promise<{ ok: true; porcelain: string } | { ok: false; reason: string }> {
+  const filterArgs = await filterNeutralizeArgs(cwd);
+  if (filterArgs === null) return { ok: false, reason: "filter-neutralize-failed" };
+  // fsmonitor/untrackedCache OFF: both can serve stale entries — the
+  // whole point of the fresh index is that NOTHING is trusted.
+  // 30s (not the plain status's 10): every tracked file is re-read
+  // and re-hashed, and the clean-smudge identity runs over it.
+  // R5-B1 (round-5 audit): `submodule.<name>.ignore=all` in REPO config
+  // hides a populated submodule's modified bytes from status — proven:
+  // with the setting, porcelain came back empty over modified child/a.
+  // `diff.ignoreSubmodules=none` (the runObservedGit pin) does NOT cover
+  // the status command; only `--ignore-submodules=none` on the COMMAND
+  // LINE beats the per-submodule config (git precedence: cmd > config),
+  // and it is harmless on uninitialized submodules (quiet, exit 0 —
+  // verified). Child HEAD moves and child worktree dirt now both show.
+  const st = await runObservedGit(cwd, [...filterArgs, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], 30, { maxBytes, envExtra: fresh.envExtra });
+  if (st.code !== 0) return { ok: false, reason: `status-failed:code=${st.cause}:${st.code}` };
+  if (st.truncated) return { ok: false, reason: `status-truncated:${String(st.stdout.length)}` };
+  return { ok: true, porcelain: st.stdout };
+}
+
 export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 1024 * 1024): Promise<ArtifactIdentity> {
+  // MG-C5-F1 (round-2 audit cycle 1): a non-empty `$GIT_DIR/info/attributes`
+  // is a highest-precedence conversion source that GIT_ATTR_SOURCE cannot
+  // override and the layout digest cannot falsify (unchanged bytes pass).
+  // identity as unverifiable (dirty), fail closed. In a NON-GIT dir
+  // `rev-parse` fails -> not observable -> same dirty verdict the
+  // failing status below would have produced.
+  // F2 (audit round 2 follow-up): an UNOBSERVABLE identity must never be
+  // comparable. A constant digest here made every unobservable tree equal
+  // to every other one (sameArtifact + the post-gate comparison treat
+  // equal nonempty dirty digests as the same artifact), so a gate could
+  // swap the worktree contents and still read "unchanged". A fresh random
+  // nonce is unequal to every other digest, including itself on a
+  // re-observation, so the identity can never certify anything.
+  if (!(await attributesObservable(cwd))) {
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`attributes-unobservable:${randomUUID()}`).digest("hex") };
+  }
   // W3-A1: `-z` gives NUL-separated, UNSAFE-path-QUOTE-FREE records — a
   // filename containing a quote or newline can no longer forge a porcelain
   // line into (or out of) the digest text; the ?? paths are extracted raw.
-  const dirty = await runObservedGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes });
-  if (dirty.code !== 0) {
-    // W1-M1 fail CLOSED: status failed (index.lock, EACCES, timeout) —
-    // a tree whose dirt cannot be verified is treated as dirty, never clean.
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`status-failed:code=${dirty.cause}:${dirty.code}\x00${dirty.stderr.slice(-2048)}`).digest("hex") };
+  // R4-B1 (round-4 audit): this is now the FRESH-INDEX observation — the
+  // plain `git status` it replaces trusted the repo's own conversion
+  // settings (a tracked `filter=evil` .gitattributes collapsed mutated
+  // bytes to the committed blob, probe r4-false-clean) AND a stat-cached
+  // index (a prior plain status stamped the mutated file's stat so even a
+  // later neutralized scan read it clean). A read-tree-built index under
+  // GIT_ATTR_SOURCE=EMPTY_TREE + pinned identity drivers has neither
+  // cache nor conversion: every tracked file is re-read and re-hashed
+  // raw. A failed/unbuildable fresh observation is dirt we cannot see —
+  // fail CLOSED as dirty+unobservable, never clean.
+  // R5-F1: build the throwaway observation index ONCE; status AND the
+  // `diff HEAD` below both run against it (never the real stat cache),
+  // and it is removed when this observation ends.
+  const freshBuilt = await buildFreshObservationIndex(cwd);
+  if (!freshBuilt.ok) {
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`fresh-${freshBuilt.reason}\x00${sha}`).digest("hex") };
   }
-  // W4-A1 fail CLOSED: a status output that hit the capture cap is a
-  // list we cannot see the front of — treat it like a failed status.
-  if (dirty.truncated) {
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`status-truncated:${dirty.stdout.length}\x00${dirty.stderr.slice(-2048)}`).digest("hex") };
+  const fresh = freshBuilt.fresh;
+  try {
+  const dirty = await observeStatusFresh(cwd, maxBytes, fresh);
+  if (!dirty.ok) {
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`fresh-${dirty.reason}\x00${sha}`).digest("hex") };
   }
   // W11-A1/A3 (audit cycle P16, findings A-C1/A-C2): a tracked entry
   // flagged `--assume-unchanged` (tag `h`) or `--skip-worktree` (tag
@@ -614,10 +1114,10 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   if (indexFlags.code !== 0) {
     // fail closed: an index we cannot read the flags of is dirt we
     // cannot see (same rule as a failed status).
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-failed:code=${indexFlags.cause}:${indexFlags.code}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`ls-files-failed:code=${indexFlags.cause}:${indexFlags.code}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
   }
   if (indexFlags.truncated) {
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-truncated:${indexFlags.stdout.length}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`ls-files-truncated:${indexFlags.stdout.length}\x00${indexFlags.stderr.slice(-2048)}`).digest("hex") };
   }
   // `ls-files -v -z` records are "XY path" (X = flag letter); the bare
   // `??`/`M ` one-char-plus-space form of a clean checkout is tag `H`.
@@ -637,13 +1137,13 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // HIDDEN dirt: fail closed, disclosing the hidden paths' digest.
   const othersAll = await runObservedGit(cwd, ["ls-files", "--others", "-z"], 10, { maxBytes });
   if (othersAll.code !== 0) {
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-others-failed:code=${othersAll.cause}:${othersAll.code}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`ls-files-others-failed:code=${othersAll.cause}:${othersAll.code}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
   }
   if (othersAll.truncated) {
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`ls-files-others-truncated:${othersAll.stdout.length}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`ls-files-others-truncated:${othersAll.stdout.length}\x00${othersAll.stderr.slice(-2048)}`).digest("hex") };
   }
   const porcelainUntracked = new Set<string>();
-  for (const rec of dirty.stdout.split("\0")) {
+  for (const rec of dirty.porcelain.split("\0")) {
     if (rec.startsWith("?? ")) porcelainUntracked.add(rec.slice(3));
   }
   const hidden: string[] = [];
@@ -657,9 +1157,37 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
     // binds the hidden files' PATHS *and* CONTENT (streamed), so two
     // different payloads under one hidden path never collide either.
     const hiddenContent = await untrackedDigestPart(cwd, hidden.map((h) => `?? ${h}`).join("\0") + "\0");
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`untracked-hidden:${String(hidden.length)}\x00${hidden.join("\n")}\x00${hiddenContent}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`untracked-hidden:${String(hidden.length)}\x00${hidden.join("\n")}\x00${hiddenContent}`).digest("hex") };
   }
-  if (flagged.length === 0 && dirty.stdout.trim() === "") return { sha };
+  // R5-B2 (round-5 audit, REGRESSION of the fresh-index port): the fresh
+  // index compares HEAD against the WORKTREE, so a staged divergence whose
+  // worktree file was restored to HEAD content is invisible in porcelain
+  // (proven: index holds `XXXX`, worktree holds `base`, porcelain empty,
+  // every ls-files tag `H` → two DISTINCT staged states both observed
+  // byte-equal CLEAN, while the integration gate refuses exactly this
+  // state at its post-gate staged check). "Clean" must mean the REAL
+  // index matches HEAD too — the same command the gate uses, run on the
+  // real index (no fresh envExtra) with --no-optional-locks so the check
+  // itself never writes that index. Only needed on the clean branch:
+  // every dirty path already binds staged CONTENT via write-tree below.
+  // exit 0 = index==HEAD, 1 = index!=HEAD (fall through dirty), >=128 or
+  // truncated = unreadable -> fail closed as dirt-we-cannot-see.
+  if (flagged.length === 0 && dirty.porcelain.trim() === "") {
+    const staged = await runObservedGit(cwd, ["--no-optional-locks", "diff-index", "--cached", "--quiet", "--ignore-submodules=none", "--no-ext-diff", "HEAD", "--"], 15, { maxBytes: 1024 * 1024 });
+    if (staged.code !== 0 && staged.code !== 1) {
+      return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`staged-check-failed:code=${staged.cause}:${staged.code}\x00${staged.stderr.slice(-2048)}`).digest("hex") };
+    }
+    if (staged.truncated) {
+      return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`staged-check-truncated:${String(staged.stdout.length)}`).digest("hex") };
+    }
+    if (staged.code === 1) {
+      // Staged divergence: DIRTY. Fall through — the digest below folds in
+      // `write-tree` of the REAL index, so distinct staged states get
+      // distinct digests and never collide with a clean {sha}.
+    } else {
+      return { sha };
+    }
+  }
   // Clean means clean: empty porcelain AND a flag-free index AND an
   // exclude-blind others list is the ONLY path that may stamp a tree
   // clean — every failure beyond this point yields dirty-unknown.
@@ -674,7 +1202,7 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   if (indexTree.code !== 0 || indexTree.stdout.trim() === "" || indexTree.truncated) {
     // fail closed: an index we cannot hash (unmerged entries, EACCES,
     // timeout) is dirt we cannot see.
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`write-tree-failed:${indexTree.cause}:${indexTree.code}\x00${indexTree.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`write-tree-failed:${indexTree.cause}:${indexTree.code}\x00${indexTree.stderr.slice(-2048)}`).digest("hex") };
   }
   const indexPart = indexTree.stdout.trim();
   // W2-H1: the worktree delta's OUTPUT bytes are pinned against
@@ -705,19 +1233,31 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // assigns a filter survives it, but its driver is now identity).
   // (git 2.54 has no `--no-conversion` flag on diff — probe-verified.)
   const filterPinArgs: string[] = ["-c", "core.attributesFile=/dev/null"];
-  const filterDefs = await runObservedGit(cwd, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge)$"], 10, { maxBytes: 256 * 1024 });
+  // MG-C5-A1 (round-2): the SAME conversion-neutralizing pins the
+  // checkout/status observations carry ride the diff too — a gate-set
+  // `core.autocrlf`/`core.eol`/`core.symlinks`/`core.ident` must not
+  // bend the diff bytes relative to the staged identity.
+  for (const [k, v] of PINNED_NEUTRALIZING_CONFIG) filterPinArgs.push("-c", `${k}=${v}`);
+  // C2-F1 (p12c5 cycle-2 audit): `process` is enumerated too — it
+  // REPLACES clean+smudge when set, so pinning only clean|smudge left a
+  // process driver live under a supposedly neutralized observation.
+  const filterDefs = await runObservedGit(cwd, ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge|process)$"], 10, { maxBytes: 256 * 1024 });
   // git config --get-regexp exits 1 for "no matches" — that IS clean.
   if (filterDefs.code > 1 || filterDefs.truncated || (filterDefs.code !== 0 && !(filterDefs.code === 1 && filterDefs.stdout.trim() === ""))) {
     // fail closed: drivers we cannot enumerate may all be lying.
-    return { sha, dirty: true, dirtyDigest: createHash("sha256").update(`filter-enum-failed:code=${filterDefs.cause}:${filterDefs.code}\x00${filterDefs.stderr.slice(-2048)}`).digest("hex") };
+    return { sha, dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`filter-enum-failed:code=${filterDefs.cause}:${filterDefs.code}\x00${filterDefs.stderr.slice(-2048)}`).digest("hex") };
   }
   for (const line of filterDefs.stdout.split("\n")) {
-    // Key = everything before the LAST ".clean"/".smudge" token (quoted
-    // subsection names may contain spaces; values follow after it).
-    const m = /^(filter\..+\.(?:clean|smudge))(?=[ \t]|$)/.exec(line);
-    if (m?.[1] !== undefined) filterPinArgs.push("-c", `${m[1]}=cat`);
+    // Key = everything before the LAST ".clean"/".smudge"/".process"
+    // token (quoted subsection names may contain spaces; values follow
+    // after it). C2-F1b: a `process` driver pins to the EMPTY value
+    // (git's documented disable) — `=cat` would SPAWN cat as a filter
+    // server whose handshake failure leaves `status` exiting 0 CLEAN
+    // (false-clean oracle, probe git 2.54).
+    const m = /^(filter\..+\.)(clean|smudge|process)(?=[ \t]|$)/.exec(line);
+    if (m?.[1] !== undefined) filterPinArgs.push("-c", m[2] === "process" ? `${m[1]}${m[2]}=` : `${m[1]}${m[2]}=cat`);
   }
-  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "-c", "core.autocrlf=false", ...filterPinArgs, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 60, { hashStdout: true });
+  const diff = await runObservedGit(cwd, ["-c", "diff.algorithm=myers", "-c", "diff.ignoreBlankLines=false", "-c", "core.autocrlf=false", ...filterPinArgs, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--default-prefix", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], 60, { hashStdout: true, envExtra: fresh.envExtra });
   // W5-A1 (superseded by W6): a truncated diff used to fail closed as a
   // prefix marker; now any missing digest (stream cut short) or a failed
   // diff fails closed the same way — never a partial stamp.
@@ -727,7 +1267,7 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
   // W3-A1: untracked content is FOLDED IN (audit finding: two different
   // contents under the same ?? path used to share one identity, so a gate
   // PASS stamped on it could be re-used against bytes it never measured).
-  const untrackedPart = await untrackedDigestPart(cwd, dirty.stdout);
+  const untrackedPart = await untrackedDigestPart(cwd, dirty.porcelain);
   // W11-A1 (finding A-C1/A-C2): the diff and status are BOTH blind to
   // h/S-flagged entries, so the flagged files' ON-DISK bytes are digested
   // directly here (streamed via fileDigest): two different tampers under
@@ -738,11 +1278,27 @@ export async function observeIdentity(cwd: string, sha: string, maxBytes = 64 * 
     const d = await fileDigest(join(cwd, p));
     flaggedContent.push(`${f}=${d ?? "unreadable"}`);
   }
+  // R3-F2 (audit round-3): PARTIAL measurement is unmeasured measurement.
+  // A digest built with a failed diff, an unreadable untracked file, or an
+  // unreadable flagged file binds everything it COULD read but silently
+  // omits what it could not — two observations of trees differing ONLY in
+  // the unmeasured part compare equal. Mark such identities `unobservable`
+  // (sameArtifact then refuses them, including against themselves). A
+  // fully-measured dirty tree (every source digested, just not clean)
+  // stays comparable — the F2 dirty-delta semantics are preserved.
+  const partialMeasurement =
+    diffPart.startsWith("diff-failed:") ||
+    untrackedPart.split("\n").some((l) => l.startsWith("unreadable:")) ||
+    flaggedContent.some((f) => f.endsWith("=unreadable"));
   return {
     sha,
     dirty: true,
-    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.stdout}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}${flaggedContent.length > 0 ? `\x00index-flags\n${flaggedContent.sort().join("\n")}` : ""}`).digest("hex"),
+    ...(partialMeasurement ? { unobservable: true as const } : {}),
+    dirtyDigest: createHash("sha256").update(`porcelain-all\n${dirty.porcelain}\x00index-tree\n${indexPart}\x00diff-binary-head\n${diffPart}\x00untracked\n${untrackedPart}${flaggedContent.length > 0 ? `\x00index-flags\n${flaggedContent.sort().join("\n")}` : ""}`).digest("hex"),
   };
+  } finally {
+    await rm(fresh.dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 export async function collectAcceptanceEvidence(o: AcceptEvidenceOptions): Promise<EvaluateInput> {
@@ -759,7 +1315,7 @@ export async function collectAcceptanceEvidence(o: AcceptEvidenceOptions): Promi
   //    "episode-dir" = no worktree was given at all; "worktree-unobservable"
   //    = a worktree was given but git could not answer for it (not a repo,
   //    git missing, etc.) — never "given", which read like a reason.
-  let current: ArtifactIdentity = { sha: o.graph.policy?.baseCommit ?? "", dirty: true, dirtyDigest: createHash("sha256").update(`no-worktree:fallback=${o.worktreePath === undefined ? "episode-dir" : "worktree-unobservable"}`).digest("hex") };
+  let current: ArtifactIdentity = { sha: o.graph.policy?.baseCommit ?? "", dirty: true, unobservable: true, dirtyDigest: createHash("sha256").update(`no-worktree:fallback=${o.worktreePath === undefined ? "episode-dir" : "worktree-unobservable"}`).digest("hex") };
   const head = await runShell("git rev-parse HEAD", cwd, 10, { env: GIT_ENV });
   const preIdentity: ArtifactIdentity = head.code === 0 && head.stdout.trim() !== ""
     ? await observeIdentity(cwd, head.stdout.trim())
@@ -2261,6 +2817,17 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // default (no recursive) proves we own the directory BEFORE git
       // ever sees it, and the retry loop re-rolls on the (astronomical)
       // name collision.
+      // F3 (audit round 2 follow-up): every PRE-GATE refusal is decided
+      // BEFORE a gate directory is allocated, so a refusal can never leak
+      // an empty merge-gate/g-* directory. The attributes check is pure
+      // (no writes), and the filter-neutralize check likewise.
+      const preGateFilterArgs = await filterNeutralizeArgs(repoForMerge);
+      if (preGateFilterArgs === null) {
+        return { pass: false, runId, sha: greq.candidateSha, detail: "filter-neutralize-unobservable-pre-gate" };
+      }
+      if (!(await attributesObservable(repoForMerge))) {
+        return { pass: false, runId, sha: greq.candidateSha, detail: "attributes-source-not-empty-pre-gate" };
+      }
       const parent = join(epPath, "merge-gate");
       await mkdir(parent, { recursive: true });
       let dir = "";
@@ -2289,16 +2856,21 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // commit-tree never applied filters), so the gate worktree is
       // materialized with every conversion neutralized — the on-disk
       // bytes are the candidate's bytes. An unobservable driver set
-      // fails closed BEFORE the worktree is even added.
-      const preGateFilterArgs = await filterNeutralizeArgs(repoForMerge);
-      if (preGateFilterArgs === null) {
-        return { pass: false, runId, sha: greq.candidateSha, detail: "filter-neutralize-unobservable-pre-gate" };
-      }
+      // fails closed BEFORE the worktree is even added (checked above,
+      // before the gate directory is allocated — F3).
+      // MG-C5-F1: the attributes-source refusal is also decided above.
       try {
         // The candidate objects exist in the repo (P12 commit-tree'd them
         // moments ago) even though no ref names them — a detached worktree
         // materializes them without touching the task's tree.
-        const add = await runObservedGit(repoForMerge, [...preGateFilterArgs, "worktree", "add", "--detach", dir, greq.candidateSha], Math.min(timeoutS, 120));
+        // MG-C4-A3 (A3 BUG-tracked-eol): a CANDIDATE COMMIT containing a
+        // .gitattributes with a conversion rule (e.g. `text eol=crlf`)
+        // bends the materialization itself — the commit-tree'd blob is
+        // raw, checkout would apply the rule and write CRLF bytes, so
+        // the bytes under the gate ≠ the candidate's bytes BEFORE the
+        // gate even runs (probe git 2.54). GIT_ATTR_SOURCE pins the
+        // attribute interpreter to the empty tree (see EMPTY_TREE_OID).
+        const add = await runObservedGit(repoForMerge, [...preGateFilterArgs, "worktree", "add", "--detach", dir, greq.candidateSha], Math.min(timeoutS, 120), { envExtra: { GIT_ATTR_SOURCE: EMPTY_TREE_OID } });
         added = add.code === 0;
         if (!added) {
           return { pass: false, runId, sha: greq.candidateSha, detail: `worktree-add:${(add.stderr.trim() !== "" ? add.stderr : add.stdout).slice(-384)}`.slice(0, 512) };
@@ -2306,6 +2878,25 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         const head = await runObservedGit(dir, ["rev-parse", "HEAD"], 30);
         const tested = head.code === 0 ? head.stdout.trim().toLowerCase() : "";
         if (tested !== greq.candidateSha) return { pass: false, runId, sha: tested, detail: "identity-mismatch-materialized" };
+        // MG-C3-1 (cycle-3 audit): snapshot the gitdir IDENTITY and the
+        // object-store layout (alternates/commondir/gitdir files) BEFORE
+        // the command runs — any change during the gate disqualifies the
+        // verdict post-run.
+        const gitDirBefore = await runObservedGit(dir, ["rev-parse", "--absolute-git-dir"], 10, { maxBytes: 4096 });
+        const commonDirBefore = await runObservedGit(dir, ["rev-parse", "--git-common-dir"], 10, { maxBytes: 4096 });
+        let layoutBefore = "";
+        if (gitDirBefore.code === 0 && gitDirBefore.stdout.trim() !== "" && commonDirBefore.code === 0 && commonDirBefore.stdout.trim() !== "") {
+          const gdRaw = gitDirBefore.stdout.trim();
+          const cdRaw = commonDirBefore.stdout.trim();
+          const gdAbs = resolve(dir, gdRaw);
+          const cdAbs = resolve(dir, cdRaw);
+          let gdReal = "";
+          let cdReal = "";
+          try { gdReal = await realpath(gdAbs); } catch { /* fail closed below */ }
+          try { cdReal = await realpath(cdAbs); } catch { /* fail closed below */ }
+          if (gdReal !== "" && cdReal !== "") layoutBefore = `${gdReal}\n${cdReal}\n${await gitLayoutDigest(gdReal, cdReal, dir)}`;
+        }
+        if (layoutBefore === "") return { pass: false, runId, sha: greq.candidateSha, detail: "git-layout-unobservable-pre-gate" };
         const r = await runShell(gateCmd, dir, timeoutS, { env: GIT_ENV });
         // P9 audit cycle-1 F2: a PASSING command only measures the
         // candidate if what was tested IS the candidate. `rev-parse HEAD`
@@ -2344,17 +2935,86 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
             if (postFilterArgs === null) {
               mutated = "filter-neutralize-unobservable-post-gate";
             } else {
-            const st = await runObservedGit(dir, [...postFilterArgs, "status", "--porcelain=v1", "-z", "--untracked-files=all"], 10, { maxBytes: 4 * 1024 * 1024 });
-            if (st.code !== 0 || st.truncated) {
-              mutated = "tree-state-unreadable-post-gate";
-            } else {
-  for (const entry of st.stdout.split("\0")) {
-                if (entry === "") continue;
-                const xy = entry.slice(0, 2);
-                // "??" untracked additions are tolerated (see above);
-                // "!!" cannot appear (--untracked-files shows them).
-                if (xy !== "??") { mutated = `tracked-mutation-post-gate:${xy}`; break; }
+            // MG-C3-2 (cycle-3 audit): overriding the drivers is NOT
+            // enough — cleanliness is also CACHED in the index stat
+            // entries. Probe on real git 2.54: a gate defines clean
+            // filter mapping altered bytes to the committed blob,
+            // rewrites a tracked file, runs a plain `git status` INSIDE
+            // the gate (refreshing the stat cache under the poison), and
+            // exits 0 — our NEUTRALIZED `update-index --really-refresh`
+            // + `status` then still reported the tree CLEAN (empty
+            // tracked output) while raw bytes differed. The refresh
+            // busted the cache but git re-stamped the entries from
+            // on-disk size+mtime without re-converting in the
+            // status's window. Fix: a FRESH INDEX BUILT DURING THE
+            // OBSERVATION CANNOT CARRY POISON — `read-tree HEAD` into a
+            // throwaway GIT_INDEX_FILE materializes pristine stat data,
+            // so the following status re-reads and re-converts every
+            // tracked file with the pinned identity drivers; altered
+            // raw bytes can only report as modified. Verified on the
+            // exact reproduction: fresh-index status reports the mutated
+            // file (" M base.txt") where the old chain said clean.
+            // Unobservable build → fail closed.
+            const idxDir = await mkdtemp(join(tmpdir(), "tre-gate-idx-"));
+            const idxPath = join(idxDir, "idx");
+            try {
+              const tree = await runObservedGit(dir, [...postFilterArgs, "read-tree", "HEAD"], 30, { maxBytes: 4 * 1024 * 1024, envExtra: { GIT_INDEX_FILE: idxPath, GIT_ATTR_SOURCE: EMPTY_TREE_OID } });
+              if (tree.code !== 0 || tree.truncated) {
+                mutated = "fresh-index-build-failed-post-gate";
+              } else {
+                let idxStat: Awaited<ReturnType<typeof lstat>> | null = null;
+                try { idxStat = await lstat(idxPath); } catch { /* fail closed below */ }
+                if (idxStat === null || idxStat.size === 0) {
+                  mutated = "fresh-index-unwritten-post-gate";
+                } else {
+                // R5-B1: command-line --ignore-submodules=none — repo-local
+                // submodule.<name>.ignore=all must not hide child dirt here
+                // either (cmd-line beats config; quiet on uninitialized subs).
+                const st = await runObservedGit(dir, [...postFilterArgs, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"], 10, { maxBytes: 4 * 1024 * 1024, envExtra: { GIT_INDEX_FILE: idxPath, GIT_ATTR_SOURCE: EMPTY_TREE_OID } });
+                if (st.code !== 0 || st.truncated) {
+                  mutated = "tree-state-unreadable-post-gate";
+                } else {
+                  for (const entry of st.stdout.split("\0")) {
+                    if (entry === "") continue;
+                    const xy = entry.slice(0, 2);
+                    // MG-C4-2 (cycle-2 verifier, repros/A2/eol): "??"
+                    // entries are tolerated as CONTENT additions, but
+                    // NOT when the path is an ATTRIBUTES file: the gate
+                    // materializes exactly the candidate commit, so a
+                    // .gitattributes present as untracked was CREATED
+                    // during the gate — and attributes files feed git's
+                    // BUILT-IN text/eol/ident conversions that no
+                    // filter pin can neutralize (probe: `base.txt text
+                    // eol=crlf` + rewritten CRLF bytes read clean).
+                    // Same class: .gitmodules (submodule interpretation).
+                    // MG-C4-A3 (A3 BUG-ignored-staged/ignored-attrs):
+                    // the check above is blind to an interpretation file
+                    // that the CANDIDATE'S OWN .gitignore excludes (e.g.
+                    // a pattern matching `.gitattributes` hides the
+                    // gate-written poison from `??`) — `--ignored`
+                    // without a value does not consult gitignore-style
+                    // patterns at all, so require `--ignored=matching`
+                    // and police the `!!` entries by the same segment
+                    // rule. Names only are ever read/disclosed here.
+                    const p = entry.slice(3);
+                    const seg = p.split("/").pop() ?? "";
+                    if (xy === "??" || xy === "!!") {
+                      if (seg === ".gitattributes" || seg === ".gitmodules" || seg === ".gitignore") { mutated = `untracked-attributes-post-gate:${p.slice(0, 128)}`; break; }
+                      continue;
+                    }
+                    // "!!" with any other name is a gate-created file the
+                    // merge never consumes (the CAS moves COMMIT objects,
+                    // not the worktree) — tolerated as content.
+                    // MG-C4-A3 (A3 BUG-staged-divergence): ANY other
+                    // status code means the staged tree or the on-disk
+                    // tracked content diverged from HEAD during the gate.
+                    mutated = `tracked-mutation-post-gate:${xy}`; break;
+                  }
+                }
+                }
               }
+            } finally {
+              await rm(idxDir, { recursive: true, force: true }).catch(() => undefined);
             }
             // P9 audit cycle-2 F1: `git status` is BLIND to on-disk deltas
             // of entries flagged `--assume-unchanged` (tag h) or
@@ -2377,6 +3037,51 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
                 }
               }
             }
+            // MG-C4-A3 (A3 BUG-staged-divergence): the fresh-index
+            // status above proves ON-DISK bytes match HEAD, but the
+            // gate worktree's OWN index is a second tree the audit
+            // showed could diverge while every status stayed clean
+            // (the gate `git add`s altered content, then restores the
+            // worktree file — status clean, staged tree forged). A
+            // staged-vs-HEAD comparison goes straight through the
+            // INDEX ENTRIES' content (the stat cache plays no part in
+            // a --cached tree comparison): any difference fails the
+            // verdict closed. --quiet: exit 0 identical, 1 differs,
+            // ≥128 unreadable — all three handled.
+            if (mutated === "") {
+              // --quiet (= --exit-code, no output): exit 1 means the
+              // index differs from HEAD. Without it diff-index exits 0
+              // even when entries differ — the staged-only fixture
+              // integrated under exactly that (audit finding 1).
+              const staged = await runObservedGit(dir, ["--no-optional-locks", "diff-index", "--cached", "--quiet", "--ignore-submodules=none", "--no-ext-diff", "HEAD", "--"], 15, { maxBytes: 1024 * 1024 });
+              if (staged.code !== 0 || staged.truncated) {
+                mutated = `staged-tree-divergence-post-gate:exit=${staged.code}${staged.truncated ? "+truncated" : ""}`;
+              }
+            }
+            // MG-C4-A3 (A3 BUG-blob-overwrite class): the object store's
+            // INTERNAL consistency is part of what the candidate IS. A
+            // gate that overwrites a loose object at its hash path (or
+            // prunes/grafts the store) makes the SAME sha resolve to
+            // different bytes for the next reader while every PATH-level
+            // digest stays silent. Empirical (git 2.54, this cycle):
+            // `--connectivity-only` EXITED 0 on an overwritten loose
+            // blob — it never re-hashes object CONTENT — so the check
+            // must be the FULL fsck, which reports "hash-path mismatch"
+            // + "missing blob" and exits 1. Run ONCE post-gate (the
+            // verdict only needs to prove the store the merge will
+            // consume is self-consistent NOW); --no-dangling/--no-root
+            // keep the noise down and no path content is read or
+            // disclosed (hashes only). Cost: a full store walk per
+            // gate — accepted as the price of closing the
+            // reinterpretation-at-identity class; a walk that CANNOT
+            // finish inside the cap is an unknown, so truncation/
+            // timeout fails closed like every other unobservability.
+            if (mutated === "") {
+              const fs = await runObservedGit(dir, ["fsck", "--no-progress", "--no-dangling", "--"], 300, { maxBytes: 512 * 1024 });
+              if (fs.code !== 0 || fs.truncated) {
+                mutated = `object-store-fsck-post-gate:exit=${fs.code}${fs.truncated ? "+truncated" : ""}:${fs.stdout.slice(0, 180).replace(/\s+/g, " ")}`;
+              }
+            }
             // P9 audit cycle-2 F1: replacement refs survive EVERY
             // observation honest-looking if the objects are substituted
             // (proven: HEAD, status, and ls-files all described the
@@ -2395,6 +3100,85 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
                 mutated = "replacement-refs-post-gate";
               }
             }
+            // MG-C3-1 (cycle-3 audit): the gate runs with write access
+            // to its own worktree's .git — `git worktree move` or
+            // `mv .git <evil> && ln -s <evil> .git` (or rewriting the
+            // gitdir/commondir pointers) makes every post-gate read
+            // describe a DIFFERENT repository while HEAD still resolves
+            // to the candidate sha (the evil repo is an identical clone
+            // — probe: post-gate status passed while the real worktree
+            // held UNSAFE bytes). Re-check the gitdir identity
+            // (realpath'd) AND the object-store layout digest taken
+            // pre-gate: any drift fails the verdict closed.
+            if (mutated === "") {
+              const gitDirAfter = await runObservedGit(dir, ["rev-parse", "--absolute-git-dir"], 10, { maxBytes: 4096 });
+              const commonDirAfter = await runObservedGit(dir, ["rev-parse", "--git-common-dir"], 10, { maxBytes: 4096 });
+              if (gitDirAfter.code !== 0 || gitDirAfter.stdout.trim() === "" || commonDirAfter.code !== 0 || commonDirAfter.stdout.trim() === "") {
+                mutated = "git-layout-unobservable-post-gate";
+              } else {
+                let gdRealAfter = "";
+                let cdRealAfter = "";
+                try { gdRealAfter = await realpath(resolve(dir, gitDirAfter.stdout.trim())); } catch { /* mismatch below */ }
+                try { cdRealAfter = await realpath(resolve(dir, commonDirAfter.stdout.trim())); } catch { /* mismatch below */ }
+                const beforeLines = layoutBefore.split("\n");
+                if (gdRealAfter === "" || cdRealAfter === "" || gdRealAfter !== beforeLines[0] || cdRealAfter !== beforeLines[1]) {
+                  mutated = "gitdir-relocated-post-gate";
+                } else {
+                  const layoutAfter = await gitLayoutDigest(gdRealAfter, cdRealAfter, dir);
+                  if (layoutAfter !== (beforeLines[2] ?? "")) mutated = "git-layout-drift-post-gate";
+                }
+              }
+            }
+            }
+          }
+        }
+        // MG-C4-A3 (A3 BUG timing-status residual) — KNOWN LIMITATION,
+        // not closed. The chain above is a sequence of observations taken
+        // while a gate-escaped writer (setsid) can still run. A writer
+        // that rewrites tracked bytes after the fresh-index status and
+        // before this verdict is accepted: reproduced on this build
+        // (trace: status END #2 → MUTATE → verdict accepted; the final
+        // scan below ran BEFORE the write). Re-running the observation
+        // here narrows nothing it cannot prove — only preventing
+        // concurrent writes (an enforced isolation boundary or an
+        // immutable snapshot) closes it. The merged blob is object-
+        // fetched and was proven original in that fixture, so the
+        // impact is stale certification of the worktree, not a
+        // changed merged tree. Tracked as the deferred enforcement item.
+        if (mutated === "") {
+          const postFilterArgsFinal = await filterNeutralizeArgs(dir);
+          if (postFilterArgsFinal === null) {
+            mutated = "filter-neutralize-unobservable-final-quiescence";
+          } else {
+            const idxDirF = await mkdtemp(join(tmpdir(), "tre-gate-idx-f-"));
+            const idxPathF = join(idxDirF, "idx");
+            try {
+              const treeF = await runObservedGit(dir, [...postFilterArgsFinal, "read-tree", "HEAD"], 30, { maxBytes: 4 * 1024 * 1024, envExtra: { GIT_INDEX_FILE: idxPathF, GIT_ATTR_SOURCE: EMPTY_TREE_OID } });
+              let idxStatF: Awaited<ReturnType<typeof lstat>> | null = null;
+              try { idxStatF = await lstat(idxPathF); } catch { /* fail closed below */ }
+              if (treeF.code !== 0 || treeF.truncated || idxStatF === null || idxStatF.size === 0) {
+                mutated = "final-quiescence-index-unobservable";
+              } else {
+                // R5-B1: same cmd-line submodule pin as the post-gate status.
+                const stF = await runObservedGit(dir, [...postFilterArgsFinal, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"], 10, { maxBytes: 4 * 1024 * 1024, envExtra: { GIT_INDEX_FILE: idxPathF, GIT_ATTR_SOURCE: EMPTY_TREE_OID } });
+                if (stF.code !== 0 || stF.truncated) {
+                  mutated = "final-quiescence-status-unreadable";
+                } else {
+                  for (const entry of stF.stdout.split("\0")) {
+                    if (entry === "") continue;
+                    const xy = entry.slice(0, 2);
+                    const p = entry.slice(3);
+                    const seg = p.split("/").pop() ?? "";
+                    if (xy === "??" || xy === "!!") {
+                      if (seg === ".gitattributes" || seg === ".gitmodules" || seg === ".gitignore") { mutated = `untracked-attributes-final-quiescence:${p.slice(0, 128)}`; break; }
+                      continue;
+                    }
+                    mutated = `tracked-mutation-final-quiescence:${xy}`; break;
+                  }
+                }
+              }
+            } finally {
+              await rm(idxDirF, { recursive: true, force: true }).catch(() => undefined);
             }
           }
         }
@@ -2476,18 +3260,97 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
               if (rec.acked === true) executionSeq++;
               else if (typeof rec.notes !== "string" || !rec.notes.startsWith("no-effect:")) actUnknown++;
             }
-            if (actUnknown > 0) {
-              log(`integration-act-unknown: ${actUnknown} merge terminal(s) with unverified side effect at/below the current seq — P12 refuses replay (not-replayable, docs/16 §2); after RECONCILING observed reality (did the CAS land?), an operator-authorized recovery runs with --integration-seq-bump ${String(executionSeq + 1)}`);
-            }
+            // MG-C5-A3 (round-2 audit): the remedy hint is NOT emitted
+            // here any more — see the post-derivation block below. The
+            // bump recommendation must exceed the FINAL seq (count AND
+            // held high-water); advising before the high-water is folded
+            // in recommended a bump that the same journal still refused.
             // F3 (a): a persisted high-water beats a stale/lower bump —
             // spent seqs are remembered DURABLY, not by operator flag.
+            // p12c5 cycle-2 audit C2-F3: a high-water record only
+            // PROVES its seq was SPENT when the identity reached an
+            // ACKED terminal outcome. The old unconditional
+            // `rec.seq + 1` advanced past a CRASHED allocation (intent
+            // appended, no outcome) — the next activation derived a
+            // NEW actionId and P12's open-intent recovery could never
+            // see the stranded intent; an act-unknown terminal likewise
+            // got advanced past, executing a fresh identity WITHOUT
+            // the reconciliation + explicit operator bump the contract
+            // requires (the act-unknown terminal lives on the OLD seq,
+            // so P12 cannot refuse the new one). Terminal facts are
+            // read from the outcome's OWN identity: the record id
+            // embeds the allocation seq (`<actionId>#o<seq>[r<k>][f]`
+            // — the exact suffix grammar merge.ts lines pin); an
+            // unparseable id consumes nothing (fail toward holding,
+            // never toward a blind new identity).
+            const consumedSeq = new Set<number>();
+            for (const r of records) {
+              if (typeof r !== "object" || r === null) continue;
+              const rec = r as { kind?: unknown; acked?: unknown; actionId?: unknown; episodeId?: unknown; taskId?: unknown; id?: unknown };
+              if (rec.kind !== "decision-outcome" || rec.acked !== true) continue;
+              if (typeof rec.actionId !== "string" || !exactMergeId.test(rec.actionId)) continue;
+              if (rec.episodeId !== mreq.episodeId || rec.taskId !== mreq.taskId) continue;
+              if (typeof rec.id !== "string") continue;
+              const tail = rec.id.slice(`${rec.actionId}#o`.length);
+              const m = /^(\d+)(?:r\d+)?f?$/.exec(tail);
+              const allocated = m?.[1] === undefined ? Number.NaN : Number.parseInt(m[1], 10);
+              if (Number.isSafeInteger(allocated) && allocated >= 0) consumedSeq.add(allocated);
+            }
             for (const r of records) {
               if (typeof r !== "object" || r === null) continue;
               const rec = r as { kind?: unknown; episodeId?: unknown; taskId?: unknown; seq?: unknown };
               if (rec.kind !== "seq-high-water" || rec.episodeId !== mreq.episodeId || rec.taskId !== mreq.taskId) continue;
-              if (typeof rec.seq === "number" && Number.isSafeInteger(rec.seq) && rec.seq >= 0 && rec.seq + 1 > highWater) highWater = rec.seq + 1;
+              if (typeof rec.seq !== "number" || !Number.isSafeInteger(rec.seq) || rec.seq < 0) continue;
+              // C2-F3: advance ONLY past CONSUMED allocations (acked
+              // terminal observed for that identity). An open intent
+              // or an act-unknown/no-effect terminal holds the line:
+              // the next activation re-derives the SAME seq, where
+              // P12 either recovers the intent on observed reality,
+              // replays a provable no-effect, or refuses
+              // not-replayable with the operator-bump remedy disclosed
+              // above — the three dispositions the contract names.
+              // Audit finding 3: an UNRESOLVED allocation (no acked
+              // outcome) must still be HELD, not skipped. Skipping it
+              // let a restart re-derive seq 0 while the open intent
+              // (or act-unknown terminal) lived at the bumped seq,
+              // bypassing its recovery. Hold = the allocator must not
+              // go BELOW the highest persisted allocation: an
+              // unresolved seq is re-derived (executionSeq = seq), so
+              // P12 recovers it; a consumed seq advances past it.
+              if (consumedSeq.has(rec.seq)) {
+                if (rec.seq + 1 > highWater) highWater = rec.seq + 1;
+              } else if (rec.seq > highWater) {
+                highWater = rec.seq;
+              }
             }
             if (highWater > executionSeq) executionSeq = highWater;
+            // MG-C5-A3 (round-2 audit): emit the act-unknown remedy ONLY
+            // after the final seq is derived (count AND held high-water).
+            // Seeding an act-unknown terminal at seq7 + high-water7 made
+            // the old pre-derivation hint advise `--integration-seq-bump
+            // 1` (count was 0): following it re-derived seq 7 — under the
+            // held high-water — and P12 refused AGAIN, one bump short.
+            // The remedy must EXCEED the derivation the same journal
+            // produces, so a fresh actUnknown set recomputes the advice
+            // from the completed state: max(executionSeq, seq of each
+            // act-unknown terminal) + 1.
+            if (actUnknown > 0) {
+              let strandedSeq = executionSeq;
+              try {
+                for (const r of records) {
+                  if (typeof r !== "object" || r === null) continue;
+                  const rec = r as { kind?: unknown; acked?: unknown; actionId?: unknown; episodeId?: unknown; taskId?: unknown; id?: unknown; notes?: unknown };
+                  if (rec.kind !== "decision-outcome" || rec.acked === true) continue;
+                  if (typeof rec.actionId !== "string" || !exactMergeId.test(rec.actionId)) continue;
+                  if (rec.episodeId !== mreq.episodeId || rec.taskId !== mreq.taskId) continue;
+                  if (typeof rec.notes === "string" && rec.notes.startsWith("no-effect:")) continue;
+                  const m = typeof rec.id === "string" ? /^(\d+)(?:r\d+)?f?$/.exec(rec.id.slice(`${rec.actionId}#o`.length)) : null;
+                  const seqOfTerminal = m?.[1] === undefined ? Number.NaN : Number.parseInt(m[1], 10);
+                  if (Number.isSafeInteger(seqOfTerminal) && seqOfTerminal > strandedSeq) strandedSeq = seqOfTerminal;
+                }
+              } catch { /* hint degrades to executionSeq+1 */ }
+              log(`integration-act-unknown: ${actUnknown} merge terminal(s) with unverified side effect at/below the current seq — P12 refuses replay (not-replayable, docs/16 §2); after RECONCILING observed reality (did the CAS land?), an operator-authorized recovery runs with --integration-seq-bump ${String(strandedSeq + 1)}`);
+            }
             // F3 (b): log-then-act. Record the allocation BEFORE the
             // merge runs (id-stable per (episode, task, seq), so a retry
             // after a failed append re-records the same tuple). An append

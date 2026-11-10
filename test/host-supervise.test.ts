@@ -27,7 +27,8 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEpisodeLayout, type EpisodeGraph } from "../src/episode/journal.js";
-import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit, fileDigest } from "../src/host/supervise.js";
+import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit, fileDigest, filterNeutralizeArgs } from "../src/host/supervise.js";
+import { sameArtifact } from "../src/acceptance/evaluator.js";
 import { makeTelegramDeliver } from "../src/telegram/escalation.js";
 
 async function freshEpisode(t: { diagnostic: (m: string) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
@@ -72,12 +73,24 @@ test("host wiring: exit-0 worker + passing policy gate ⇒ accepted-finish with 
   });
   const worker = await exitZeroWorker(root);
 
+  // R3-F2 (audit round-3): the acceptance evidence must bind to an
+  // OBSERVABLE tree — an unmeasured (no-worktree) identity now refuses
+  // comparison against everything, so a real acceptance needs a real
+  // git worktree (the fallback path is tested for its refusal below).
+  const wt = join(root, "wt");
+  await mkdir(wt, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: wt });
+  await writeFile(join(wt, "f.txt"), "base\n");
+  execFileSync("git", ["add", "f.txt"], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"], { cwd: wt });
+
   const res = await runHostEpisode({
     episodesRoot: root,
     graph,
     taskId: "t1",
     grantedBy: "test-harness",
     workerCommand: worker,
+    worktreePath: wt,
     maxIterations: 3,
     log: (line) => t.diagnostic(line),
   });
@@ -237,6 +250,12 @@ test("W1-C1: with NO worktree the fallback identity is disclosed dirty-unknown, 
   assert.equal(ev.current.sha, "abc123");
   assert.equal(ev.current.dirty, true, "the episode dir is NOT the task's tree: the fallback is dirty (unknown), never a clean claim");
   assert.ok(ev.current.dirtyDigest, "the fallback carries an explicit unknown digest");
+  // R3-F2 (audit round-3): an unmeasured identity is flagged unobservable
+  // and refuses comparison against EVERYTHING (incl. itself) — an
+  // evidence/identity self-comparison from one failed observation can
+  // never certify acceptance.
+  assert.equal(ev.current.unobservable, true, "the no-worktree fallback is UNOBSERVABLE, not merely dirty");
+  assert.ok(!sameArtifact(ev.current, ev.current), "an unobservable identity never equals itself");
 });
 
 test("W1-M1 + minor-9: dirty identity has a CONTENT-bound digest (porcelain collisions fail closed)", async () => {
@@ -892,6 +911,82 @@ test("W11-A4 (A-M1): worker-authored clean/smudge filters cannot collapse two di
   await writeFile(join(wt, "a.txt"), "TAMPER-TWO");
   const i2 = await observeIdentity(wt, sha);
   assert.notEqual(i2.dirtyDigest, i1.dirtyDigest, "two contents through a worker-authored clean filter MUST NOT collide (regression: both hashed to one CONSTANT diff)");
+});
+
+test("C2-F1/F1b (p12c5 cycle-2 audit): a PROCESS filter is enumerated and pinned DISABLED (empty value), never `=cat`", async () => {
+  // Cycle-1 F2 neutralized clean/smudge drivers only. git 2.54 probe
+  // (C2-F1): a `process` driver REPLACES clean+smudge when set — a
+  // clean/smudge-only enumeration let a process driver keep converting
+  // bytes under a supposedly neutralized observation. Fix: the
+  // enumeration regex covers clean|smudge|process.
+  // C2-F1b probe: the PIN VALUE for a process key MUST be the empty
+  // string (git's documented "disable this filter"). `=cat` is WRONG:
+  // git spawns `cat` as a filter SERVER, the handshake fails
+  // ("expected git-filter-server", "cat died of signal 15") and —
+  // worse — the command still EXITS 0 REPORTING CLEAN: a false-clean
+  // oracle replacing the very fraud the neutralization exists to kill.
+  const root = await mkdtemp(join(tmpdir(), "tre-host-procfilt-"));
+  const wt = join(root, "wt"); await mkdir(wt);
+  const g = (...a: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: wt, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  g("init", "-q");
+  // A process filter that answers the CLEAN query with the committed
+  // bytes for ANY input (the C2-F1 forge shape).
+  const pf = join(root, "pf.py");
+  await writeFile(pf, [
+    "#!/usr/bin/env python3",
+    "import sys",
+    "inp, out = sys.stdin.buffer, sys.stdout.buffer",
+    "def rpk():",
+    "    h = inp.read(4)",
+    "    if len(h) < 4: return None",
+    "    n = int(h, 16)",
+    "    return b'' if n == 0 else inp.read(n - 4)",
+    "def wpk(d):",
+    "    out.write(b'%04x' % (len(d) + 4)); out.write(d)",
+    "def flush(): out.write(b'0000'); out.flush()",
+    "wpk(b'git-filter-server'); wpk(b'version=2')",
+    "wpk(b'capability<clean>=true'); wpk(b'capability<smudge>=true'); flush()",
+    "while True:",
+    "    cmd = None",
+    "    while True:",
+    "        p = rpk()",
+    "        if p is None: sys.exit(0)",
+    "        if p == b'': break",
+    "        s = p.decode('utf-8', 'replace')",
+    "        if s.startswith('command='): cmd = s[8:]",
+    "    if cmd in ('clean', 'smudge'):",
+    "        data = b''",
+    "        while True:",
+    "            p = rpk()",
+    "            if p is None: sys.exit(0)",
+    "            if p == b'': break",
+    "            data += p",
+    "        wpk(b'success'); flush()",
+    "        wpk(b'base\\n'); flush()",
+  ].join("\n"));
+  await chmod(pf, 0o755);
+  g("config", "filter.evil.process", pf);
+  await writeFile(join(wt, ".gitattributes"), "*.txt filter=evil\n");
+  await writeFile(join(wt, "a.txt"), "base\n");
+  g("add", "."); g("commit", "-q", "-m", "base");
+
+  // (1) The enumeration MUST see the process driver and pin it with the
+  //     EMPTY value — `=cat` would be the false-clean oracle.
+  const pinArgs = await filterNeutralizeArgs(wt);
+  assert.ok(pinArgs !== null, "the driver set is observable");
+  assert.ok(pinArgs.includes("-c"), "argv carries config overrides");
+  const pin = pinArgs!.slice(2);
+  assert.ok(pin.includes("filter.evil.process=") && !pin.includes("filter.evil.process=cat"),
+    `a process driver must be pinned to the EMPTY value (documented disable), got ${JSON.stringify(pin)}`);
+
+  // (2) Under the pinned argv the raw forged bytes are VISIBLE: the
+  //     neutralized status reports the tamper instead of converting it
+  //     away (and terminates — a live process filter would hold it).
+  await writeFile(join(wt, "a.txt"), "FORGED");
+  const st = await runObservedGit(wt, [...pinArgs!, "status", "--porcelain=v1", "-z"], 10);
+  assert.equal(st.cause, "exit");
+  assert.equal(st.code, 0);
+  assert.match(st.stdout, /M/, "with the process driver DISABLED, the forged bytes MUST show as modified (a `=cat` pin would spawn cat, fail the handshake, and report CLEAN — the C2-F1b false-clean oracle)");
 });
 
 test("W11-A5 (A-C4): artifact declarations escaping the observed tree yield NO digest proof (rejected, exists:false)", async () => {

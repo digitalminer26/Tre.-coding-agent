@@ -486,25 +486,41 @@ test("P12 head-moved: gate advances the episode branch → CAS rejected, head-mo
 
 test("P12 act-unknown: exit-0 contradicted by the re-read → failed/advance-unverified, NEVER no-effect", async (t) => {
   const fx = makeRepo(t);
-  // reference-transaction hook: after our CAS commits, an invisible actor
-  // moves the ref again before the command exits (exit 0, head at a third
-  // value) — the one state where nothing-happened is NOT provable.
+  // MG-C4-3 re-arm: this state was previously produced by a repo
+  // reference-transaction HOOK — the exact attack surface the new
+  // core.hooksPath=/dev/null pin closes (hooks must NEVER run inside
+  // the merge transaction; the hooks probe in repros/A2 demonstrated a
+  // gate could forge the merged branch that way). The STATE itself is
+  // actor-agnostic: any invisible writer moving the ref after our CAS
+  // lands is the one case where nothing-happened is NOT provable. So
+  // the fixture is now a PATH shim (same pattern as the C2-F4 test):
+  // the real CAS runs (and passes its own old-value check), then the
+  // shim moves the ref to a third value before reporting exit 0.
   git(fx.dir, ["branch", "third", fx.base]);
   advanceBranch(fx.dir, "third", "third value");
   const third = head(fx.dir, "refs/heads/third");
-  const hook = join(fx.dir, ".git", "hooks", "reference-transaction");
-  writeFileSync(hook, [
+  const dir = mkdtempSync(join(tmpdir(), "tre-p12-actunknown-shim-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const probe = spawnSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" });
+  const real = (probe.stdout ?? "").trim();
+  if (!real) throw new Error("no real git on PATH for the shim");
+  const shimBody = [
     "#!/bin/sh",
-    'if [ "$1" = committed ]; then',
-    '  while read -r _old new ref; do',
-    '    [ "$ref" = "refs/heads/ep1" ] && [ "$new" != "' + third + '" ] && git update-ref refs/heads/ep1 ' + third,
-    "  done",
-    "fi",
-    "exit 0",
-  ].join("\n"));
-  chmodSync(hook, 0o755);
+    `REAL="${real}"`,
+    `REPO="${fx.dir}"`,
+    `THIRD="${third}"`,
+    'for a in "$@"; do [ "$a" = update-ref ] && { "$REAL" "$@"; rc=$?; [ $rc -eq 0 ] && "$REAL" -C "$REPO" update-ref refs/heads/ep1 "$THIRD"; exit $rc; }; done',
+    '"$REAL" "$@"',
+    "",
+  ].join("\n");
+  const shim = join(dir, "git");
+  writeFileSync(shim, shimBody);
+  chmodSync(shim, 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${dir}${delimiter}${saved}`;
   const j = memJournal();
-  const r = await integrateTestedCandidate(req(fx), ports(j));
+  let r;
+  try { r = await integrateTestedCandidate(req(fx), ports(j)); } finally { process.env.PATH = saved; }
   assert.equal(r.status, "failed");
   assert.equal(r.stage, "verify");
   assert.equal(r.reason, "advance-unverified");

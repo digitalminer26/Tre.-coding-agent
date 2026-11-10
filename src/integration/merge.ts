@@ -128,6 +128,18 @@ function execCapture(cwd: string, args: string[]): Promise<{ stdout: string }> {
   // config-level re-enabler exists. An ancient git without the flag
   // fails its own argument parsing → hard error → fail closed.
   const pinned = args[0] === "--no-replace-objects" ? args : ["--no-replace-objects", ...args];
+  // MG-C4-3 (cycle-2 verifier, repros/A2/hooks): a gate-installed
+  // core.hooksPath (writable via `git config` into the shared common
+  // config) made `reference-transaction` hooks fire DURING the CAS
+  // update-ref and rewrite the merged branch — hook side effects ran
+  // INSIDE the merge transaction. No merge-gate git call needs hooks
+  // (no hook output is consumed anywhere), so the hook surface is
+  // pinned closed for EVERY invocation in this module. (The supervise-
+  // side digest now also catches the config write itself, but the CAS
+  // is the last line of defense and must not depend on it.)
+  if (!pinned.includes("core.hooksPath=/dev/null")) {
+    pinned.splice(1, 0, "-c", "core.hooksPath=/dev/null");
+  }
   return new Promise((resolve, reject) => {
     execFile("git", pinned, { cwd, env: gitEnv(), timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
       (err, stdout, stderr) => {

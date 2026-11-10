@@ -31,7 +31,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile, readFile, chmod } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile, chmod, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DecisionJournal, validateSupervisorRecord, type EpisodeGraph } from "../src/episode/journal.js";
@@ -269,6 +269,224 @@ test("P9 audit cycle-1 F2 (cycle-2 F5 fidelity rewrite): a gate that mutates the
   assert.equal(baseNow, "base\n", "the main worktree's tracked file was never touched (mutation was worktree-local)");
 });
 
+test("P9 audit p12c5 cycle-2 C2-F2: a gate installing a clean-filter forge + stat-cache refresh fails CLOSED — the neutralized chain exposes the forged bytes, the branch never moves", async (t) => {
+  const repo = await makeRepo(t, "ep-c2f2");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-c2f2-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // The C2-F2 forge shape (probe, git 2.54): INSIDE the merge-gate
+  // worktree the command defines a conventional clean filter mapping
+  // ANY bytes to the committed blob of base.txt, assigns it via
+  // .gitattributes, rewrites base.txt with UNSAFE bytes, then runs a
+  // PLAIN `git status` — which converts through the poison and may
+  // record the entry's stat cache as CLEAN. A later `status` with only
+  // `-c filter.x.clean=cat` changes CONVERSION CONFIG, which does not
+  // invalidate the cached cleanliness. The fix busts the stat cache
+  // FIRST (`update-index --really-refresh` under the same neutralized
+  // argv; exit 1 = "needs update" is the dirt we came to expose) and
+  // only then re-runs the neutralized status. On this Apple Git build
+  // the unfixed status also re-detects the M (it re-stats by size), so
+  // this test PINS THE FIXED CHAIN's verdict rather than the
+  // false-clean itself — the false-clean class is documented as
+  // empirically build-dependent (probe notes, p12c5 cycle 2).
+  const gateCmd = 'if [ -f .git ]; then git config filter.x.clean "printf base\\n"; printf "*.txt filter=x\\n" > .gitattributes; printf FORGED-PAYLOAD > base.txt; git status --porcelain >/dev/null 2>&1; fi; exit 0';
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-c2f2", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `a clean-filter-forge gate must not yield an integrated finish (got ${res.result.stopped})`);
+  assert.equal(res.result.stopped, "halt");
+  assert.equal(res.result.detail, "integration-refused");
+
+  const evidence = (await readFile(join(root, "ep-c2f2", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const candidateGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /tracked-mutation-post-gate/.test(e.text ?? ""));
+  assert.ok(candidateGate.length >= 1,
+    `expected the forged base.txt exposed as tracked-mutation-post-gate through the refresh+status chain, got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head — the forged candidate never landed");
+});
+
+test("P9 audit p12c5 cycle-2 C2-F2b: a gate CORRUPTING the worktree index fails the stat-refresh path CLOSED (stat-refresh-failed-post-gate)", async (t) => {
+  const repo = await makeRepo(t, "ep-c2f2b");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-c2f2b-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // C2-F2b: the refresh's exit-code contract is load-bearing — 1 is
+  // EXPECTED dirt ("needs update"), anything ELSE non-zero is a FATAL
+  // and the cache was NOT busted, so the following status could still
+  // read poisoned entries: fail CLOSED before ever consulting it.
+  // Probe (git 2.54): a naive `printf GARBAGE >> index` does NOT make
+  // this build's index read corrupt (the trailing bytes are ignored —
+  // refresh exits 0); the version field must break: flipping byte 7 of
+  // the DIRC header gives "error: bad index version 88 / fatal: index
+  // file corrupt" with exit 128. A linked worktree's gitdir resolves
+  // via `git rev-parse --git-path index`.
+  const gateCmd = 'if [ -f .git ]; then i="$(git rev-parse --git-path index)"; printf X | dd of="$i" bs=1 seek=7 count=1 conv=notrunc 2>/dev/null; fi; exit 0';
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-c2f2b", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `an index-corrupting gate must not integrate (got ${res.result.stopped})`);
+  assert.equal(res.result.stopped, "halt");
+  assert.equal(res.result.detail, "integration-refused");
+
+  const evidence = (await readFile(join(root, "ep-c2f2b", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const candidateGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /stat-refresh-failed-post-gate|index-flags-unreadable-post-gate/.test(e.text ?? ""));
+  assert.ok(candidateGate.length >= 1,
+    `expected stat-refresh-failed-post-gate (fatal refresh fails CLOSED before the status is consulted), got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head");
+});
+
+// ─── Cycle-3 audit (MG-C3-1 / MG-C3-2): gitdir redirect + mtime stat forge ─
+
+test("P9 audit cycle-3 MG-C3-2: a stat-cache forge with mtime-backdating (status inside the gate, FORGED bytes hidden from a driver-only status) fails CLOSED via the fresh-index observation", async (t) => {
+  const repo = await makeRepo(t, "ep-mgc32");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-mgc32-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // The exact cycle-3 probe (real git 2.54, wt3-wt6): define clean
+  // filter x mapping ANY bytes to base.txt's committed blob, rewrite
+  // base.txt FORGED, backdate its mtime BELOW the index stat stamp,
+  // then run a plain `git status` INSIDE the gate — that converts
+  // through the poison and records the entry CLEAN in the stat cache.
+  // The OLD chain (`update-index --really-refresh` + status, both with
+  // filter.x clean pinned to cat) then read the tree CLEAN — the
+  // refresh re-stamped from size+mtime without re-converting, so the
+  // forged raw bytes passed. The NEW chain builds a FRESH INDEX
+  // (`read-tree HEAD` into a throwaway GIT_INDEX_FILE) during the
+  // observation: pristine stat entries force a full re-read +
+  // identity-conversion of every tracked file, so FORGED raw bytes
+  // can only report as modified (verified: fresh-index status reports
+  // " M base.txt" where the poisoned cache chain said clean).
+  const gateCmd = 'if [ -f .git ]; then git config filter.x.clean "printf base\\n"; printf "*.txt filter=x\\n" > .gitattributes; printf FORGED-CYCLE3 > base.txt; touch -t 202001010101 base.txt; git status --porcelain >/dev/null 2>&1; fi; exit 0';
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-mgc32", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `an mtime-poisoned clean-filter forge must not yield an integrated finish (got ${res.result.stopped})`);
+  assert.equal(res.result.stopped, "halt");
+  assert.equal(res.result.detail, "integration-refused");
+
+  const evidence = (await readFile(join(root, "ep-mgc32", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const candidateGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /tracked-mutation-post-gate/.test(e.text ?? ""));
+  assert.ok(candidateGate.length >= 1,
+    `expected the mtime-forged base.txt exposed as tracked-mutation-post-gate through the FRESH-INDEX chain, got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head — the forged candidate never landed");
+});
+
+test("P9 audit cycle-3 MG-C3-1: a gate RELOCATING its gitdir (worktree move + gitdir-pointer rewrite) fails CLOSED — the pre-gate layout snapshot no longer matches", async (t) => {
+  const repo = await makeRepo(t, "ep-mgc31");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-mgc31-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // The cycle-3 probe: the merge gate runs with write access to its
+  // OWN worktree registration. `git worktree move` relocates the
+  // worktree AND rewrites the .git pointer, after which every
+  // post-gate observation (`rev-parse HEAD`, status, ls-files) still
+  // resolves — against the MOVED repo — and HEAD still equals the
+  // candidate sha, so a naive chain stamps PASS on a worktree whose
+  // on-disk bytes are no longer observed where the host thinks they
+  // are. The fix snapshots the REALPATH'd gitdir + common dir and a
+  // digest of the gitdir-layout files (HEAD/alternates/commondir/
+  // gitdir/worktrees) BEFORE the gate and re-checks after: any drift
+  // fails closed with gitdir-relocated-post-gate. The probe here is
+  // the minimal deterministic redirect: move the linked worktree's
+  // admin dir and replace it with a symlink — HEAD, status, and
+  // ls-files all still resolve (through the symlink) with HEAD ==
+  // candidate sha, so only the realpath'd identity check exposes it.
+  const gateCmd = 'if [ -f .git ]; then p="$(git rev-parse --absolute-git-dir)"; mv "$p" "$p.evil" && ln -s "$p.evil" "$p"; fi; exit 0';
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-mgc31", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `a gitdir-relocating gate must not integrate (got ${res.result.stopped})`);
+  assert.equal(res.result.stopped, "halt");
+  assert.equal(res.result.detail, "integration-refused");
+
+  const evidence = (await readFile(join(root, "ep-mgc31", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const candidateGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /gitdir-relocated-post-gate|git-layout-drift-post-gate|git-layout-unobservable-post-gate/.test(e.text ?? ""));
+  assert.ok(candidateGate.length >= 1,
+    `expected gitdir-relocated-post-gate (pre-gate layout snapshot mismatch), got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head");
+});
+
+test("P9 audit p12c5 cycle-2 C2-F3 (audit finding 3): an UNRESOLVED seq-high-water record is HELD — the next activation re-derives the SAME seq (crash recovery stays reachable)", async (t) => {
+  const repo = await makeRepo(t, "ep-c2f3");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-c2f3-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // C2-F3: the OLD allocator advanced unconditionally past EVERY
+  // persisted seq-high-water record — but a record only PROVES the seq
+  // was spent once its identity reached an ACKED terminal. A crashed
+  // allocation (intent appended, no outcome) left a record whose seq
+  // was never consumed; advancing past it made the next activation
+  // derive a NEW identity, stranding the open intent beyond P12's
+  // recovery. The fix consumes a high-water ONLY when an acked merge
+  // outcome carries that allocation seq (`<actionId>#o<seq>[r<k>][f]`).
+  // Fixture: a valid, UNCONSUMED high-water at seq 7 seeded before the
+  // first activation. Pre-fix the merge would run at seq 8 (a fresh
+  // external identity over a phantom-spent seq); post-fix it must run
+  // at seq 0 — observable through the outcome record id's `#o<seq>` suffix.
+  const epDir = join(root, "ep-c2f3");
+  await mkdir(join(epDir, "events"), { recursive: true });
+  await writeFile(join(epDir, "events", "decisions.jsonl"),
+    JSON.stringify({ schema: "tre-supervisor/1", kind: "seq-high-water", id: "seqhw-ep-c2f3-t1-7", ts: 1700000000, episodeId: "ep-c2f3", taskId: "t1", seq: 7 }) + "\n");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-c2f3", "test -f base.txt"), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    log: (l) => { t.diagnostic(l); },
+  });
+  assert.equal(res.result.stopped, "accepted-finish", `a phantom high-water must not block integration (${res.result.stopped}; detail=${res.result.detail ?? ""})`);
+
+  const journal = await DecisionJournal.forEpisode(epDir);
+  const { records } = await journal.read();
+  const recs = records as { kind?: string; action?: string; actionId?: string; id?: string; seq?: number }[];
+  // P12's OWN terminal carries the allocation seq in its id suffix
+  // (`a-<taskId>-merge-<16hex>#o<seq>`); the loop-side sup-… outcome
+  // does not name the seq, so read P12's record directly.
+  const p12Outcome = recs.find((r) => r.kind === "decision-outcome" && typeof r.id === "string" && /^a-t1-merge-[0-9a-f]{16}#o\d/.test(r.id));
+  assert.ok(p12Outcome, `expected a P12 merge terminal (a-t1-merge-<hex>#o<seq>) in the journal, got ${JSON.stringify(recs.map((r) => String(r.id)))}`);
+  // Audit finding 3: an UNRESOLVED high-water (no acked outcome) is
+  // HELD, never skipped — the allocator re-derives seq 7 (the open
+  // allocation) rather than dropping to 0, so P12 can reach the
+  // identity that owns any open intent / act-unknown terminal there.
+  assert.match(p12Outcome.id as string, /#o7$/,
+    `an unresolved high-water(seq=7) must be RE-DERIVED, not skipped to 0 (id ${p12Outcome.id as string}); skipping it bypassed recovery of the identity at seq 7`);
+  // The re-derived allocation re-records the same high-water (max is
+  // idempotent), and the seeded record survives untouched.
+  const hws = recs.filter((r) => r.kind === "seq-high-water").map((r) => r.seq).sort((a, b) => (a as number) - (b as number));
+  assert.deepEqual(hws, [7, 7], "the seeded seq-7 record survives and the re-derived allocation re-records seq 7 (idempotent max)");
+});
+
 test("P9 negative: NO episodeBranch ⇒ no port, no disclosure, NO trigger; accepted WITHOUT touching the branch", async (t) => {
   const repo = await makeRepo(t, "ep-neg");
   const root = await mkdtemp(join(tmpdir(), "tre-host-mp-neg-"));
@@ -285,4 +503,141 @@ test("P9 negative: NO episodeBranch ⇒ no port, no disclosure, NO trigger; acce
   assert.equal(res.result.stopped, "accepted-finish", "acceptance still works without the integration trigger");
   assert.notEqual(res.result.detail, "integrated", "no detail=integrated without the trigger");
   assert.equal(head(repo, "refs/heads/ep1"), episodeHeadBefore, "the episode branch stands untouched — merge-unwired doctrine");
+});
+
+// MG-C4-A3 regression (audit finding 1, A3 BUG-staged-divergence): the
+// gate's OWN index may diverge from HEAD while the on-disk bytes stay
+// clean. `diff-index --cached` WITHOUT --quiet exits 0 even when the
+// index differs, so the staged check must read the exit as a verdict.
+// The gate restages a rewritten file and restores the worktree copy —
+// status is clean, the staged tree is forged.
+test("MG-C4-A3 audit-1: a gate that stages altered content and restores the worktree fails CLOSED — the staged-tree divergence is refused", async (t) => {
+  const repo = await makeRepo(t, "ep-staged");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-staged-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  const gateCmd = "if [ -f .git ]; then printf FORGED > base.txt; git add base.txt; printf 'base\\n' > base.txt; fi; exit 0";
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-staged", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `a staged-divergent gate must not integrate (got ${res.result.stopped}; detail=${res.result.detail ?? ""})`);
+  assert.equal(res.result.detail, "integration-refused");
+
+  const evidence = (await readFile(join(root, "ep-staged", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const stagedGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /staged-tree-divergence-post-gate/.test(e.text ?? ""));
+  assert.ok(stagedGate.length >= 1, `expected staged-tree-divergence-post-gate, got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head");
+});
+
+// MG-C4-A3 regression (A3 BUG-class `blob-overwrite`): a gate that
+// corrupts a LOOSE OBJECT at its hash path makes the same sha resolve
+// to different bytes for the next reader while every path-level digest
+// and every status stays silent (probe, git 2.54: `git status` on a
+// store with a corrupted blob exits 0 CLEAN; `fsck` alone sees it —
+// and `fsck --connectivity-only` does NOT re-hash content, so the
+// post-gate check is the FULL fsck). The gate below overwrites the
+// candidate's OWN base.txt blob with valid-zlib but foreign bytes —
+// exactly the reinterpretation-at-identity attack — and must be
+// refused by the object-store-fsck-post-gate evidence path.
+test("MG-C4-A3: a gate that corrupts a loose blob fails CLOSED — full fsck exposes the corruption, the branch never moves", async (t) => {
+  const repo = await makeRepo(t, "ep-fsck");
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-fsck-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // Runs ONLY in the detached merge-gate worktree (the `-f .git` test:
+  // linked worktrees carry .git as a FILE). Resolve the candidate's OWN
+  // base.txt blob through git itself, then overwrite the loose object
+  // with different content under the SAME hash path. Loose objects are
+  // 0444 — chmod first. The split uses cut (a nested-`${var%p}` form
+  // cannot survive the adapter's shell-quoting — probe: exit 2 from
+  // the policy gate before the trigger ever fired). The write's exit
+  // status is deliberately NOT checked here: if the forgery silently
+  // fails, the test's own evidence assertion below fails LOUD (never
+  // a vacuous pass).
+  // The forged object is a VALID Git loose object (zlib stream of a
+  // `blob <len>\0` header plus foreign bytes) stored under the
+  // ORIGINAL hash path — so it inflates and reads fine, and only a
+  // full fsck re-hashing the content exposes the hash mismatch.
+  // python3 is used to write it: git's own tooling cannot author a
+  // mismatched object.
+  const gateCmd = 'if [ -f .git ]; then'
+    + ' oid=$(git rev-parse HEAD:base.txt);'
+    + ' od=$(git rev-parse --git-path objects);'
+    + ' pre=$(printf %s "$oid" | cut -c 1-2);'
+    + ' suf=$(printf %s "$oid" | cut -c 3-);'
+    + ' chmod u+w "$od/$pre/$suf" 2>/dev/null;'
+    + ' python3 -c \'import zlib,sys; open(sys.argv[1],"wb").write(zlib.compress(b"blob 7\\0FORGED\\n"))\' "$od/$pre/$suf" 2>/dev/null;'
+    + ' fi; exit 0';
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-fsck", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `a store-corrupting gate must not yield an integrated finish (got ${res.result.stopped}; detail=${res.result.detail ?? ""})`);
+  assert.equal(res.result.detail, "integration-refused", "the stop discloses the integration refusal");
+
+  const evidence = (await readFile(join(root, "ep-fsck", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const fsckGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /object-store-fsck-post-gate/.test(e.text ?? ""));
+  assert.ok(fsckGate.length >= 1, `expected a candidate merge-gate run failed by object-store-fsck-post-gate, got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+  // The evidence carries the fsck exit (non-zero) — never a bare string.
+  assert.match(String(fsckGate[0]?.text ?? ""), /object-store-fsck-post-gate:exit=[1-9]/, "the refusal names the failing fsck exit code");
+
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head — a candidate over a corrupt store never landed");
+});
+
+// MG-C4-A3 regression (A3 BUG-class `tracked-eol`): a CANDIDATE COMMIT
+// carrying `.gitattributes` with `text eol=crlf` bends git's BUILT-IN
+// conversions — no filter pin touches them. Un-neutralized, the gate
+// worktree materializes CRLF bytes (≠ the raw blob), the gate rewrites
+// the file TO those CRLF bytes, and `status` reads CLEAN: the accepted
+// verdict is certified against bytes that were never the candidate's
+// (A3 fixture: MERGED_BASE_HEX stayed "base" — stale certification of
+// an untested worktree state). The fix pins GIT_ATTR_SOURCE to the
+// empty tree on the materialization AND the observation, so the
+// on-disk bytes are raw and the rewrite reports modified.
+test("MG-C4-A3: a candidate with eol=crlf attributes cannot mask gate-rewritten bytes — the raw-comparing status fails the gate CLOSED", async (t) => {
+  // The task branch adds `.gitattributes` (eol rule over base.txt) →
+  // the MERGED candidate commit carries it, so the conversion rule is
+  // part of what is being certified.
+  const repo = await makeRepo(t, "ep-eol", { "task.txt": "task work\n", ".gitattributes": "base.txt text eol=crlf\n" });
+  const root = await mkdtemp(join(tmpdir(), "tre-host-mp-eol-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const worker = await exitZeroWorker(root);
+
+  // Worktree-only mutation: CRLF bytes where the candidate blob says
+  // LF. With attribute identity pinned the fresh-index status MUST see
+  // it; un-pinned, git's own smudge comparison declares it clean.
+  const gateCmd = "if [ -f .git ]; then printf 'base\\r\\n' > base.txt; fi; exit 0";
+  const preHead = head(repo, "refs/heads/ep1");
+
+  const res = await runHostEpisode({
+    episodesRoot: root, graph: baseGraph("ep-eol", gateCmd), taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, worktreePath: repo, episodeBranch: "ep1",
+    maxIterations: 1,
+    log: (l) => { t.diagnostic(l); },
+  });
+
+  assert.notEqual(res.result.stopped, "accepted-finish", `the eol-masked mutation must not certify (got ${res.result.stopped}; detail=${res.result.detail ?? ""})`);
+  assert.equal(res.result.detail, "integration-refused", "the stop discloses the integration refusal");
+
+  const evidence = (await readFile(join(root, "ep-eol", "acceptance", "evidence.jsonl"), "utf8"))
+    .split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { sha?: string; text?: string });
+  const eolGate = evidence.filter((e) => /merge-gate/.test(e.text ?? "") && /tracked-mutation-post-gate/.test(e.text ?? ""));
+  assert.ok(eolGate.length >= 1, `expected the raw-comparing post-gate status to report the CRLF rewrite as a tracked mutation, got ${JSON.stringify(evidence.map((e) => e.text?.slice(0, 160)))}`);
+
+  assert.equal(head(repo, "refs/heads/ep1"), preHead, "the episode branch stands at the pre-run head");
 });

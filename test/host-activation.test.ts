@@ -13,7 +13,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, chmod, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, chmod, rm, mkdir } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -135,7 +136,7 @@ test("activate: a usage error exits 2 and prints the reason + usage (stderr, no 
   assert.ok(lines.some((l) => l.includes("usage: tre.-episode")), "usage follows the reason");
 });
 
-async function freshEpisode(t: { diagnostic: (m: string) => void; after: (fn: () => void) => void }): Promise<{ root: string; graphPath: string; graph: EpisodeGraph; worker: string }> {
+async function freshEpisode(t: { diagnostic: (m: string) => void; after: (fn: () => void) => void }): Promise<{ root: string; graphPath: string; graph: EpisodeGraph; worker: string; wt: string }> {
   const root = await mkdtemp(join(tmpdir(), "activate-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const graph: EpisodeGraph = {
@@ -155,14 +156,24 @@ async function freshEpisode(t: { diagnostic: (m: string) => void; after: (fn: ()
   const worker = join(root, "worker.sh");
   await writeFile(worker, "#!/bin/sh\nexit 0\n");
   await chmod(worker, 0o755);
-  return { root, graphPath: join(dir, "graph.json"), graph, worker };
+  // R3-F2 (audit round-3): acceptance evidence must bind to an
+  // OBSERVABLE tree — the unmeasured no-worktree fallback identity now
+  // refuses comparison against everything (including itself), so the
+  // happy-path activation carries a real git worktree.
+  const wt = join(root, "wt");
+  await mkdir(wt, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: wt });
+  await writeFile(join(wt, "f.txt"), "base\n");
+  execFileSync("git", ["add", "f.txt"], { cwd: wt });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"], { cwd: wt });
+  return { root, graphPath: join(dir, "graph.json"), graph, worker, wt };
 }
 
 test("activate e2e: a real exit-0 episode over the REAL modules exits 0 with the stop summary", async (t) => {
-  const { root, graphPath, worker } = await freshEpisode(t);
+  const { root, graphPath, worker, wt } = await freshEpisode(t);
   const lines: string[] = [];
   const code = await activate(
-    ["--graph", graphPath, "--task", "t1", "--episodes-root", root, "--worker", worker, "--max-iterations", "3"],
+    ["--graph", graphPath, "--task", "t1", "--episodes-root", root, "--worktree", wt, "--worker", worker, "--max-iterations", "3"],
     (l) => lines.push(l),
   );
   assert.equal(code, 0, `exit code (log: ${lines.join(" | ")})`);
@@ -185,7 +196,7 @@ test("activate: a task absent from the graph is a setup failure (exit 1)", async
 });
 
 test("activate: --telegram with no machine bridge still runs, and the MISSING delivery is disclosed — never claimed", async (t) => {
-  const { root, graphPath, worker } = await freshEpisode(t);
+  const { root, graphPath, worker, wt } = await freshEpisode(t);
   const lines: string[] = [];
   // HOME points at the tmp dir: no machine-level bot config exists, so the
   // bridge comes up disabled — the documented refusal path (docs/19 §5).
@@ -193,7 +204,7 @@ test("activate: --telegram with no machine bridge still runs, and the MISSING de
   process.env["HOME"] = root;
   try {
     const code = await activate(
-      ["--graph", graphPath, "--task", "t1", "--episodes-root", root, "--worker", worker, "--telegram"],
+      ["--graph", graphPath, "--task", "t1", "--episodes-root", root, "--worktree", wt, "--worker", worker, "--telegram"],
       (l) => lines.push(l),
     );
     assert.equal(code, 0);

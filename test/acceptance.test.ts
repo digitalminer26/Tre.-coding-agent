@@ -214,6 +214,42 @@ test("sameArtifact: sha + dirty/dirtyDigest semantics", () => {
   assert.ok(!sameArtifact({ sha: SHA, dirty: true, dirtyDigest: "d1" }, { sha: SHA, dirty: true }), "measured ≠ unmeasured");
 });
 
+test("R3-F2 (audit round-3): an UNOBSERVABLE identity refuses everything, INCLUDING ITSELF", () => {
+  const UNOBS = { sha: SHA, dirty: true, unobservable: true as const, dirtyDigest: "deadbeef" };
+  // The self-comparison is the actual vulnerability shape: evidence and
+  // current minted by ONE failed observation are reference-equal, and
+  // the pre-fix code passed forged bytes to integration that way.
+  assert.ok(!sameArtifact(UNOBS, UNOBS), "an unmeasured identity certifies NOTHING — not even the observation that minted it");
+  assert.ok(!sameArtifact(UNOBS, { ...UNOBS }), "and not a structural copy either");
+  assert.ok(!sameArtifact(UNOBS, { sha: SHA, dirty: true, dirtyDigest: "deadbeef" }), "marker on one side refuses the pair");
+  assert.ok(!sameArtifact({ sha: SHA, dirty: true, dirtyDigest: "deadbeef" }, UNOBS), "…on either side");
+  assert.ok(!sameArtifact({ sha: SHA, unobservable: true }, { sha: SHA }), "an unobservable clean-claim refuses the clean commit");
+  // A plain identity is unaffected: legitimate observability never
+  // regresses (no false negatives).
+  assert.ok(sameArtifact(ID_DIRTY, { sha: SHA, dirty: true, dirtyDigest: "d1" }), "observable semantics unchanged");
+  // The marker rides identityOnly into the durable record, and the
+  // record validator accepts it (mirror of the journal boolTrue shape).
+  const rec = toAcceptanceRecord({
+    verdict: "uncertain",
+    taskId: "t1",
+    taskRevision: 1,
+    criteria: [{ id: "c1", pass: false }],
+    remainingWork: [],
+    staleEvidenceRefs: [],
+    artifact: UNOBS,
+    reasons: ["evidence:current-identity-unobservable"],
+    modelAdvisory: null,
+  });
+  assert.equal(rec.artifact?.unobservable, true, "a stored assessment bound to an unmeasured identity declares itself one");
+  const env = { schema: "tre-supervisor/1" as const, id: "d-unobs", ts: 1, episodeId: "ep", ...rec };
+  validateSupervisorRecord(env); // the journal shape accepts the literal-true marker
+  assert.throws(
+    () => validateSupervisorRecord({ ...env, artifact: { ...env.artifact, unobservable: false } } as never),
+    EpisodeSchemaError,
+    "the marker is literal true only (boolTrue) — a false/'true' value is a schema violation",
+  );
+});
+
 test("current identity is dirty: clean-sha evidence is stale; matching dirty identity counts", () => {
   const a = evaluate(input({ current: { ...ID_DIRTY } }));
   assert.equal(a.verdict, "uncertain", "clean evidence at dirty current is stale");

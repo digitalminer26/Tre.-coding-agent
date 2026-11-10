@@ -1,5 +1,65 @@
 # HANDOFF
 
+## 2026-11-10 — Observation-hardening stack (merge-gate MG-C3/C4 + acceptance R3-F2/R4-B1 + round-5 R5-B1/R5-B2), committed as one increment
+
+This tree lands the whole audit-driven observation-hardening stack that
+round 5 was run against (working tree at audit time = fff99fc + these
+changes; report `.tre/audits/r5-sol-report.md`), now including the two
+round-5 blockers it found.
+
+- **Merge-gate identity/layout hardening (MG-C3-1/C3-2, MG-C4-1/C4-2)**
+  — the gate's post-run re-observation snapshots the gitdir identity +
+  object-store layout (shadow-`.git` symlink / alternates rewrite ⇒
+  verdict disqualified), refuses `core.hooksPath`/`core.symlinks`/
+  interpretation-state flips written into the SHARED common dir during
+  the gate, pins the clean/smudge drivers *and* their stat-cache (the
+  fresh-index `read-tree` + `GIT_ATTR_SOURCE=EMPTY_TREE` shape), and
+  treats an `??`-materialized attributes file as dirt, not content.
+- **Acceptance R3-F2**: an observation that FAILED to measure (failed
+  status/write-tree/diff, unreadable untracked/flagged file, hidden
+  dirt) carries `unobservable: true`, and `sameArtifact` refuses it
+  against EVERYTHING including itself (a stored assessment bound to an
+  unmeasured identity shows the marker through the journal schema).
+- **R4-B1 (round-4 blocker)**: `observeIdentity` moved to a THROWAWAY
+  index per observation (`buildFreshObservationIndex`: temp
+  `GIT_INDEX_FILE` + `read-tree HEAD`, `GIT_ATTR_SOURCE=EMPTY_TREE`) —
+  no stat cache, no filter path — killing the `filter.evil.clean` +
+  stat-refresh false-clean chain (tests `test/audit-round4.test.ts`).
+- **R5-F1 (this round, earlier fix)**: the identity's `diff HEAD` runs
+  against the SAME fresh index as the status (shared read-tree), so no
+  plain-status stat refresh between the two can hide bytes.
+- **R5-B1 (round-5 blocker, pre-existing channel)**: repo config
+  `submodule.<name>.ignore=all` hid populated-submodule modifications
+  from BOTH status paths (the `diff.ignoreSubmodules=none` pin covers
+  diff, not status; GIT_ATTR_SOURCE does not reach submodule handling).
+  Fix: `--ignore-submodules=none` on the COMMAND LINE (beats config)
+  in `observeStatusFresh` and both integration-gate status invocations
+  — quiet + exit 0 on uninitialized submodules (verified, pinned).
+- **R5-B2 (round-5 blocker, REGRESSION of the fresh-index port)**: the
+  fresh index compares HEAD↔worktree, so a staged divergence with the
+  worktree restored to HEAD content read CLEAN (porcelain empty, every
+  ls-files tag `H`) *before* the write-tree real-index digest — two
+  distinct staged states observed byte-equal-clean while the
+  integration gate refuses exactly that state. Fix: the clean branch
+  is gated on the gate's own real-index check
+  (`--no-optional-locks diff-index --cached --quiet
+  --ignore-submodules=none HEAD --`): exit 1 falls through to the
+  dirty path (digest folds write-tree of the REAL index), exit ≥128 /
+  truncated fails closed unobservable, exit 0 returns clean.
+- **Tests**: `test/audit-round5.test.ts` — staged divergence never
+  clean (unit), staged payloads discriminating + stable, staged→unstaged
+  returns clean (control), clean-stamped evidence goes STALE against a
+  staged divergence (no `complete` re-mint), `ignore=all` cannot hide
+  child bytes (unit + no-`complete` end-to-end), uninitialized submodule
+  stays clean (control for the cmd-line pin). Mutation notes in the file
+  header. Full suite green twice (2582 pass / 0 fail / 14 skip); the
+  identity/gate suites ran 5× with no flakes.
+- **Deliberate NON-change**: the evaluator does NOT refuse `complete`
+  merely because `current.dirty` — evidence binding (`sameArtifact`) is
+  the currency mechanism, dirty-digests make evidence discriminate, and
+  the R5-B2 fix restores the missing signal at the observation layer
+  where it belongs (test 6 pins the stale-evidence property end-to-end).
+
 ## 2026-11-08 — P20 cycle 11a (audit of cf4ff04): F4 flakiness fixed, mutation claims re-verified honestly
 
 A read-only audit of cf4ff04 found one MAJOR test defect and one

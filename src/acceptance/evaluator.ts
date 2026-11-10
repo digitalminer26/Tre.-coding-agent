@@ -42,6 +42,15 @@ export interface ArtifactIdentity {
   sha: string;
   dirty?: boolean;
   dirtyDigest?: string;
+  /** R3-F2 (audit round-3): the observation FAILED to measure this tree
+   *  (unobservable attributes, failed/truncated status or write-tree,
+   *  exclude-hidden dirt, …) — the identity carries no measurement, only
+   *  a refusal. `sameArtifact` refuses it against EVERYTHING, including
+   *  itself: an unmeasured identity can never certify anything, not
+   *  even the observation that minted it (the nonce dirtyDigest closes
+   *  cross-observation equality but a self-comparison — evidence and
+   *  current from ONE observation — needs this marker). */
+  unobservable?: true;
 }
 
 export interface AcceptanceCriterionSpec {
@@ -163,6 +172,9 @@ function identityOnly(a: ArtifactIdentity): ArtifactIdentity {
   const out: ArtifactIdentity = { sha: a.sha };
   if (a.dirty !== undefined) out.dirty = a.dirty;
   if (a.dirtyDigest !== undefined) out.dirtyDigest = a.dirtyDigest;
+  // R3-F2: the marker rides into the durable record — a stored
+  // assessment bound to an unmeasured identity must show it is one.
+  if (a.unobservable === true) out.unobservable = true;
   return out;
 }
 
@@ -183,6 +195,17 @@ export function sameArtifact(a: ArtifactIdentity, b: ArtifactIdentity): boolean 
     !validIdentity(a) || !validIdentity(b) ||
     a.sha.length === 0 || b.sha.length === 0
   ) return false;
+  // R3-F2 (audit round-3): an UNOBSERVABLE identity is unmeasured, and
+  // an unmeasured identity is never the same artifact as anything —
+  // INCLUDING ITSELF. Evidence stamped from one failed observation and
+  // the current identity from that same observation would otherwise
+  // compare equal by reference-equal digests, funding an artifact-only
+  // acceptance on tree bytes nothing measured (probe: a pre-seeded
+  // info/attributes rule + an empty-criteria task + one artifact: the
+  // gate overwrites the artifact with FORGED bytes and the run accepts
+  // with verdict `complete`). The dirtyDigest nonce closes equality
+  // ACROSS observations; this closes equality OF an observation.
+  if (a.unobservable === true || b.unobservable === true) return false;
   if (a.sha !== b.sha) return false;
   const da = a.dirty === true;
   const db = b.dirty === true;
