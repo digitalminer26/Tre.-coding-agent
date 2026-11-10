@@ -1,9 +1,9 @@
 # 20. P9/M2 — Shared supervision: DAG scheduler, N workers, measured endpoint capacity
 
-Status: **M2 spec (docs-first round) — this document is the contract M2
-implements.** No M2 code exists yet; nothing here pre-implements, and this
-round changes no module. Code lands only after Hong signs off the open
-decisions (§13).
+Status: **M2 contract — signed off (2026-11-09: Hong approved the
+proposed resolutions for the open decisions §13 D1–D6; code round
+in progress against this document).** This document is the contract M2
+implements; it changes no module by itself.
 Scope: P9/M2 ONLY (docs/11 §11.4: "shared supervision for two or N
 workers"). M3 (broader autonomy, fleet budget layer) and M4 (dashboard,
 multi-episode fleet, CLI attach) are NOT in scope.
@@ -312,8 +312,8 @@ GPU reality applies).
   §4: "the episode budget is the backstop"), so enforcement is the
   doctrine's intent; the aggregate must also be checked BEFORE admitting
   a new task (reserve-first doctrine: admission asks the ledger for the
-  standing coverage, never an estimate of its own invention). D6 is for
-  Hong's sign-off.
+  standing coverage, never an estimate of its own invention). D6
+  RESOLVED as (a) — see §13.
 - **Coverage mode (docs/12 §7.7) is the revocation path:** tightening
   policy mid-episode makes redelivered reserves fail `policy-revoked`
   — unchanged; with N loops the only new requirement is that the
@@ -435,37 +435,34 @@ injected once per scheduling decision like the ledger fold does.
   the scheduler's in-memory live set on each write, never an input;
   a corrupt state.json rebuilds from reconcile, unchanged).
 
-## 13. Open decisions (for sign-off before code)
+## 13. Open decisions — RESOLVED (Hong signed off "go with the proposed
+solutions for D1–D6", 2026-11-09, Telegram). The text below is kept as
+the decision record; each is now BINDING for the code round.
 
-1. **Global vs per-endpoint observer slot default.** Proposed: one
-   global observer slot per episode (§5). Alternative: count P15 calls
-   against the endpoint's capacity slot while running (pessimistic;
-   proposed design treats the observer as a separate small consumer,
-   matching docs/11 §0 "need not consume an inference slot
-   continuously"). — **proposed: global 1, revisit after benchmark.**
-2. **Capacity file location:** machine-level
-   `~/.tre/episodes/capacity.json` (shared across episodes, matches the
-   machine-level config doctrine) vs per-episode override. Proposed:
-   machine-level only; per-episode override is an explicit non-goal
-   (episodes don't own hardware facts).
-3. **`failed` semantics granularity:** a failed task currently taints
-   only its dependents; episode `quiesced-blocked` covers mixed
-   outcomes. Alternative considered: partial-success exit codes per
-   failed count — rejected for M2 (closed 3-code map stays; the journal
-   carries the breakdown). Confirm.
-4. **Worktree retention:** keep finished-task worktrees until episode
-   cleanup (proposed — forensics + P12 acceptance refs point at them);
-   auto-removal at task `done` is M3 scope at the earliest.
-5. **P20 lease scope:** the lease name stays `host.lease` for both paths
-   (proposed — the invariant is one supervisor per episode regardless of
-   task count; renaming buys nothing and breaks takeover compat).
-6. **Episode-recovery caps enforcement (§6):** map
+1. **Global vs per-endpoint observer slot default.** **RESOLVED: global 1
+   per episode** (§5), as proposed. Rationale of the rejected alternative
+   recorded: counting P15 against endpoint capacity was pessimistic and
+   conflicts with docs/11 §0 "need not consume an inference slot
+   continuously". Revisit only if the §11 observer-contention benchmark
+   shows worker starvation.
+2. **Capacity file location.** **RESOLVED: machine-level only,
+   `~/.tre/episodes/capacity.json`**, as proposed; per-episode override
+   stays an explicit non-goal (episodes don't own hardware facts).
+3. **`failed` semantics granularity.** **RESOLVED (confirmed):** closed
+   3-code exit map stays; the journal carries the per-task breakdown.
+4. **Worktree retention.** **RESOLVED: keep finished-task worktrees
+   until episode cleanup**, as proposed; auto-removal at task `done` is
+   M3 scope at the earliest.
+5. **P20 lease scope.** **RESOLVED: lease name stays `host.lease`** for
+   both paths, as proposed (one supervisor per episode regardless of task
+   count; takeover compat preserved).
+6. **Episode-recovery caps enforcement (§6).** **RESOLVED: map
    `recoveryBudget.maxEpisodeRecoveryUsd`/`Turns` into the ledger's
-   episode `caps.usd`/`caps.turns` at policy derivation (proposed —
-   docs/11 §14.7 labels them "I7 aggregate limits", and a M2 aggregate
-   must bind admission before it binds gates), vs leaving them
-   planner-only as in M1 with the episode ceiling riding operator-set
-   ledger caps. — **proposed: map into ledger caps.**
+   episode `caps.usd`/`caps.turns` at policy derivation**, as proposed —
+   docs/11 §14.7 labels them "I7 aggregate limits" and the M2 aggregate
+   binds admission before it binds gates. They do NOT feed strategy
+   classification in the scheduler's slice; classification reads the raw
+   recoveryBudget directly, so the planner's behavior does not change.
 
 ## 14. Out of scope (explicitly, so the audit doesn't have to guess)
 
