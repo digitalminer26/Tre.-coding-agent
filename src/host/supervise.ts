@@ -521,6 +521,20 @@ export async function runObservedGit(repo: string, args: string[], timeoutS = 30
     // config; the per-call duplicates are harmless).
     "-c", "core.fsmonitor=false",
     "-c", "core.untrackedCache=false",
+    // R7-B2 (round-7 audit): `core.fileMode=false` makes EVERY worktree
+    // comparison (status, diff, write-tree's stat refresh) ignore the
+    // exec bit — a bare `chmod` on a tracked file stayed invisible to
+    // status AND to every mode-carrying digest input (probes
+    // .tre/review-probes/t5,t6: a child submodule poisoned with
+    // `core.fileMode=false` hid a chmod from its own status AND from
+    // the parent's aggregate scan; parent status went blind too).
+    // Command-line pins propagate into the submodule child scan that
+    // the parent's status spawns (probe t5: `git -c core.filemode=true
+    // status` reported `M sub` over a child whose own config said
+    // false), so forcing the bit here closes the config-poisoning route
+    // for the WHOLE observed tree; walkChildEntries binds the on-disk
+    // bit directly as a config-independent second channel.
+    "-c", "core.fileMode=true",
     // MG-C4 (audit cycle-4, INCONCLUSIVE #1): the supervisor-side git
     // runs shared no hook pin, unlike merge.ts — a repo-local (or
     // gate-written) core.hooksPath made post-checkout/reference-
@@ -776,6 +790,13 @@ async function gitLayoutDigest(gitdir: string, common: string, worktreeDir: stri
     "core.hooksPath", "core.ignoreCase", "core.symlinks", "core.sparseCheckout",
     "core.sparseCheckoutCone", "core.fsmonitor", "core.untrackedCache",
     "core.worktree", "core.excludesFile", "core.attributesFile", "core.eol",
+    // R7-B2 (round-7 audit): `core.fileMode=false` makes the worktree scan
+    // IGNORE exec-bit changes — a gate flipping a tracked file's mode
+    // stayed invisible to status AND to every mode-carrying digest input.
+    // Bind the effective value: flipping the setting itself moves the
+    // digest (and pins force the scan to honor the mode, see
+    // PINNED_NEUTRALIZING_CONFIG).
+    "core.fileMode",
     "core.autocrlf", "core.logAllRefUpdates", "core.repositoryFormatVersion",
     "core.preferSymlinkDirs",
     "extensions.worktreeConfig", "extensions.partialClone", "extensions.objectFormat",
@@ -1032,6 +1053,13 @@ async function walkChildEntries(root: string, rel: string, lines: string[], stat
     }
     if (st.isDirectory()) { await walkChildEntries(root, relp, lines, state); continue; }
     if (!st.isFile()) { lines.push(`nonfile:${relp}`); continue; }
+    // R7-B2 (round-7 audit): bind the ON-DISK exec bit (0/1) beside the
+    // content — a raw `chmod` with unchanged bytes used to leave this
+    // walk (and the parent's whole fold) untouched, so the identity
+    // never moved. `st.mode` comes from lstat, not git: no repo config
+    // can hide the bit from it. The child's INDEX modes are folded
+    // separately (ls-files -s in submoduleStatePart).
+    const execBit = (st.mode & 0o111) !== 0 ? 1 : 0;
     try {
       const h = createHash("sha256");
       const fh = await open(abs, "r");
@@ -1046,7 +1074,7 @@ async function walkChildEntries(root: string, rel: string, lines: string[], stat
           if (bytesRead === 0) break;
         }
       } finally { await fh.close(); }
-      lines.push(`f:${relp}:${total}:${h.digest("hex")}`);
+      lines.push(`f:${relp}:${total}:${execBit}:${h.digest("hex")}`);
     } catch { lines.push(`unreadable:${relp}`); state.partial = true; }
   }
 }
@@ -1065,11 +1093,23 @@ async function submoduleStatePart(cwd: string, gitlinkPaths: string[]): Promise<
     const head = await runObservedGit(child, ["rev-parse", "HEAD"], 10, { maxBytes: 64 });
     const headSha = head.code === 0 && !head.truncated && head.stdout.trim() !== "" ? head.stdout.trim() : "";
     if (headSha === "") partial = true;
+    // R7-B2 (round-7 audit): fold the child's OWN INDEX as git's
+    // path/mode/blob list (`ls-files -s -z` — mode and sha are digested,
+    // the index's content, config-independent of core.fileMode). The
+    // parent's write-tree hashes the gitlink sha only — child staged
+    // content or a staged exec-bit change left it untouched, so the
+    // dirty digest never bound the child index (e.g. staged-only child
+    // divergence between two dirty observations).
+    const childIdx = await runObservedGit(child, ["ls-files", "-s", "-z"], 10, { hashStdout: true });
+    const idxPart = childIdx.code === 0 && childIdx.stdoutDigest !== undefined && !childIdx.truncated
+      ? `idx-sha256:${childIdx.stdoutDigest}`
+      : `idx-failed:${childIdx.cause}:${childIdx.code ?? "no-digest"}`;
+    if (idxPart.startsWith("idx-failed:")) partial = true;
     const lines: string[] = [];
     const state = { count: 0, partial: false };
     await walkChildEntries(child, "", lines, state);
     if (state.partial) partial = true;
-    chunks.push(`child:${p}:head=${headSha === "" ? "unreadable" : headSha}\n${lines.join("\n")}`);
+    chunks.push(`child:${p}:head=${headSha === "" ? "unreadable" : headSha}:${idxPart}\n${lines.join("\n")}`);
   }
   return { part: chunks.join("\x00"), partial };
 }
@@ -1098,6 +1138,24 @@ async function submoduleBlindnessCheck(root: string, depth = 0): Promise<string>
     if (staged.code !== 0 && staged.code !== 1) return `child-staged-check-failed:${p}:${staged.cause}:${staged.code}`;
     if (staged.truncated) return `child-staged-check-truncated:${p}`;
     if (staged.code === 1) return `child-staged-divergence:${p}`;
+    // R7-B1 (round-7 audit): a child file excluded by the child's own
+    // .gitignore/info/exclude is NO dirt to any status — the parent's
+    // porcelain, the child's flags, and the staged check above all read
+    // byte-equal clean over an ignored payload the bare {sha} never
+    // binds (probe: `echo '*.bak' > child/.gitignore; echo X >
+    // child/x.bak` → parent observed clean; r7-verify-blockers B1c).
+    // `ls-files --others` WITHOUT exclude options lists every untracked
+    // path regardless of any exclude source (W11-A3's rule, applied to
+    // the child): on the clean branch it must be EMPTY, since plain
+    // untracked child content already forces the dirty path. Anything
+    // here is excluded content hidden inside a supposedly clean child —
+    // fail closed naming the child (paths bound only by marker).
+    const childOthers = await runObservedGit(child, ["ls-files", "--others", "-z"], 10, { maxBytes: 4 * 1024 * 1024 });
+    if (childOthers.code !== 0) return `child-others-check-failed:${p}:${childOthers.cause}:${childOthers.code}`;
+    if (childOthers.truncated) return `child-others-check-truncated:${p}`;
+    for (const rec of childOthers.stdout.split("\0")) {
+      if (rec !== "") return `child-excluded-content:${p}`;
+    }
     const nested = await submoduleBlindnessCheck(child, depth + 1);
     if (nested !== "") return nested;
   }
