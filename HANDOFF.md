@@ -1,5 +1,61 @@
 # HANDOFF
 
+## 2026-11-11 — M2 audit cycle 2: `--max-parallel` gate, live state.json slots, F1/F2/F3 probes
+
+Cycle-2 worker for the implement-audit `m2-finds` workstream. Starting HEAD
+`995ef35` (clean). Commit `c56d835` — fixes the three cycle-1 audit
+**recommendations** (no bugs; the six majors F1–F6 stay closed and untouched).
+Not pushed (the orchestrator syncs). No Telegram (the orchestrator reports).
+
+**R1 — `--max-parallel` silently ignored without `--schedule`** (`src/host/activate.ts`):
+`parseActivateArgs` accepted `--max-parallel` on the M1 `--task` path, where
+`activate()` forwards nothing to `runHostEpisode` — a dropped ceiling, silently.
+It now returns `{ error: "--max-parallel requires --schedule" }` (usage error,
+exit 2, the same mechanism as the `--schedule`/`--task` exclusion), and USAGE
+says so. Tests: `--graph g --task t --max-parallel 2` → that error;
+`--schedule --max-parallel 2 --graph g` still parses.
+
+**R2 — S6 `state.json` slots were written once, at episode end, as `{}`**
+(`src/host/supervise.ts` + `src/supervisor/schedule.ts`): docs/20 §12
+describes slots as a derived projection "rebuilt from the scheduler's
+in-memory live set on each write", but the host wrote `state.json` exactly
+once — at episode end, when the live set is necessarily drained — so mid-run
+readers only ever saw `{}`. The scheduler now publishes its live set on each
+admission, terminal, rollback and successful swap through a new narrow
+`deps.onLiveSet` hook (synchronous, try-wrapped, fire-and-forget — **never an
+await**, so the F1 stop-flag rollback window is not reopened; the scheduler
+remains the single source of truth, no parallel ledger). The host rebuilds
+`state.json`'s slots projection from it (keys `<endpoint>#<taskId>` → taskId),
+serialized behind a promise chain (last publish wins), RMW-ing the file to
+preserve the runner/loop hint rows the runner writes concurrently. The final
+write folds in the derived terminal task rows and stamps the drained (empty)
+live set, waiting for the last mid-run projection to settle first.
+
+Test (`test/host-schedule-entry.test.ts`): two tasks on distinct endpoints run
+concurrently; the mid-run file is observed to hold BOTH live slots
+(`{"endpoint-a#a":"a","endpoint-b#b":"b"}`), then the run is released and the
+final file drains to `{}` with both tasks `done`. Deterministic (a gate
+promise + bounded file spin — no fixed sleep); the gate wait is
+`Promise.race`-bounded and the run is always released in `finally`, so the
+test can never leak/cancel its neighbours. Mutation-checked: removing
+`onLiveSet` fails the mid-run assertion.
+
+**R3 — original probe absent**: recreated the F1/F2/F3 repro probes under
+`.tre/implement-audit/m2-finds/scratch/` — `probe-r4f1-f2-c13.mjs` (F1 P1b
+rollback + P1 own-admit control, F2 P2b/P2ev, F3a activation-required, F3b
+id uniqueness; all PASS against `dist/`) and `trace-r4f1.mjs` (the P1b raw
+trace). The cycle-1 auditor's bad capacity fixture (`{"*":4}`) is corrected
+to `{"*":{"maxConcurrent":4}}`; each file's header names its finding and the
+run command. `.tre/implement-audit/` is gitignored — on-disk artifacts only,
+not committed, never run by `npm test`.
+
+docs/20 §12 updated: the slots when-clause (per admission/terminal, then
+empty at episode end) and the `--max-parallel` `--schedule`-only rule.
+
+Gate: `npm run build` 0 errors; full `npm test` **2698 tests, 2684 pass,
+0 fail, 14 skipped** (baseline 2697/2683/0/14 — +1 new test). P17 import
+allow-list unchanged and green.
+
 ## 2026-11-10 — M2 F4: production host entry for the scheduler (`tre.-episode --schedule`)
 
 Docs/20 §12 host surface. `src/host/activate.ts` (still P17-thin: its
