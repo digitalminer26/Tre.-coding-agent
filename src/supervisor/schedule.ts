@@ -550,14 +550,20 @@ export interface SchedulerDeps {
   /** scheduler-level operator shutdown steer (docs/20 §3.4). */
   shutdown?: { poll(): Promise<boolean> };
   journal?: { append(record: object): Promise<void> };
-  /** AUDIT R4-F3 (round 4): per-activation identity (the host's lease
-   *  token — `token` from claimLease). Journal action ids are counters
-   *  per activation, so a restart replaying the same episode would mint
-   *  the SAME actionIds as its predecessor (durable-evidence identity
-   *  collision). With an activation given, every action id is prefixed
-   *  `sched-<activation>-`; absent (older hosts), ids keep the
-   *  historical shape — documented as activation-local. */
-  activation?: string;
+  /** AUDIT R4-F3 (round 4) + F3 (haiku55 round 5): per-activation
+   *  identity (the host's lease token — `token` from claimLease) is
+   *  REQUIRED. Journal action ids are counters per activation, so a
+   *  restart replaying the same episode minted the SAME actionIds as
+   *  its predecessor (durable-evidence identity collision — probe P3:
+   *  two activations of one episode on a shared journal emitted
+   *  identical kind/actionId/seq). An opt-in prefix left the SHIPPED
+   *  DEFAULT on the collision path; docs/20 §8 explicitly permits
+   *  re-admission after a crash, so uniqueness across activations is
+   *  the contract, not a courtesy. The host MUST pass the lease token;
+   *  a missing/blank activation is an activation refusal (throws,
+   *  setup-failure exit). Every action id — admit, deny, observer
+   *  grant, and scope-overlap — carries the slug. */
+  activation: string;
   /** raw P15 call (the host's observer resource); fairness is layered
    *  over it here — the loops only ever see hooks.investigate. */
   investigate?: (task: SchedTaskLike, packet: object, limits: object) => Promise<object>;
@@ -620,23 +626,26 @@ export async function runSchedulerEpisode(
 
   // §4.1: the capacity view is read ONCE per activation (the file is
   // operator-owned; a rebuild is a fresh activation with a fresh read).
+  // AUDIT F3 (haiku55 round 5): the activation identity is checked
+  // BEFORE anything is touched (an activation refusal throws → the
+  // host's setup-failure exit; nothing spawns).
+  if (typeof deps.activation !== "string" || deps.activation.trim() === "") {
+    throw new Error('sched: activation-required');
+  }
   let raw: string | undefined;
   try { raw = await deps.capacity.read(); } catch { raw = undefined; }
   const cap = parseCapacity(raw, now());
   const disclosures = [...cap.disclosures];
   for (const d of disclosures) log(d);
   const slots = new CapacitySlots(cap.caps, deps.maxParallel);
-  // AUDIT R4-F3 (round 4): action-id namespace = this activation. The
-  // per-task seq counters restart at 0 every activation, so a restart
-  // replaying the same episode minted the SAME journal actionIds as its
-  // predecessor (deny/admit/grant/overlap alike) — durable evidence
-  // could not tell the two activations apart. Prefix the lease token
-  // (slugged to the journal id alphabet) when the host supplies one.
-  const actSlug =
-    typeof deps.activation === "string" && deps.activation.trim() !== ""
-      ? deps.activation.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
-      : undefined;
-  const actPrefix = actSlug !== undefined ? `${actSlug}-` : "";
+  // AUDIT R4-F3 (round 4) + F3 (haiku55 round 5): the activation is
+  // REQUIRED (checked above), so every action id in this run carries
+  // the lease-token slug — the per-task seq counters restart at 0 every
+  // activation and a restart replaying the same episode would mint the
+  // SAME journal actionIds as its predecessor (deny/admit/grant/overlap
+  // alike). Prefix the lease token (slugged to the journal id alphabet).
+  const actSlug = deps.activation.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
+  const actPrefix = `${actSlug}-`;
   let observerGrants = 0;
   const observer = new ObserverQueue(deps.observerSlots ?? 1);
 
@@ -656,6 +665,30 @@ export async function runSchedulerEpisode(
   }
   for (const t of tasks) {
     const initial = sstr(t.status, 32);
+    // AUDIT F2 (haiku55 round 5): a seeded `running` whose reconcile
+    // verdict never landed (no occupies evidence) was SILENTLY IGNORED
+    // — no fate, no slot — so a possibly-live worker's endpoint was
+    // treated as free and a new task was admitted onto a cap-1
+    // endpoint (double-spawn, the exact §8 violation). A task whose
+    // worker MAY still run is parked, never double-spawned: fail
+    // closed. With occupies evidence the slot was already reserved in
+    // the occupancy pass above (R4-F2, must not regress); the fate is
+    // still parked — the evidence reserves, reconcile decides.
+    if (initial === 'running') {
+      // Without occupies evidence nothing reserved this endpoint yet —
+      // reserve it NOW (fail closed): until reconcile proves the old
+      // worker dead, its slot is not handed out (§8: a task whose
+      // worker may still run is never double-spawned onto its
+      // endpoint). Evidence-present was already reserved by the
+      // occupancy pass; this branch must not double-reserve it.
+      if (t.occupies === undefined) slots.reserve(endpointOfModel(t.model));
+      const dwhy = t.occupies !== undefined
+        ? 'reconcile-pending:occupies-evidence'
+        : 'reconcile-pending:no-evidence';
+      fates.set(t.id, { status: 'parked', detail: dwhy });
+      outcomes.set(t.id, { status: 'parked', detail: dwhy, denials: [] });
+      continue;
+    }
     if (initial === 'paused' || initial === 'done' || initial === 'failed' || initial === 'parked') {
       // AUDIT-R1: carry the durable acceptance evidence into the fate —
       // a seeded `done` whose verdict is `complete` gates its dependents
@@ -932,7 +965,13 @@ export async function runSchedulerEpisode(
         if (gotSlot) slots.release(endpoint);
         return;
       }
-      // admitted.
+      // AUDIT F1 (haiku55 round 5): remember the pre-admission state so
+      // a post-journal rollback is a true inverse — the denial HISTORY
+      // (the `denials` array) is durable disclosure and survives; the
+      // per-task derived state is restored exactly.
+      const preFate = fates.get(t.id);
+      const preOutcome = outcomes.get(t.id);
+      const preLastDenial = lastDenial.get(t.id);
       fates.set(t.id, { status: 'running' });
       outcomes.set(t.id, { status: 'running', denials: denialsFor(t.id) });
       lastDenial.delete(t.id);
@@ -945,6 +984,17 @@ export async function runSchedulerEpisode(
       running.set(t.id, { endpoint, task: t });
       admittedEver.push(t.id);
       await journal('sched-admit', { taskId: t.id, actionId: `sched-${actPrefix}${graph.episodeId}-${t.id}-admit-${admissions}`, endpoint });
+      // AUDIT F1 (haiku55 round 5): COMMIT-TIME poll. The flag as
+      // observed at the instant this admission's own sched-admit record
+      // completed. The pinned F3 (r2)/R4-F1 (r4) contract says a flag
+      // raised during THIS admission's own admit append never rolls
+      // this admission back (the task starts; only the NEXT admission
+      // stops) — this is the only moment that distinction is
+      // observable, because after the append resolves the two histories
+      // ("flag set by my admit append" vs "flag set later, in the
+      // overlap window") are otherwise indistinguishable.
+      await refreshShutdown();
+      const flagAtCommit = shutdownRequested;
       // advisory scope-overlap (§3.2): journalize, permit, never block.
       // AUDIT F4 (round 2): every admit recomputed ALL concurrent pairs,
       // so three simultaneous overlapping tasks journaled the earliest
@@ -964,6 +1014,37 @@ export async function runSchedulerEpisode(
         // `+` is excluded from TASK_ID_RE → the pair is unambiguous.
         await journal('scope-overlap', { taskId: a, actionId: `sched-${actPrefix}${graph.episodeId}-overlap-${key}`, pair: key });
         log(`scope-overlap ${a} ${b}`);
+      }
+      // AUDIT F1 (haiku55 round 5): the scope-overlap loop is the LAST
+      // await between the pre-admit re-check and the loop start — a
+      // flag raised DURING an overlap append used to still reach
+      // runOne (probe P1b: b's loop started after the operator
+      // stopped, episode reported "quiesced-complete"). Re-poll at the
+      // true last moment and ROLL THE ADMISSION BACK when the flag was
+      // raised strictly AFTER this admission's commit record: the loop
+      // never starts, the slot returns, the derived fate reverts
+      // (docs/20 §8: an admitted-but-never-started task is simply
+      // re-admitted — idempotent). The sched-admit record stays in the
+      // journal: the admission happened; its non-execution is the
+      // crash window §8 names. `flagAtCommit` keeps the r2/r4 contract
+      // (a flag from this admission's own admit append starts this
+      // loop, stops the next). After this poll there is NO await
+      // before `deps.loop` is invoked (runOne runs its async body
+      // synchronously up to the loop call).
+      await refreshShutdown();
+      if (shutdownRequested && !flagAtCommit) {
+        // Full inverse of the commit block above. The `denials` array
+        // is untouched (history is disclosure-only durable); the
+        // per-task derived state restores to the pre-admission snapshots.
+        running.delete(t.id);
+        slots.release(endpoint);
+        if (preFate === undefined) fates.delete(t.id); else fates.set(t.id, preFate);
+        if (preOutcome === undefined) outcomes.delete(t.id); else outcomes.set(t.id, preOutcome);
+        if (preLastDenial === undefined) lastDenial.delete(t.id); else lastDenial.set(t.id, preLastDenial);
+        if (admittedEver[admittedEver.length - 1] === t.id) admittedEver.pop();
+        admissions -= 1;
+        log(`sched: shutdown during the post-admit journal window — admit ${t.id} rolled back (never started)`);
+        return;
       }
       runOne(t, endpoint);
     }

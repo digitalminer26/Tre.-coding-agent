@@ -148,7 +148,7 @@ function harness(
     ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
     ...(opts.investigate !== undefined ? { investigate: opts.investigate } : {}),
     ...(opts.observerSlots !== undefined ? { observerSlots: opts.observerSlots } : {}),
-    ...(opts.activation !== undefined ? { activation: opts.activation } : {}),
+    ...(opts.activation !== undefined ? { activation: opts.activation } : { activation: "test-act-1" }),
     journal: {
       async append(record: object) {
         journalAppends.push(record as Record<string, unknown>);
@@ -878,12 +878,19 @@ test("AUDIT C1-1 (r3): a capacitySwap that frees a slot wakes the wall — a den
   // admission is possible).
   let waiterStarted = false;
   let slowDone = false;
+  // AUDIT F6 (haiku55 r5): explicit EVENT TIMELINE — the old test
+  // proved only eventual completion + single admission (mutation-
+  // proven to pass with pingDecide/wakeNow removed). The timeline
+  // pins the ORDERING: swap -> waiter-start (slowFinish still
+  // pending, inside the bounded handshake) -> slow-return.
+  const timeline: string[] = [];
   const h = harness([t("slow", { model: "A" }), t("waiter", { model: "A" })], {
     capacity: capFile({ A: 1, B: 4, "*": 4 }),
     script: {
       slow: async (hooks) => {
         await tick(5);
         assert.ok(hooks.capacitySwap("B", "A"), "the swap must succeed");
+        timeline.push("swap");
         // AUDIT R4-F4 (round 4): bounded deferred handshake — `slow`
         // stays alive UNTIL `waiter` has actually started. Pre-fix the
         // wake was lost, the handshake timed out, and waiter only
@@ -1088,7 +1095,6 @@ test("AUDIT R4-F3 (r4): journal actionIds are namespaced by activation — resta
   const shared: Record<string, unknown>[] = [];
   const h1 = harness(g(), { activation: "123.abc-def_99" });
   const h2 = harness(g(), { activation: "124.ghi-jkl_00" });
-  const h0 = harness(g());
   // a standing denial in both activations (ledger gate closed for `x`)
   const withDeny = (h: Harness) => {
     h.deps.capacity = capFile({ "*": 0 });
@@ -1101,7 +1107,7 @@ test("AUDIT R4-F3 (r4): journal actionIds are namespaced by activation — resta
   const h1o = harness([t("a")], { activation: "127.obs-one", investigate: inv, script: { a: async (hooks) => { await hooks.investigate({ reason: "r", evidence: [] }, { maxTokens: 10 }); return { stopped: "accepted-finish" }; } } });
   const h2o = harness([t("a")], { activation: "128.obs-two", investigate: inv, script: { a: async (hooks) => { await hooks.investigate({ reason: "r", evidence: [] }, { maxTokens: 10 }); return { stopped: "accepted-finish" }; } } });
   void withDeny;
-  for (const h of [h1, h2, h0, h1d, h2d, h1o, h2o]) {
+  for (const h of [h1, h2, h1d, h2d, h1o, h2o]) {
     const orig = h.deps.journal!;
     h.deps.journal = {
       async append(record: object) {
@@ -1112,17 +1118,15 @@ test("AUDIT R4-F3 (r4): journal actionIds are namespaced by activation — resta
   }
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h1.deps);
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h2.deps);
-  await runSchedulerEpisode({ episodeId: "ep-sched" }, h0.deps);
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h1d.deps);
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h2d.deps);
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h1o.deps);
   await runSchedulerEpisode({ episodeId: "ep-sched" }, h2o.deps);
   const admits = (h: Harness) => h.journalAppends.filter((r) => r["kind"] === "sched-admit").map((r) => String(r["actionId"]));
-  const ids1 = admits(h1), ids2 = admits(h2), ids0 = admits(h0);
+  const ids1 = admits(h1), ids2 = admits(h2);
   assert.equal(ids1.length, 2); assert.equal(ids2.length, 2);
   assert.equal(new Set([...ids1, ...ids2]).size, 4, "two activations of one episode mint zero colliding actionIds");
   assert.ok(ids1.every((id) => id.startsWith("sched-123.abc-def_99-ep-sched-")), "the activation slug leads the id");
-  assert.ok(ids0.every((id) => /^sched-ep-sched-[ab]-admit-\d+$/.test(id)), "no activation → the historical shape (documented activation-local)");
   // the SHARED stream: every actionId from the two named activations
   // (admit + deny + observer) is unique across the whole episode life.
   const named = shared.filter((r) => /^sched-12[345678]\./.test(String((r as { actionId?: string })["actionId"] ?? "")));
@@ -1131,12 +1135,133 @@ test("AUDIT R4-F3 (r4): journal actionIds are namespaced by activation — resta
   assert.equal(new Set(namedIds).size, namedIds.length, "zero cross-activation collisions in the shared journal (admit+deny+observer)");
 });
 
-test("AUDIT R4-F3 (r4): a blank activation is ignored (ids keep the historical shape)", async () => {
-  const h = harness([t("a")], { activation: "   " });
-  await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
-  const admits = h.journalAppends.filter((r) => r["kind"] === "sched-admit").map((r) => String(r["actionId"]));
-  assert.equal(admits.length, 1);
-  assert.match(admits[0]!, /^sched-ep-sched-a-admit-\d+$/, "whitespace-only activation never yields a leading '-' id");
+test("AUDIT F3 (haiku55 r5): the activation identity is REQUIRED — a missing/blank one refuses activation", async () => {
+  // The collision fix must not be OPT-IN: the shipped default used to
+  // be the collision path (probe P3: two activations through one
+  // shared journal emitted identical kind/actionId/seq). A missing or
+  // whitespace-only activation is now an activation refusal (throws
+  // BEFORE any spawn → the host's setup-failure exit).
+  const h = harness([t("a")]);
+  const bare = { ...h.deps } as SchedulerDeps;
+  delete (bare as { activation?: string }).activation;
+  await assert.rejects(() => runSchedulerEpisode({ episodeId: "ep-sched" }, bare), /sched: activation-required/);
+  const blank = harness([t("a")], { activation: "   " });
+  await assert.rejects(() => runSchedulerEpisode({ episodeId: "ep-sched" }, blank.deps), /sched: activation-required/);
+  const hblank = harness([t("a")], { activation: "" });
+  await assert.rejects(() => runSchedulerEpisode({ episodeId: "ep-sched" }, hblank.deps), /sched: activation-required/);
+});
+
+test("AUDIT F3 (haiku55 r5): two DEFAULT-shaped activations through one shared journal dir mint zero duplicate actionIds", async () => {
+  // The probe P3 reproduction (`.tre/delegation/haiku55-audit/logs/
+  // probe-r4f1-f2-c13.mjs`), upgraded to the required-activation
+  // contract: two activations of the SAME episode on one durable
+  // journal, each with its own lease-token-shaped activation, plus
+  // admit AND deny AND overlap records flowing through the shared
+  // stream. Zero duplicate actionIds, zero duplicate (kind,seq)
+  // collisions per activation identity.
+  const shared: Record<string, unknown>[] = [];
+  const scope = { files: ["x/*.ts"] };
+  const g = () => [t("a", { scope }), t("b", { scope })];
+  const slow = async () => { await tick(5); return { stopped: "accepted-finish" }; };
+  const mk = (activation: string) => {
+    // Delayed loop bodies: `a` must still be RUNNING when `b` is
+    // admitted, or no concurrent scope pair exists and the
+    // scope-overlap record is never journaled (probe P1b's shape).
+    const h = harness(g(), {
+      activation, capacity: capFile({ "*": 4 }),
+      script: { a: slow, b: slow },
+    });
+    const orig = h.deps.journal!;
+    h.deps.journal = {
+      async append(record: object) {
+        shared.push(record as Record<string, unknown>);
+        await orig.append(record);
+      },
+    };
+    return h;
+  };
+  const h1 = mk("901.aaa-111.0");
+  const h2 = mk("902.bbb-222.1");
+  await runSchedulerEpisode({ episodeId: "ep-sched" }, h1.deps);
+  await runSchedulerEpisode({ episodeId: "ep-sched" }, h2.deps);
+  // both activations must have journaled admits AND the overlap pair
+  const kinds = new Set(shared.map((r) => String(r["kind"])));
+  assert.ok(kinds.has("sched-admit") && kinds.has("scope-overlap"), "admits and the overlap pair are in the shared stream");
+  const ids = shared.map((r) => String(r["actionId"]));
+  assert.ok(ids.length >= 6, "both activations journaled (admit×2 + overlap per activation)");
+  const dups = ids.length - new Set(ids).size;
+  assert.equal(dups, 0, `zero duplicate actionIds across activations (probe P3 reproduced: pre-fix duplicateActionIds was 1)`);
+  assert.ok(shared.every((r) => String(r["actionId"]).startsWith("sched-90")), "every id carries an activation slug");
+});
+
+test("AUDIT F1 (haiku55 r5): a flag raised during the scope-overlap append rolls the admission back — no loop starts after the stop", async () => {
+  // Probe P1b reproduction: tasks a and b share scope.files ["x/*.ts"];
+  // the scope-overlap journal append for the a+b pair yields and the
+  // operator raises the shutdown flag DURING that await. Pre-fix the
+  // pre-admit re-check sat BEFORE the overlap loop, so b's runOne
+  // started anyway (admitted ["a","b"], stopped "quiesced-complete").
+  // Fix: re-poll after the overlap-journal loop — the last await before
+  // the loop starts — and roll the admission back (slot returned, fate
+  // reverted; §8: an admitted-but-never-started task is re-admitted).
+  // The slow loop bodies are load-bearing: `a` must still be RUNNING
+  // when `b` is admitted or no concurrent pair exists and the overlap
+  // record is never journaled (probe P1b's loop shape: tick(5)).
+  const scope = { files: ["x/*.ts"] };
+  const slow = async () => { await tick(5); return { stopped: "accepted-finish" }; };
+  const h = harness([t("a", { scope }), t("b", { scope })], {
+    capacity: capFile({ "*": 4 }),
+    script: { a: slow, b: slow },
+  });
+  let flipped = false;
+  const orig = h.deps.journal!;
+  h.deps.journal = {
+    async append(record: object) {
+      const r = record as { kind?: unknown };
+      if (r["kind"] === "scope-overlap") { await tick(1); flipped = true; } // operator stops mid-append
+      await orig.append(record);
+    },
+  };
+  h.deps.shutdown = { async poll() { return flipped; } };
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.deepEqual(h.admitted, ["a"], "b's loop NEVER started — the overlap window cannot smuggle an admission past the stop");
+  assert.equal(res.stopped, "shutdown", "the episode reports the operator stop, not quiesced-complete");
+  assert.equal(res.admissions, 1, "the rolled-back admission is not counted (b re-admittable on the next activation, §8)");
+  assert.equal(res.tasks.b, undefined, "b has no outcome — its fate reverted to queued");
+});
+
+test("AUDIT F2 (haiku55 r5): a seeded `running` task WITHOUT occupies evidence is parked — its endpoint is never handed out", async () => {
+  // Probe P2b reproduction: ghost status "running", model M, NO occupies
+  // evidence; b also targets M on a cap-1 endpoint. Pre-fix the seed
+  // loop silently IGNORED `running` (no fate, no slot) and b was
+  // admitted onto the possibly-live worker's endpoint (double-spawn,
+  // the §8 violation). Fix: any seeded `running` without a reconcile
+  // verdict is parked fail-closed; the endpoint stays occupied-for-this-
+  // activation by the parked ghost's fate (no new admission can run
+  // beside a worker that may still be live).
+  const h = harness(
+    [t("ghost", { status: "running", model: "M" }), t("b", { model: "M" })],
+    { capacity: capFile({ "*": 1, M: 1 }) },
+  );
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.ghost?.status, "parked", "the no-evidence running seed is parked, never ignored");
+  assert.match(res.tasks.ghost?.detail ?? "", /reconcile-pending:no-evidence/, "the derived fate names the missing reconcile verdict");
+  assert.deepEqual(h.admitted, [], "b is NOT admitted onto the ghost's cap-1 endpoint (pre-fix: admitted [\"b\"])");
+  assert.equal(res.stopped, "quiesced-blocked", "the episode blocks with the ghost's dependents unrun — never a false double-spawn");
+});
+
+test("AUDIT F2 (haiku55 r5): a seeded `running` WITH occupies evidence keeps reserving its slot (R4-F2 must not regress)", async () => {
+  // Probe P2: the evidence-present case stays fixed — the slot is
+  // reserved BEFORE any admission, so the cap-1 endpoint denies b. The
+  // fate is now parked too (evidence reserves; only reconcile clears).
+  const h = harness(
+    [t("ghost", { status: "running", model: "M", occupies: { endpoint: "M" } }), t("b", { model: "M" })],
+    { capacity: capFile({ "*": 1, M: 1 }) },
+  );
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.deepEqual(h.admitted, [], "the reserved slot still denies b (P2 held: admitted [], quiesced-blocked)");
+  assert.equal(res.tasks.ghost?.status, "parked", "running+evidence is parked with the evidence named");
+  assert.match(res.tasks.ghost?.detail ?? "", /reconcile-pending:occupies-evidence/);
+  assert.equal(res.stopped, "quiesced-blocked");
 });
 
 test("AUDIT R4-F1 (r4): a yields-then-REJECTS journal append cannot smuggle an admission past the stop", async () => {

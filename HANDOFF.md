@@ -1,5 +1,46 @@
 # HANDOFF
 
+## 2026-11-10 — M2 scheduler audit round 5 (F1/F2/F3): stop-flag rollback window, no-evidence running seed parked, activation identity required
+
+Fixes the three MAJOR haiku55 findings on `src/supervisor/schedule.ts`
+(report `.tre/delegation/haiku55-audit/logs/review-haiku55.md`, probes
+`probe-r4f1-f2-c13.mjs` + `.out.txt`):
+
+- **F1**: the scope-overlap journal loop was the last await between the
+  pre-admit shutdown re-check and `runOne` — a flag raised during an
+  overlap append still started the loop (probe P1b). The admission now
+  takes a COMMIT-TIME poll right after its `sched-admit` append resolves
+  (the only moment that distinguishes "flag set by my own admit append"
+  from "flag set later"), re-polls after the overlap loop, and rolls the
+  admission BACK (slot returned, live set / fate / outcome / lastDenial
+  restored to pre-admission snapshots, `admittedEver` popped, admissions
+  decremented; the sched-admit journal record stays — §8's crash window)
+  only when the flag rose strictly after the commit. This keeps the
+  pinned F3 (r2) / R4-F1 (r4) contract (a flag set during a task's OWN
+  admit append starts that task, stops the NEXT admission) while closing
+  the overlap window; after the last poll there is no await before
+  `deps.loop` runs. Tests `AUDIT F1 (haiku55 r5)` (+ the two pinned
+  older tests, unmodified — the predecessor's unconditional post-overlap
+  re-poll regressed them and is replaced).
+- **F2**: a seeded `running` task with NO `occupies` evidence was
+  silently ignored (no fate, no slot) — probe P2b admitted a new task
+  onto a possibly-live worker's cap-1 endpoint. It is now parked
+  fail-closed (`reconcile-pending:no-evidence`) and reserves its
+  endpoint for the activation; with evidence the R4-F2 occupancy pass
+  still reserves (pinned, `reconcile-pending:occupies-evidence`).
+- **F3**: `activation` is REQUIRED (throws `sched: activation-required`
+  before any await/spawn → the host's setup-failure exit). The opt-in
+  prefix left the shipped default on the collision path (probe P3);
+  every action id (admit/deny/observer/overlap) carries the lease-token
+  slug. `AUDIT R4-F3 (r4)` updated (the no-activation historical-shape
+  case is deleted with the contract), new tests pin the refusal and the
+  zero-duplicate shared-journal reproduction.
+
+78/78 host-schedule, 94/94 budget-ledger+host-activation green. F4
+(host wiring), F5 (sched-gate floorOf), F6 (swap-wake ordering test)
+follow in separate increments.
+
+
 ## 2026-11-10 — Observation-hardening stack (merge-gate MG-C3/C4 + acceptance R3-F2/R4-B1 + round-5 R5-B1/R5-B2), committed as one increment
 
 This tree lands the whole audit-driven observation-hardening stack that
