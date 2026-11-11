@@ -424,7 +424,8 @@ injected once per scheduling decision like the ledger fold does.
   and `--schedule` are mutually exclusive (M1 path unchanged; one flag
   decides whether the host drives one loop or the scheduler drives N).
   `--max-parallel` can only LOWER the capacity-file admission (a policy
-  ceiling), never raise it.
+  ceiling), never raise it; it is a `--schedule`-only flag (on the M1
+  `--task` path it is refused as a usage error, never silently ignored).
 - M1's single-task activation remains the supported debugging path
   (per-task loops can be run individually across processes only if the
   lease is held out — documented as forensics mode, NOT concurrency:
@@ -433,7 +434,11 @@ injected once per scheduling decision like the ledger fold does.
 - S6 `state.json` slots: derived projection of the scheduler's live set
   (`{localA: taskId|null, …}` shape stays a projection — rebuilt from
   the scheduler's in-memory live set on each write, never an input;
-  a corrupt state.json rebuilds from reconcile, unchanged).
+  a corrupt state.json rebuilds from reconcile, unchanged). The host
+  rewrites it on each admission and each terminal transition (the
+  scheduler publishes its live set per event; keys are
+  `<endpoint>#<taskId>` → taskId), and once more — empty — at episode
+  end, so a mid-run reader sees the live occupancy, not only `{}`.
 
 ## 13. Open decisions — RESOLVED (Hong signed off "go with the proposed
 solutions for D1–D6", 2026-11-09, Telegram). The text below is kept as

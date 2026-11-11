@@ -114,6 +114,9 @@ test("parse: usage errors — missing required, unknown flag, dangling value, ba
   assert.equal(errOf(["--max-iterations", "1.5"]), "--max-iterations must be a positive integer");
   assert.equal(errOf(["--max-iterations", "-2"]), "--max-iterations must be a positive integer");
   assert.equal(errOf(["--max-iterations", "abc"]), "--max-iterations must be a positive integer");
+  // M2 audit cycle 2 (R1): --max-parallel is a --schedule-only ceiling.
+  // On the M1 --task path it was accepted and silently dropped.
+  assert.equal(errOf(["--graph", "g", "--task", "t", "--max-parallel", "2"]), "--max-parallel requires --schedule");
 });
 
 test("parse: --help is a request, not an error", () => {

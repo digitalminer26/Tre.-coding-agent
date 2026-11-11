@@ -19,6 +19,10 @@ test("schedule entry: parse surface and existing closed exit map", async () => {
   assert.deepEqual(parseActivateArgs(["--graph", "g", "--schedule", "--task", "a"]), { error: "--schedule and --task are mutually exclusive" });
   assert.deepEqual(parseActivateArgs(["--schedule"]), { error: "--graph is required" });
   for (const n of ["0", "-1", "1.5", "NaN", "Infinity"]) assert.ok("error" in parseActivateArgs(["--graph", "g", "--schedule", "--max-parallel", n]));
+  // M2 audit cycle 2 (R1): --max-parallel WITHOUT --schedule is a usage
+  // error, never a silently-ignored flag (the M1 path drops it).
+  assert.deepEqual(parseActivateArgs(["--graph", "g", "--task", "t", "--max-parallel", "2"]), { error: "--max-parallel requires --schedule" });
+  assert.ok(!("error" in parseActivateArgs(["--schedule", "--max-parallel", "2", "--graph", "g"])), "--max-parallel with --schedule still parses");
   const logs: string[] = [];
   assert.equal(await activate(["--help"], (s) => logs.push(s)), 0);
   assert.match(logs.join("\n"), /--schedule/);
@@ -60,6 +64,66 @@ test("schedule entry: two scripted tasks share one lease, ledger admission, dura
     await assert.rejects(readFile(join(res.episodePath, "host.lease")), { code: "ENOENT" });
     assert.ok(res.disclosures.some((s) => s.includes("NO per-task isolation")));
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("schedule entry: state.json slots is a LIVE projection rebuilt on each admission and terminal (R2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sched-slots-entry-"));
+  const logs: string[] = [];
+  let release!: () => void;
+  const opened = new Promise<void>((r) => { release = r; });
+  let bothRunning!: () => void;
+  const gate = new Promise<void>((r) => { bothRunning = r; });
+  let inFlight = 0;
+  const statePath = join(root, "schedule-entry", "state.json");
+  let run: ReturnType<typeof runScheduledHostEpisode> | undefined;
+  try {
+    const g = graph();
+    // Distinct endpoints so BOTH tasks can hold a slot at once (no machine
+    // capacity file → each endpoint serializes at 1; distinct models = 2).
+    // The ledger admission preflight denies an unlisted model, so the graph
+    // must AUTHORIZE both endpoints (it fails closed otherwise).
+    g.policy = { authority: { paths: [], notPaths: [], models: ["endpoint-a", "endpoint-b"] } };
+    g.tasks[0]!.model = "endpoint-a"; g.tasks[1]!.model = "endpoint-b";
+    run = runScheduledHostEpisode({ graph: g, episodesRoot: root, grantedBy: "test", log: (l) => logs.push(l),
+      loop: async (cfg, ports) => {
+        inFlight += 1;
+        if (inFlight === 2) bothRunning();
+        await opened;
+        await accepted(cfg, ports);
+        return { stopped: "accepted-finish", iterations: [], investigationCount: 0 };
+      },
+    });
+    // BOUNDED gate: if the two admissions never overlap, fail LOUD with the
+    // scheduler's own log rather than hanging the whole test file.
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`both loops never ran concurrently (inFlight=${inFlight}); scheduler log: ${logs.join(" | ")}`)), 10_000);
+    });
+    try { await Promise.race([gate, timeout]); } finally { if (timer !== undefined) clearTimeout(timer); }
+    // Bounded spin (no fixed sleep): the host serializes projection writes,
+    // so the file settles within a few ms of the second publish.
+    let mid: Record<string, string | null> | undefined;
+    for (let i = 0; i < 1000; i++) {
+      try {
+        const st = JSON.parse(await readFile(statePath, "utf8")) as { slots?: Record<string, string | null> };
+        mid = st.slots;
+        if (Object.keys(st.slots ?? {}).length === 2) break;
+      } catch { mid = undefined; }
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    assert.deepEqual(mid, { "endpoint-a#a": "a", "endpoint-b#b": "b" },
+      `mid-run slots reflect the LIVE set (scheduler log: ${logs.join(" | ")})`);
+    release();
+    const res = await run;
+    assert.equal(res.admissions, 2);
+    const finalState = await readEpisodeState(join(res.episodePath, "state.json"));
+    assert.deepEqual(finalState.slots, {}, "the final write restores the drained (empty) live set");
+    assert.deepEqual(Object.values(finalState.tasks).map((t) => t.status), ["done", "done"]);
+  } finally {
+    release();
+    await run?.catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("schedule entry: ledger-backed admission refuses unapproved models before scripted loop", async () => {

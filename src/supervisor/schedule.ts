@@ -550,6 +550,19 @@ export interface SchedulerDeps {
   /** scheduler-level operator shutdown steer (docs/20 §3.4). */
   shutdown?: { poll(): Promise<boolean> };
   journal?: { append(record: object): Promise<void> };
+  /** M2 audit cycle 2 (R2): live-set projection observer. Called by the
+   *  scheduler on each admission and each terminal transition (and after
+   *  a successful swap) with the CURRENT live set (taskId -> endpoint) —
+   *  the scheduler's in-memory `running` map is the ONLY source, so the
+   *  projection stays derived, never an input (docs/20 §12: "rebuilt
+   *  from the scheduler's in-memory live set on each write"). The host
+   *  uses it to rebuild the S6 state.json `slots` projection mid-run
+   *  instead of only at episode end. DISCLOSURE-ONLY: invoked
+   *  synchronously and fire-and-forget (never awaited — no new await
+   *  point on the admission path, so the F1 stop-flag window stays
+   *  closed), and a throwing projector never affects scheduling.
+   *  Absent = no projection (behavior unchanged). */
+  onLiveSet?: (live: { taskId: string; endpoint: string }[]) => void;
   /** AUDIT R4-F3 (round 4) + F3 (haiku55 round 5): per-activation
    *  identity (the host's lease token — `token` from claimLease) is
    *  REQUIRED. Journal action ids are counters per activation, so a
@@ -713,6 +726,16 @@ export async function runSchedulerEpisode(
     }
   }
   const running = new Map<string, { endpoint: string; task: SchedTaskLike }>();
+  /** R2: publish the live set to the host's projection observer. Called
+   *  at every admission, terminal, rollback and successful swap — the
+   *  ONLY events that change `running`. Synchronous + try-wrapped:
+   *  disclosure-only, never an await (the F1 stop-flag window stays
+   *  closed), never fatal. */
+  const project = (): void => {
+    if (deps.onLiveSet === undefined) return;
+    try { deps.onLiveSet([...running.entries()].map(([taskId, r]) => ({ taskId, endpoint: r.endpoint }))); }
+    catch { /* projection is disclosure only */ }
+  };
   // AUDIT C1-4 (round 3): EVERY task admitted this episode (a finished
   // loop's ledger reservation may still be unsettled) — the aggregate
   // the host's admissionCheck folds into standing coverage.
@@ -818,12 +841,15 @@ export async function runSchedulerEpisode(
     // slot (admission-lifetime, §4.3), then wake the wall.
     if (running.get(t.id) === held) running.delete(t.id);
     if (held !== undefined) slots.release(held.endpoint);
+    // R2: the terminal transition changed the live set — republish.
+    project();
     pendingTerminal += 1;
     wakeNow();
   };
 
   const runOne = (t: SchedTaskLike, endpoint: string): void => {
     running.set(t.id, { endpoint, task: t });
+    project(); // R2: the loop started — the live set changed
     const hooks: SchedulerLoopHooks = {
       investigate: async (packet, limits) => {
         const seq = (observerSeq += 1);
@@ -852,6 +878,7 @@ export async function runSchedulerEpisode(
           return false;
         }
         if (h !== undefined) h.endpoint = target;
+        project(); // R2: the live set's endpoint occupancy moved — republish
         // AUDIT C1-1 (round 3): the swap FREED a slot on `held` — a
         // denied queued task may now be admissible on that endpoint.
         // §3.4: the wall must not sleep while admission is possible, so
@@ -1038,6 +1065,7 @@ export async function runSchedulerEpisode(
         // per-task derived state restores to the pre-admission snapshots.
         running.delete(t.id);
         slots.release(endpoint);
+        project(); // R2: the rolled-back admission left the live set
         if (preFate === undefined) fates.delete(t.id); else fates.set(t.id, preFate);
         if (preOutcome === undefined) outcomes.delete(t.id); else outcomes.set(t.id, preOutcome);
         if (preLastDenial === undefined) lastDenial.delete(t.id); else lastDenial.set(t.id, preLastDenial);

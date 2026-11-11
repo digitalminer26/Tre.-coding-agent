@@ -44,6 +44,7 @@ import {
   openIntents,
   validateSupervisorRecord,
   type EpisodeGraph,
+  type EpisodeState,
   type SupervisorRecord,
   type TaskAcceptance,
 } from "../episode/journal.js";
@@ -3865,6 +3866,32 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
       }) } } : {}),
     });
     try {
+      // M2 audit cycle 2 (R2): docs/20 §12 describes S6 state.json slots
+      // as a DERIVED projection rebuilt from the scheduler's live set on
+      // each write. Before this, the host wrote state.json exactly once —
+      // at episode end, when the live set was necessarily empty — so a
+      // mid-run reader only ever saw `slots: {}`. The scheduler now
+      // publishes its live set (taskId -> endpoint) on every admission/
+      // terminal/swap via deps.onLiveSet; this projection rebuilds the
+      // scheduler endpoint-shape into state.json's slots shape and writes
+      // it. The projection is OUTPUT ONLY — never read back as admission
+      // authority (the scheduler's in-memory live set is the single source
+      // of truth) — and each write RMWs to preserve any task rows the
+      // runner's state.json hint cache wrote concurrently. Writes are
+      // serialized behind a promise chain (last publish wins) and a
+      // failure is disclosed, never fatal: state.json is a cache (S6).
+      let stateWrite = Promise.resolve();
+      const liveSlots = new Map<string, string>();
+      const writeSlotsProjection = (): void => {
+        const slots = Object.fromEntries([...liveSlots.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+        stateWrite = stateWrite.then(async () => {
+          const statePath = join(epPath, "state.json");
+          let existing: EpisodeState | undefined;
+          try { existing = await readEpisodeState(statePath); } catch { existing = undefined; }
+          const merged: EpisodeState = { ...(existing ?? { schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }) };
+          await writeEpisodeState(statePath, { ...merged, slots });
+        }).catch((e: unknown) => { log(`state.json projection write failed (cache only, S6): ${String((e as Error)?.message ?? e).slice(0, 120)}`); });
+      };
       const deps: SchedulerDeps = {
         activation: lease.token,
         graph: { read: async () => graph },
@@ -3972,6 +3999,11 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
           throw e;
         }) },
         maxParallel: opts.maxParallel, worktrees, admissionCheck, journal: schedulerJournal,
+        onLiveSet: (live) => {
+          liveSlots.clear();
+          for (const { taskId, endpoint } of live) liveSlots.set(`${endpoint}#${taskId}`, taskId);
+          writeSlotsProjection();
+        },
         acceptanceFor: async (t) => {
           const { records } = await journal.read();
           const key = acceptanceKeys.get(t.id);
@@ -3983,9 +4015,17 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
       const res = await runSchedulerEpisode({ episodeId: graph.episodeId }, deps);
       // runSchedulerEpisode returns ONLY after draining its live map. Thus
       // the terminal live projection is empty, including shutdown. Never
-      // read or merge state.json; it is output, not admission authority.
+      // read or use state.json as admission authority — it is OUTPUT. The
+      // final write folds the derived terminal task rows in and stamps the
+      // empty terminal live set; it waits for the last mid-run projection
+      // write to settle, and RMWs to preserve any concurrent runner hint
+      // rows (S6 cache semantics — the scheduler remains the sole source
+      // of the slots projection).
+      await stateWrite;
+      let finalState: EpisodeState | undefined;
+      try { finalState = await readEpisodeState(join(epPath, "state.json")); } catch { finalState = undefined; }
       await writeEpisodeState(join(epPath, "state.json"), {
-        schema: "tre-episode-state/1", episodeId: graph.episodeId,
+        ...(finalState ?? { schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }),
         tasks: Object.fromEntries(Object.entries(res.tasks).map(([id, fate]) => [id, { status: fate.status }])),
         slots: {},
       });

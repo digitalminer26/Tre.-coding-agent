@@ -66,7 +66,7 @@ const USAGE = [
   "  --graph <file>          the episode graph (validated on read)",
   "  --task <id>             the task the loop drives (exactly one)",
   "  --schedule              drive ALL ready tasks (docs/20 M2); mutually exclusive with --task",
-  "  --max-parallel <n>      episode admission ceiling (positive integer; only LOWERS capacity.json)",
+  "  --max-parallel <n>      episode admission ceiling (positive integer; only LOWERS capacity.json; requires --schedule)",
   "  --granted-by <id>       grant identity for gate requests (default: cli-activate)",
   "  --episodes-root <dir>   episodes root (default: $HOME/.tre/episodes)",
   "  --worktree <dir>        the task's working tree (worker cwd + identity)",
@@ -179,6 +179,13 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
   if (graphPath === undefined) return { error: "--graph is required" };
   if (schedule && taskId !== undefined) return { error: "--schedule and --task are mutually exclusive" };
   if (!schedule && taskId === undefined) return { error: "--task is required" };
+  // M2 audit cycle 2 (R1): `--max-parallel` is an episode ADMISSION
+  // ceiling — it is only consulted by the scheduler (`runScheduledHostEpisode`
+  // → CapacitySlots). Accepting it on the M1 `--task` path silently
+  // DROPPED the operator's ceiling (the flag parsed, nothing lowered).
+  // Refuse it loudly instead: a usage error (exit 2), the same mechanism
+  // as the mutual-exclusion error above.
+  if (maxParallel !== undefined && !schedule) return { error: "--max-parallel requires --schedule" };
   return {
     graphPath,
     taskId: taskId ?? "",
