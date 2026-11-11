@@ -782,6 +782,11 @@ test("P8 guard: only src/budget/ and the P16 host entry import the ledger module
   for (const file of files) {
     if (file.startsWith("src/budget" + "/")) continue;
     if (file === "src/host/supervise.ts") continue; // P16: the host owns the ledger wiring (docs/18 §0.1)
+    // R4-F5: the scheduler's ledger-backed AGGREGATE admissionCheck
+    // adapter lives host-side precisely because this guard holds — the
+    // scheduler compartment (src/supervisor/) imports nothing, so the
+    // fold reaches the ledger through this host module only.
+    if (file === "src/host/sched-gate.ts") continue;
     const content = await readFile(file, "utf-8").catch(() => "");
     if (specifiersOf(content).some(touchesBudget)) offenders.push(file);
   }

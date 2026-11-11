@@ -1729,39 +1729,29 @@ const epPathIdentity = async (epPath: string): Promise<string> => {
   }
 };
 
-export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpisodeResult> {
-  const log = opts.log ?? ((line: string) => { process.stderr.write(`supervisor-host: ${line}\n`); });
-  const episodeId = opts.graph?.episodeId ?? "unknown";
-
-  // ── graph + S4 scaffold ─────────────────────────────────────────────────
-  let graph: EpisodeGraph;
-  if (opts.graphPath !== undefined) {
-    graph = await readEpisodeGraph(opts.graphPath);
-  } else if (opts.graph !== undefined) {
-    graph = opts.graph;
-  } else {
-    throw new Error("host: either graphPath or graph is required");
-  }
-  assertId(graph.episodeId, "episodeId");
-  assertId(opts.taskId, "taskId");
-  assertId(opts.grantedBy, "grantedBy");
-  // P9 audit cycle-2 F4: the merge-port branch is validated against
-  // P12's EXACT grammar (SAFE_ID — a single path element) BEFORE any
-  // worker starts, so a name P12 would refuse at integration (e.g.
-  // `integrate/ep1`) fails fast at activation instead of burning a
-  // whole episode into `context:episodeBranch`. The policy guards
-  // (never `main` — case-folded, never the `agent` namespace) stay
-  // P12's own per-call authority; this is only the contract alignment.
-  if (opts.episodeBranch !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(opts.episodeBranch)) {
-    throw new Error(`host: episodeBranch must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (P12's SAFE_ID grammar — a single git branch-name element, e.g. "episode-${graph.episodeId}")`);
-  }
-  if (opts.integrationSeqBump !== undefined && (!Number.isSafeInteger(opts.integrationSeqBump) || opts.integrationSeqBump < 0)) {
-    throw new Error("host: integrationSeqBump must be a non-negative safe integer");
-  }
-  const root = opts.episodesRoot ?? join(process.env["HOME"] ?? "/tmp", ".tre", "episodes");
-  const epPath = episodeDir(root, graph.episodeId);
-  const epId = await epPathIdentity(epPath);
-
+/**
+ * P9/M2 carve (mechanical, behavior-identical): the episode-lease
+ * acquisition block extracted VERBATIM from runHostEpisode (the P18-A4
+ * "one supervisor per episode" claim + every audit-cycle refinement up
+ * through P20c11 — all findings and repro notes travel with the code).
+ * Claims `host.lease` under `host.lease.lock`, refuses a live holder,
+ * reclaims a dead one with disclosure, and returns an ownership handle:
+ *   token   — the per-activation ownership identity (intentScope);
+ *   path    — the lease file path (for release-failure disclosure);
+ *   held()  — whether OUR claim is currently established;
+ *   release — the strict, token-verified, RETRIED release (P20c6-F2).
+ * All former closure variables (epPath, epId, episodeId, log,
+ * leaseSwapHoldMs) are parameters; nothing else changed. See docs/20 §2
+ * ("one supervisor per episode" — the scheduler holds THE lease).
+ */
+async function acquireEpisodeLease(args: {
+  epPath: string;
+  epId: string;
+  episodeId: string;
+  log: (line: string) => void;
+  leaseSwapHoldMs?: number;
+}): Promise<{ token: string; path: string; held: () => boolean; release: () => Promise<"released" | "absent" | "failed"> }> {
+  const { epPath, epId, episodeId, log } = args;
   // P18-A4 (sol audit cycle 1, the "enforce the exclusion" half): ONE
   // supervisor per episode. The channel's dedup/cap machinery assumes a
   // serialized durable domain; two live `runHostEpisode` instances on one
@@ -1927,14 +1917,14 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     return "failed";
   };
   const refuseSameProcess = (): never => {
-    throw new Error(`host: episode ${graph.episodeId} is already activated in this process (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
+    throw new Error(`host: episode ${episodeId} is already activated in this process (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
   };
   const refuseLive = (pid: number): never => {
-    throw new Error(`host: episode ${graph.episodeId} is already activated by pid ${pid} (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
+    throw new Error(`host: episode ${episodeId} is already activated by pid ${pid} (lease: ${leasePath}) — refusing a concurrent activation (P18-A4)`);
   };
   const takeLease = async (): Promise<void> => {
     await mkdir(epPath, { recursive: true });
-    const body = JSON.stringify({ pid: process.pid, token: leaseToken, episodeId: graph.episodeId, claimedAt: Date.now() });
+    const body = JSON.stringify({ pid: process.pid, token: leaseToken, episodeId: episodeId, claimedAt: Date.now() });
     // P19-F1: publish = stage a COMPLETE body (write + fsync), then
     // link() it into place. A concurrent reader never sees a partial
     // claim; link() is no-replace, so two racing creators get exactly
@@ -2202,7 +2192,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // and re-observes our live lease. This closes the reproduced
         // delayed-reclaim double-admission; it is a deployment-chosen
         // bound, not a mathematical impossibility result.
-        const swapHoldMs = opts.leaseSwapHoldMs ?? 0;
+        const swapHoldMs = args.leaseSwapHoldMs ?? 0;
         if (swapHoldMs > 0) await sleep(swapHoldMs);
         // Post-swap verification, REWRITTEN after the cycle-4 audit.
         // The cycle-3 version THREW on a lost/vanished stamp — (a) with
@@ -2665,9 +2655,46 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       }
       await sleep(50);
     }
-    throw new Error(`host: episode ${graph.episodeId} lease claim stayed contended (40 attempts on ${leasePath}) — refusing to activate (P18-C3)`);
+    throw new Error(`host: episode ${episodeId} lease claim stayed contended (40 attempts on ${leasePath}) — refusing to activate (P18-C3)`);
   };
   await takeLease();
+  return { token: leaseToken, path: leasePath, held: () => leaseHeld, release: releaseOursClaim };
+}
+
+export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpisodeResult> {
+  const log = opts.log ?? ((line: string) => { process.stderr.write(`supervisor-host: ${line}\n`); });
+  const episodeId = opts.graph?.episodeId ?? "unknown";
+
+  // ── graph + S4 scaffold ─────────────────────────────────────────────────
+  let graph: EpisodeGraph;
+  if (opts.graphPath !== undefined) {
+    graph = await readEpisodeGraph(opts.graphPath);
+  } else if (opts.graph !== undefined) {
+    graph = opts.graph;
+  } else {
+    throw new Error("host: either graphPath or graph is required");
+  }
+  assertId(graph.episodeId, "episodeId");
+  assertId(opts.taskId, "taskId");
+  assertId(opts.grantedBy, "grantedBy");
+  // P9 audit cycle-2 F4: the merge-port branch is validated against
+  // P12's EXACT grammar (SAFE_ID — a single path element) BEFORE any
+  // worker starts, so a name P12 would refuse at integration (e.g.
+  // `integrate/ep1`) fails fast at activation instead of burning a
+  // whole episode into `context:episodeBranch`. The policy guards
+  // (never `main` — case-folded, never the `agent` namespace) stay
+  // P12's own per-call authority; this is only the contract alignment.
+  if (opts.episodeBranch !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(opts.episodeBranch)) {
+    throw new Error(`host: episodeBranch must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ (P12's SAFE_ID grammar — a single git branch-name element, e.g. "episode-${graph.episodeId}")`);
+  }
+  if (opts.integrationSeqBump !== undefined && (!Number.isSafeInteger(opts.integrationSeqBump) || opts.integrationSeqBump < 0)) {
+    throw new Error("host: integrationSeqBump must be a non-negative safe integer");
+  }
+  const root = opts.episodesRoot ?? join(process.env["HOME"] ?? "/tmp", ".tre", "episodes");
+  const epPath = episodeDir(root, graph.episodeId);
+  const epId = await epPathIdentity(epPath);
+
+  const lease = await acquireEpisodeLease({ epPath, epId, episodeId: graph.episodeId, log, leaseSwapHoldMs: opts.leaseSwapHoldMs });
   // P18-A4: everything after the claim runs under the lease — a setup
   // throw (bad graph, task-absent, journal open) must release it too,
   // or the dead run keeps the episode locked to this (alive) process.
@@ -3667,7 +3694,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // token is exactly the activation's ownership identity; deriving the
     // scope from it means a restarted activation can never reissue the
     // previous one's intent ids (and thus never mask its orphaned merge).
-    intentScope: leaseToken,
+    intentScope: lease.token,
     // P9 audit cycle-1 F5: the operator's declared branch IS the
     // integration trigger — a COMPLETE verdict dispatches the merge act
     // inside the loop under the lease (no post-run seam exists anymore).
@@ -3704,7 +3731,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     // TOCTOU of any check-then-unlink without a compare-and-delete
     // primitive; the takeover side fences it by re-verifying staleness
     // under the lock before acting.)
-    if (leaseHeld) {
+    if (lease.held()) {
       // P20c6-F2: the release is the SAME strict, token-verified,
       // RETRIED path as the takeover anomaly self-release. The old
       // single-shot read+unlink in one swallow-everything catch could
@@ -3714,9 +3741,9 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // release is now surfaced on the log; it stays recoverable (the
       // lease holds a real pid: takeover refuses while we live,
       // reclaims with disclosure after we exit).
-      const outcome = await releaseOursClaim();
+      const outcome = await lease.release();
       if (outcome === "failed") {
-        log(`P20c6-F2: lease release FAILED after 3 attempts on ${leasePath} — our claim may persist until this process exits (recoverable: takeover reclaims a dead-pid lease with disclosure)`);
+        log(`P20c6-F2: lease release FAILED after 3 attempts on ${lease.path} — our claim may persist until this process exits (recoverable: takeover reclaims a dead-pid lease with disclosure)`);
       }
     }
   }
