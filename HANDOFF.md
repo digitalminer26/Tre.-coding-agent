@@ -36,9 +36,25 @@ Fixes the three MAJOR haiku55 findings on `src/supervisor/schedule.ts`
   case is deleted with the contract), new tests pin the refusal and the
   zero-duplicate shared-journal reproduction.
 
-78/78 host-schedule, 94/94 budget-ledger+host-activation green. F4
-(host wiring), F5 (sched-gate floorOf), F6 (swap-wake ordering test)
-follow in separate increments.
+78/78 host-schedule, 94/94 budget-ledger+host-activation green.
+
+### follow-up increment (same round): F5 + F6
+
+- **F5 (minor)**: `AUDIT F5 (haiku55 r5)` pins the probe-S4 fix — the
+  host supplies `floorOf` with the loop's RAISED estimate, so a pending
+  sibling folds at what its loop will actually reserve (0.4), not the
+  class floor (0.25): `b` is denied up front instead of admitted and
+  denied later at the loop boundary. The `floorOf` clamp (never below
+  the class minimum) was already pinned; the raised-estimate path is
+  now too.
+- **F6 (minor)**: the C1-1 swap-wake test now asserts the EVENT
+  ORDERING via the bounded handshake timeline
+  (`["swap","waiter-start","slow-return"]`). MUTATION-CHECKED: deleting
+  `pingDecide = true; wakeNow();` from `capacitySwap` (schedule.ts)
+  makes the test FAIL (handshake times out, waiter never starts before
+  slow returns); restored, 79/79 host-schedule green.
+
+9/9 F-item tests green. F4 (host wiring) follows.
 
 
 ## 2026-11-10 — Observation-hardening stack (merge-gate MG-C3/C4 + acceptance R3-F2/R4-B1 + round-5 R5-B1/R5-B2), committed as one increment

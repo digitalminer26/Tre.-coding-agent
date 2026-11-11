@@ -901,17 +901,26 @@ test("AUDIT C1-1 (r3): a capacitySwap that frees a slot wakes the wall — a den
         while (!waiterStarted && Date.now() < deadline) await tick(5);
         assert.ok(waiterStarted, "waiter started while slow was still running (no lost wake)");
         slowDone = true;
+        timeline.push("slow-return");
         return { stopped: "accepted-finish" };
       },
       waiter: async () => {
         assert.equal(slowDone, false, "R4-F4: the waiter must start BEFORE slow finishes — the swap-freed slot, not the terminal");
         waiterStarted = true;
+        timeline.push("waiter-start");
         return { stopped: "accepted-finish" };
       },
     },
   });
   const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
   assert.equal(res.stopped, "quiesced-complete");
+  // AUDIT F6 (haiku55 r5): the ORDERING assertion — swap happens, the
+  // waiter starts while `slow` is still inside its body (the bounded
+  // handshake proves it, not the eventual completion), and only then
+  // does slow return. Mutation-checked: deleting `pingDecide = true;
+  // wakeNow();` from capacitySwap fails the handshake (waiter never
+  // starts before the deadline) — see the F6 note in HANDOFF.md.
+  assert.deepEqual(timeline, ["swap", "waiter-start", "slow-return"], "event ordering: swap → waiter-start (slow still running) → slow-return");
   // waiter admitted while `slow` was STILL running — pre-fix this
   // ordering was impossible (the wake was lost).
   assert.equal(res.tasks.waiter?.status, "done");
@@ -1447,6 +1456,39 @@ test("R4-F5 wire shape: reserveDefault floors are what the loop will durably cha
   // never launder the admission. Pin the floors the fold is built on.
   assert.deepEqual(reserveDefault("run"), { usd: 0.25, turns: 1 });
   assert.deepEqual(reserveDefault("resume"), { usd: 0.05, turns: 1 });
+});
+
+test("AUDIT F5 (haiku55 r5): the fold prices a pending sibling at its RAISED estimate, not the class floor (probe S4)", async () => {
+  // Probe S4 reproduction: the loop for `a` reserves a RAISED estimate
+  // (0.4) — a loop may raise above the class floor (0.25) — while the
+  // adapter folded pending `a` at the class floor. With the episode cap
+  // at 0.5, `b` (floor 0.25) was admitted against a pending `a@0.25`,
+  // then the loop's boundary reserve of 0.4 denied the admission
+  // anyway: a wasted admission the aggregate should have refused. Fix:
+  // the host supplies floorOf with the RAISED estimate (clamped up to
+  // the class floor), so the fold charges what the loop will actually
+  // reserve (§6: "admission asks the ledger for the standing coverage,
+  // never an estimate of its own invention").
+  const ledger = await BudgetLedger.open(join(await mkdtemp(join(tmpdir(), "f5-raised-")), "budget.jsonl"));
+  const policy = f5Policy({ usd: 0.5 });
+  const raised: Record<string, { usd: number; turns: number }> = { a: { usd: 0.4, turns: 1 } };
+  const gate = makeLedgerAdmissionCheck({
+    ledger, policy, now: () => NOW,
+    floorOf: (id) => raised[id] ?? reserveDefault("run"),
+  });
+  // Without the raised estimate the fold would price a@0.25 and allow
+  // b (0.25+0.25 = 0.5 fits); WITH it the fold prices a@0.4 and b's own
+  // floor (0.4+0.25 > 0.5) is denied up front — no wasted admission.
+  assert.deepEqual(await gate({ id: "b" }, { admitted: ["a"] }), { allowed: false, codes: ["episode-budget-exceeded"] }, "pending a folded at its raised 0.4, not the 0.25 class floor (probe S4: pre-fix b was allowed)");
+  // And the raised fold still fits what genuinely fits: cap 0.7 admits
+  // b beside a@0.4.
+  const wide = f5Policy({ usd: 0.7 });
+  const gateWide = makeLedgerAdmissionCheck({
+    ledger: await BudgetLedger.open(join(await mkdtemp(join(tmpdir(), "f5-raised-wide-")), "budget.jsonl")),
+    policy: wide, now: () => NOW,
+    floorOf: (id) => raised[id] ?? reserveDefault("run"),
+  });
+  assert.equal((await gateWide({ id: "b" }, { admitted: ["a"] })).allowed, true, "0.4 + 0.25 fits a 0.7 episode cap");
 });
 
 test("R4-F5: released candidate still pays a fresh floor beside pending siblings", async () => {
