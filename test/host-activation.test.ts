@@ -86,7 +86,7 @@ test("parse: the full happy path yields every field", () => {
   assert.deepEqual(p, {
     graphPath: "/x/graph.jsonx", taskId: "t1", grantedBy: "me",
     episodesRoot: "/eps", worktreePath: "/wt", workerCommand: "./w.sh",
-    maxIterations: 3, telegram: true,
+    maxIterations: 3, telegram: true, schedule: false,
   });
 });
 

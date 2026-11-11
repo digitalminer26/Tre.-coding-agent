@@ -1,5 +1,70 @@
 # HANDOFF
 
+## 2026-11-10 — M2 F4: production host entry for the scheduler (`tre.-episode --schedule`)
+
+Docs/20 §12 host surface. `src/host/activate.ts` (still P17-thin: its
+import set is untouched — the new wiring lives entirely in
+`src/host/supervise.ts`):
+
+- `--schedule` (no value) and `--max-parallel <n>` (positive integer)
+  parse into `ActivateArgs.schedule` / `ActivateArgs.maxParallel`;
+  `--schedule` + `--task` → `{ error: "--schedule and --task are mutually
+  exclusive" }`; M1 (`--task` alone) parsing is unchanged; `--schedule`
+  without `--task` still requires `--graph`. USAGE lists both flags.
+- `activate()` calls the NEW `runScheduledHostEpisode` in schedule mode,
+  logs the per-task status line plus one episode summary line, and maps
+  the scheduler's stop through the EXISTING `exitCodeForStop` (no new
+  codes).
+
+`runScheduledHostEpisode(opts)` (supervise.ts) reuses M1's lease/identity
+patterns verbatim: `readEpisodeGraph` + `assertId` + `episodeDir` +
+`epPathIdentity` + the SAME `acquireEpisodeLease` (`host.lease`) under the
+P18-A4 try/finally with the token-verified retried release, then
+`createEpisodeLayout` and singletons ONCE (DecisionJournal, BudgetLedger,
+`gatePolicyFromGraph`, escalation channel + dispatcher, AttemptRunner). It
+hands the scheduler `activation: lease.token` (F3 requires it), `graph.read`
+returning the already-validated graph, `loop: runSupervisorEpisode`,
+per-task `loopConfig`/`loopPorts`, the machine-level
+`~/.tre/episodes/capacity.json` raw bytes (ENOENT→undefined) with
+`maxParallel` passed through, `admissionCheck` from
+`makeLedgerAdmissionCheck` (F5's adapter, actually invoked per admission),
+`journal` (scheduler records preserved as `decision-outcome` notes — P4
+has a closed record-kind set), `acceptanceFor` (the durable acceptance
+record's verdict for `done`), `shutdown` (a `<episode>/shutdown` marker,
+disclosed), `clock`/`log` (`sched:` prefix). After the run it writes the
+S6 projection — `state.json` rebuilt from the scheduler's drained live set
+(slots `{}` at terminal; never merged from disk input, proven by a test
+that corrupts state.json mid-run).
+
+**M1 ports the schedule path does NOT yet wire (disclosed in code, on the
+host log, and in the result `disclosures`):**
+- **merge port** — `episodeBranch` only sets the loop's `integration:
+  on-finish` trigger; no `integrationTestedCandidate` port is injected, so
+  a requested merge fails closed via the executor's `merge-unwired`
+  refusal (never a false success).
+- **repair / rewriteTask dispatch acts** — throw named unwired errors
+  (no M2 scope in F4).
+- **per-task isolation** — only when the graph carries an additive
+  `policy.repoPath` (WorktreeProvisioner at `epPath/worktrees/<taskId>`,
+  refusals park that task); absent → tasks share the tree and the
+  disclosure says so loudly.
+- M1's `parkTask` test seam is not re-exposed; the park act is wired
+  through the dispatcher inside loopPorts.
+
+Tests (`test/host-schedule-entry.test.ts`, all green): parse surface +
+closed exit map; two scripted tasks sharing ONE lease with a corrupt
+state.json proving the derived S6 projection (admissionCheck recorded via
+journal intents, exit 0 via `exitCodeForStop`); ledger-backed model-
+authority denial refusing both tasks before any scripted loop (exit 5);
+lease exclusion (a second scheduler AND `runHostEpisode` refuse while the
+first holds `host.lease`; a throwing scripted loop becomes a named
+`loop-error` outcome); accepted stop with no durable acceptance verdict
+fails closed. `test/host-activation.test.ts` stays green with only the
+happy-path expectation updated for the new `schedule: false` field.
+
+Gate: `npm run build` + full `npm test` green (2697 tests, 0 fail, 14
+skipped). P17 import allow-list NOT widened.
+
 ## 2026-11-10 — M2 scheduler audit round 5 (F1/F2/F3): stop-flag rollback window, no-evidence running seed parked, activation identity required
 
 Fixes the three MAJOR haiku55 findings on `src/supervisor/schedule.ts`

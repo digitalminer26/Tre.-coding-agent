@@ -22,7 +22,7 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { runHostEpisode } from "./supervise.js";
+import { runHostEpisode, runScheduledHostEpisode } from "./supervise.js";
 import { makeTelegramBridge } from "../telegram/bridge.js";
 import { makeTelegramDeliver } from "../telegram/escalation.js";
 
@@ -33,6 +33,8 @@ export interface ActivateArgs {
   graphPath: string;
   /** The task this supervisor loop drives (exactly one, docs/18 §1). */
   taskId: string;
+  schedule: boolean;
+  maxParallel?: number;
   /** Grant identity for every gate request + journal record (§14.7). */
   grantedBy: string;
   /** Episodes root (S4). Absent → the host default ($HOME/.tre/episodes). */
@@ -63,6 +65,8 @@ const USAGE = [
   "",
   "  --graph <file>          the episode graph (validated on read)",
   "  --task <id>             the task the loop drives (exactly one)",
+  "  --schedule              drive ALL ready tasks (docs/20 M2); mutually exclusive with --task",
+  "  --max-parallel <n>      episode admission ceiling (positive integer; only LOWERS capacity.json)",
   "  --granted-by <id>       grant identity for gate requests (default: cli-activate)",
   "  --episodes-root <dir>   episodes root (default: $HOME/.tre/episodes)",
   "  --worktree <dir>        the task's working tree (worker cwd + identity)",
@@ -89,6 +93,8 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
   let integrationSeqBump: number | undefined;
   let maxIterations: number | undefined;
   let telegram = false;
+  let schedule = false;
+  let maxParallel: number | undefined;
 
   const needValue = (flag: string, value: string | undefined): string | undefined =>
     value === undefined || value.startsWith("--") ? `${flag} requires a value` : undefined;
@@ -153,6 +159,16 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
       if (!Number.isInteger(n) || n <= 0) return { error: "--max-iterations must be a positive integer" };
       maxIterations = n;
       i++;
+    } else if (a === "--schedule") {
+      schedule = true;
+    } else if (a === "--max-parallel") {
+      const raw = argv[i + 1];
+      const err = needValue(a, raw);
+      if (err !== undefined) return { error: err };
+      const n = Number(raw);
+      if (!Number.isSafeInteger(n) || n <= 0) return { error: "--max-parallel must be a positive integer" };
+      maxParallel = n;
+      i++;
     } else if (a === "--telegram") {
       telegram = true;
     } else {
@@ -161,10 +177,13 @@ export function parseActivateArgs(argv: string[]): ActivateParse {
   }
 
   if (graphPath === undefined) return { error: "--graph is required" };
-  if (taskId === undefined) return { error: "--task is required" };
+  if (schedule && taskId !== undefined) return { error: "--schedule and --task are mutually exclusive" };
+  if (!schedule && taskId === undefined) return { error: "--task is required" };
   return {
     graphPath,
-    taskId,
+    taskId: taskId ?? "",
+    schedule,
+    ...(maxParallel !== undefined ? { maxParallel } : {}),
     grantedBy,
     ...(episodesRoot !== undefined ? { episodesRoot } : {}),
     ...(worktreePath !== undefined ? { worktreePath } : {}),
@@ -299,6 +318,14 @@ export async function activate(argv: string[], logRaw: (line: string) => void = 
     }
 
     try {
+      if (args.schedule) {
+        const res = await runScheduledHostEpisode({ ...args, escalationDeliver: deliver, log });
+        for (const [taskId, outcome] of Object.entries(res.taskOutcomes)) {
+          log(`sched task ${taskId}: ${outcome.status}${outcome.stopped !== undefined ? ` stopped=${outcome.stopped}` : ""}`);
+        }
+        log(`episode ${res.episodePath} stopped: ${res.result.stopped} admissions=${res.admissions} denials=${res.denials.length}`);
+        return exitCodeForStop(res.result.stopped);
+      }
       const res = await runHostEpisode({
         graphPath: args.graphPath,
         taskId: args.taskId,

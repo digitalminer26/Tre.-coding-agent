@@ -61,6 +61,9 @@ import { investigate as runInvestigation } from "../investigation/agent.js";
 import { makeEscalationChannel, makeEscalationDispatcher, type DeliverPort } from "../escalation/channel.js";
 import { AttemptRunner, type AttemptTask } from "../runner/attempt.js";
 import { FileSteeringQueue } from "../steer/file-queue.js";
+import { runSchedulerEpisode, type SchedulerDeps, type SchedulerResult } from "../supervisor/schedule.js";
+import { makeLedgerAdmissionCheck } from "./sched-gate.js";
+import { WorktreeProvisioner } from "../worktree/provision.js";
 import type { TaskAcceptanceSpec } from "../acceptance/evaluator.js";
 
 // ─── Host options ──────────────────────────────────────────────────────────
@@ -3746,6 +3749,254 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         log(`P20c6-F2: lease release FAILED after 3 attempts on ${lease.path} — our claim may persist until this process exits (recoverable: takeover reclaims a dead-pid lease with disclosure)`);
       }
     }
+  }
+}
+
+export interface HostScheduleEpisodeOptions extends Omit<HostEpisodeOptions, "taskId"> {
+  maxParallel?: number;
+  /** In-process test seam: never a CLI option, never starts another host. */
+  loop?: typeof runSupervisorEpisode;
+}
+
+export interface HostScheduleEpisodeResult {
+  result: SupervisorResult;
+  episodePath: string;
+  taskOutcomes: SchedulerResult["tasks"];
+  admissions: number;
+  denials: SchedulerResult["denials"];
+  disclosures: string[];
+}
+
+/** M2 admission + supervision slice. Deliberately separate from M1's
+ * closure-heavy wiring. Merge, repair, and revision rewrite are NOT wired:
+ * requested integration remains an on-finish trigger and therefore fails
+ * closed through merge-unwired, never reports an unintegrated success.
+ * Without policy.repoPath no isolation is promised (shared cwd, disclosed).
+ * Shutdown source: <episode>/shutdown marker; sticky until operator removes
+ * it. Both scheduler admission and task steer boundaries observe it.
+ */
+export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions): Promise<HostScheduleEpisodeResult> {
+  const log = (line: string): void => { try { (opts.log ?? ((s) => process.stderr.write(`${s}\n`)))(`sched: ${line}`); } catch { /* reporting only */ } };
+  const graph = opts.graphPath !== undefined ? await readEpisodeGraph(opts.graphPath) : opts.graph;
+  if (!graph) throw new Error("host: either graphPath or graph is required");
+  assertId(graph.episodeId, "episodeId");
+  assertId(opts.grantedBy, "grantedBy");
+  for (const task of graph.tasks) assertId(task.id, "taskId");
+  if (opts.maxParallel !== undefined && (!Number.isSafeInteger(opts.maxParallel) || opts.maxParallel < 1)) throw new Error("host: maxParallel must be a positive integer");
+  const root = opts.episodesRoot ?? join(process.env["HOME"] ?? "/tmp", ".tre", "episodes");
+  const epPath = episodeDir(root, graph.episodeId);
+  const epId = await epPathIdentity(epPath);
+  const lease = await acquireEpisodeLease({ epPath, epId, episodeId: graph.episodeId, log, leaseSwapHoldMs: opts.leaseSwapHoldMs });
+  try {
+    await createEpisodeLayout(root, graph.episodeId, graph);
+    const journal = await DecisionJournal.forEpisode(epPath);
+    const ledger = await BudgetLedger.forEpisode(epPath);
+    const policy = gatePolicyFromGraph(graph, epPath);
+    const disclosures = ["merge/repair/rewrite ports unwired in schedule mode; requested integration fails closed"];
+    const paths = new Map<string, string>();
+    // Additive graph policy extension; P4 preserves unknown policy fields.
+    const repoPath = (graph.policy as { repoPath?: unknown } | undefined)?.repoPath;
+    let worktrees: SchedulerDeps["worktrees"];
+    if (typeof repoPath === "string" && repoPath.length > 0) {
+      // Open lazily inside ensure: a provisioning refusal parks that task,
+      // rather than throwing the entire episode out of activation.
+      let provisioner: Promise<WorktreeProvisioner> | undefined;
+      worktrees = { ensure: async (taskId) => {
+        try {
+          provisioner ??= WorktreeProvisioner.open({ repoRoot: repoPath, wtRoot: join(epPath, "worktrees"), warn: log });
+          if (!graph.policy?.baseCommit) return { refused: "missing-baseCommit" };
+          const wt = await (await provisioner).ensureTaskWorktree({ episodeId: graph.episodeId, taskId, baseCommit: graph.policy.baseCommit });
+          paths.set(taskId, wt.path);
+          return { path: wt.path };
+        } catch (e) { return { refused: String((e as { code?: string }).code ?? "provision-failed") }; }
+      } };
+    } else {
+      disclosures.push("NO per-task isolation: policy.repoPath absent; tasks run in the shared tree");
+    }
+    disclosures.forEach(log);
+    const sessionFor = (id: string): string => join(epPath, "sessions", `${id}.jsonl`);
+    const treeFor = (id: string): string | undefined => paths.get(id) ?? opts.worktreePath;
+    const escalationPath = join(epPath, "events", "escalations.jsonl");
+    const escalation = makeEscalationChannel({ now,
+      append: async (rec) => { await appendFile(escalationPath, JSON.stringify(rec) + "\n", "utf8"); },
+      read: async () => {
+        const raw = await readFile(escalationPath, "utf8").catch((e: unknown) => {
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") return "";
+          throw e;
+        });
+        return raw.split("\n").filter(Boolean).map((line) => { try { return JSON.parse(line) as unknown; } catch { return line; } });
+      },
+      ...(opts.escalationDeliver ? { deliver: opts.escalationDeliver } : {}),
+    });
+    const dispatcher = makeEscalationDispatcher({ channel: escalation });
+    const acceptanceKeys = new Map<string, { ts: number; id: string }>();
+    const journalPort: ComposePorts["journal"] = {
+      append: async (rec) => {
+        const r = rec as SupervisorRecord;
+        await journal.append(r);
+        if (r.kind === "acceptance" && r.taskId) acceptanceKeys.set(r.taskId, { ts: r.ts, id: r.id });
+      },
+      read: async () => journal.read(),
+    };
+    // P4 has a closed record-kind set. Preserve scheduler payloads in
+    // decision-outcome notes, with the scheduler's activation-unique id.
+    const schedulerJournal = { append: async (record: object): Promise<void> => {
+      const r = record as { episodeId: string; taskId: string; actionId: string; ts: number; seq: number };
+      await journal.append({ kind: "decision-outcome", schema: "tre-supervisor/1", episodeId: r.episodeId, taskId: r.taskId,
+        id: `sched-${r.actionId}`, actionId: r.actionId, ts: r.ts, acked: true, progress: "none", notes: JSON.stringify(record) } as SupervisorRecord);
+    } };
+    const shutdown = { poll: async (): Promise<boolean> => {
+      try { await stat(join(epPath, "shutdown")); return true; }
+      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; throw e; }
+    } };
+    const firstReservation = new Map<string, string>();
+    const admissionCheck = makeLedgerAdmissionCheck({ ledger, policy, now, log,
+      reservationActionIdOf: (id) => firstReservation.get(id),
+      // No estimate field is defined in P4; honor additive raised estimates.
+      floorOf: (id) => {
+        const task = graph.tasks.find((t) => t.id === id) as { estimate?: { usd: number; turns: number } } | undefined;
+        return task?.estimate ?? { usd: 0, turns: 0 }; // adapter clamps to class default
+      },
+    });
+    const runner = await AttemptRunner.open({ root, episodeId: graph.episodeId,
+      ...(opts.workerCommand ? { spawner: { kind: `tre:${opts.workerCommand}`, spawn: (t: AttemptTask, attemptId: string, o?: { resume?: boolean }) => ({
+        command: opts.workerCommand!, args: [o?.resume ? "--resume" : "--session", t.session], cwd: t.worktreePath,
+        env: { ...process.env, TRE_ATTEMPT_ID: attemptId, TRE_EPISODE_ID: t.episodeId, TRE_TASK_ID: t.taskId },
+      }) } } : {}),
+    });
+    try {
+      const deps: SchedulerDeps = {
+        activation: lease.token,
+        graph: { read: async () => graph },
+        loop: (cfg, ports) => (opts.loop ?? runSupervisorEpisode)(cfg as SupervisorConfig, ports as ComposePorts),
+        loopConfig: (t): SupervisorConfig => {
+          const task = graph.tasks.find((x) => x.id === t.id)!;
+          return {
+            episodeId: graph.episodeId, taskId: t.id, taskRevision: task.revision,
+            grantedBy: opts.grantedBy, intentScope: lease.token,
+            worker: { session: sessionFor(t.id), model: t.model, worktreePath: treeFor(t.id) },
+            authority: graph.policy?.authority ?? { paths: [], notPaths: [] },
+            acceptance: { spec: acceptanceSpecFrom(task.acceptance), ...(graph.policy?.baseCommit ? { current: { sha: graph.policy.baseCommit } } : {}) },
+            recoveryBudget: graph.policy?.recoveryBudget, maxIterations: opts.maxIterations,
+            ...(opts.episodeBranch ? { integration: { trigger: "on-finish" as const } } : {}),
+          };
+        },
+        loopPorts: (t, hooks): ComposePorts => {
+          const session = sessionFor(t.id);
+          const steerPath = join(epPath, "steer", `${t.id}.jsonl`);
+          const queue = new FileSteeringQueue({ path: steerPath, sessionPath: session });
+          const gate: GatePort = {
+            check: async (req) => ledgerCheck(policy, toLedgerRequest(req, t.id), await ledger.snapshotAt(now()), now()),
+            reserve: async (req, receipt) => {
+              const rec = await ledger.reserve(policy, toLedgerRequest(req, t.id), receipt as ActionReceipt);
+              if (!firstReservation.has(t.id)) firstReservation.set(t.id, req.actionId);
+              return { id: rec.id };
+            },
+            closeReservation: (ref, why, attest) => ledger.closeReservation(ref, why, attest),
+            ingestSession: (s, scope) => ledger.ingestSession(s, scope),
+            recordManualSpend: (s, scope) => ledger.recordManualSpend(s, scope),
+            recordWallclock: (scope, seconds) => ledger.recordWallclock(scope, seconds),
+          };
+          const receipts = new Map<string, { req: LedgerGateRequest; receipt: ActionReceipt }>();
+          const executorGate = {
+            check: async (_p: unknown, req: GateRequestLike) => {
+              const lr = toLedgerRequest(req, t.id);
+              const res = ledgerCheck(policy, lr, await ledger.snapshotAt(now()), now());
+              if (res.allowed && res.receipt) {
+                if (receipts.size >= 64) receipts.delete(receipts.keys().next().value!);
+                receipts.set(req.actionId, { req: lr, receipt: res.receipt });
+              }
+              return res;
+            },
+            reserve: async (_p: unknown, req: { actionId: string }) => {
+              const hit = receipts.get(req.actionId);
+              if (!hit) throw new Error("host gate: check receipt required");
+              receipts.delete(req.actionId);
+              const rec = await ledger.reserve(policy, hit.req, hit.receipt);
+              if (!firstReservation.has(t.id)) firstReservation.set(t.id, req.actionId);
+              return rec;
+            },
+            closeReservation: gate.closeReservation,
+          };
+          let model = t.model;
+          const runnerPort: RunnerPort = {
+            run: (task) => runner.run({ ...task, episodeId: graph.episodeId, session, worktreePath: treeFor(t.id) }),
+            reconcile: () => runner.reconcile({ episodeId: graph.episodeId, taskId: t.id, session, worktreePath: treeFor(t.id) }),
+            resume: async (task, attemptId) => {
+              const target = (task as { model?: string }).model ?? model;
+              if (!hooks.capacitySwap(target, model)) throw new Error("capacity:full");
+              model = target;
+              return runner.resume({ episodeId: graph.episodeId, taskId: t.id, session, model, worktreePath: treeFor(t.id) }, attemptId);
+            },
+            stop: (h) => runner.stop({ session: h.session }),
+          };
+          const discloseDelivery = (r: { channel: string }): void => {
+            log(`${t.id}: ${r.channel.startsWith("escalation:") ? "question NOT delivered" : "question dispatched"} (${r.channel})`);
+          };
+          return {
+            planner: { planRecovery: (input) => planRecovery(input as Parameters<typeof planRecovery>[0]) },
+            executor: { executeRecoveryAction: (plan, ctx, ports) => executeRecoveryAction(plan, ctx as never, ports as never) },
+            executorPorts: { journal: journalPort, gate: executorGate,
+              steer: { push: async (req: object) => { await appendFile(steerPath, JSON.stringify(req) + "\n", "utf8"); } },
+              dispatch: {
+                investigate: async (req: object) => {
+                  const diag = await hooks.investigate({ ...req, episodeId: graph.episodeId, taskId: t.id }, {});
+                  return { evidenceRefs: (diag as { evidenceRefs?: string[] }).evidenceRefs ?? [] };
+                },
+                repair: async () => { throw new Error("host: schedule repair unwired"); },
+                rewriteTask: async () => { throw new Error("host: schedule rewrite unwired"); },
+                escalate: async (req: object) => {
+                  const res = await dispatcher.escalate({ ...req, episodeId: graph.episodeId, taskId: t.id });
+                  discloseDelivery(res); return { channel: res.channel };
+                },
+                park: async () => { discloseDelivery(await dispatcher.park({ episodeId: graph.episodeId, taskId: t.id })); },
+              },
+            },
+            runner: runnerPort, gate, journal: journalPort,
+            investigate: hooks.investigate,
+            accept: { evaluate: async () => evaluateAcceptance(await collectAcceptanceEvidence({ graph, taskId: t.id, epPath, worktreePath: treeFor(t.id) })) },
+            steer: { poll: async () => {
+              let stopped = await shutdown.poll();
+              const texts: string[] = [];
+              for (const item of queue.drain()) {
+                const text = typeof item === "string" ? item : item.text;
+                if (text.trim() === "shutdown") stopped = true; else texts.push(text);
+              }
+              return { texts, shutdown: stopped };
+            } }, now, log,
+          };
+        },
+        investigate: (_t, packet, limits) => runInvestigation(packet as never, { now }, Object.keys(limits).length ? { limits } : undefined),
+        capacity: { read: async () => readFile(join(process.env["HOME"] ?? "/tmp", ".tre", "episodes", "capacity.json"), "utf8").catch((e: unknown) => {
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw e;
+        }) },
+        maxParallel: opts.maxParallel, worktrees, admissionCheck, journal: schedulerJournal,
+        acceptanceFor: async (t) => {
+          const { records } = await journal.read();
+          const key = acceptanceKeys.get(t.id);
+          const rec = [...records].reverse().find((r) => r.kind === "acceptance" && r.taskId === t.id && key !== undefined && r.id === key.id);
+          return rec?.kind === "acceptance" ? rec.verdict : undefined;
+        },
+        shutdown, clock: { now }, log,
+      };
+      const res = await runSchedulerEpisode({ episodeId: graph.episodeId }, deps);
+      // runSchedulerEpisode returns ONLY after draining its live map. Thus
+      // the terminal live projection is empty, including shutdown. Never
+      // read or merge state.json; it is output, not admission authority.
+      await writeEpisodeState(join(epPath, "state.json"), {
+        schema: "tre-episode-state/1", episodeId: graph.episodeId,
+        tasks: Object.fromEntries(Object.entries(res.tasks).map(([id, fate]) => [id, { status: fate.status }])),
+        slots: {},
+      });
+      return {
+        result: { stopped: res.stopped === "quiesced-complete" ? "completed" : res.stopped === "shutdown" ? "shutdown" : "halt", detail: res.detail ?? res.stopped, iterations: [], investigationCount: res.observerGrants },
+        episodePath: epPath, taskOutcomes: res.tasks, admissions: res.admissions, denials: res.denials,
+        disclosures: [...disclosures, ...res.disclosures],
+      };
+    } finally { try { runner.close(true); } catch { log("runner-close failed"); } }
+  } finally {
+    if (lease.held() && await lease.release() === "failed") log(`lease release FAILED after 3 attempts on ${lease.path}`);
   }
 }
 
