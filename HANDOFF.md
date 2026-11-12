@@ -1,3 +1,63 @@
+## 2026-11-13 — M3 audit fix round 4 (Sol, m3fix3): ambient GIT_* re-routed the whole proof — every provisioner git call now runs on a GIT_*-stripped env
+
+A FOURTH hostile audit (prompt `~/.tre/audits/m3fix3-sol-prompt.txt`,
+log `~/.tre/audits/m3fix3-sol-out.txt`, verdict **FAIL** on 0c0caaf:
+1 blocker + a claim-audit note; blocker reproduced by the auditor in
+`.tre/review-probes/m3f3-env-loss.mjs`). The round-3 gate neutralized
+the repo's own settings but still inherited the orchestrator's launch
+environment:
+
+1. **B1 — an ambient `GIT_WORK_TREE` re-routed the cleanliness proof
+   to a DIFFERENT checkout.** With `GIT_WORK_TREE=<clean main repo>`
+   exported, every provisioner git call (the real-index tag gates AND
+   the fresh-index status proof AND git's own `worktree remove` check)
+   inspected the main checkout instead of the task tree: status EMPTY,
+   tags all H, unforced remove DESTROYED a linked task tree holding an
+   ignored (`info/exclude` `*.bak`) unique uncommitted payload. Fix
+   (belt the whole namespace, not a deny-list): `gitEnv()` rebuilds a
+   clean environment PER CALL — every `GIT_*` variable stripped (a
+   future git env var cannot newly defeat the gate; fail-closed by
+   construction), `GIT_CONFIG_SYSTEM=/dev/null` pinned baseline, and
+   the fresh-index calls layer their own `GIT_INDEX_FILE`/
+   `GIT_ATTR_SOURCE`/config pins on top. All FIVE execFileAsync sites
+   in the module (git, gitVerify, gitWithEnv, probeExit0, the
+   filter-enumeration probe) now pass `env: gitEnv(...)` — repository
+   routing comes from `cwd` alone. (The integration merge module
+   already strips an explicit list — this module goes further because
+   the provisioner performs only local, non-networked calls, so
+   nothing legitimate rides in GIT_*: no GIT_SSH_COMMAND etc. needed.)
+2. **Regression** `ambient GIT_WORK_TREE cannot re-route the
+   cleanliness proof (audit-sol round-4 B1)`: linked worktree +
+   info/exclude-ignored unique payload + ambient
+   GIT_WORK_TREE/GIT_DIR pointing at the clean main repo ⇒ removal
+   refuses `hidden-content`, tree + payload bytes intact; with the
+   redirect cleared and the payload removed the clean tree still
+   removes (no over-refusal). **Mutation-checked both ways:** against
+   a gitEnv→raw-`process.env` passthrough build the test fails exactly
+   at the rejects-assertion, and the auditor's own
+   `.tre/review-probes/m3f3-env-loss.mjs` destroys the payload on the
+   passthrough build (exit 0 "REPRO PASS") but is refused `hidden-content`
+   by the fixed build (exit 1) — the earlier note that the unit test
+   "wasn't a perfect mutation proxy" was WRONG: the first patch script
+   had silently failed to apply; a verified patch fails the test.
+3. **Claim audit (Sol note, fixed):** round 3's HANDOFF/docs wording
+   "core.fileMode=true on every index-reading gate call" overstated
+   the implementation — the two REAL-index `ls-files` tag gates carry
+   the fsmonitor pin only. That IS the correct design (the tag gates
+   read staged BITS fileMode cannot conceal; the worktree-bit
+   comparison happens only in the fresh-index status proof where the
+   pin rides), so the wording was corrected in both places rather
+   than the code changed. (`gitEnv` was independently verified to
+   cover ALL five execFileAsync sites: git, gitVerify, gitWithEnv,
+   probeExit0, and the filter-enumeration probe.)
+
+Provisioner suite 63/63; full suite **2731 / 2717 pass / 0 fail /
+14 skipped** (twice — one intermediate run showed a single unrelated
+failure that never reproduced in two subsequent full runs; noted for
+honesty). Disclosed residue unchanged; NEW accepted residue: none —
+the strip is invisible to normal operation (no provisioner call
+legitimately reads GIT_*).
+
 ## 2026-11-13 — M3 audit fix round 3 (Sol, m3fix2): the gate trusted the repo's OWN conversion settings — fresh-index neutralized status proof
 
 A THIRD hostile audit of the M3 fix (auditor: GPT Sol via OpenRouter,
@@ -35,9 +95,14 @@ index + R5-F1 attribute arm) into the leaf provisioner:
 2. **B2 — `core.fileMode=false` hid an exec-bit change.** chmod 0755 on
    a tracked 100644 file moved nothing under the inherited config
    (status EMPTY, tags H) and the pre-fix remove destroyed the mode
-   change. Fix: `core.fileMode=true` rides the pin set on every
-   index-reading gate call (the fresh index also drops the stat cache,
-   belt-and-braces).
+   change. Fix: `core.fileMode=true` rides the pin set on the
+   fresh-index status proof (the fresh index also drops the stat
+   cache, belt-and-braces). NOTE (Sol round-4 claim audit, wording
+   corrected here): the two REAL-index `ls-files` tag gates carry the
+   fsmonitor pin only — no fileMode pin, by design: they read the
+   index's STAGED bits (tags, mode 160000), which `core.fileMode`
+   cannot conceal; the worktree-bit comparison happens solely in the
+   status proof, which is where the pin must be.
 3. **Gate order** restructured: the real-index tag gates (`ls-files -v`
    flags, empty→index-blind, `ls-files -s` gitlinks) run FIRST — they
    inspect index BITS a throwaway index would not carry — then the

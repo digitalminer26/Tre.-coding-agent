@@ -597,6 +597,46 @@ test("remove: $GIT_DIR/info/attributes rules refuse fail-closed — the arm-the-
   assert.equal(rep.worktreeRemoved, true, "inert info/attributes does not over-refuse");
 });
 
+test("remove: an ambient GIT_WORK_TREE cannot re-route the cleanliness proof to another checkout (audit-sol round-4 B1)", async () => {
+  // The gate's proof and git's own removal check inherit the process
+  // environment; an inherited GIT_WORK_TREE (or GIT_DIR …) points EVERY
+  // git call at a DIFFERENT checkout. The pre-fix gate then proved the
+  // OTHER tree clean and deleted this one over an unexamined ignored
+  // payload (auditor repro m3f3-env-loss.mjs: unique bytes in an
+  // ignored .bak lost). Fix: every provisioner git call strips the
+  // whole GIT_* namespace — routing comes from cwd alone.
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epEnv1", taskId: "t1", baseCommit: base });
+  const exclPath = resolve(wt.path, (await git(wt.path, "rev-parse", "--git-path", "info/exclude")).trim());
+  await mkdir(dirname(exclPath), { recursive: true });
+  await writeFile(exclPath, "*.bak\n");
+  await writeFile(join(wt.path, "unique.bak"), "UNCOMMITTED UNIQUE PAYLOAD\n");
+  assert.match(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "-uall"), /!! unique\.bak/, "the task tree itself shows the ignored payload (the auditor's precondition)");
+
+  const saved = { GIT_WORK_TREE: process.env.GIT_WORK_TREE, GIT_DIR: process.env.GIT_DIR };
+  process.env.GIT_WORK_TREE = repo; // the clean MAIN checkout — the redirection
+  process.env.GIT_DIR = repo + "/.git";
+  try {
+    await assert.rejects(
+      prov.removeTaskWorktree({ episodeId: "epEnv1", taskId: "t1" }),
+      (e: unknown) => { expectCode(e, "hidden-content"); return true; },
+      "with the redirect in force the gate must still see THIS tree's ignored content",
+    );
+    assert.equal(existsSync(wt.path), true, "worktree kept — the payload survives the redirect attempt");
+    assert.equal(await readFile(join(wt.path, "unique.bak"), "utf8"), "UNCOMMITTED UNIQUE PAYLOAD\n", "payload bytes intact");
+  } finally {
+    if (saved.GIT_WORK_TREE === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = saved.GIT_WORK_TREE;
+    if (saved.GIT_DIR === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved.GIT_DIR;
+  }
+
+  // No over-refusal: with the redirect gone (and the payload removed),
+  // a clean tree still removes normally — the strip is invisible to
+  // normal operation.
+  await rm(join(wt.path, "unique.bak"));
+  const rep = await prov.removeTaskWorktree({ episodeId: "epEnv1", taskId: "t1" });
+  assert.equal(rep.worktreeRemoved, true, "clean tree still removable");
+});
+
 test("remove: submodule entries refuse as has-submodules — protection never rests on git's incidental removal error (audit-haiku F3)", async () => {
   const { prov, repo, base } = await setup();
   // A committed submodule (added to the BASE so the worktree carries

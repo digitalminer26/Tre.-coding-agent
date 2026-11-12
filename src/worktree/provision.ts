@@ -140,16 +140,46 @@ function revArgs(rev: string): string[] {
   return rev.startsWith("-") ? ["--", rev] : [rev];
 }
 
+/** Sol round-4 (audit m3fix3) B1 fix: NO git call in this module may
+ *  inherit an ambient GIT_* variable. An inherited GIT_WORK_TREE (or
+ *  GIT_DIR / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY /
+ *  GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_CONFIG* / GIT_ATTR* /
+ *  GIT_NAMESPACE …) RE-ROUTES the call's repository — the removal gate
+ *  would then prove cleanliness of a DIFFERENT checkout and delete the
+ *  task tree over an unexamined ignored payload (repro: audit
+ *  m3fix3-env-loss: ambient GIT_WORK_TREE=main made an unforced remove
+ *  of a linked worktree holding a unique ignored file succeed).
+ *  Rather than deny-listing names one at a time, EVERY provisioner git
+ *  invocation strips the whole GIT_* namespace and gets a clean env:
+ *  repository routing comes from `cwd` alone, config from the repo's
+ *  own files plus the explicit -c pins, and the fresh-index calls
+ *  layer their own GIT_INDEX_FILE/GIT_ATTR_SOURCE/... on top. The
+ *  provisioner performs only local, non-paged, non-networked git calls,
+ *  so nothing legitimate rides in GIT_* (fail-closed by construction
+ *  against future git env vars too). */
+function gitEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === "GIT_*") continue; // git's own single-char wildcard (never legitimately set)
+    if (k.startsWith("GIT_")) continue;
+    if (v !== undefined) env[k] = v;
+  }
+  // Deterministic baseline: system config is machine-state outside the
+  // repo (and unreadable under sandboxes) — pin it off rather than
+  // depend on the ambient GIT_CONFIG_SYSTEM someone exported.
+  return { GIT_CONFIG_SYSTEM: "/dev/null", ...env, ...(extra ?? {}) };
+}
+
 /** git with an extra env layer (throwaway-index gating). Same failure
  *  semantics as `git` (any non-zero → git-failed; NO documented-negative
- *  collapsing). */
+ *  collapsing). Env is the sanitized gitEnv base + extra pins. */
 async function gitWithEnv(cwd: string, args: string[], envExtra: Record<string, string>): Promise<string> {
   try {
     const { stdout } = await execFileAsync("git", args, {
       cwd,
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
-      env: { ...process.env, ...envExtra },
+      env: gitEnv(envExtra),
     });
     return stdout;
   } catch (err) {
@@ -175,7 +205,7 @@ async function filterNeutralizeArgs(cwd: string): Promise<string[]> {
   const probe = ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge|process)$"];
   let out = "";
   try {
-    const { stdout } = await execFileAsync("git", probe, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER });
+    const { stdout } = await execFileAsync("git", probe, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, env: gitEnv() });
     out = stdout;
   } catch (err) {
     const e = err as { code?: number | string; stderr?: string; message?: string };
@@ -246,6 +276,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
       cwd,
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
+      env: gitEnv(),
     });
     return stdout;
   } catch (err) {
@@ -300,6 +331,7 @@ async function gitVerify(cwd: string, args: string[]): Promise<string | null> {
       cwd,
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
+      env: gitEnv(),
     });
     return stdout.trim() === "" ? null : stdout.trim();
   } catch (err) {
@@ -313,7 +345,7 @@ async function gitVerify(cwd: string, args: string[]): Promise<string | null> {
  *  documented negatives → false; real failures → git-failed. */
 async function probeExit0(cwd: string, args: string[]): Promise<boolean> {
   try {
-    await execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER });
+    await execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER, env: gitEnv() });
     return true;
   } catch (err) {
     const e = err as { code?: number | string; stderr?: string };
