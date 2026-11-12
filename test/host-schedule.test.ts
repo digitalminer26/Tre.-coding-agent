@@ -512,6 +512,19 @@ test("M3 release: a kept refusal with a detail journals both, still never as rel
   assert.equal(rec?.["detail"], "worktree holds IGNORED content");
 });
 
+test("M3 release: a noop release (nothing removed, nothing kept) journals 'noop' — never a false 'released' (audit-haiku F5)", async () => {
+  const h = harness([t("a")], {
+    worktrees: {
+      async ensure() { return { path: "/wt/a" }; },
+      async release() { return { noop: true, detail: "no registered worktree" }; },
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done");
+  const rec = h.journalAppends.find((r) => r["kind"] === "sched-worktree");
+  assert.deepEqual([rec?.["outcome"], rec?.["detail"]], ["noop", "no registered worktree"]);
+});
+
 test("M3 release: a throwing release is disclosed (release-threw) and never fails the episode", async () => {
   const h = harness([t("a")], {
     worktrees: {

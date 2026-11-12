@@ -1,3 +1,78 @@
+## 2026-11-12 — M3 audit fix round 2 (Haiku 5.5): the hardened gate was still bypassable — fsmonitor pin, empty-index, submodules, honest noop, unique refusal ids
+
+A SECOND hostile audit of the M3 fix (auditor:
+`anthropic/claude-haiku-5.5` via OpenRouter, full source access, prompt
+`~/.tre/audits/m3-fix-audit-prompt.txt`, log
+`~/.tre/audits/m3-fix-audit-haiku.log`) returned verdict
+**DO-NOT-SHIP-as-stated** (1 blocker, 4 major, 2 minor). All seven fixed;
+each independently verified against the code the error names, with
+mutation-checked regressions (F3/F5/F6 fail against stashed src):
+
+1. **F1 (blocker) — the gate trusted fsmonitor (src/worktree/provision.ts).**
+   The round-1 hardened calls ran with repo config in force:
+   `core.fsmonitor=true` + a lying `.git/hooks/fsmonitor` (answers `ok`
+   with an empty token list) + a pre-set `fsmonitor-valid` bit makes
+   `git status` report CLEAN over modified files — the same attack
+   surface the supervise observation stack already closed (R6-B1 pins
+   `-c core.fsmonitor=false` on EVERY git call it trusts; the release
+   gate never got the pin). Fix: `-c core.fsmonitor=false` on all three
+   index-reading gate invocations (status, `ls-files -v`, `ls-files -s`;
+   the branch-deletion checks that follow touch no index, so the bit is
+   irrelevant there). Regression installs the lying hook + valid bit and
+   asserts BOTH halves of the finding: the naive gate view reads CLEAN
+   over the edit (the hole, reproduced in-test) while the pinned view
+   sees `M a.txt`, and the remove refuses `dirty` keeping the payload.
+   Honest caveat (mutation-run): against pre-fix dist this test still
+   PASSED — on this git (2.54) `git worktree remove` ran its own dirty
+   check that caught the edit, so the payload loss is git-version-
+   dependent; the pin makes the gate itself honest instead of relying
+   on git's internal check (same stance as F3).
+2. **F2 (major) — all-`H` over an EMPTY index passed vacuously.** A
+   corrupt/truncated index lists no entries, so the flag gate said
+   "clean, nothing to hide" and removed. Now an empty tag set refuses as
+   new code `index-blind` (fail-closed; `force` remains the explicit
+   operator discard). Regression builds an empty-tree root commit
+   (canonical empty tree via `commit-tree` — `mktree` would block on
+   stdin under execFile) and asserts the refusal + tree kept; verified
+   it SUCCEEDS-at-removing pre-fix (fails against stashed src).
+3. **F3 (major) — submodule entries (mode 160000).** Unforced removal of
+   a tree with gitlinks is git-version-dependent (old git refuses with
+   "working trees containing submodules cannot be moved or removed", new
+   git may destroy the checkout-with-submodules tree) — protection must
+   not rest on git's incidental error. The gate now scans `ls-files -s`
+   and refuses `has-submodules` BEFORE attempting removal. Regression
+   plants a 160000 entry; fails pre-fix.
+4. **F5 (major) — nothing-removed journaled as `released`
+   (src/host/supervise.ts, src/supervisor/schedule.ts).** Host
+   `releaseWorktree` returned `undefined` when no provisioner was ever
+   registered and when the provisioner's remove hit its no-registration
+   noop — the scheduler mapped undefined to `released`. The contract now
+   returns `{noop:true,detail}` on both paths and the scheduler journals
+   outcome `noop` (distinct from `released` and from `kept:<code>`);
+   +1 schedule test.
+5. **F6 — round-1 refusal ids still collided.** `steer-<seq>-refused-
+   <model>` is not unique when the SAME model is refused twice in one
+   poll (two steer texts, each `model:<same>`). Id is now
+   `steer-<seq>_refused_<N>-<model>` (per-poll refusal counter, model
+   kept for grep). Collision regression refuses one model twice AND two
+   models once; asserts 3 distinct ids carrying counter+model; fails pre-fix.
+6. **F7 (minor) — tautological assertions (test/).** Two remove tests
+   asserted `repo !== ""` on a path string (always true); replaced with
+   `existsSync(wt.path)` — proves the tree actually left the disk. The
+   refusal-id test now also asserts the ids match the expected shape,
+   not merely differ.
+7. **F4 (minor, disclosed not fixed) — status→remove TOCTOU.** Content
+   can appear between the gate read and the removal; inherent to any
+   check-then-delete. Precondition comment added at the gate: acceptable
+   residual risk because auto-release runs only after the task's agent
+   process is dead (single-writer assumption), and the forced operator
+   path explicitly discards by contract.
+
+Docs: docs/11 §14 ledger gained the round-2 row; docs/20 D4 note updated
+for the new refusal codes (`index-blind`, `has-submodules`), the
+fsmonitor pin, and the `noop` outcome. Gate: quality-check OK; tsc
+clean; full suite **2725 / 2711 pass / 0 fail / 14 skipped**.
+
 ## 2026-11-12 — M3 audit fix: worktree release no longer destroys status-invisible content; refusals journaled honestly
 
 The post-M3 audit (probe: `~/.tre/review-probes/m3-cleanup-audit.mjs`)

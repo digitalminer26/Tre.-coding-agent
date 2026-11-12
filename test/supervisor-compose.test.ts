@@ -349,16 +349,16 @@ test("M3 swap allowlist: no models in authority = NO override approved (parity w
     "with an empty pool every override is refused (same semantics as the ledger's model-not-approved)");
 });
 
-test("M3 swap allowlist: two refusals in ONE poll journal under DISTINCT actionIds (audit: seq-only ids collided)", async () => {
+test("M3 swap allowlist: refusals in ONE poll journal under DISTINCT actionIds — incl. the SAME model twice (audit-haiku F6: model-name ids still collided on repeats)", async () => {
   const f = mkFakes({ exitCode: 1 });
-  f.steerPolls.push({ texts: ["model:delta", "model:epsilon"] }); // both OUTSIDE {alpha,beta,gamma}
+  f.steerPolls.push({ texts: ["model:delta", "model:delta", "model:epsilon"] }); // all OUTSIDE {alpha,beta,gamma}
   const s = scripted(planOf("model-swap", { model: "beta" }), planOf("hold"));
   await run(cfgBase(), f, s.planner);
   const refused = f.jrec.filter((r) => String(r.notes).includes("refused — model-not-approved"));
-  assert.equal(refused.length, 2, "both refusals are durable (a colliding id + keyed append would swallow the second)");
+  assert.equal(refused.length, 3, "all three refusals are durable (a colliding id + keyed append would swallow duplicates)");
   const ids = new Set(refused.map((r) => String(r["actionId"])));
-  assert.equal(ids.size, 2, "distinct actionIds — the refused model name rides in the id, seq alone is not unique");
-  assert.ok([...ids].every((id) => /refused-(delta|epsilon)$/.test(id)), `ids carry the model: ${[...ids].join(", ")}`);
+  assert.equal(ids.size, 3, "distinct actionIds — a per-poll counter rides in the id; model name alone collides on repeats");
+  assert.ok([...ids].every((id) => /_refused_[123]-(delta|epsilon)$/.test(id)), `ids carry a counter + the model: ${[...ids].join(", ")}`);
 });
 
 test("§9/F22-R4-2: an executor-side spawn reservation closes 'settled' on a proven exit", async () => {

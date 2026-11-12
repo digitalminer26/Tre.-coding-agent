@@ -3915,11 +3915,15 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
       // territory). Removal failure can never fail the task: the fate
       // was already decided; this only reclaims disk.
       release: async (taskId) => {
-        if (provisioner === undefined) return; // nothing was ever provisioned
+        // Audit-haiku F5: every no-removal path returns a DISTINCT
+        // outcome — a missing provisioner or a git-level noop means
+        // NOTHING was removed (journalized `noop` by the scheduler),
+        // never a false `released`.
+        if (provisioner === undefined) return { noop: true, detail: "nothing was ever provisioned" };
         try {
           const rep = await (await provisioner).removeTaskWorktree({ episodeId: graph.episodeId, taskId });
           paths.delete(taskId);
-          return rep.noop ? { kept: "noop", detail: "no registered worktree" } : undefined;
+          return rep.noop ? { noop: true, detail: "no registered worktree" } : undefined;
         } catch (e) {
           const code = String((e as { code?: string }).code ?? "remove-failed");
           const msg = (e as Error)?.message;

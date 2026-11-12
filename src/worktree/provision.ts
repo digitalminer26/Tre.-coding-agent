@@ -87,6 +87,8 @@ export type ProvisionErrorCode =
   | "branch-conflict"           // branch exists but not at the pinned base
   | "dirty"                     // remove refused: worktree has uncommitted changes
   | "hidden-content"            // remove refused: content git status cannot show (ignored file, info/exclude entry, assume-unchanged/skip-worktree bit)
+  | "index-blind"               // remove refused: ls-files reported an EMPTY index (unreadable/corrupt) — cannot prove removable
+  | "has-submodules"            // remove refused: submodule (mode 160000) entries present — unsupported for agent worktrees
   | "unmerged"                  // branch deletion refused: commits past base
   | "no-base-for-branch-delete" // deleteBranch without proof base
   | "prune-refused"             // stale entries exist outside our wtRoot
@@ -607,7 +609,8 @@ export class WorktreeProvisioner {
    *    surfaced, not bypassed. A user whose directory is gone yields
    *    stale-registration guidance, never a circular branch-in-use (ds-c2 F4).
    *  Error codes thrown: not-registered, stale-registration, foreign-branch,
-   *  locked, dirty, branch-in-use, no-base-for-branch-delete, unmerged,
+   *  locked, dirty, hidden-content, index-blind, has-submodules,
+   *  branch-in-use, no-base-for-branch-delete, unmerged,
    *  git-failed (prune() also throws prune-refused and locked).
    *  Branch names beginning with "-" are rejected by git's own
    *  check-ref-format (verified: `git branch -- -foo` → "not a valid
@@ -661,7 +664,13 @@ export class WorktreeProvisioner {
     // `dir/` line; empty ignored directories are the disclosed residue
     // git itself cannot represent — `remove -f -f` discards them.)
     // Non-`!!` entries are ordinary dirty.
-    const status = await git(entry.path, ["status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"]);
+    // Audit-haiku F1: the gate's OWN view must not consult a configured
+    // core.fsmonitor hook — a hook that lies "clean" (or leaves a stale
+    // fsmonitor-valid index bit) hides a modified tracked file from
+    // status AND from ls-files -v (the bit is not a tag), and git's own
+    // remove trusts the bit too. `-c core.fsmonitor=false` forces the
+    // real stat comparison regardless of repo config.
+    const status = await git(entry.path, ["-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"]);
     if (status.trim() !== "" && !force) {
       const lines = status.split("\n").filter((l) => l.trim() !== "");
       const ordinary = lines.filter((l) => !l.startsWith("!!"));
@@ -675,20 +684,60 @@ export class WorktreeProvisioner {
     // (`S`), and every other non-`H` ls-files tag. A tracked file
     // modified under those bits reads clean and vanishes with the
     // tree. The worktree is only honestly removable when EVERY index
-    // entry is `H ` (tracked, unflagged). An EMPTY index (no tracked
-    // files at all) is vacuously clean; a FAILED ls-files propagates
-    // as git-failed and is caught upstream as a kept refusal.
+    // entry is `H ` (tracked, unflagged). An EMPTY ls-files output is
+    // NOT vacuous cleanliness: a corrupt or unreadable index can print
+    // nothing and exit 0 on some git builds, so we fail CLOSED as
+    // `index-blind` rather than assume no tracked files exist. A
+    // genuinely file-less tree is extremely rare in practice (agent
+    // worktrees always have a baseCommit with files); the cost of a
+    // false refusal is one kept directory, the cost of a false pass is
+    // the whole tree. A FAILED ls-files (non-zero exit) propagates as
+    // git-failed and is caught upstream as a kept refusal.
+    // Audit-haiku F1: `-c core.fsmonitor=false` forces the gate's own
+    // view to do the real stat comparison regardless of repo config —
+    // the fsmonitor-valid index bit is NOT visible in ls-files -v (it
+    // stays an `H` tag) and a lying hook would hide modified content
+    // from status, ls-files, AND git's own removal check.
     // DISCLOSED RESIDUE (git itself cannot represent these in any
     // status form): directories ignored while containing ONLY empty
     // subdirectories, and modified CONTENT hidden behind a sparse-
     // checkout skip-worktree — sparse checkout is unsupported for
     // agent worktrees (docs/11 §5 worktree doctrine).
+    // Audit-haiku F3: submodule entries (mode 160000) are invisible to
+    // both the ignore gate and the flag gate above; git's own removal
+    // happens to refuse them with a blunt error, but we gate explicitly
+    // so protection never rests on git's accident.
+    // TOCTOU note (audit-haiku F4): the gate's view is a snapshot taken
+    // while the task is TERMINAL (fate already written). Content
+    // written after the gate reads but before the rm is an unavoidable
+    // race with no git-level fix (git's own check is equally racy and
+    // does not see ignored content). This is acceptable only because
+    // release runs exclusively after an accepted-done fate — the worker
+    // is provably stopped by the scheduler before release is called.
     if (!force) {
-      const tagged = await git(entry.path, ["ls-files", "-v"]);
+      const tagged = await git(entry.path, ["-c", "core.fsmonitor=false", "ls-files", "-v"]);
       const flagged = tagged.split("\n").filter((l) => l !== "" && l[0] !== "H");
       if (flagged.length > 0) {
         const kinds = [...new Set(flagged.map((l) => l[0] ?? "?"))].sort().join(",");
         throw new WorktreeProvisionError("hidden-content", `worktree ${path} has ${flagged.length} index entr${flagged.length === 1 ? "y" : "ies"} with disclaiming flags (${kinds}: assume-unchanged/skip-worktree/other) whose content status cannot show — refusing to remove (force to discard)`);
+      }
+      // Audit-haiku F2/F3: an EMPTY ls-files output means the index is
+      // not readable-as-expected (a corrupt/unreadable index prints
+      // nothing and exits 0 on some git versions) — fail CLOSED rather
+      // than vacuously clean. A genuinely file-less tree is rare (every
+      // agent baseCommit has files); the cost of a false refusal is one
+      // kept directory, the cost of a false pass is the tree.
+      if (tagged.trim() === "") {
+        throw new WorktreeProvisionError("index-blind", `worktree ${path} reported an EMPTY index (ls-files -v) — cannot prove removable; refusing (corrupt/unreadable index fails closed; force to discard)`);
+      }
+      // Audit-haiku F3: submodule entries (mode 160000) are invisible to
+      // the ignore/flag gates above and git's own removal refuses only
+      // BY ACCIDENT (a blunt "working trees containing submodules"
+      // error). Refuse explicitly with OUR code — protection must not
+      // rest on git's incident.
+      const stages = await git(entry.path, ["-c", "core.fsmonitor=false", "ls-files", "-s"]);
+      if (stages.split("\n").some((l) => l.startsWith("160000 "))) {
+        throw new WorktreeProvisionError("has-submodules", `worktree ${path} contains submodule entries — agent worktrees do not carry submodules and git cannot remove them safely; refusing`);
       }
     }
 

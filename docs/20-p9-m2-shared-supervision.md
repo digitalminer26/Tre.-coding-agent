@@ -474,9 +474,15 @@ the decision record; each is now BINDING for the code round.
    the host maps it to an UNFORCED P6 `removeTaskWorktree` (dirty, locked,
    foreign-branch, stale registration, or content git status cannot show
    — ignored files or assume-unchanged/skip-worktree index flags, refused
-   as `hidden-content` — → KEPT and journaled `kept:<code>`; branches are
+   as `hidden-content`; an EMPTY index refuses `index-blind`; submodule
+   (mode 160000) entries refuse `has-submodules` — audit-haiku round 2;
+   the gate's own git calls pin `-c core.fsmonitor=false` so a lying
+   fsmonitor hook + valid bit cannot forge a clean read) → KEPT and
+   journaled `kept:<code>`; branches are
    never deleted — P12 territory). Every outcome is one
-   `sched-worktree` journal record (`released` only on an actual removal);
+   `sched-worktree` journal record (`released` only on an actual removal;
+   nothing-removed nothings journal `noop` — a missing provisioner or an
+   unregistered worktree, never a false `released`);
    release is disclosure-only and can
    never alter a fate. Un-accepted finishes and episode-cleanup retention
    are unchanged.

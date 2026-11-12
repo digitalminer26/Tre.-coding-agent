@@ -527,7 +527,7 @@ export interface SchedulerDeps {
    *  `{ kept }` records a conservative refusal in the journal under its
    *  own `kept:<code>` outcome (never `released`); throwing is disclosed
    *  as `release-threw`. Neither changes the task's fate. */
-  worktrees?: { ensure(taskId: string): Promise<{ path?: string; refused?: string }>; release?(taskId: string): Promise<{ kept?: string; detail?: string } | void> };
+  worktrees?: { ensure(taskId: string): Promise<{ path?: string; refused?: string }>; release?(taskId: string): Promise<{ kept?: string; noop?: boolean; detail?: string } | void> };
   /** P8 headroom view (docs/20 §3.2.4 + §6: reserve-first doctrine —
    *  the scheduler asks the ledger for standing coverage, never an
    *  estimate of its own invention). */
@@ -858,11 +858,17 @@ export async function runSchedulerEpisode(
       try {
         const r = await deps.worktrees.release(t.id);
         const kept = (r as { kept?: string } | undefined)?.kept;
+        const noop = (r as { noop?: boolean } | undefined)?.noop;
         if (typeof kept === 'string' && kept.length > 0) {
           // Conservative refusal reported as a return (host maps every
           // WorktreeProvisionError code here): journaled per code,
           // never as 'released'.
           outcome = `kept:${sstr(kept, 80)}`;
+        } else if (noop === true) {
+          // Audit-haiku F5: nothing was removed AND nothing was kept
+          // (no provisioner / no registered worktree) — an honest
+          // third outcome, never a false 'released'.
+          outcome = 'noop';
         } else {
           outcome = 'released';
         }

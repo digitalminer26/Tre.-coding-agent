@@ -463,7 +463,75 @@ test("remove: an assume-unchanged modified file refuses as hidden-content (M3 au
   // force discards knowingly
   const rep = await prov.removeTaskWorktree({ episodeId: "epAu1", taskId: "t1", force: true });
   assert.equal(rep.worktreeRemoved, true);
-  assert.equal(repo !== "", true);
+  assert.equal(existsSync(wt.path), false, "forced removal actually removed the tree");
+});
+
+test("remove: a LYING fsmonitor hook + fsmonitor-valid bit cannot hide a modified file (audit-haiku F1)", async () => {
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epFsm1", taskId: "t1", baseCommit: base });
+  // A hook that answers the simple protocol with "ok" tells git
+  // "everything valid" — combined with the fsmonitor-valid index bit,
+  // a subsequently modified file reads CLEAN: status prints nothing,
+  // ls-files -v keeps its `H` tag (the bit is not a tag), and git's
+  // own removal check trusts the bit too. Pre-fix, an unforced remove
+  // deleted the edit.
+  await git(wt.path, "config", "core.fsmonitor", "echo ok");
+  assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "clean baseline under the hook");
+  await writeFile(join(wt.path, "a.txt"), "edited-under-lying-hook, uncommitted\n");
+  await git(wt.path, "update-index", "--fsmonitor-valid", "a.txt");
+  // The hole as the audit reproduced it: the naive gate view is blind.
+  assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "hook+bit hide the edit from a hook-trusting status (the audit finding)");
+  // The gate's OWN view forces core.fsmonitor=false — the edit is seen.
+  assert.match(await git(wt.path, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), /M a\.txt/, "fsmonitor-forced status sees the edit (helper trims the XY space)");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epFsm1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "dirty"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept — the hidden edit survives");
+  assert.equal(await readFile(join(wt.path, "a.txt"), "utf-8"), "edited-under-lying-hook, uncommitted\n");
+});
+
+test("remove: submodule entries refuse as has-submodules — protection never rests on git's incidental removal error (audit-haiku F3)", async () => {
+  const { prov, repo, base } = await setup();
+  // A committed submodule (added to the BASE so the worktree carries
+  // the 160000 entry).
+  const sub = join(dirname(repo), "suborigin");
+  await makeRepo(sub);
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", sub, "vend");
+  await git(repo, "commit", "-m", "add submodule");
+  const base2 = await git(repo, "rev-parse", "HEAD");
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epSub1", taskId: "t1", baseCommit: base2 });
+  assert.ok((await git(wt.path, "ls-files", "-s")).includes("160000 "), "worktree carries a submodule entry");
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epSub1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "has-submodules"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept");
+});
+
+test("remove: an EMPTY index (all-H over nothing) refuses as index-blind — vacuous cleanliness fails closed (audit-haiku F2)", async () => {
+  const { prov, repo } = await setup();
+  // Forge the finding's state with a DETERMINISTIC shape: a worktree
+  // whose baseCommit is an empty-tree root commit (zero entries — a
+  // rare but legal state; agent trees always have files, but the gate
+  // must not ASSUME that). Its index is legitimately empty: the
+  // round-1 all-'H' check passed VACUOUSLY over nothing and removed
+  // the tree while every entry was 'verified'. Pre-fix this remove
+  // SUCCEEDED; post-fix the empty tag set fails closed as
+  // index-blind before any removal is attempted.
+  // (git mktree would block on stdin under execFile — use git's
+  // canonical empty-tree object id directly.)
+  const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+  const emptySha = await git(repo, "commit-tree", emptyTree, "-m", "empty root");
+  assert.equal((await git(repo, "ls-tree", "-r", "--name-only", emptySha)).trim(), "", "base tree is genuinely empty");
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epEmpty1", taskId: "t1", baseCommit: emptySha });
+  assert.equal((await git(wt.path, "ls-files", "-v")).trim(), "", "index lists zero entries");
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epEmpty1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "index-blind"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept — an empty index is never vacuously removable");
 });
 
 test("remove: an ALL-H index (unflagged) still removes clean — the flag gate is not vacuous", async () => {

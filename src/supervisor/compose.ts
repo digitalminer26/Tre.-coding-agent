@@ -571,6 +571,7 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
           await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}shutdown-${seq}`, acked: false, progress: 'none', notes: 'supervisor: shutdown requested via steering' });
           return await finish('shutdown');
         }
+        let refusedInPoll = 0; // audit-haiku F6: N refusals in ONE poll need N distinct ids
         for (const t of steered?.texts ?? []) {
           const m = /^model:([A-Za-z0-9][A-Za-z0-9._-]{0,255})$/.exec(t ?? '');
           // R4/F21: a superseded override is recorded, never silently lost.
@@ -591,11 +592,15 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
               : [];
             const steerModel = m[1]!;
             if (!approvedPool.includes(steerModel)) {
-              // M3 audit fix: the model name rides in the actionId — two
-              // refused overrides in ONE poll (same seq) must not collide
-              // (model ids here are regex-bounded to [A-Za-z0-9._-], the
-              // same charset the supersede-id below already embeds).
-              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-refused-${steerModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
+              // M3 audit fix + audit-haiku F6: two refusals in ONE poll
+              // (same seq), even for the SAME model, must not collide —
+              // a per-poll counter rides in the id. The `_refused_`
+              // separator is collision-proof against the supersede id
+              // `steer-<seq>-<model>` (underscore is outside the model
+              // regex `[A-Za-z0-9._-]`, so no model name can ever
+              // reproduce it).
+              refusedInPoll += 1;
+              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}_refused_${refusedInPoll}-${steerModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
               continue;
             }
             if (overrideModel !== undefined) {
