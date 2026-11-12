@@ -212,6 +212,24 @@ test("schedule entry: two asides of the same base within one millisecond never c
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("aside: a non-EEXIST link failure (no-hardlink source) still preserves BOTH same-ms copies (M2 audit c5 finding)", async () => {
+  // A DIRECTORY source makes link() fail with EPERM on macOS and Linux —
+  // the real trigger for the no-hardlink fallback, no dist mutation needed.
+  const dir = await mkdtemp(join(tmpdir(), "aside-nolink-"));
+  const base = join(dir, "state.json");
+  const TS = 1_700_000_000_001;
+  try {
+    await mkdir(base);
+    const a1 = await preserveAside(base, TS);
+    assert.ok(a1.startsWith(`${base}.unreadable-${TS}`), `fallback first name: ${a1}`);
+    await mkdir(base); // second same-ms aside of the same base
+    const a2 = await preserveAside(base, TS);
+    assert.notEqual(a2, a1, "the fallback must NOT rename onto the taken name (rename replaces — evidence lost)");
+    assert.ok(a2.startsWith(`${base}.unreadable-${TS}`), `fallback second name: ${a2}`);
+    await assert.rejects(readFile(base, "utf8"), { code: "ENOENT" }, "source consumed");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("schedule entry: a corrupt state.json reaching the FINAL write is preserved aside, never replaced (W1-M7)", async () => {
   const root = await mkdtemp(join(tmpdir(), "sched-corrupt-final-"));
   const logs: string[] = [];

@@ -185,24 +185,48 @@ const now = () => Date.now();
  *  "preserve failed — NOTHING overwritten". */
 export async function preserveAside(statePath: string, ts: number = now(), cap = 500): Promise<string> {
   const stem = `${statePath}.unreadable-${String(ts)}`;
+  let probeMode = false; // sticky once link() proves unusable (see below)
   for (let n = 0; n < cap; n++) {
     const candidate = n === 0 ? stem : `${stem}.${String(n)}`;
-    try {
-      await link(statePath, candidate); // atomic claim: EEXIST = taken
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException)?.code === "EEXIST") continue; // try the next candidate
-      await rename(statePath, candidate); // no hardlink here: plain-rename fallback
-      return candidate;
+    if (!probeMode) {
+      try {
+        await link(statePath, candidate); // atomic claim: EEXIST = taken
+        // The link holds the bytes under the claimed name; drop the original
+        // name. A failed unlink leaves BOTH names — the bytes are preserved
+        // either way, so it is not a preserve failure.
+        await unlink(statePath).catch(() => {});
+        return candidate;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === "EEXIST") continue; // try the next candidate
+        // link() is unusable here (no-hardlink filesystem, cross-device,
+        // a directory source — EPERM on both): a non-EEXIST error proves
+        // NOTHING about the candidate, so switch to occupancy-probe mode for
+        // all remaining candidates instead of blindly renaming (a plain
+        // rename REPLACES a taken name — that silently destroyed a same-ms
+        // first copy, M2 audit c5 finding).
+        probeMode = true;
+      }
     }
-    // The link holds the bytes under the claimed name; drop the original
-    // name. A failed unlink leaves BOTH names — the bytes are preserved
-    // either way, so it is not a preserve failure.
-    await unlink(statePath).catch(() => {});
+    if (await asideTaken(candidate)) continue; // occupied: try the next name
+    // No hardlink primitive here: check-then-rename is the best available.
+    // The lease serializes episode writers, so the probe->rename window has
+    // no second writer (M2 audit c4 note).
+    await rename(statePath, candidate);
     return candidate;
   }
-  const last = `${stem}.${String(cap)}`; // cap same-ms collisions: bounded fallback
+  // Cap exhausted (>=cap asides of one base in one ms): still never replace
+  // an existing name — the random suffix makes a collision astronomically
+  // unlikely where a plain `${stem}.${cap}` rename would overwrite.
+  let last = `${stem}.${String(cap)}`;
+  if (await asideTaken(last)) last = `${last}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
   await rename(statePath, last);
   return last;
+}
+
+/** Is `p` already claimed? lstat success = taken; ENOENT = free; any OTHER
+ *  stat error counts as taken (conservative: step aside to the next name). */
+async function asideTaken(p: string): Promise<boolean> {
+  try { await lstat(p); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code !== "ENOENT"; }
 }
 
 function assertId(v: string, what: string): string {

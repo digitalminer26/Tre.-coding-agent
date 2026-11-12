@@ -1,3 +1,19 @@
+## 2026-11-12 — M2 audit c5b: fallback aside path made evidence-safe (orchestrator closing patch)
+
+Cycle-5 audit (audit-c5.md) found the no-hardlink fallback in `preserveAside`
+renamed blindly: a same-ms second aside on a filesystem where `link` fails
+non-EEXIST (EPERM — e.g. a directory source) REPLACED the first preserved
+copy. Fix (auditor-prescribed, applied by the orchestrator and verified with
+the auditor's own probe): sticky probe-mode on any non-EEXIST link error —
+candidates are occupancy-probed (`asideTaken`, conservative on stat errors)
+before a plain rename; the cap-exhausted tail rename appends a random suffix
+if taken; the atomic link+unlink fast path is unchanged. Regression test uses
+a real directory source (EPERM on macOS/Linux, no dist mutation). Gate: build
+clean; full npm test 2702 pass / 0 fail / 14 skipped. Auditor's EPERM-injected
+repro (logs/c2-audit/c5b-fallback-probe.mjs vs dist-c5b-nolink) now shows both
+same-ms copies preserved (bug reproduced on 816bd03's dist-c5-nolink, fixed on
+current dist).
+
 # HANDOFF
 
 ## 2026-11-11 — M2 audit cycle 5: the preserve-aside move is atomic (link+unlink)
