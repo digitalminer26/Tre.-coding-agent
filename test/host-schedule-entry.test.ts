@@ -212,6 +212,24 @@ test("schedule entry: two asides of the same base within one millisecond never c
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("aside: dangling-symlink occupant is skipped, not replaced; cap-tail uses a fresh random name (M2 audit c5b)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aside-tail-"));
+  const base = join(dir, "state.json");
+  const TS = 1_700_000_000_002;
+  try {
+    // A dangling symlink at the first candidate: lstat sees it (taken), so
+    // the probe must skip it, never rename over it.
+    const { symlink } = await import("node:fs/promises");
+    await symlink(join(dir, "nowhere"), `${base}.unreadable-${TS}`);
+    await writeFile(base, "payload");
+    const got = await preserveAside(base, TS, 1); // cap=1 → candidate 0 then the random tail
+    assert.notEqual(got, `${base}.unreadable-${TS}`, "dangling symlink occupant is not replaced");
+    assert.equal(await readFile(got, "utf8"), "payload");
+    const { lstat: ls } = await import("node:fs/promises");
+    assert.ok((await ls(`${base}.unreadable-${TS}`)).isSymbolicLink(), "the symlink is left in place");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("aside: a non-EEXIST link failure (no-hardlink source) still preserves BOTH same-ms copies (M2 audit c5 finding)", async () => {
   // A DIRECTORY source makes link() fail with EPERM on macOS and Linux —
   // the real trigger for the no-hardlink fallback, no dist mutation needed.

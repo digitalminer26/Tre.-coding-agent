@@ -182,7 +182,10 @@ const now = () => Date.now();
  *  `rename` (same filesystem in practice — keep it simple). Bounded: `cap`
  *  probes, then the plain-rename fallback, never a hang. Throws only when
  *  the fallback move itself fails — the caller then logs the honest
- *  "preserve failed — NOTHING overwritten". */
+ *  "preserve failed — NOTHING overwritten".
+ *  PRECONDITION: every caller holds the episode lease (acquired before all
+ *  three call sites — runHostEpisode and runScheduledHostEpisode), so the
+ *  probe→rename window on the fallback path has no second writer. */
 export async function preserveAside(statePath: string, ts: number = now(), cap = 500): Promise<string> {
   const stem = `${statePath}.unreadable-${String(ts)}`;
   let probeMode = false; // sticky once link() proves unusable (see below)
@@ -217,10 +220,17 @@ export async function preserveAside(statePath: string, ts: number = now(), cap =
   // Cap exhausted (>=cap asides of one base in one ms): still never replace
   // an existing name — the random suffix makes a collision astronomically
   // unlikely where a plain `${stem}.${cap}` rename would overwrite.
-  let last = `${stem}.${String(cap)}`;
-  if (await asideTaken(last)) last = `${last}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
-  await rename(statePath, last);
-  return last;
+  // Random tail: re-roll and probe until free (bounded — 8 tries, then the
+  // last roll is used; a 32-bit collision on every roll is not a real path).
+  for (let r = 0; r < 8; r++) {
+    const last = `${stem}.${String(cap)}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
+    if (await asideTaken(last)) continue;
+    await rename(statePath, last);
+    return last;
+  }
+  const lastResort = `${stem}.${String(cap)}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
+  await rename(statePath, lastResort);
+  return lastResort;
 }
 
 /** Is `p` already claimed? lstat success = taken; ENOENT = free; any OTHER

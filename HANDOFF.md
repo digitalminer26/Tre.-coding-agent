@@ -1,3 +1,15 @@
+## 2026-11-12 — M2 audit c5b follow-up: cap-tail probe loop, lease precondition, dangling-symlink test
+
+Independent audit of 2811469 (audit-c5b.md): no bugs; three recommendations,
+all addressed. (1) The cap-tail random suffix was renamed without an
+occupancy check — now re-rolled and lstat-probed (8 tries, then one last
+roll). (2) Probe→rename TOCTOU on the fallback path — verified that
+`acquireEpisodeLease` precedes all three `preserveAside` call sites in both
+`runHostEpisode` and `runScheduledHostEpisode`; the precondition is now
+written into the doc comment. (3) Coverage — new test: dangling-symlink
+occupant is skipped and left in place, cap-tail yields a fresh name. Gate:
+build clean; npm test 2703 tests, 2689 pass, 0 fail, 14 skipped.
+
 ## 2026-11-12 — M2 audit c5b: fallback aside path made evidence-safe (orchestrator closing patch)
 
 Cycle-5 audit (audit-c5.md) found the no-hardlink fallback in `preserveAside`
