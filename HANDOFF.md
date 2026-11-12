@@ -1,3 +1,21 @@
+## 2026-11-12 — M2 audit c5d (Sol, round 1): stale parkTask seam closed; exhaustion bound pinned
+
+Sol's audit of 0e73011 confirmed the c5c fixes (throw-on-exhaustion safe at
+all three callers; RangeError guard clean; new tests discriminate in both
+link and probe modes) but found BUG-1 MAJOR: the returned parkTask closure
+acted AFTER the lease release — a stale activation could move/write the
+CURRENT owner's state.json under a NEW owner's lease (reproduced via
+lease-seam probe against unmodified dist). Fix: the seam now claims a FRESH
+lease per call (the same exclusion every activation path obeys; refuse while
+any live holder owns the episode) and releases after acting — `lease.held()`
+cannot gate it because release never clears the flag and post-run ownership
+is never ours. Integration test: foreign live-pid lease ⇒ parkTask rejects,
+owner state byte-intact, zero asides; drop the lease ⇒ same closure parks.
+REC-1: the exhaustion test now counts Math.random calls — EXACTLY 8 rolls,
+and a scripted free 9th value is never used (a 9-roll mutant fails it).
+Gate: build clean; npm test 2707 tests, 2693 pass, 0 fail, 14 skipped; P17
+activation-suite pass 14/0. Next: Sol audit round 2.
+
 ## 2026-11-12 — M2 audit c5c follow-up (implement round, then Sol audits x3): no-overwrite invariant completed
 
 Audit c5c found the cap-tail exhaustion path still renamed UNPROBED

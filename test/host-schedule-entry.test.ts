@@ -258,25 +258,34 @@ test("aside: random-tail collision RETRY re-rolls past an occupied tail (M2 audi
   } finally { Math.random = realRandom; await rm(dir, { recursive: true, force: true }); }
 });
 
-test("aside: tail exhaustion THROWS and keeps the source — never an unprobed rename (M2 audit c5c F1)", async () => {
-  // All rolls identical and the tail occupied: 8 probes, all taken → the
-  // function must reject with the source intact (no lastResort overwrite).
+test("aside: tail exhaustion THROWS and keeps the source — never an unprobed rename (M2 audit c5c F1, bound pinned per c5d REC-1)", async () => {
+  // The documented bound is EXACTLY 8 rolls. Scripted random: eight rolls
+  // of an occupied value, then a DISTINCT FREE value. A ninth attempt would
+  // silently succeed (source moved); the correct implementation throws with
+  // the source intact after exactly 8 calls. Counts assert the bound, not
+  // just eventual rejection (c5d REC-1: unlimited identical rolls could not
+  // detect an extra attempt).
   const dir = await mkdtemp(join(tmpdir(), "aside-exhaust-"));
   const base = join(dir, "state.json");
   const TS = 1_700_000_000_004;
   const realRandom = Math.random;
   try {
     const stem = `${base}.unreadable-${TS}`;
-    const v = 0.5;
-    const t = `${stem}.1.${Math.floor(v * 4294967296).toString(36)}`;
+    const vOcc = 0.5, vFree = 0.75;
+    const tOcc = `${stem}.1.${Math.floor(vOcc * 4294967296).toString(36)}`;
+    const tFree = `${stem}.1.${Math.floor(vFree * 4294967296).toString(36)}`;
+    assert.notEqual(tOcc, tFree, "scripted occupied/free tails are distinct");
     await writeFile(stem, "OCC-STEM");
-    await writeFile(t, "OCC-TAIL");
+    await writeFile(tOcc, "OCC-TAIL");
     await writeFile(base, "payload");
-    Math.random = () => v;
+    let calls = 0;
+    Math.random = () => { calls++; return calls <= 8 ? vOcc : vFree; };
     await assert.rejects(preserveAside(base, TS, 1), /refusing to overwrite/);
+    assert.equal(calls, 8, "the tail loop makes EXACTLY 8 rolls (documented bound)");
     assert.equal(await readFile(base, "utf8"), "payload", "source kept in place on exhaustion");
-    assert.equal(await readFile(t, "utf8"), "OCC-TAIL", "the tail occupant survived exhaustion");
+    assert.equal(await readFile(tOcc, "utf8"), "OCC-TAIL", "the tail occupant survived exhaustion");
     assert.equal(await readFile(stem, "utf8"), "OCC-STEM");
+    await assert.rejects(readFile(tFree, "utf8"), /ENOENT/, "the free 9th candidate was never used — the loop bound is 8");
   } finally { Math.random = realRandom; await rm(dir, { recursive: true, force: true }); }
 });
 

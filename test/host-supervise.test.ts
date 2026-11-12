@@ -60,6 +60,49 @@ async function exitZeroWorker(root: string, extra = ""): Promise<string> {
   return p;
 }
 
+test("c5d BUG-1: a stale activation's parkTask CANNOT act under a later owner's lease", async (t) => {
+  // c5d BUG-1 (Sol audit): the seam used to be the raw runPark closure — a
+  // stale activation (lease already released) could move/write the CURRENT
+  // owner's state.json under the new owner's lease (reproduced against the
+  // old dist). The seam now re-establishes ownership: direct act only while
+  // our claim stands, otherwise a fresh claim — which REFUSES (throws,
+  // state untouched) while another live holder owns the episode.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    log: (l) => t.diagnostic(l),
+  });
+  const epDir = join(root, graph.episodeId);
+  const statePath = join(epDir, "state.json");
+  const leasePath = join(epDir, "host.lease");
+
+  // Run 1 has returned: its lease is released. Simulate the NEW owner by
+  // claiming with a LIVE pid (this process) — exactly the state a second
+  // scheduler's activation produces.
+  await writeFile(leasePath, JSON.stringify({ pid: process.pid, token: "second-owner", episodeId: graph.episodeId, claimedAt: Date.now() }), "utf8");
+  await writeFile(statePath, "OWNER-STATE", "utf8");
+
+  await assert.rejects(res.parkTask(), /refus|lease|holder|ownership/i, "a stale closure cannot act while a live holder owns the episode");
+  assert.equal(await readFile(statePath, "utf8"), "OWNER-STATE", "the current owner's state is untouched by the stale closure");
+  const { readdir } = await import("node:fs/promises");
+  const asides = (await readdir(epDir)).filter((n) => n.includes("unreadable"));
+  assert.equal(asides.length, 0, "nothing was moved aside — refusal happened before any mutation");
+
+  // Ownership is genuinely what gated it: drop the foreign lease, restore a
+  // READABLE state (the refusal left the foreign bytes as-is, which a new
+  // park would correctly fail closed on), and the SAME closure acts — its
+  // fresh claim succeeds, then releases.
+  await unlink(leasePath);
+  await writeFile(statePath, JSON.stringify({ schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }), "utf8");
+  await res.parkTask();
+  const state = JSON.parse(await readFile(statePath, "utf8")) as { tasks: Record<string, { status: string }> };
+  assert.equal(state.tasks.t1?.status, "parked", "with no live holder the seam claims its own lease and parks");
+});
+
 test("host wiring: exit-0 worker + passing policy gate ⇒ accepted-finish with a real acceptance record", async (t) => {
   // The criterion IS the policy-gate id (EV7: a deterministic criterion
   // is funded by a current PASS gate of the same id), so the host-run

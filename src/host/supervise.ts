@@ -3785,7 +3785,22 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       result,
       episodePath: epPath,
       steerStats: { linesRead: steerQueue.getStats().linesRead, injected: steerQueue.getStats().injected, malformed: steerQueue.getStats().malformed },
-      parkTask: runPark,
+      // c5d BUG-1 (Sol audit): the OLD seam returned the raw `runPark`
+      // closure — callable after this lease was released, so a STALE
+      // activation could move/write the CURRENT owner's state.json under
+      // the new owner's lease (reproduced: lease-seam probe). The seam now
+      // re-establishes ownership PER CALL: it claims a FRESH lease and
+      // refuses (throws, state untouched) while any live holder owns the
+      // episode — the same exclusion every activation path obeys. (Note
+      // `lease.held()` could NOT gate this: the release above never clears
+      // the flag, and by contract the caller receives this object only
+      // after the release ran — post-run ownership is NEVER ours.) The
+      // IN-LOOP park act stays direct (ports.park = runPark, under the
+      // activation's own lease). Releases on completion.
+      parkTask: async (): Promise<void> => {
+        const own = await acquireEpisodeLease({ epPath, epId, episodeId: graph.episodeId, log, ...(opts.leaseSwapHoldMs !== undefined ? { leaseSwapHoldMs: opts.leaseSwapHoldMs } : {}) });
+        try { await runPark(); } finally { await own.release(); }
+      },
       // P9 audit cycle-1 F1: NO post-run merge seam — integration
       // dispatches IN the loop (cfg.integration.trigger, docs/16 §0.6)
       // while the lease is held. A closure returned here would act
