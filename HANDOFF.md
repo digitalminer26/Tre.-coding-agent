@@ -1,3 +1,17 @@
+## 2026-11-12 — M2 audit c5e (Sol, round 3 target): failed seam release now disclosed
+
+Sol round 2 (audit-c5e.md) verified BUG-1/REC-1 fixed (old repro dies, both
+new tests kill their mutants, exclusion + composition probed live) and found
+one MINOR: the parkTask seam's finally swallowed release()'s "failed"
+outcome — violating the P20c6-F2 disclosure contract (reproduced: persistent
+unlink EIO => parkTask resolves silently, live-pid claim retained, next call
+refused with zero disclosures). Fixed: the seam now logs the SAME disclosure
+as both activation finallys. New regression test injects real unlink EIO via
+the documented createRequire+syncBuiltinESMExports pattern: asserts >=3
+attempts, a "release FAILED" log line, and the retained claim visible;
+removing the disclosure fails the test (mutation-verified). Gate: build
+clean; npm test 2708 tests, 2694 pass, 0 fail, 14 skipped; P17 14/0.
+
 ## 2026-11-12 — M2 audit c5d (Sol, round 1): stale parkTask seam closed; exhaustion bound pinned
 
 Sol's audit of 0e73011 confirmed the c5c fixes (throw-on-exhaustion safe at

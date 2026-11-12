@@ -103,6 +103,52 @@ test("c5d BUG-1: a stale activation's parkTask CANNOT act under a later owner's 
   assert.equal(state.tasks.t1?.status, "parked", "with no live holder the seam claims its own lease and parks");
 });
 
+test("c5e BUG-1: a failed parkTask lease release is DISCLOSED (P20c6-F2 contract), never silently swallowed", async (t) => {
+  // release() returns "failed" on a persistent read/unlink error (it never
+  // throws). The seam's finally must surface it — a live-pid claim of ours
+  // may still be on disk. Repro of the silent wedge: unlink of OUR episode's
+  // host.lease fails EIO on every attempt; the seam must log the failure AND
+  // the claim must remain visible (recoverable), not vanish behind a
+  // resolved parkTask.
+  const { root, graph } = await freshEpisode(t, {
+    policy: { baseCommit: "abc123", gate: { cmd: "true" } },
+  });
+  const worker = await exitZeroWorker(root);
+  const lines: string[] = [];
+  const res = await runHostEpisode({
+    episodesRoot: root, graph, taskId: "t1", grantedBy: "test-harness",
+    workerCommand: worker, maxIterations: 1,
+    log: (l) => { lines.push(l); t.diagnostic(l); },
+  });
+  const epDir = join(root, graph.episodeId);
+  const leasePath = join(epDir, "host.lease");
+
+  // Injection per the node:module documented pattern: the ESM namespace is
+  // read-only; patch the builtin's CJS export object and sync the live
+  // bindings so the dist code's imported `unlink` sees it.
+  const { createRequire, syncBuiltinESMExports } = await import("node:module");
+  const require2 = createRequire(import.meta.url);
+  const fsCjs = require2("node:fs/promises") as { unlink: unknown };
+  const realUnlink = fsCjs.unlink;
+  let attempts = 0;
+  fsCjs.unlink = async (p: unknown) => {
+    if (typeof p === "string" && p === leasePath) { attempts++; throw Object.assign(new Error("injected EIO"), { code: "EIO" }); }
+    return (realUnlink as (q: string) => Promise<void>)(p as string);
+  };
+  syncBuiltinESMExports();
+  try {
+    await res.parkTask(); // act succeeds; release fails 3x under the injection
+    assert.ok(attempts >= 3, `release attempted the lease unlink (got ${attempts})`);
+    assert.ok(lines.some((l) => /release FAILED/.test(l)), "the failed release is DISCLOSED on the host log");
+    const raw = JSON.parse(await readFile(leasePath, "utf8")) as { episodeId: string };
+    assert.equal(raw.episodeId, graph.episodeId, "the retained claim is visible (recoverable takeover), not silently dropped");
+  } finally {
+    fsCjs.unlink = realUnlink;
+    syncBuiltinESMExports();
+    await unlink(leasePath).catch(() => {}); // clear the retained claim for cleanup
+  }
+});
+
 test("host wiring: exit-0 worker + passing policy gate ⇒ accepted-finish with a real acceptance record", async (t) => {
   // The criterion IS the policy-gate id (EV7: a deterministic criterion
   // is funded by a current PASS gate of the same id), so the host-run

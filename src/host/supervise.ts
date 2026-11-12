@@ -3799,7 +3799,15 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
       // activation's own lease). Releases on completion.
       parkTask: async (): Promise<void> => {
         const own = await acquireEpisodeLease({ epPath, epId, episodeId: graph.episodeId, log, ...(opts.leaseSwapHoldMs !== undefined ? { leaseSwapHoldMs: opts.leaseSwapHoldMs } : {}) });
-        try { await runPark(); } finally { await own.release(); }
+        try { await runPark(); } finally {
+          // c5e BUG-1 (Sol round 2): release() RETURNS "failed" on a
+          // persistent read/unlink error — it never throws — and the
+          // P20c6-F2 contract says the caller MUST disclose (a live-pid
+          // claim of ours is still on disk). The old one-liner swallowed
+          // it (reproduced: silent wedge until process exit). Same
+          // disclosure as the two activation finallys.
+          if (await own.release() === "failed") log(`c5e-BUG-1: parkTask lease release FAILED after 3 attempts on ${own.path} — our claim may persist until this process exits (recoverable: takeover reclaims a dead-pid lease with disclosure)`);
+        }
       },
       // P9 audit cycle-1 F1: NO post-run merge seam — integration
       // dispatches IN the loop (cfg.integration.trigger, docs/16 §0.6)
