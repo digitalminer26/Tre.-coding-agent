@@ -25,7 +25,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -490,6 +490,111 @@ test("remove: a LYING fsmonitor hook + fsmonitor-valid bit cannot hide a modifie
   );
   assert.equal(existsSync(wt.path), true, "worktree kept — the hidden edit survives");
   assert.equal(await readFile(join(wt.path, "a.txt"), "utf-8"), "edited-under-lying-hook, uncommitted\n");
+});
+
+// --- Audit-sol round 3 (m3fix2) B1/B2: the status proof must be
+// filter-neutral AND fileMode-pinned, on a THROWAWAY fresh index (no
+// stat cache). Both losses were reproduced against the pre-fix gate by
+// the auditor (.tre/review-probes/m3f2-loss.mjs): status read EMPTY,
+// every ls-files tag stayed H, and an UNFORCED remove destroyed the
+// uncommitted content. These tests are mutation-checked the same way:
+// reverting the fresh-index/neutralization block must make them fail.
+
+test("remove: a clean filter mapped to the committed blob cannot hide same-length modified bytes (audit-sol B1)", async () => {
+  const { prov, repo, base } = await setup();
+  // .gitattributes routes a.txt through filter "discard", whose clean
+  // rewrites ANY content to the committed blob. A REAL-index status
+  // trusts the stat cache the filter poisoned at add-time: overwriting
+  // a.txt with a same-length payload makes filtered comparison say
+  // UNCHANGED — status empty, tags all H — and the pre-fix gate
+  // removed the tree with the unique payload inside (m3f2-loss.mjs).
+  await git(repo, "config", "filter.discard.clean", "sed 's/.*/original/'");
+  await writeFile(join(repo, ".gitattributes"), "a.txt filter=discard\n");
+  await git(repo, "add", ".");
+  await git(repo, "commit", "-m", "base with filter");
+  const base2 = await git(repo, "rev-parse", "HEAD");
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epFil1", taskId: "t1", baseCommit: base2 });
+  await writeFile(join(wt.path, "a.txt"), "PAYLOAD!\n");
+  // The audit finding: raw bytes differ from the blob, yet the
+  // filter-trusting view is silent.
+  assert.notEqual(await readFile(join(wt.path, "a.txt"), "utf-8"), "original\n", "payload differs from committed bytes");
+  assert.equal(await git(wt.path, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "filter-trusting status is blind (the audit finding)");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epFil1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "dirty"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept — the payload survives");
+  assert.equal(await readFile(join(wt.path, "a.txt"), "utf-8"), "PAYLOAD!\n", "byte-for-byte preservation (the audit's missing-regression ask)");
+
+  // The neutralized gate proves CLEAN the other direction too: an
+  // unmodified worktree under the same filter still removes normally.
+  // (taskPath is wtRoot/<taskId> — a distinct taskId, the refused t1
+  // tree is still on disk.)
+  const wt2 = await prov.ensureTaskWorktree({ episodeId: "epFil2", taskId: "t2", baseCommit: base2 });
+  const rep2 = await prov.removeTaskWorktree({ episodeId: "epFil2", taskId: "t2" });
+  assert.equal(rep2.worktreeRemoved, true, "a genuinely clean filtered worktree is still removable");
+});
+
+test("remove: core.fileMode=false cannot hide an exec-bit change (audit-sol B2)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epFm1", taskId: "t1", baseCommit: base });
+  // With core.fileMode=false git skips the exec-bit comparison at
+  // read-index time: chmod 0755 on a tracked 100644 file (contents
+  // UNTOUCHED — the auditor's exact repro) moves no byte, status is
+  // EMPTY, tags stay H — and the pre-fix gate removed the tree with
+  // the uncommitted mode change inside (m3f2-loss.mjs).
+  await git(wt.path, "config", "core.fileMode", "false");
+  await chmod(join(wt.path, "a.txt"), 0o755);
+  assert.ok((await stat(join(wt.path, "a.txt"))).mode & 0o111, "exec bit set on the worktree file");
+  assert.equal(await git(wt.path, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "fileMode=false status is blind (the audit finding)");
+  assert.match(await git(wt.path, "-c", "core.fsmonitor=false", "-c", "core.fileMode=true", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), /[M] a\.txt/, "with fileMode pinned true the change is visible (the fix's mechanism)");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epFm1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "dirty"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept — the mode change survives");
+  assert.ok((await stat(join(wt.path, "a.txt"))).mode & 0o111, "exec bit still set after the refusal");
+});
+
+test("remove: a COMMITTED .gitattributes rule arms no driver against the gate — clean filtered worktree still removes (audit-sol B1, GIT_ATTR_SOURCE arm)", async () => {
+  // The .gitattributes arm of B1: with no filter.* config in the work
+  // tree the rule can't convert anything, so this asserts the
+  // neutralization does NOT over-refuse on attributes alone.
+  const { prov, repo, base } = await setup();
+  await writeFile(join(repo, ".gitattributes"), "*.bin filter=absent-driver\n");
+  await git(repo, "add", ".");
+  await git(repo, "commit", "-m", "base with attrs");
+  const base2 = await git(repo, "rev-parse", "HEAD");
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epFil3", taskId: "t1", baseCommit: base2 });
+  const rep = await prov.removeTaskWorktree({ episodeId: "epFil3", taskId: "t1" });
+  assert.equal(rep.worktreeRemoved, true);
+});
+
+test("remove: $GIT_DIR/info/attributes rules refuse fail-closed — the arm-the-driver override cannot gate a removal (audit-sol B1 closure)", async () => {
+  // info/attributes OVERRIDES GIT_ATTR_SOURCE, so any effective rule
+  // there puts content interpretation outside the gate's view — the
+  // removal gate refuses before any removal is attempted, even though
+  // the worktree is otherwise perfectly clean.
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epAttr1", taskId: "t1", baseCommit: base });
+  // Write where the gate looks: `--git-path info/attributes` from the
+  // worktree resolves to the COMMON git dir (info/ is common-shared),
+  // not the per-worktree admin dir — mirror the gate's own resolution.
+  const attrPath = resolve(wt.path, (await git(wt.path, "rev-parse", "--git-path", "info/attributes")).trim());
+  await mkdir(dirname(attrPath), { recursive: true });
+  await writeFile(attrPath, "a.txt filter=some-driver\n");
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epAttr1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "hidden-content"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept");
+  // Comments-only / whitespace-only files are inert and must NOT
+  // refuse (the tokenizer follows git attr.c, not JS \s).
+  await writeFile(attrPath, "# nothing effective\n\n");
+  const rep = await prov.removeTaskWorktree({ episodeId: "epAttr1", taskId: "t1" });
+  assert.equal(rep.worktreeRemoved, true, "inert info/attributes does not over-refuse");
 });
 
 test("remove: submodule entries refuse as has-submodules — protection never rests on git's incidental removal error (audit-haiku F3)", async () => {

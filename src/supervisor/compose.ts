@@ -594,11 +594,18 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
             if (!approvedPool.includes(steerModel)) {
               // M3 audit fix + audit-haiku F6: two refusals in ONE poll
               // (same seq), even for the SAME model, must not collide —
-              // a per-poll counter rides in the id. The `_refused_`
-              // separator is collision-proof against the supersede id
-              // `steer-<seq>-<model>` (underscore is outside the model
-              // regex `[A-Za-z0-9._-]`, so no model name can ever
-              // reproduce it).
+              // a per-poll counter rides in the id. The refusal id
+              // `steer-<seq>_refused_<n>-<model>` cannot collide with
+              // the supersede id `steer-<seq>-<model>` by SEPARATOR
+              // POSITION: immediately after <seq> the refusal carries
+              // `_refused_` while the supersede carries `-`, and no
+              // parse-legal model name (regex `[A-Za-z0-9]` first
+              // char) can shift that alignment — uniqueness follows
+              // from the separator position, not from the character
+              // class (underscore IS inside `[A-Za-z0-9._-]`; the
+              // earlier comment here claimed otherwise — audit-sol
+              // round 3 M-note: the assertion was bogus, the
+              // property it gestures at still holds).
               refusedInPoll += 1;
               await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}_refused_${refusedInPoll}-${steerModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
               continue;

@@ -1,3 +1,71 @@
+## 2026-11-13 — M3 audit fix round 3 (Sol, m3fix2): the gate trusted the repo's OWN conversion settings — fresh-index neutralized status proof
+
+A THIRD hostile audit of the M3 fix (auditor: GPT Sol via OpenRouter,
+prompt `~/.tre/audits/m3fix2-sol-prompt.txt`, log
+`~/.tre/audits/m3fix2-sol-out.txt`, verdict **FAIL** on 89d6dbc: 2
+blockers + 1 minor; both blockers reproduced by the auditor against the
+pre-fix dist in `.tre/review-probes/m3f2-loss.mjs`). Both fixed by
+porting the supervise observation stack's proven doctrine (R4-B1 fresh
+index + R5-F1 attribute arm) into the leaf provisioner:
+
+1. **B1 — clean/smudge filters concealed modified bytes.** A tracked
+   `.gitattributes` routing a file through a filter whose clean driver
+   maps ANY bytes to the committed blob (`filter.discard.clean="sed
+   's/.*/original/'"`) made the REAL-index status trust a filter-
+   poisoned stat cache: overwrite a.txt with a same-length payload →
+   pinned status EMPTY, tags all H, unforced remove DESTROYED the
+   payload. Fix (three layers, all fail-closed): (a) the gate's status
+   now runs on a THROWAWAY fresh index (`GIT_INDEX_FILE` in a tmp dir,
+   `read-tree HEAD` — no stat cache, so git re-reads and re-hashes
+   every tracked file raw; also refuses via git-failed on an unborn
+   HEAD); (b) `filterNeutralizeArgs`: every configured filter driver
+   enumerated from config and pinned to identity (`=cat` for
+   clean/smudge; EMPTY value for `process` — `=cat` there would spawn
+   a dead filter server whose handshake makes status report CLEAN, a
+   false-clean oracle verified on git 2.54), plus
+   `core.attributesFile=/dev/null` and the PINNED_NEUTRALIZING_CONFIG
+   set (autocrlf/eol/safecrlf/symlinks/ident/fileMode);
+   `config --get-regexp` exit 1 is the documented "no matches", any
+   other failure propagates git-failed (kept), never "assume none";
+   (c) `GIT_ATTR_SOURCE=<empty tree>` kills tracked .gitattributes, and
+   because `info/attributes` OVERRIDES GIT_ATTR_SOURCE, any effective
+   rule there (git attr.c tokenizer: byte-accurate, latin1 — not JS
+   `\s`) refuses `hidden-content` fail-closed (unreadable/non-regular/
+   >1 MiB also refuse).
+2. **B2 — `core.fileMode=false` hid an exec-bit change.** chmod 0755 on
+   a tracked 100644 file moved nothing under the inherited config
+   (status EMPTY, tags H) and the pre-fix remove destroyed the mode
+   change. Fix: `core.fileMode=true` rides the pin set on every
+   index-reading gate call (the fresh index also drops the stat cache,
+   belt-and-braces).
+3. **Gate order** restructured: the real-index tag gates (`ls-files -v`
+   flags, empty→index-blind, `ls-files -s` gitlinks) run FIRST — they
+   inspect index BITS a throwaway index would not carry — then the
+   fresh-index status proof. An assume-unchanged-modified file keeps
+   its precise `hidden-content` classification instead of being
+   re-labeled plain `dirty` by the fresh index.
+4. **M1 (minor, docs):** docs/11 fix-2 row claimed F1 "fails pre-fix"
+   while HANDOFF honestly recorded it PASSING pre-fix dist on git 2.54
+   (git's own removal check caught the edit there) — the row now
+   carries the honest carve-out, and the audit's 212-vs-211 test-count
+   correction is pinned. The compose.ts F6 comment claimed underscore
+   is outside `[A-Za-z0-9._-]` (bogus — it is inside); rewritten: id
+   collision-freedom follows from SEPARATOR POSITION.
+
+Regressions (all mutation-checked against the pre-fix build — git
+archive HEAD into `.tre/dbg-mut`, exact "Missing expected rejection."
+failures pre-fix, pass post-fix): clean-filter same-length payload
+refuses `dirty` with byte-for-byte preservation + a clean-filtered
+control still removes; `core.fileMode=false` chmod refuses `dirty`
+exec bit intact; a committed `.gitattributes` rule with no driver
+config does NOT over-refuse; `info/attributes` rules refuse
+`hidden-content` while comments-only stays inert (in-test discovery:
+`--git-path info/attributes` resolves to the COMMON git dir, not the
+per-worktree admin dir — the gate's resolution mirrored, and verified
+by check-attr probe: only the common file is consulted).
+Provisioner suite 62/62. Disclosed residue unchanged (empty-subdir
+ignored dirs; sparse-checkout — unsupported for agent worktrees).
+
 ## 2026-11-12 — M3 audit fix round 2 (Haiku 5.5): the hardened gate was still bypassable — fsmonitor pin, empty-index, submodules, honest noop, unique refusal ids
 
 A SECOND hostile audit of the M3 fix (auditor:

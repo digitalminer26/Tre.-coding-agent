@@ -64,7 +64,8 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -115,10 +116,128 @@ export class WorktreeProvisionError extends Error {
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 
+/** Canonical empty-tree object id (git's well-known constant). */
+const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+// Sol round-3 (audit m3fix2) B2/B1 doctrine, ported from the supervise
+// observation stack (src/host/supervise.ts PINNED_NEUTRALIZING_CONFIG):
+// conversion settings a repo can set against a cleanliness check. Every
+// one rides the gate's index-reading calls. fileMode=false is the B2
+// hole (an exec-bit change moves nothing under it); autocrlf/eol/
+// safecrlf/symlinks/ident bend worktree↔blob comparison the same way.
+const PINNED_NEUTRALIZING_CONFIG: ReadonlyArray<readonly [string, string]> = [
+  ["core.autocrlf", "false"],
+  ["core.eol", "native"],
+  ["core.safecrlf", "false"],
+  ["core.symlinks", "true"],
+  ["core.ident", "false"],
+  ["core.fileMode", "true"],
+];
+
 /** `--`-separate a rev-like operand (option injection: a leading "-"
  *  stays a positional rev with a real `--` separator, not a prefixed token). */
 function revArgs(rev: string): string[] {
   return rev.startsWith("-") ? ["--", rev] : [rev];
+}
+
+/** git with an extra env layer (throwaway-index gating). Same failure
+ *  semantics as `git` (any non-zero → git-failed; NO documented-negative
+ *  collapsing). */
+async function gitWithEnv(cwd: string, args: string[], envExtra: Record<string, string>): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: GIT_MAX_BUFFER,
+      env: { ...process.env, ...envExtra },
+    });
+    return stdout;
+  } catch (err) {
+    const e = err as { stderr?: string; code?: number | string; message?: string };
+    throw new WorktreeProvisionError("git-failed", `git ${args.join(" ")} failed: ${e.stderr?.trim() || e.message || String(err)}`, {
+      command: `git ${args.join(" ")}`,
+      stderr: (e.stderr ?? "").slice(0, 2000),
+    });
+  }
+}
+
+/** Sol round-3 (audit m3fix2) B1 fix, ported from supervise.ts
+ *  filterNeutralizeArgs: enumerate EVERY configured filter driver in the
+ *  repo and pin each to identity (`=cat` for clean/smudge) or disabled
+ *  (empty value for `process` — `=cat` would spawn cat as a filter
+ *  server whose dead handshake leaves status reporting CLEAN, a
+ *  false-clean oracle verified on git 2.54). Plus core.attributesFile
+ *  killed (a driver can only be ARMED by an attributes source) and the
+ *  PINNED_NEUTRALIZING_CONFIG set. `config --get-regexp` exit 1 is the
+ *  documented "no matches"; any other non-zero fails CLOSED (git-failed
+ *  → the worktree is kept), never "assume no drivers". */
+async function filterNeutralizeArgs(cwd: string): Promise<string[]> {
+  const probe = ["config", "--get-regexp", "^filter\\..+\\.(clean|smudge|process)$"];
+  let out = "";
+  try {
+    const { stdout } = await execFileAsync("git", probe, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER });
+    out = stdout;
+  } catch (err) {
+    const e = err as { code?: number | string; stderr?: string; message?: string };
+    if (e.code !== 1) throw gitFailure(probe, e);
+  }
+  const pins: string[] = ["-c", "core.attributesFile=/dev/null"];
+  for (const [k, v] of PINNED_NEUTRALIZING_CONFIG) pins.push("-c", `${k}=${v}`);
+  for (const line of out.split("\n")) {
+    const m = /^(filter\..+\.)(clean|smudge|process)(?=[ \t]|$)/.exec(line);
+    if (m?.[1] !== undefined) pins.push("-c", m[2] === "process" ? `${m[1]}${m[2]}=` : `${m[1]}${m[2]}=cat`);
+  }
+  return pins;
+}
+
+/** Git's attributes tokenizer (attr.c): a line is ignorable iff it is
+ *  zero-bytes or its FIRST byte is '#'. Byte-accurate (latin1 round-trip)
+ *  — JS `\s` matches NBSP and stripping `#…` anywhere would turn the
+ *  real rule path `\u00a0#` into a fake comment (supervise round-2 F1).
+ *  Returns true when ANY non-ignorable line exists (a real rule). */
+function hasEffectiveAttrRules(buf: Buffer): boolean {
+  const lines = buf.toString("latin1").split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  for (const line of lines) {
+    const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (body === "" || body.charCodeAt(0) === 0x23) continue;
+    if (/^[ \t]*$/.test(body)) continue; // git trims leading blanks: blanks-only = no pattern
+    return true;
+  }
+  return false;
+}
+
+/** Sol round-3 (audit m3fix2) B1 arm-the-driver closure: with
+ *  GIT_ATTR_SOURCE pointing at the EMPTY tree and core.attributesFile
+ *  killed, the ONLY attributes source that can still arm a conversion
+ *  for the gate's status is `$GIT_DIR/info/attributes` — it OVERRIDES
+ *  GIT_ATTR_SOURCE (supervise round-2 MG-C5-F1). Absent/empty is fine;
+ *  ANY effective rule (or unreadability) refuses fail-closed: file
+ *  interpretation (filter/eol/text) would then be outside what the
+ *  gate can observe, and content an armed driver can hide must never
+ *  be removed on a proof the driver itself controls. */
+async function refuseReinterpretingAttributes(cwd: string, pins: string[]): Promise<void> {
+  const pathOut = await git(cwd, [...pins, "rev-parse", "--git-path", "info/attributes"]);
+  const p = resolve(cwd, pathOut.trim());
+  const refuse = (why: string): never => {
+    throw new WorktreeProvisionError("hidden-content", `removal gate: $GIT_DIR/info/attributes ${why} — the attribute interpretation of tracked content is not observable, so no cleanliness proof is valid; refusing (fail-closed)`);
+  };
+  let st: Awaited<ReturnType<typeof lstat>>;
+  try {
+    st = await lstat(p);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // absent: no armable source
+    return refuse(`at ${p} is unreadable (${String((e as NodeJS.ErrnoException).code ?? e)})`);
+  }
+  if (!st.isFile()) return refuse(`at ${p} is not a regular file (type unobservable)`);
+  if (st.size > 1024 * 1024) return refuse(`at ${p} exceeds 1 MiB (rules unbounded — not observable)`);
+  let buf: Buffer;
+  try {
+    buf = await readFile(p);
+  } catch (e) {
+    return refuse(`at ${p} raced unreadable (${String((e as NodeJS.ErrnoException).code ?? e)})`);
+  }
+  if (hasEffectiveAttrRules(buf)) return refuse(`at ${p} holds attribute rules that may reinterpret tracked bytes (filter/eol/text)`);
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -652,33 +771,11 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force (force discards uncommitted work AND overrides the lock)`);
     }
 
-    // Dirty gate (strictly conservative: includes untracked AND
-    // ignored — M3 audit fix: `status -uall` WITHOUT --ignored showed
-    // EMPTY over an ignored payload file and over an assume-unchanged
-    // modification, and an unforced remove destroyed both; proven
-    // against pre-fix dist). `--ignored=traditional -uall` surfaces
-    // every ignore mechanism (.gitignore, info/exclude,
-    // core.excludesFile) as per-FILE `!!` entries — presence is the
-    // finding, the path rides only in the bounded stderr detail.
-    // (`matching` would collapse a whole ignored directory to one
-    // `dir/` line; empty ignored directories are the disclosed residue
-    // git itself cannot represent — `remove -f -f` discards them.)
-    // Non-`!!` entries are ordinary dirty.
-    // Audit-haiku F1: the gate's OWN view must not consult a configured
-    // core.fsmonitor hook — a hook that lies "clean" (or leaves a stale
-    // fsmonitor-valid index bit) hides a modified tracked file from
-    // status AND from ls-files -v (the bit is not a tag), and git's own
-    // remove trusts the bit too. `-c core.fsmonitor=false` forces the
-    // real stat comparison regardless of repo config.
-    const status = await git(entry.path, ["-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"]);
-    if (status.trim() !== "" && !force) {
-      const lines = status.split("\n").filter((l) => l.trim() !== "");
-      const ordinary = lines.filter((l) => !l.startsWith("!!"));
-      if (ordinary.length > 0) {
-        throw new WorktreeProvisionError("dirty", `worktree ${path} has uncommitted changes — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
-      }
-      throw new WorktreeProvisionError("hidden-content", `worktree ${path} holds IGNORED content git status would not otherwise show (${lines.length} entr${lines.length === 1 ? "y" : "ies"}) — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
-    }
+    // Content gates, unforced only (force = the operator's explicit
+    // discard, documented on the force option). ORDER: index-flag
+    // gates read the REAL index first (they inspect index BITS which a
+    // throwaway index would not carry), then the content proof runs on
+    // a THROWAWAY fresh index.
     // Index-flag gate (M3 audit fix): `status` is BLIND to entries the
     // index itself disclaims — assume-unchanged (`h`), skip-worktree
     // (`S`), and every other non-`H` ls-files tag. A tracked file
@@ -734,10 +831,76 @@ export class WorktreeProvisioner {
       // the ignore/flag gates above and git's own removal refuses only
       // BY ACCIDENT (a blunt "working trees containing submodules"
       // error). Refuse explicitly with OUR code — protection must not
-      // rest on git's incident.
+      // rest on git's incident. (Mode stays the first column even at
+      // conflict stages — verified against git 2.54 staged output.)
       const stages = await git(entry.path, ["-c", "core.fsmonitor=false", "ls-files", "-s"]);
       if (stages.split("\n").some((l) => l.startsWith("160000 "))) {
         throw new WorktreeProvisionError("has-submodules", `worktree ${path} contains submodule entries — agent worktrees do not carry submodules and git cannot remove them safely; refusing`);
+      }
+      // Dirty gate (strictly conservative: includes untracked AND
+      // ignored — M3 audit fix: `status -uall` WITHOUT --ignored showed
+      // EMPTY over an ignored payload file and an unforced remove
+      // destroyed it while status read clean; proven against pre-fix
+      // dist). `--ignored=traditional -uall` surfaces every ignore
+      // mechanism (.gitignore, info/exclude, core.excludesFile) as
+      // per-FILE `!!` entries — presence is the finding, the path rides
+      // only in the bounded stderr detail. (`matching` would collapse a
+      // whole ignored directory to one `dir/` line; empty ignored
+      // directories are the disclosed residue git itself cannot
+      // represent — `remove -f -f` discards them.) Non-`!!` entries are
+      // ordinary dirty.
+      // Audit-sol B1/B2 (round 3): the status proof runs on a
+      // THROWAWAY index built fresh from HEAD under the full
+      // neutralization pin set + GIT_ATTR_SOURCE=<empty tree>
+      // (supervise.ts R4-B1/R5-F1 doctrine, ported to the release
+      // gate). A REAL-index status trusts the stat cache: a clean
+      // filter mapped to the committed blob (or any prior poisoned git
+      // run) stamped modified bytes as unchanged, and
+      // core.fileMode=false made git skip the exec-bit comparison at
+      // read-index time — an EMPTY status over dirty bytes (both
+      // losses reproduced against the pre-fix gate:
+      // .tre/review-probes/m3f2-loss.mjs). A fresh index has NO stat
+      // cache: git re-reads and re-hashes every tracked file raw. This
+      // does not mutate the worktree's real index (release must be
+      // read-only on shared state), so the throwaway lives in a tmp
+      // dir. `read-tree HEAD` also refuses (git-failed → kept) when
+      // HEAD is unborn — a mid-checkout worktree is never removable
+      // unforced. The flag gate above ran FIRST so an
+      // assume-unchanged-modified file keeps its `hidden-content`
+      // classification (a fresh index would have shown it as plain
+      // `dirty` — same refusal, less precise disclosure).
+      const pins = await filterNeutralizeArgs(entry.path);
+      // B1 arm-the-driver closure (fail-closed): info/attributes
+      // overrides GIT_ATTR_SOURCE, so it must hold no effective rules.
+      await refuseReinterpretingAttributes(entry.path, pins);
+      let freshIdxDir: string | null = null;
+      let status: string;
+      try {
+        freshIdxDir = await mkdtemp(join(tmpdir(), "tre-remove-idx-"));
+        const freshEnv: Record<string, string> = {
+          GIT_INDEX_FILE: join(freshIdxDir, "idx"),
+          GIT_ATTR_SOURCE: EMPTY_TREE_OID,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        };
+        await gitWithEnv(entry.path, [...pins, "read-tree", "HEAD"], freshEnv);
+        // `--ignore-submodules=none`: per-submodule
+        // `submodule.<n>.ignore=all` hides a populated child's modified
+        // bytes from status (supervise R5-B1 — proven empty over
+        // modified child/a WITH the config set; only the command-line
+        // flag beats it).
+        status = await gitWithEnv(entry.path, [...pins, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all", "--ignore-submodules=none"], freshEnv);
+      } finally {
+        // The index file is a throwaway; nothing downstream needs it.
+        if (freshIdxDir !== null) void rm(freshIdxDir, { recursive: true, force: true }).catch(() => {});
+      }
+      if (status.trim() !== "") {
+        const lines = status.split("\n").filter((l) => l.trim() !== "");
+        const ordinary = lines.filter((l) => !l.startsWith("!!"));
+        if (ordinary.length > 0) {
+          throw new WorktreeProvisionError("dirty", `worktree ${path} has uncommitted changes — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
+        }
+        throw new WorktreeProvisionError("hidden-content", `worktree ${path} holds IGNORED content git status would not otherwise show (${lines.length} entr${lines.length === 1 ? "y" : "ies"}) — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
       }
     }
 
