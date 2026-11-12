@@ -1,5 +1,35 @@
 # HANDOFF
 
+## 2026-11-11 — M2 audit cycle 4: the preserve-aside name is collision-proof
+
+Cycle-4 worker for the implement-audit `m2-finds` workstream. Starting HEAD
+`e444efe` (tree verified CLEAN). Addresses the ONE recommendation the
+cycle-3 audit raised (non-blocking, not reproduced). Not pushed (the
+orchestrator syncs). No Telegram (the orchestrator reports).
+
+**The finding** (audit-c3): all three `.unreadable-<ts>` preserve-aside
+sites (`src/host/supervise.ts` — `runPark` ~2879, the slots projection
+~3905, the final terminal write ~4065) built the aside path as
+`` `${p}.unreadable-${String(now())}` ``. `now()` is millisecond-granular
+and POSIX `rename` REPLACES an existing target, so two asides of the same
+base inside one millisecond would silently destroy the earlier preserved
+bytes — the exact failure the W1-M7 rule exists to prevent.
+
+**The fix** (`src/host/supervise.ts`, ~12 lines): one exported helper,
+`asideName(base, ts = now())`, returns the first FREE
+`<base>.unreadable-<ts>[.N]` candidate (a `stat`-based `exists()` probe
+loop; no new imports — `stat` is already imported). All three sites now
+compute `const preserve = await asideName(<path>)` and keep their existing
+`rename`/log bodies verbatim, so every disclosure string, skip decision
+and exit code is unchanged — the only behavioral difference is that a
+collision degrades to a `.N` suffix instead of an overwrite. New focused
+unit test `test/host-schedule-entry.test.ts` ("two asides of the same base
+within one millisecond never collide") pins the naming: bare ts name when
+free, `.1`/`.2` when taken — verified discriminating by mutating dist's
+helper back to the bare ts name (1 fail, then restored). Gate: `npm run
+build` rc=0; FULL `npm test` rc=0 — 2701 tests, 2687 pass, 0 fail, 14
+skipped (baseline 2700 + 1).
+
 ## 2026-11-11 — M2 audit cycle 3: state.json writers follow the W1-M7 preserve-aside rule
 
 Cycle-3 worker for the implement-audit `m2-finds` workstream. Starting HEAD

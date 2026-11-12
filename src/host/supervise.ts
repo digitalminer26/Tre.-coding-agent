@@ -168,6 +168,22 @@ export interface HostEpisodeResult {
 
 const now = () => Date.now();
 
+/** True when `p` exists (any stat failure — ENOENT or worse — reads as
+ *  "cannot prove it is free"). */
+const exists = async (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
+
+/** W1-M7 preserve-aside name. `now()` is millisecond-granular and the three
+ *  aside sites can fire for the same base in the same ms; POSIX `rename`
+ *  REPLACES its target, so a collision would silently destroy the earlier
+ *  preserved bytes. Deterministically probe `<base>.unreadable-<ts>[.N]`
+ *  and return the first candidate that is NOT taken. */
+export async function asideName(base: string, ts: number = now()): Promise<string> {
+  const stem = `${base}.unreadable-${String(ts)}`;
+  let name = stem;
+  for (let n = 1; await exists(name); n++) name = `${stem}.${String(n)}`;
+  return name;
+}
+
 function assertId(v: string, what: string): string {
   if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) {
     throw new Error(`host: ${what} must be a safe, non-empty path component (got ${JSON.stringify(v)})`);
@@ -2876,7 +2892,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // `state = fresh` overwrote it silently. Fail closed: move
         // the bytes aside (never destroyed), skip the durable write,
         // disclose on the host log.
-        const preserve = `${statePath}.unreadable-${String(now())}`;
+        const preserve = await asideName(statePath);
         try { await rename(statePath, preserve); log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, durable park write SKIPPED`); }
         catch { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, durable park write SKIPPED`); }
         return;
@@ -3902,7 +3918,7 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
             // only and the scheduler's admission/terminal path must be
             // unaffected (state.json is a cache, S6).
             if (code !== "ENOENT") {
-              const preserve = `${statePath}.unreadable-${String(now())}`;
+              const preserve = await asideName(statePath);
               try { await rename(statePath, preserve); log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, slots projection write SKIPPED`); }
               catch { log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, slots projection write SKIPPED`); }
               return;
@@ -4062,7 +4078,7 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
           // log, and the terminal merge write is skipped; the episode
           // result below is unaffected (state.json is a cache, S6).
           finalWritable = false;
-          const preserve = `${finalPath}.unreadable-${String(now())}`;
+          const preserve = await asideName(finalPath);
           try { await rename(finalPath, preserve); log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, terminal merge write SKIPPED`); }
           catch { log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, terminal merge write SKIPPED`); }
         }

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activate, exitCodeForStop, parseActivateArgs } from "../src/host/activate.js";
-import { runHostEpisode, runScheduledHostEpisode } from "../src/host/supervise.js";
+import { asideName, runHostEpisode, runScheduledHostEpisode } from "../src/host/supervise.js";
 import { DecisionJournal, readEpisodeState, type EpisodeGraph } from "../src/episode/journal.js";
 import type { SupervisorConfig, ComposePorts } from "../src/supervisor/compose.js";
 
@@ -178,6 +178,24 @@ test("schedule entry: a corrupt state.json mid-run is preserved aside, never ove
     assert.deepEqual(finalState.slots, {});
     assert.deepEqual(Object.values(finalState.tasks).map((t) => t.status), ["done", "done"]);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("schedule entry: two asides of the same base within one millisecond never collide (M2 audit c4)", async () => {
+  // Audit c3 finding: `${base}.unreadable-${now()}` is ms-granular and a
+  // POSIX rename REPLACES its target — a same-ms second aside would destroy
+  // the first preserved copy. asideName() probes deterministically.
+  const dir = await mkdtemp(join(tmpdir(), "aside-name-"));
+  const base = join(dir, "state.json");
+  const TS = 1_700_000_000_000;
+  try {
+    // No occupant: the bare ts name is used (unchanged shape).
+    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}`);
+    // Occupy exactly that name, as a first aside would.
+    await writeFile(`${base}.unreadable-${TS}`, "first");
+    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}.1`, "the taken ms name is skipped, not replaced");
+    await writeFile(`${base}.unreadable-${TS}.1`, "second");
+    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}.2`, "probes upward past every occupant");
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("schedule entry: a corrupt state.json reaching the FINAL write is preserved aside, never replaced (W1-M7)", async () => {
