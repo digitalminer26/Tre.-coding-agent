@@ -419,6 +419,16 @@ injected once per scheduling decision like the ledger fold does.
    productivity measures — slot utilization is explicitly NOT a success
    metric). Observer contention: run with 0/1 observer slot vs N loops
    investigating simultaneously under the fairness queue.
+   Implemented as `test/m2-acceptance-bench.test.ts` (6 tests, all through
+   real `runSchedulerEpisode`): the worker-scale case holds a barrier
+   gate open so overlap is genuine (peak active bodies asserted: 1 at
+   maxParallel=1, 2 at 2, 3 at 3 — a sequential harness fails the test);
+   the fairness case holds all three investigations queued at once
+   (maxWaiting ≥ 2 asserted) with every grant inside W=3; the
+   single-slot comparison pins that all 6 investigating tasks still
+   accept; the parked case races the episode against a 10s guard and
+   asserts the quiescence CLASSIFICATION (`quiesced-blocked`), not just
+   fates — a hang fails bounded instead of timing out the suite.
 4. **Replay/fault fixtures** first, then observe-only, then controlled
    live (§11.4 validation-gate paragraph — engineering release gates,
    not per-action human approval).

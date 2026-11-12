@@ -27,6 +27,11 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEpisodeLayout, type EpisodeGraph } from "../src/episode/journal.js";
+
+// m2c6 M1: every freshEpisode root plants a sentinel; the file-final test
+// sweeps them ALL. Reverting the t.after teardown fails that test with the
+// orphaned count (teardown necessity pin — the c5f fix had none).
+const LEAK_SENTINELS: string[] = [];
 import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, runObservedGit, fileDigest, filterNeutralizeArgs } from "../src/host/supervise.js";
 import { sameArtifact } from "../src/acceptance/evaluator.js";
 import { makeTelegramDeliver } from "../src/telegram/escalation.js";
@@ -36,7 +41,16 @@ async function freshEpisode(t: { diagnostic: (m: string) => void; after?: (fn: (
   // c5f BUG-1 (Sol audit round 3): the episode root was never removed —
   // register lifecycle cleanup for EVERY caller (node:test TestContext
   // provides after(); the teardown runs when the test finishes).
+  // m2c6 M1: teardown necessity is pinned by the last test in this file
+  // (LEAK_SENTINELS sweep below) — reverting this line fails that test.
+  // M2: permission-locked leftovers — rm with force:true still rejects
+  // EACCES on a nonempty chmod-000 subdir; fixtures that chmod-lock
+  // content must restore permissions (or accept the orphan + disclose).
   t.after?.(() => rm(root, { recursive: true, force: true }));
+  // Sentinel so the file-final sweep can prove THIS root was removed.
+  const sentinel = join(root, ".tre-freshepisode-sentinel");
+  await writeFile(sentinel, "x");
+  LEAK_SENTINELS.push(sentinel);
   const graph: EpisodeGraph = {
     schema: "tre-graph/1",
     episodeId: "ep-host",
@@ -1424,4 +1438,14 @@ test("W13-F4b: an Error name carrying a newline cannot forge a host-log line", a
   const parkLines = lines.filter((l) => l.startsWith("park:"));
   assert.ok(parkLines.some((l) => /NOT delivered \((?:recorded|re-notice): Error\)/.test(l)),
     `the hostile name collapsed to 'Error' in the disclosure, got ${JSON.stringify(parkLines)}`);
+});
+
+test("M2 acceptance: freshEpisode teardown necessity — no sentinel survives (m2c6 M1)", async () => {
+  // File order = declaration order under node:test, so every earlier
+  // freshEpisode teardown has fired. Any surviving sentinel = a leaked
+  // root = the teardown was reverted or a caller skipped cleanup.
+  const { existsSync } = await import("node:fs");
+  const orphans = LEAK_SENTINELS.filter((s) => existsSync(s));
+  assert.equal(orphans.length, 0, `leaked episode roots: ${JSON.stringify(orphans.slice(0, 5))}`);
+  assert.ok(LEAK_SENTINELS.length >= 16, `expected ≥16 freshEpisode roots swept (got ${LEAK_SENTINELS.length})`);
 });

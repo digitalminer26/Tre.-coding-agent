@@ -9,12 +9,13 @@
  * bound, and the independence invariant from §11.4 (one parked task does
  * not block independent work) must hold at every scale.
  *
- * Determinism: scripted loop bodies with fixed behavior (no model calls —
- * the observer channel is the scheduler's fairness queue over a scripted
- * P15-shaped investigate), real `runSchedulerEpisode` against that
- * harness (the same harness style as test/host-schedule.test.ts). A
- * scripted investigate records its grant in observerLog, so the fairness
- * bound is observable end-to-end.
+ * NON-VACUOUS by construction (m2c6 M3/M4 review): loop bodies hold a
+ * barrier gate open so N workers genuinely overlap — the benchmark
+ * asserts peak overlap ≥ 2 at maxParallel ≥ 2 and ≥ 1 at 1. The fairness
+ * case holds all three investigations inside the critical section at
+ * once so the waiting set is non-empty (maxWaiting ≥ 2 asserted), every
+ * request granted within W=3. The zero-observer comparison (§11.3, m2c6
+ * M4) documents that with observerSlots=1 all 6 tasks still investigate.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -57,30 +58,61 @@ function deps(
   };
 }
 const t = (id: string, extra: Partial<SchedTaskLike> = {}): SchedTaskLike => ({ id, ...extra });
+const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 for (const workers of [1, 2, 3]) {
-  test(`M2 acceptance benchmark: ${workers} worker(s) accept the fixed 6-task workload`, async () => {
+  test(`M2 acceptance benchmark: ${workers} worker(s) accept the fixed 6-task workload with real overlap`, async () => {
+    let active = 0;
+    let peak = 0;
+    const ids = ["t1", "t2", "t3", "t4", "t5", "t6"];
     const t0 = Date.now();
     const res = await runSchedulerEpisode(
       { episodeId: "ep-bench" },
-      deps(["t1", "t2", "t3", "t4", "t5", "t6"].map((id) => t(id)), {}, { maxParallel: workers }),
+      deps(
+        ids.map((id) => t(id)),
+        Object.fromEntries(ids.map((id) => [id, async () => {
+          active += 1;
+          peak = Math.max(peak, active);
+          await tick(); await tick(); // hold the gate open so siblings overlap
+          active -= 1;
+          return { stopped: "accepted-finish" };
+        }])),
+        { maxParallel: workers },
+      ),
     );
     const wallMs = Date.now() - t0;
-    const done = Object.entries(res.tasks).filter(([, f]) => (f as { status: string }).status === "done").length;
-    assert.equal(done, 6, `all 6 accepted with ${workers} workers (wall ${wallMs}ms)`);
+    const done = Object.values(res.tasks).filter((f) => f.status === "done").length;
+    console.log(`M2-BENCH workers=${workers} done=${done} stopped=${res.stopped} wallMs=${wallMs} peak=${peak}`);
+    assert.equal(done, 6, `all 6 accepted with ${workers} workers (wall ${wallMs}ms, peak overlap ${peak})`);
     assert.equal(res.stopped, "quiesced-complete");
+    // m2c6 M3: the benchmark is vacuous unless overlap is demonstrated.
+    assert.ok(peak >= Math.min(workers, 2), `expected real overlap at maxParallel=${workers} (peak ${peak})`);
   });
 }
 
 test("M2 acceptance benchmark: observer fairness — queued investigations granted within W", async () => {
-  // 3 tasks all requesting investigation at once: W = 3 waiting, so every
-  // request must be granted within 3 grants (docs/20 §5 no-starvation bound).
+  // All three investigations hold the slot INSIDE the critical section at
+  // once, so the waiting set is genuinely non-empty (m2c6 M4): maxWaiting
+  // ≥ 2 proves contention, and every request granted within W=3 proves
+  // the no-starvation bound (docs/20 §5).
   const order: string[] = [];
+  let waiting = 0;
+  let maxWaiting = 0;
+  const grantDone: Record<string, () => void> = {};
+  const granted: Record<string, Promise<void>> = {};
+  for (const id of ["a", "b", "c"]) {
+    granted[id] = new Promise<void>((r) => { grantDone[id] = r; });
+  }
   const d = deps(
     [t("a"), t("b"), t("c")],
     Object.fromEntries(
       ["a", "b", "c"].map((id) => [id, async (hooks: SchedulerLoopHooks) => {
-        await hooks.investigate({}, {});
+        waiting += 1;
+        maxWaiting = Math.max(maxWaiting, waiting);
+        grantDone[id]!(); // signal: this request is now inside
+        await Promise.all([granted["a"], granted["b"], granted["c"]]); // all three queued together…
+        await hooks.investigate({}, {}); // …then each takes its turn
+        waiting -= 1;
         return { stopped: "accepted-finish" };
       }]),
     ),
@@ -88,20 +120,49 @@ test("M2 acceptance benchmark: observer fairness — queued investigations grant
       maxParallel: 3,
       investigate: async (task: SchedTaskLike) => {
         order.push(task.id);
+        await tick(); // hold the slot briefly so the next waiter visibly waits
         return { class: "unknown", confidence: 0 };
       },
     },
   );
   const res = await runSchedulerEpisode({ episodeId: "ep-bench" }, d);
-  const done = Object.entries(res.tasks).filter(([, f]) => (f as { status: string }).status === "done").length;
-  assert.equal(done, 3, "all 3 accepted");
+  assert.equal(Object.values(res.tasks).filter((f) => f.status === "done").length, 3, "all 3 accepted");
+  console.log(`M2-BENCH fairness order=${order.join(",")} maxWaiting=${maxWaiting} grants=${order.length}`);
+  assert.ok(maxWaiting >= 2, `expected real contention (maxWaiting ${maxWaiting})`);
   for (const id of ["a", "b", "c"]) {
     const first = order.indexOf(id);
     assert.ok(first >= 0 && first < 3, `${id} granted within W=3 (order ${order.join(",")})`);
   }
 });
 
-test("M2 acceptance benchmark: parked task does not block independent work", async () => {
+test("M2 acceptance benchmark: observerSlots=1 does not reduce acceptance (docs/20 §11.3 comparison)", async () => {
+  // The §11.3 shape is "0/1 observer slot vs N loops investigating
+  // simultaneously": with the accepted single slot, all tasks that need
+  // investigation still investigate and still accept.
+  const investigated: string[] = [];
+  const ids = ["t1", "t2", "t3", "t4", "t5", "t6"];
+  const res = await runSchedulerEpisode(
+    { episodeId: "ep-bench" },
+    deps(
+      ids.map((id) => t(id)),
+      Object.fromEntries(ids.map((id) => [id, async (hooks: SchedulerLoopHooks) => {
+        await hooks.investigate({}, {});
+        return { stopped: "accepted-finish" };
+      }])),
+      {
+        maxParallel: 3,
+        investigate: async (task: SchedTaskLike) => {
+          investigated.push(task.id);
+          return { class: "unknown", confidence: 0 };
+        },
+      },
+    ),
+  );
+  assert.equal(Object.values(res.tasks).filter((f) => f.status === "done").length, 6);
+  assert.equal(investigated.length, 6, "every task investigated under the single slot");
+});
+
+test("M2 acceptance benchmark: parked task does not block independent work", async (tst) => {
   const d = deps(
     [t("blocked"), t("free")],
     {
@@ -110,8 +171,17 @@ test("M2 acceptance benchmark: parked task does not block independent work", asy
     },
     { maxParallel: 2 },
   );
-  const res = await runSchedulerEpisode({ episodeId: "ep-bench" }, d);
+  // m2c6 M5: a hang must produce a bounded regression failure, not a
+  // silent timeout — race the episode against a 10s guard.
+  const res = (await Promise.race([
+    runSchedulerEpisode({ episodeId: "ep-bench" }, d),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("episode hung: parked task blocked quiescence")), 10000)),
+  ])) as Awaited<ReturnType<typeof runSchedulerEpisode>>;
   const byId = Object.fromEntries(Object.entries(res.tasks).map(([k, f]) => [k, f.status]));
   assert.equal(byId["free"], "done", "independent task accepted");
   assert.equal(byId["blocked"], "parked", "blocked task parked");
+  // m2c6 M5: assert the quiescence CLASSIFICATION, not just fates — a
+  // parked remainder must read quiesced-blocked, never quiesced-complete.
+  assert.equal(res.stopped, "quiesced-blocked", "parked remainder classifies the episode blocked");
+  tst.diagnostic?.(`M2-BENCH parked-episode stopped=${res.stopped}`);
 });
