@@ -1215,9 +1215,13 @@ test("remove: routing poison with the MAIN REPO as target would read clean pre-f
   const pinned = await git(wt.path, ...pin, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all");
   assert.match(pinned, /unique\.bak/, "pinned status must see this tree's payload");
   // And the SHIPPED gate's work-tree-resolving calls carry routeArgs
-  // at the exact positions (sol R6 minor 3: source-bound necessity —
-  // patching routeArgs() to [] flips this too, closing the mutation
-  // gap where removing every shipped pin left all tests green).
+  // at the exact positions (sol R6 minor 3 / R7 verification: this
+  // source-binding proves the callsites CONSUME routeArgs — patching
+  // routeArgs() to [] flips the argv-shape and pinned-status
+  // assertions above FIRST; it cannot flip THIS one (the source text
+  // survives a body mutation), so it is a wiring pin, not an
+  // independent mutation witness — closing the gap where removing
+  // every shipped pin left all tests green).
   const src = await readFile(new URL("../../src/worktree/provision.ts", import.meta.url), "utf-8");
   const callsites = src.split("\n").filter((l) => /routeArgs\(entry\.path\)/.test(l) && /\b(git|gitWithEnv)\(/.test(l));
   assert.equal(callsites.length, 4, `expected the 4 pinned gate callsites (ls-files -v, ls-files -s, read-tree, status) to route via routeArgs(entry.path), got ${callsites.length}`);

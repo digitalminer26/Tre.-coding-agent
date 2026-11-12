@@ -28,8 +28,10 @@ here:
    pinned-view witness asserts the shipped function's exact argv,
    runs the honest-view status THROUGH it, and source-binds the four
    pinned gate callsites (count asserted) — patching `routeArgs` to
-   `[]` now flips the witness, closing the mutation gap the audit
-   demonstrated (removing every shipped pin left 67/67 green).
+   `[]` now flips the witness (at the argv-shape and pinned-status
+   assertions; the source-binding is a wiring pin a body mutation
+   cannot flip — round-7 audit note), closing the mutation gap the
+   audit demonstrated (removing every shipped pin left 67/67 green).
    Sol's suggested deterministic poison-after-guard race test was
    deliberately NOT added: concurrent poisoning during release lives
    inside the accepted TOCTOU precondition — binding the tests to
@@ -37,6 +39,17 @@ here:
    supported behavior.
 4. **Count wording:** round-5's "2735 pass" → "2735 total / 2721
    pass".
+
+Round-7 re-verification (m3fix7, log `~/.tre/audits/m3fix7-sol-out.txt`,
+verdict **PASS WITH MINORS** on cf31da1: all three runtime closures
+independently mutation-confirmed; malformed-entry probes —
+prunable-but-present payload dir, redirected gitfiles, missing gitdir —
+all refused, payloads intact). Its one new minor closed here: the
+stale-registration wording claimed "directory is gone" where the real
+condition is a GONE GITFILE (a present payload directory may carry the
+entry); corrected at all three sites + the prune() doc, and the
+witness's source-binding claim narrowed to what a body mutation can
+flip (argv-shape + pinned-status; the callsite count is a wiring pin).
 
 Provisioner suite 68/68; full suite **2736 total / 2722 pass / 0 fail /
 14 skipped**; quality-check OK. Residue unchanged.

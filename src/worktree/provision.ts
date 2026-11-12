@@ -692,8 +692,8 @@ export class WorktreeProvisioner {
         throw new WorktreeProvisionError(
           "stale-registration",
           entry.locked
-            ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
-            : `worktree at ${path} is registered but its directory is gone — call prune() first`,
+            ? `worktree at ${path} is LOCKED but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
+            : `worktree at ${path} is registered but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — call prune() first`,
         );
       }
       if (mode === "branch" && entry.branch !== branch) {
@@ -792,8 +792,8 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError(
         "stale-registration",
         entry.locked
-          ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
-          : `worktree at ${path} is registered but its directory is gone — call prune() first`,
+          ? `worktree at ${path} is LOCKED but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
+          : `worktree at ${path} is registered but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — call prune() first`,
       );
     }
     const expected = taskBranchName(episodeId, taskId);
@@ -847,8 +847,8 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError(
         "stale-registration",
         entry.locked
-          ? `worktree at ${path} is LOCKED and its directory is gone — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
-          : `worktree at ${path} is registered but its directory is gone — call prune() instead of remove`,
+          ? `worktree at ${path} is LOCKED but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — \`git worktree unlock\` then prune() (git never marks locked entries prunable)`
+          : `worktree at ${path} is registered but NOT a live checkout (its .git gitfile is gone — the directory may still exist with content) — call prune() instead of remove`,
       );
     }
     const expected = taskBranchName(episodeId, taskId);
@@ -1095,9 +1095,10 @@ export class WorktreeProvisioner {
   }
 
   /**
-   * Remove admin records of VANISHED worktrees (git's own prune semantics:
-   * only entries whose directory is gone are touched; live worktrees are
-   * never affected). Refuses when ANY stale entry lies outside this
+   * Remove admin records of STALE worktrees (git's own prune semantics:
+   * only entries that are no longer a live checkout — gitfile gone; the
+   * directory may still exist holding content — are touched; live
+   * worktrees are never affected). Refuses when ANY stale entry lies outside this
    * provisioner's wtRoot — another tool's metadata is not ours to prune —
    * and reports exactly what it removed (registry diff; git's own
    * `prune --dry-run` prints nothing on this platform, so before/after
