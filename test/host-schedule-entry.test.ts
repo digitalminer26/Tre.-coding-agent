@@ -230,6 +230,66 @@ test("aside: dangling-symlink occupant is skipped, not replaced; cap-tail uses a
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("aside: random-tail collision RETRY re-rolls past an occupied tail (M2 audit c5c F2)", async () => {
+  // cap=1 with the bare stem OCCUPIED forces the random-tail loop. Scripted
+  // rolls: the first tail collides with an occupied name, the second is
+  // free. The retry must take the SECOND name with the occupant byte-intact
+  // — this pins the occupancy probe INSIDE the tail loop (c5c F2: the c5b
+  // test passed even with the probe disabled).
+  const dir = await mkdtemp(join(tmpdir(), "aside-retry-"));
+  const base = join(dir, "state.json");
+  const TS = 1_700_000_000_003;
+  const realRandom = Math.random;
+  try {
+    const stem = `${base}.unreadable-${TS}`;
+    const tail = (v: number) => `${stem}.1.${Math.floor(v * 4294967296).toString(36)}`;
+    const v1 = 0.123456789, v2 = 0.987654321;
+    const t1 = tail(v1), t2 = tail(v2);
+    assert.notEqual(t1, t2, "scripted rolls produce distinct names");
+    await writeFile(stem, "OCC-STEM");       // candidate 0 taken → probe mode / tail loop
+    await writeFile(t1, "OCC-TAIL");          // first random candidate taken → retry
+    await writeFile(base, "payload");
+    let i = 0; const seq = [v1, v2];
+    Math.random = () => seq[Math.min(i++, seq.length - 1)] ?? v2;
+    const got = await preserveAside(base, TS, 1);
+    assert.equal(got, t2, "the retry lands on the SECOND roll, not the occupied one");
+    assert.equal(await readFile(t1, "utf8"), "OCC-TAIL", "the tail occupant is never overwritten");
+    assert.equal(await readFile(got, "utf8"), "payload");
+  } finally { Math.random = realRandom; await rm(dir, { recursive: true, force: true }); }
+});
+
+test("aside: tail exhaustion THROWS and keeps the source — never an unprobed rename (M2 audit c5c F1)", async () => {
+  // All rolls identical and the tail occupied: 8 probes, all taken → the
+  // function must reject with the source intact (no lastResort overwrite).
+  const dir = await mkdtemp(join(tmpdir(), "aside-exhaust-"));
+  const base = join(dir, "state.json");
+  const TS = 1_700_000_000_004;
+  const realRandom = Math.random;
+  try {
+    const stem = `${base}.unreadable-${TS}`;
+    const v = 0.5;
+    const t = `${stem}.1.${Math.floor(v * 4294967296).toString(36)}`;
+    await writeFile(stem, "OCC-STEM");
+    await writeFile(t, "OCC-TAIL");
+    await writeFile(base, "payload");
+    Math.random = () => v;
+    await assert.rejects(preserveAside(base, TS, 1), /refusing to overwrite/);
+    assert.equal(await readFile(base, "utf8"), "payload", "source kept in place on exhaustion");
+    assert.equal(await readFile(t, "utf8"), "OCC-TAIL", "the tail occupant survived exhaustion");
+    assert.equal(await readFile(stem, "utf8"), "OCC-STEM");
+  } finally { Math.random = realRandom; await rm(dir, { recursive: true, force: true }); }
+});
+
+test("aside: cap < 1 is rejected, not silently skipped (M2 audit c5c R1)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aside-cap0-"));
+  const base = join(dir, "state.json");
+  try {
+    await writeFile(base, "payload");
+    await assert.rejects(preserveAside(base, 1_700_000_000_005, 0), RangeError);
+    assert.equal(await readFile(base, "utf8"), "payload", "cap=0 leaves the source untouched");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("aside: a non-EEXIST link failure (no-hardlink source) still preserves BOTH same-ms copies (M2 audit c5 finding)", async () => {
   // A DIRECTORY source makes link() fail with EPERM on macOS and Linux —
   // the real trigger for the no-hardlink fallback, no dist mutation needed.

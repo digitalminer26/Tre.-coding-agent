@@ -180,13 +180,15 @@ const now = () => Date.now();
  *  hardlink support, a cross-device aside, a vanished source) is NOT proof
  *  the name is free, so the probe stops and falls back to the old plain
  *  `rename` (same filesystem in practice — keep it simple). Bounded: `cap`
- *  probes, then the plain-rename fallback, never a hang. Throws only when
- *  the fallback move itself fails — the caller then logs the honest
- *  "preserve failed — NOTHING overwritten".
+ *  probes, then the plain-rename fallback, never a hang. Throws when the
+ *  fallback move itself fails OR the random tail exhausts (source then stays
+ *  in place, nothing destroyed) — the caller logs the honest
+ *  "preserve failed — NOTHING overwritten". cap must be >= 1.
  *  PRECONDITION: every caller holds the episode lease (acquired before all
  *  three call sites — runHostEpisode and runScheduledHostEpisode), so the
  *  probe→rename window on the fallback path has no second writer. */
 export async function preserveAside(statePath: string, ts: number = now(), cap = 500): Promise<string> {
+  if (cap < 1) throw new RangeError(`preserveAside: cap must be >= 1 (got ${cap})`); // cap=0 would skip every deterministic name (M2 audit c5c R1)
   const stem = `${statePath}.unreadable-${String(ts)}`;
   let probeMode = false; // sticky once link() proves unusable (see below)
   for (let n = 0; n < cap; n++) {
@@ -217,20 +219,21 @@ export async function preserveAside(statePath: string, ts: number = now(), cap =
     await rename(statePath, candidate);
     return candidate;
   }
-  // Cap exhausted (>=cap asides of one base in one ms): still never replace
-  // an existing name — the random suffix makes a collision astronomically
-  // unlikely where a plain `${stem}.${cap}` rename would overwrite.
-  // Random tail: re-roll and probe until free (bounded — 8 tries, then the
-  // last roll is used; a 32-bit collision on every roll is not a real path).
+  // Cap exhausted (>=cap asides of one base in one ms): never rename onto a
+  // name that has not been probed free — a plain `${stem}.${cap}` rename
+  // WOULD overwrite an existing aside (M2 audit c5 finding). Random tail:
+  // re-roll and probe until free. On exhaustion (all 8 rolls taken — with
+  // fair 32-bit randomness a ~2^-256 event, or a hostile/degenerate
+  // Math.random), THROW instead of renaming: the source stays in place and
+  // nothing is destroyed; callers catch and log the honest
+  // "preserve failed — NOTHING overwritten" (M2 audit c5c F1).
   for (let r = 0; r < 8; r++) {
     const last = `${stem}.${String(cap)}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
     if (await asideTaken(last)) continue;
     await rename(statePath, last);
     return last;
   }
-  const lastResort = `${stem}.${String(cap)}.${Math.floor(Math.random() * 4294967296).toString(36)}`;
-  await rename(statePath, lastResort);
-  return lastResort;
+  throw new Error(`preserveAside: every deterministic name (cap=${cap}) and all 8 random tail candidates are occupied — refusing to overwrite (source kept at ${statePath})`);
 }
 
 /** Is `p` already claimed? lstat success = taken; ENOENT = free; any OTHER

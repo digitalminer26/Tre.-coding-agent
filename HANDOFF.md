@@ -1,3 +1,16 @@
+## 2026-11-12 — M2 audit c5c follow-up (implement round, then Sol audits x3): no-overwrite invariant completed
+
+Audit c5c found the cap-tail exhaustion path still renamed UNPROBED
+(lastResort) and the c5b test did not gate the tail retry. Fixed directly:
+(1) exhaustion now THROWS — source kept in place, nothing destroyed, callers
+already catch and log "NOTHING overwritten"; (2) cap<1 rejected with
+RangeError (cap=0 silently skipped every deterministic name); (3) three new
+tests with scripted Math.random: tail-collision RETRY (second roll wins,
+first occupant intact), tail EXHAUSTION (rejects, source + occupant intact),
+cap=0 rejection. Mutation-checked: disabling the tail probe fails both new
+tests. Gate: build clean; npm test 2706 tests, 2692 pass, 0 fail, 14 skipped.
+Auditor for the next 3 rounds: gpt-6.1-sol (Hong's designation).
+
 ## 2026-11-12 — M2 audit c5b follow-up: cap-tail probe loop, lease precondition, dangling-symlink test
 
 Independent audit of 2811469 (audit-c5b.md): no bugs; three recommendations,
