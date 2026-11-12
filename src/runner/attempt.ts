@@ -424,6 +424,22 @@ export interface AttemptRunnerOptions {
    *  Default: an absolute path must exist and be executable, a bare name
    *  must resolve on $PATH. */
   commandCheck?: (command: string) => boolean;
+  /** KILL-WINDOW TEST SEAM (W0/W1): async hook invoked INSIDE the spawn
+   *  transaction at two deterministic points —
+   *    phase "intent": immediately AFTER the intent record is durable,
+   *                    BEFORE the spawner callback and the fork;
+   *    phase "forked": once the worker process is proven to exist
+   *                    ('spawn' event observed, child tracked), BEFORE
+   *                    the final closure gate + "ok" resolve append.
+   *  These are the two crash windows the W0/W1 audit findings are about.
+   *  Production never sets it (zero cost); the kill-window suite uses it
+   *  to crash the supervisor (close(true)) deterministically inside each
+   *  window instead of racing wall-clock timers against a
+   *  sub-millisecond await chain. Runs while the spawn critical section
+   *  is held; a throw/closure-during-await aborts the transaction at the
+   *  next closure gate exactly as a real process crash would leave the
+   *  journal. */
+  spawnBarrier?: (info: { phase: "intent"; attemptId: string } | { phase: "forked"; attemptId: string; pid: number }) => Promise<void>;
 }
 
 interface ChildEntry {
@@ -678,6 +694,7 @@ export class AttemptRunner {
   private readonly pidProbeImpl: (pid: number) => Promise<PidStatus | undefined>;
   private readonly commandCheck: (command: string) => boolean;
   private readonly spawner: WorkerSpawner;
+  private readonly spawnBarrier?: (info: { phase: "intent"; attemptId: string } | { phase: "forked"; attemptId: string; pid: number }) => Promise<void>;
   private readonly root: string;
   private readonly episodeId: string;
   /** F7: serialization queue for run()/resume() — the fence, the
@@ -695,6 +712,7 @@ export class AttemptRunner {
     this.pidProbeImpl = opts.probes?.pidAlive ?? defaultPidProbe;
     this.commandCheck = opts.commandCheck ?? defaultCommandExists;
     this.spawner = opts.spawner ?? treWorkerSpawner();
+    this.spawnBarrier = opts.spawnBarrier;
   }
 
   /** Open (and register) the runner for one episode directory. `root` is
@@ -1713,6 +1731,17 @@ export class AttemptRunner {
       // matching hint identities are still probed (R6-1).
       if (view.live === true) continue;
       const ownExitedPid = view.live === false ? this.children.get(view.record.sessionPath)?.child.pid : undefined;
+      // F6 journal-first (kill-window suite): an exited own child is
+      // waitpid-disproven, but the audit trail must show the journalled
+      // pid was checked — run the same deterministic probe and record
+      // the verdict (it cannot disagree with waitpid evidence).
+      if (ownExitedPid !== undefined && !probed.has(ownExitedPid)) {
+        const ownStatus = await this.probe(ownExitedPid);
+        probed.set(ownExitedPid, ownStatus);
+        if (ownStatus !== undefined && !probes.some((p) => p.pid === ownExitedPid)) {
+          probes.push({ pid: ownExitedPid, running: ownStatus.running, sameUid: ownStatus.sameUid });
+        }
+      }
       // H1-M1 (audit): probe EVERY non-confirmation record's pid in the
       // tuple, not just the latest. A historical ok spawn whose pid was
       // recorded WITHOUT pgid/detached (unknown spawn mode) stays live
@@ -1805,6 +1834,10 @@ export class AttemptRunner {
     };
     await this.appendRecord(intent);
 
+    // KILL-WINDOW TEST SEAM (W0): intent durable, fork not yet attempted.
+    // Production: undefined, no-op.
+    if (this.spawnBarrier !== undefined) await this.spawnBarrier({ phase: "intent", attemptId });
+
     // C2-C (cycle-2 audit): the spawner callback is USER code — a throw
     // here (after the intent is durable) must resolve the intent `failed`
     // and surface as RunnerError("spawn-failed"), not a raw Error with a
@@ -1867,6 +1900,9 @@ export class AttemptRunner {
     // resolve append so a failed resolve still leaves a visible live
     // child; losing tracking of a live child is the worse failure).
     this.children.set(task.session, entry);
+    // KILL-WINDOW TEST SEAM (W1): after the fork is proven and tracked,
+    // before the final gate + ok resolve. Production: undefined, no-op.
+    if (this.spawnBarrier !== undefined) await this.spawnBarrier({ phase: "forked", attemptId, pid: child.pid ?? -1 });
     // F3 (audit): last closure gate before the "ok" resolve append —
     // close() refuses while a transaction is in flight, but close(true)
     // forces; after a forced close we must not advertise the spawn ok
