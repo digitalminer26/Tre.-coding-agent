@@ -27,7 +27,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   WorktreeProvisioner,
@@ -393,6 +393,88 @@ test("remove: refuses a dirty worktree and changes nothing (no mutation before g
   assert.equal(rep.forced, true);
   assert.equal(rep.branchDeleted, false); // branches outlive plain cleanup
   assert.equal(await git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/agent/epA/t1"), base);
+});
+
+// M3 audit regressions: the pre-fix gate used plain `status -uall`,
+// which reads EMPTY over both scenarios below, and an unforced remove
+// then DESTROYED the content (reproduced against pre-fix dist).
+
+test("remove: IGNORED content (info/exclude) refuses as hidden-content, payload survives (M3 audit)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epIg1", taskId: "t1", baseCommit: base });
+  // The pre-fix blind spot, exactly as the audit probe reproduced it:
+  // a payload directory excluded via the worktree's info/exclude.
+  const excl = await git(wt.path, "rev-parse", "--git-path", "info/exclude");
+  await writeFile(resolve(wt.path, excl), ".agent/\n", { flag: "a" });
+  await mkdir(join(wt.path, ".agent"), { recursive: true });
+  await writeFile(join(wt.path, ".agent", "payload.txt"), "SECRET-DO-LOSE\n");
+  // Sanity: the OLD gate form genuinely reads clean over this.
+  assert.equal(await git(wt.path, "status", "--porcelain", "--untracked-files=all"), "", "pre-fix gate view must read clean (the audit finding)");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epIg1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "hidden-content"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept intact");
+  assert.equal(await readFile(join(wt.path, ".agent", "payload.txt"), "utf-8"), "SECRET-DO-LOSE\n", "ignored payload NOT destroyed");
+
+  // force remains the explicit discard path
+  const rep = await prov.removeTaskWorktree({ episodeId: "epIg1", taskId: "t1", force: true });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal(rep.forced, true);
+});
+
+test("remove: IGNORED content (.gitignore) refuses as hidden-content (M3 audit)", async () => {
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epIg2", taskId: "t1", baseCommit: base });
+  // .gitignore committed ON the task branch, so the ONLY remaining
+  // content is the ignored artifact (an uncommitted .gitignore is
+  // ordinary dirty, correctly caught by the untracked half).
+  await writeFile(join(wt.path, ".gitignore"), "buildout/\n");
+  await git(wt.path, "add", ".gitignore");
+  await git(wt.path, "-c", "user.name=ptest", "-c", "user.email=ptest@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "ignore buildout");
+  await mkdir(join(wt.path, "buildout"), { recursive: true });
+  await writeFile(join(wt.path, "buildout", "artifact.bin"), "built-by-worker\n");
+  assert.equal(await git(wt.path, "status", "--porcelain", "--untracked-files=all"), "", "pre-fix gate view must read clean");
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epIg2", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "hidden-content"); return true; },
+  );
+  assert.equal(await readFile(join(wt.path, "buildout", "artifact.bin"), "utf-8"), "built-by-worker\n");
+});
+
+test("remove: an assume-unchanged modified file refuses as hidden-content (M3 audit)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epAu1", taskId: "t1", baseCommit: base });
+  // Tracked file modified with the assume-unchanged bit: status (old
+  // AND new — ignored status says nothing about flags) reads clean.
+  await writeFile(join(wt.path, "a.txt"), "hand-edited, uncommitted\n");
+  await git(wt.path, "update-index", "--assume-unchanged", "a.txt");
+  assert.equal(await git(wt.path, "status", "--porcelain", "--untracked-files=all"), "", "status is blind to the flag (the audit finding)");
+  assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "even --ignored does not see the flag");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epAu1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "hidden-content"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "worktree kept — the flagged edit survives");
+  assert.equal(await readFile(join(wt.path, "a.txt"), "utf-8"), "hand-edited, uncommitted\n");
+
+  // force discards knowingly
+  const rep = await prov.removeTaskWorktree({ episodeId: "epAu1", taskId: "t1", force: true });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal(repo !== "", true);
+});
+
+test("remove: an ALL-H index (unflagged) still removes clean — the flag gate is not vacuous", async () => {
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epAu2", taskId: "t1", baseCommit: base });
+  // Sanity the other direction: a normal checkout's ls-files -v is
+  // all-'H '; the new gate must NOT start keeping clean worktrees.
+  assert.ok((await git(wt.path, "ls-files", "-v")).split("\n").every((l) => l.startsWith("H ")), "baseline index is all-H");
+  const rep = await prov.removeTaskWorktree({ episodeId: "epAu2", taskId: "t1" });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal(rep.forced, false);
 });
 
 test("remove: noop when nothing is registered; refuses unmanaged directories", async () => {

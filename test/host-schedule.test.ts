@@ -482,7 +482,7 @@ test("M3 release: an accepted done releases the worktree, journals sched-worktre
   assert.equal(new Set(recs.map((r) => r["actionId"])).size, 2);
 });
 
-test("M3 release: a kept (conservative-refusal) release is journaled with its code, fate unchanged", async () => {
+test("M3 release: a kept (conservative-refusal) release is journaled as kept:<code>, fate unchanged", async () => {
   const h = harness([t("a")], {
     worktrees: {
       async ensure() { return { path: "/wt/a" }; },
@@ -492,7 +492,24 @@ test("M3 release: a kept (conservative-refusal) release is journaled with its co
   const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
   assert.equal(res.tasks.a?.status, "done", "a kept worktree never changes the accepted fate");
   const rec = h.journalAppends.find((r) => r["kind"] === "sched-worktree");
-  assert.deepEqual([rec?.["outcome"], rec?.["detail"], rec?.["taskId"]], ["released", "dirty", "a"]);
+  // M3 audit fix: a kept refusal is NEVER journaled as "released" —
+  // the outcome carries the refusal code, the detail carries the
+  // provisioner's reason when it has one.
+  assert.deepEqual([rec?.["outcome"], rec?.["detail"], rec?.["taskId"]], ["kept:dirty", undefined, "a"]);
+});
+
+test("M3 release: a kept refusal with a detail journals both, still never as released", async () => {
+  const h = harness([t("a")], {
+    worktrees: {
+      async ensure() { return { path: "/wt/a" }; },
+      async release() { return { kept: "hidden-content", detail: "worktree holds IGNORED content" }; },
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done");
+  const rec = h.journalAppends.find((r) => r["kind"] === "sched-worktree");
+  assert.equal(rec?.["outcome"], "kept:hidden-content");
+  assert.equal(rec?.["detail"], "worktree holds IGNORED content");
 });
 
 test("M3 release: a throwing release is disclosed (release-threw) and never fails the episode", async () => {

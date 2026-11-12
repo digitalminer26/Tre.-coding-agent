@@ -1,3 +1,50 @@
+## 2026-11-12 — M3 audit fix: worktree release no longer destroys status-invisible content; refusals journaled honestly
+
+The post-M3 audit (probe: `~/.tre/review-probes/m3-cleanup-audit.mjs`)
+reproduced a **blocker in the release path shipped one commit earlier**:
+the conservative dirty gate was `git status --porcelain -uall`, which is
+BLIND to (a) files matched by ignore rules (.gitignore, info/exclude,
+core.excludesFile) and (b) tracked files modified under
+assume-unchanged/skip-worktree index bits. An unforced
+`removeTaskWorktree` over either read "clean" and `rm -rf`'d the
+payload — the commit message and docs claimed content is preserved; it
+was not. Fixes:
+
+1. **Blocker — hardened gate (src/worktree/provision.ts).** The dirty
+   gate now runs `status --porcelain=1 --ignored=traditional -uall`
+   (per-FILE `!!` entries — `matching` would collapse a populated dir
+   to one line): any ignored file → refusal `hidden-content` (ordinary
+   changes keep `dirty`). A second gate refuses unless EVERY
+   `ls-files -v` tag is `H ` — any `h`/`S`/other disclaiming flag →
+   `hidden-content`. An empty index is vacuously clean; a failed
+   ls-files propagates as a kept refusal. `force` remains the explicit
+   operator discard (discloses `forced:true`). Disclosed residue (git
+   cannot represent them in any status form): ignored dirs containing
+   only empty subdirs, and sparse-checkout skip-worktree content
+   (sparse checkout is unsupported for agent worktrees — noted in the
+   code). +4 real-git regressions (info/exclude payload, committed
+   .gitignore artifact, assume-unchanged edit, all-H clean-removal
+   control) — all THREE content tests FAIL against pre-fix src
+   (mutation-checked by stashing src/ and rebuilding).
+2. **Major — outcome honesty (src/supervisor/schedule.ts).** A release
+   returning `{ kept }` was journaled `outcome:"released"` with the code
+   parked in `detail` — a false "removed" claim in the durable record
+   (the commit message asserted `kept:<code>`; the code never emitted
+   it). Now the outcome is `kept:<code>` and `released` only on an
+   actual removal. Host release also carries the provisioner message as
+   a bounded detail. +1 net host-schedule test (kept-outcome test
+   rewritten to `kept:<code>`, plus the new kept-with-detail test).
+3. **Minor — refusal actionId (src/supervisor/compose.ts).** Two
+   refused `model:` overrides in ONE poll shared `steer-<seq>-unapproved`
+   (seq alone isn't unique per text). Id is now
+   `steer-<seq>-refused-<model>` (model ids are regex-bounded to the
+   same charset the supersede-id already embeds). +1 compose test
+   asserts 2 refusals → 2 distinct ids; FAILS pre-fix.
+
+Docs: docs/20 D4 note updated for the refusal class + `kept:<code>`
+outcome. Gate: quality-check OK; tsc clean; full suite **2722 / 2708
+pass / 0 fail / 14 skipped**.
+
 ## 2026-11-12 — M3 parked small items shipped: worktree auto-removal at accepted `done` + steer model-swap allowlist
 
 The two items the M3 review parked as "small, self-contained" (docs/11

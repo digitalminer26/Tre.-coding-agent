@@ -523,9 +523,10 @@ export interface SchedulerDeps {
    *  refusal PARKS that task, siblings unaffected. M3 (D4 lift):
    *  `release` is called on an ACCEPTED `done` only (never failed /
    *  parked) and MUST be conservative — the host maps it to an UNFORCED
-   *  `removeTaskWorktree` (dirty → kept). A returned `{ kept }` records
-   *  a conservative refusal in the journal; throwing is disclosed as
-   *  `release-threw`. Neither changes the task's fate. */
+   *  `removeTaskWorktree` (dirty/hidden content → kept). A returned
+   *  `{ kept }` records a conservative refusal in the journal under its
+   *  own `kept:<code>` outcome (never `released`); throwing is disclosed
+   *  as `release-threw`. Neither changes the task's fate. */
   worktrees?: { ensure(taskId: string): Promise<{ path?: string; refused?: string }>; release?(taskId: string): Promise<{ kept?: string; detail?: string } | void> };
   /** P8 headroom view (docs/20 §3.2.4 + §6: reserve-first doctrine —
    *  the scheduler asks the ledger for standing coverage, never an
@@ -856,8 +857,16 @@ export async function runSchedulerEpisode(
       let detail: string | undefined;
       try {
         const r = await deps.worktrees.release(t.id);
-        outcome = 'released';
-        const d = (r as { kept?: string; detail?: string } | undefined)?.kept ?? (r as { detail?: string } | undefined)?.detail;
+        const kept = (r as { kept?: string } | undefined)?.kept;
+        if (typeof kept === 'string' && kept.length > 0) {
+          // Conservative refusal reported as a return (host maps every
+          // WorktreeProvisionError code here): journaled per code,
+          // never as 'released'.
+          outcome = `kept:${sstr(kept, 80)}`;
+        } else {
+          outcome = 'released';
+        }
+        const d = (r as { detail?: string } | undefined)?.detail;
         if (typeof d === 'string' && d.length > 0) detail = sstr(d);
       } catch (e) {
         outcome = 'release-threw';

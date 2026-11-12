@@ -591,7 +591,11 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
               : [];
             const steerModel = m[1]!;
             if (!approvedPool.includes(steerModel)) {
-              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-unapproved`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
+              // M3 audit fix: the model name rides in the actionId — two
+              // refused overrides in ONE poll (same seq) must not collide
+              // (model ids here are regex-bounded to [A-Za-z0-9._-], the
+              // same charset the supersede-id below already embeds).
+              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-refused-${steerModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
               continue;
             }
             if (overrideModel !== undefined) {

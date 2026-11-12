@@ -472,9 +472,12 @@ the decision record; each is now BINDING for the code round.
    auto-removal shipped** — the scheduler calls the host's `worktrees.release`
    on an ACCEPTED done only (failed/parked worktrees stay as evidence);
    the host maps it to an UNFORCED P6 `removeTaskWorktree` (dirty, locked,
-   foreign-branch or stale registration → KEPT and journaled as `{kept}`;
-   branches are never deleted — P12 territory). Every outcome is one
-   `sched-worktree` journal record; release is disclosure-only and can
+   foreign-branch, stale registration, or content git status cannot show
+   — ignored files or assume-unchanged/skip-worktree index flags, refused
+   as `hidden-content` — → KEPT and journaled `kept:<code>`; branches are
+   never deleted — P12 territory). Every outcome is one
+   `sched-worktree` journal record (`released` only on an actual removal);
+   release is disclosure-only and can
    never alter a fate. Un-accepted finishes and episode-cleanup retention
    are unchanged.
 5. **P20 lease scope.** **RESOLVED: lease name stays `host.lease`** for

@@ -3922,7 +3922,8 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
           return rep.noop ? { kept: "noop", detail: "no registered worktree" } : undefined;
         } catch (e) {
           const code = String((e as { code?: string }).code ?? "remove-failed");
-          return { kept: code };
+          const msg = (e as Error)?.message;
+          return typeof msg === "string" && msg.length > 0 ? { kept: code, detail: msg.slice(0, 300) } : { kept: code };
         }
       } };
     } else {

@@ -38,7 +38,14 @@
  *  - A directory at the target path that is NOT registered with this repo
  *    is refused (never adopted, never implicitly deleted).
  *  - `removeTaskWorktree` refuses a dirty worktree (any `git status
- *    --porcelain -uall` output, incl. untracked) unless `force`.
+ *    --porcelain=1 --ignored=traditional -uall` output — untracked AND
+ *    ignored, since an unforced remove over an ignored payload once
+ *    destroyed it while status read clean; M3 audit) unless `force`.
+ *    It also refuses when any `ls-files -v` tag is non-`H`
+ *    (assume-unchanged / skip-worktree bits hide modified tracked
+ *    content from status; an all-`H` index is the only provable-clean
+ *    state). Refusals distinguishing the two: ordinary changes →
+ *    `dirty`; status-invisible content → `hidden-content`.
  *  - Branch deletion requires `baseCommit` proof (`base..branch` empty)
  *    unless `force` — deletion of unmerged work is an explicit discard.
  *    `branch -d` is never used (its heuristic is merged-into-HEAD, not
@@ -79,6 +86,7 @@ export type ProvisionErrorCode =
   | "foreign-branch"            // registered worktree carries a different branch
   | "branch-conflict"           // branch exists but not at the pinned base
   | "dirty"                     // remove refused: worktree has uncommitted changes
+  | "hidden-content"            // remove refused: content git status cannot show (ignored file, info/exclude entry, assume-unchanged/skip-worktree bit)
   | "unmerged"                  // branch deletion refused: commits past base
   | "no-base-for-branch-delete" // deleteBranch without proof base
   | "prune-refused"             // stale entries exist outside our wtRoot
@@ -641,10 +649,47 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force (force discards uncommitted work AND overrides the lock)`);
     }
 
-    // Dirty gate (strictly conservative: includes untracked).
-    const status = await git(entry.path, ["status", "--porcelain", "--untracked-files=all"]);
+    // Dirty gate (strictly conservative: includes untracked AND
+    // ignored — M3 audit fix: `status -uall` WITHOUT --ignored showed
+    // EMPTY over an ignored payload file and over an assume-unchanged
+    // modification, and an unforced remove destroyed both; proven
+    // against pre-fix dist). `--ignored=traditional -uall` surfaces
+    // every ignore mechanism (.gitignore, info/exclude,
+    // core.excludesFile) as per-FILE `!!` entries — presence is the
+    // finding, the path rides only in the bounded stderr detail.
+    // (`matching` would collapse a whole ignored directory to one
+    // `dir/` line; empty ignored directories are the disclosed residue
+    // git itself cannot represent — `remove -f -f` discards them.)
+    // Non-`!!` entries are ordinary dirty.
+    const status = await git(entry.path, ["status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"]);
     if (status.trim() !== "" && !force) {
-      throw new WorktreeProvisionError("dirty", `worktree ${path} has uncommitted changes — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
+      const lines = status.split("\n").filter((l) => l.trim() !== "");
+      const ordinary = lines.filter((l) => !l.startsWith("!!"));
+      if (ordinary.length > 0) {
+        throw new WorktreeProvisionError("dirty", `worktree ${path} has uncommitted changes — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
+      }
+      throw new WorktreeProvisionError("hidden-content", `worktree ${path} holds IGNORED content git status would not otherwise show (${lines.length} entr${lines.length === 1 ? "y" : "ies"}) — refusing to remove (force to discard)`, { stderr: status.slice(0, 2000) });
+    }
+    // Index-flag gate (M3 audit fix): `status` is BLIND to entries the
+    // index itself disclaims — assume-unchanged (`h`), skip-worktree
+    // (`S`), and every other non-`H` ls-files tag. A tracked file
+    // modified under those bits reads clean and vanishes with the
+    // tree. The worktree is only honestly removable when EVERY index
+    // entry is `H ` (tracked, unflagged). An EMPTY index (no tracked
+    // files at all) is vacuously clean; a FAILED ls-files propagates
+    // as git-failed and is caught upstream as a kept refusal.
+    // DISCLOSED RESIDUE (git itself cannot represent these in any
+    // status form): directories ignored while containing ONLY empty
+    // subdirectories, and modified CONTENT hidden behind a sparse-
+    // checkout skip-worktree — sparse checkout is unsupported for
+    // agent worktrees (docs/11 §5 worktree doctrine).
+    if (!force) {
+      const tagged = await git(entry.path, ["ls-files", "-v"]);
+      const flagged = tagged.split("\n").filter((l) => l !== "" && l[0] !== "H");
+      if (flagged.length > 0) {
+        const kinds = [...new Set(flagged.map((l) => l[0] ?? "?"))].sort().join(",");
+        throw new WorktreeProvisionError("hidden-content", `worktree ${path} has ${flagged.length} index entr${flagged.length === 1 ? "y" : "ies"} with disclaiming flags (${kinds}: assume-unchanged/skip-worktree/other) whose content status cannot show — refusing to remove (force to discard)`);
+      }
     }
 
     if (params.deleteBranch === true && entry.branch !== null) {
