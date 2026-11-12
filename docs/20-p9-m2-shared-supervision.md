@@ -417,8 +417,12 @@ injected once per scheduling decision like the ledger fold does.
    workload, {1, 2, 3} workers × observer contention, measuring accepted
    tasks/human-minutes vs single-worker baseline (docs/11 §11.4
    productivity measures — slot utilization is explicitly NOT a success
-   metric). Observer contention: run with 0/1 observer slot vs N loops
-   investigating simultaneously under the fairness queue.
+   metric). Observer contention: N loops investigating simultaneously
+   under the fairness queue, served by the single global observer slot
+   (m2c7 DOC: the earlier "0/1 observer slot" phrasing described a
+   zero-slot mode that does NOT exist and is not an acceptance mode —
+   the D1 clamp in src/supervisor/schedule.ts makes one slot binding; a
+   multi-slot observer is a post-M2 option, out of acceptance scope).
    Implemented as `test/m2-acceptance-bench.test.ts` (6 tests, all through
    real `runSchedulerEpisode`): the worker-scale case holds a barrier
    gate open so overlap is genuine (peak active bodies asserted: 1 at

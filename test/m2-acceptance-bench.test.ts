@@ -14,8 +14,10 @@
  * asserts peak overlap ≥ 2 at maxParallel ≥ 2 and ≥ 1 at 1. The fairness
  * case holds all three investigations inside the critical section at
  * once so the waiting set is non-empty (maxWaiting ≥ 2 asserted), every
- * request granted within W=3. The zero-observer comparison (§11.3, m2c6
- * M4) documents that with observerSlots=1 all 6 tasks still investigate.
+ * request granted within W=3. The observer-slot comparison (§11.3,
+ * m2c6 M4 / m2c8) proves the D1 clamp binds: requesting 3 slots still
+ * serializes all investigations (peakInside=1) — no zero-slot mode
+ * exists; one slot is the shipped, binding design.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -96,9 +98,11 @@ test("M2 acceptance benchmark: observer fairness — queued investigations grant
   // arises naturally at maxParallel=3; the rendezvous pins it so the
   // proof never depends on scheduling luck), the no-starvation bound is
   // ASSERTED (every request granted within W=3), and the single-slot
-  // DISCIPLINE is asserted: observer calls NEVER overlap (peakInside ≤ 1;
-  // m2c7 counter-proof: raising the ObserverQueue clamp in a dist scratch
-  // fails this assertion, so it has genuine necessity).
+  // DISCIPLINE is asserted: observer calls NEVER overlap (peakInside=1).
+  // Necessity lives in the NEXT test (m2c8): the clamp mutant (ctor
+  // honoring slots>1) drives THAT test's peakInside to 3 and fails it;
+  // this test requests only the default slot, so its own peakInside
+  // assertion documents discipline rather than carrying the mutant proof.
   const order: string[] = [];
   let waiting = 0;
   let maxWaiting = 0;
