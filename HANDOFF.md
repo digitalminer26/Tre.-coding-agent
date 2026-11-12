@@ -1,3 +1,18 @@
+## 2026-11-12 — M2 audit c5f (Sol round 3, final): freshEpisode registers teardown (temp-dir leak closed)
+
+Sol round 3 (audit-c5f.md): NO production bugs remain in the chain — the c5e
+disclosure fix, the seam ownership, and the exhaustion bound were all
+re-verified against the final dist (original corruption repro stays
+refused; stale-reclaim composition re-checked). One MINOR: both new
+host-supervise tests leaked their mkdtemp episode roots (a pre-existing
+freshEpisode helper weakness). Fix: freshEpisode now registers
+t.after(() => rm(root, recursive)) for EVERY caller; Sol's exact leak repro
+now reports 0 remaining roots. Also corrected the two comment-wording
+imprecisions Sol cited (tail-loop reachability; the seam ALWAYS takes a
+fresh claim). Gate: build clean; npm test 2708 tests, 2694 pass, 0 fail, 14
+skipped; host-supervise 45/45; P17 14/0. Budget (3 rounds) exhausted; this
+final fix is not re-audited.
+
 ## 2026-11-12 — M2 audit c5e (Sol, round 3 target): failed seam release now disclosed
 
 Sol round 2 (audit-c5e.md) verified BUG-1/REC-1 fixed (old repro dies, both

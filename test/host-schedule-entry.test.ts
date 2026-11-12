@@ -246,7 +246,7 @@ test("aside: random-tail collision RETRY re-rolls past an occupied tail (M2 audi
     const v1 = 0.123456789, v2 = 0.987654321;
     const t1 = tail(v1), t2 = tail(v2);
     assert.notEqual(t1, t2, "scripted rolls produce distinct names");
-    await writeFile(stem, "OCC-STEM");       // candidate 0 taken → probe mode / tail loop
+    await writeFile(stem, "OCC-STEM");       // candidate 0 taken (link EEXIST, or lstat in probe mode) — the one capped iteration is consumed either way, reaching the tail loop
     await writeFile(t1, "OCC-TAIL");          // first random candidate taken → retry
     await writeFile(base, "payload");
     let i = 0; const seq = [v1, v2];

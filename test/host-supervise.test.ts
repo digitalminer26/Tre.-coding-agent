@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink, open } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, chmod, unlink, open, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -31,8 +31,12 @@ import { runHostEpisode, runShell, collectAcceptanceEvidence, observeIdentity, r
 import { sameArtifact } from "../src/acceptance/evaluator.js";
 import { makeTelegramDeliver } from "../src/telegram/escalation.js";
 
-async function freshEpisode(t: { diagnostic: (m: string) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
+async function freshEpisode(t: { diagnostic: (m: string) => void; after?: (fn: () => void | Promise<void>) => void }, graphOver: Partial<EpisodeGraph>): Promise<{ root: string; graph: EpisodeGraph }> {
   const root = await mkdtemp(join(tmpdir(), "tre-host-"));
+  // c5f BUG-1 (Sol audit round 3): the episode root was never removed —
+  // register lifecycle cleanup for EVERY caller (node:test TestContext
+  // provides after(); the teardown runs when the test finishes).
+  t.after?.(() => rm(root, { recursive: true, force: true }));
   const graph: EpisodeGraph = {
     schema: "tre-graph/1",
     episodeId: "ep-host",
