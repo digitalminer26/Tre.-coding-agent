@@ -150,7 +150,8 @@ test("M2 acceptance benchmark: observer fairness — queued investigations grant
 });
 
 test("M2 acceptance benchmark: observer slot comparison — 1 slot (docs/20 §11.3; m2c7: no 0-slot config exists, clamp is binding)", async () => {
-  // docs/20 §11.3's "0/1 slot" phrasing: the shipped design (D1) CLAMPS
+  // docs/20 §11.3's retired zero-vs-one-slot phrasing: the shipped
+  // design (D1) CLAMPS
   // observerSlots to exactly 1 (schedule.ts ObserverQueue ctor) — a
   // zero-slot observer cannot exist by construction, so the measurable
   // comparison is "N loops × the single slot": all 6 tasks still
