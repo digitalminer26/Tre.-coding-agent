@@ -47,7 +47,11 @@ prunable-but-present payload dir, redirected gitfiles, missing gitdir —
 all refused, payloads intact). Its one new minor closed here: the
 stale-registration wording claimed "directory is gone" where the real
 condition is a GONE GITFILE (a present payload directory may carry the
-entry); corrected at all three sites + the prune() doc, and the
+entry); corrected at every message occurrence — six sites (three
+checks × LOCKED/plain variants) — plus the prune() doc, the
+`stale-registration` code comment, and the release() doc line (a
+grep of src/ for "directory is gone"/"VANISHED" now returns ZERO
+hits), and the
 witness's source-binding claim narrowed to what a body mutation can
 flip (argv-shape + pinned-status; the callsite count is a wiring pin).
 

@@ -83,7 +83,7 @@ export type ProvisionErrorCode =
   | "unresolvable-base"         // baseCommit ref/sha does not name a commit
   | "path-exists"               // unregistered directory at the target path
   | "not-registered"            // asked to operate on a path this repo does not manage
-  | "stale-registration"        // registered entry whose directory is gone (prune first)
+  | "stale-registration"        // registered entry that is not a live checkout (gitfile gone; prune first)
   | "foreign-branch"            // registered worktree carries a different branch
   | "branch-conflict"           // branch exists but not at the pinned base
   | "dirty"                     // remove refused: worktree has uncommitted changes
@@ -816,7 +816,7 @@ export class WorktreeProvisioner {
    *    AFTER the manual base-pinned gate (never `branch -d`: its
    *    heuristic is merged-into-HEAD, not base-relative). A branch
    *    checked out in another worktree makes `branch -D` fail —
-   *    surfaced, not bypassed. A user whose directory is gone yields
+   *    surfaced, not bypassed. A user whose checkout gitfile is gone yields
    *    stale-registration guidance, never a circular branch-in-use (ds-c2 F4).
    *  Error codes thrown: not-registered, stale-registration, foreign-branch,
    *  locked, dirty, hidden-content, index-blind, has-submodules,
