@@ -3887,7 +3887,28 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
         stateWrite = stateWrite.then(async () => {
           const statePath = join(epPath, "state.json");
           let existing: EpisodeState | undefined;
-          try { existing = await readEpisodeState(statePath); } catch { existing = undefined; }
+          try {
+            existing = await readEpisodeState(statePath);
+          } catch (e) {
+            const code = (e as NodeJS.ErrnoException)?.code;
+            // W1-M7 (audit cycle W1), the SAME rule runPark applies: ENOENT
+            // is the only "genuinely absent" case — starting fresh there is
+            // safe. Any OTHER read failure (corrupt JSON, EACCES) means the
+            // bytes may hold other tasks' state AND are forensic evidence
+            // (an M2 audit c2 finding: the old `catch { existing = undefined }`
+            // then OVERWROTE the file, destroying it mid-run). Fail closed:
+            // move the bytes aside, disclose on the host log, and SKIP this
+            // projection write. Never throw — a projection is disclosure
+            // only and the scheduler's admission/terminal path must be
+            // unaffected (state.json is a cache, S6).
+            if (code !== "ENOENT") {
+              const preserve = `${statePath}.unreadable-${String(now())}`;
+              try { await rename(statePath, preserve); log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, slots projection write SKIPPED`); }
+              catch { log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, slots projection write SKIPPED`); }
+              return;
+            }
+            existing = undefined;
+          }
           const merged: EpisodeState = { ...(existing ?? { schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }) };
           await writeEpisodeState(statePath, { ...merged, slots });
         }).catch((e: unknown) => { log(`state.json projection write failed (cache only, S6): ${String((e as Error)?.message ?? e).slice(0, 120)}`); });
@@ -4023,12 +4044,37 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
       // of the slots projection).
       await stateWrite;
       let finalState: EpisodeState | undefined;
-      try { finalState = await readEpisodeState(join(epPath, "state.json")); } catch { finalState = undefined; }
-      await writeEpisodeState(join(epPath, "state.json"), {
-        ...(finalState ?? { schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }),
-        tasks: Object.fromEntries(Object.entries(res.tasks).map(([id, fate]) => [id, { status: fate.status }])),
-        slots: {},
-      });
+      let finalWritable = true;
+      const finalPath = join(epPath, "state.json");
+      try {
+        finalState = await readEpisodeState(finalPath);
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code !== "ENOENT") {
+          // W1-M7 (audit cycle W1), the SAME rule runPark applies — chosen
+          // here explicitly as "preserve-aside + SKIP the merge write
+          // entirely" (matching runPark's precedent), NOT "write a fresh
+          // object after preserving": the corrupt bytes are forensic
+          // evidence and this terminal write is a derived cache refresh,
+          // so there is nothing worth reconstructing at the cost of
+          // producing a file that looks like a clean terminal state. The
+          // bytes are moved aside (never destroyed), disclosed on the host
+          // log, and the terminal merge write is skipped; the episode
+          // result below is unaffected (state.json is a cache, S6).
+          finalWritable = false;
+          const preserve = `${finalPath}.unreadable-${String(now())}`;
+          try { await rename(finalPath, preserve); log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, terminal merge write SKIPPED`); }
+          catch { log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, terminal merge write SKIPPED`); }
+        }
+        finalState = undefined;
+      }
+      if (finalWritable) {
+        await writeEpisodeState(finalPath, {
+          ...(finalState ?? { schema: "tre-episode-state/1", episodeId: graph.episodeId, tasks: {} }),
+          tasks: Object.fromEntries(Object.entries(res.tasks).map(([id, fate]) => [id, { status: fate.status }])),
+          slots: {},
+        });
+      }
       return {
         result: { stopped: res.stopped === "quiesced-complete" ? "completed" : res.stopped === "shutdown" ? "shutdown" : "halt", detail: res.detail ?? res.stopped, iterations: [], investigationCount: res.observerGrants },
         episodePath: epPath, taskOutcomes: res.tasks, admissions: res.admissions, denials: res.denials,

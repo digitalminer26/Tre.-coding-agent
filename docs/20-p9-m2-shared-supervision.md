@@ -339,6 +339,12 @@ GPU reality applies).
 | merge/CAS | P12 CAS on the episode branch; concurrent task merges contend ONLY at the CAS, loser rebuilds+retests (P12's documented behavior) | unchanged; scheduler adds a serialization hint (admission order prefers dependency depth) but correctness never relies on it |
 | ledger/journal | single-writer queues per file | unchanged |
 
+`state.json` is a derived cache (S6) written by several parties; the
+HOST's writers — `runPark`, the slots projection and the terminal merge
+write — all follow the W1-M7 preserve-aside rule: a non-ENOENT read
+failure renames the bytes to `state.json.unreadable-<ts>` and SKIPS the
+durable write rather than overwriting evidence.
+
 Graph-level refusal conditions (activation fails, nothing spawns):
 duplicate task ids; duplicate session or worktree paths; task ids
 outside P6's `bad-id` grammar (validated BEFORE the first
@@ -439,6 +445,11 @@ injected once per scheduling decision like the ledger fold does.
   scheduler publishes its live set per event; keys are
   `<endpoint>#<taskId>` → taskId), and once more — empty — at episode
   end, so a mid-run reader sees the live occupancy, not only `{}`.
+  Every HOST `state.json` write (the slots projection, the terminal
+  merge write) follows the W1-M7 preserve-aside rule (`runPark`'s
+  precedent): an unreadable (non-ENOENT) state.json is renamed to
+  `state.json.unreadable-<ts>`, disclosed on the host log, and the
+  durable write is SKIPPED — never overwritten blind.
 
 ## 13. Open decisions — RESOLVED (Hong signed off "go with the proposed
 solutions for D1–D6", 2026-11-09, Telegram). The text below is kept as

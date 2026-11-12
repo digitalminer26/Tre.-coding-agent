@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activate, exitCodeForStop, parseActivateArgs } from "../src/host/activate.js";
@@ -124,6 +124,88 @@ test("schedule entry: state.json slots is a LIVE projection rebuilt on each admi
     await run?.catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("schedule entry: a corrupt state.json mid-run is preserved aside, never overwritten by the slots projection (W1-M7)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sched-corrupt-mid-"));
+  const logs: string[] = [];
+  // M2 audit cycle 2 (bug): the R2 projection's read-failure branch used to
+  // be `catch { existing = undefined }` and then OVERWROTE the file — the
+  // established W1-M7 rule (runPark) instead moves unreadable bytes aside
+  // and skips the durable write. Here a task's loop corrupts state.json
+  // mid-run; the next projection publish must leave a `.unreadable-*` copy
+  // with the corrupt bytes and must NOT clobber it.
+  const CORRUPT = '{"schema":"tre-episode-state/1","tasks":{"hint-row":{"status":"done"}}  CORRUPT-EVIDENCE';
+  const statePath = join(root, "schedule-entry", "state.json");
+  try {
+    const g = graph();
+    g.policy = { authority: { paths: [], notPaths: [], models: ["endpoint-a"] } };
+    g.tasks.forEach((t) => { t.model = "endpoint-a"; }); // one endpoint → the two loops serialize
+    let corrupted = false;
+    const res = await runScheduledHostEpisode({ graph: g, episodesRoot: root, grantedBy: "test", log: (l) => logs.push(l),
+      loop: async (cfg, ports) => {
+        if (cfg.taskId === "a") {
+          // Bounded spin FIRST: let the admission projection settle so the
+          // corruption cannot be clobbered by an in-flight write (the c2
+          // auditor's probe corrupted too early and lost that race).
+          for (let i = 0; i < 2000; i++) {
+            try {
+              const st = JSON.parse(await readFile(statePath, "utf8")) as { slots?: Record<string, string | null> };
+              if (Object.keys(st.slots ?? {}).length === 1) break;
+            } catch { /* projection not written yet */ }
+            await new Promise((r) => setTimeout(r, 1));
+          }
+          await writeFile(statePath, CORRUPT);
+          corrupted = true;
+        }
+        await accepted(cfg, ports);
+        return { stopped: "accepted-finish", iterations: [], investigationCount: 0 };
+      },
+    });
+    assert.ok(corrupted, "the loop ran and corrupted state.json");
+    // The scheduler is UNAFFECTED by the projection skip: both tasks still
+    // admit, accept and finish (the projection is disclosure-only, S6).
+    assert.equal(res.admissions, 2, JSON.stringify({ d: res.denials, o: res.taskOutcomes }));
+    assert.equal(exitCodeForStop(res.result.stopped), 0, JSON.stringify({ d: res.denials, o: res.taskOutcomes }));
+    const dir = join(root, "schedule-entry");
+    const files = await readdir(dir);
+    const aside = files.filter((f) => f.includes(".unreadable-"));
+    assert.equal(aside.length, 1, `exactly one preserved copy (dir: ${files.join(", ")})`);
+    assert.equal(await readFile(join(dir, aside[0]!), "utf8"), CORRUPT, "the preserved copy holds the corrupt bytes verbatim");
+    assert.ok(logs.some((l) => l.includes("SKIPPED")), `the skipped write is disclosed (log: ${logs.join(" | ")})`);
+    // state.json (a cache, S6) is rebuilt by the final terminal write.
+    const finalState = await readEpisodeState(statePath);
+    assert.deepEqual(finalState.slots, {});
+    assert.deepEqual(Object.values(finalState.tasks).map((t) => t.status), ["done", "done"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("schedule entry: a corrupt state.json reaching the FINAL write is preserved aside, never replaced (W1-M7)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sched-corrupt-final-"));
+  const logs: string[] = [];
+  const CORRUPT = '{"schema":"tre-episode-state/1","tasks":{"hint-row":{"status":"done"}}  CORRUPT-EVIDENCE';
+  const dir = join(root, "schedule-entry");
+  try {
+    // Deterministic construction that avoids racing the write chain: NO
+    // task is admitted (both models unapproved), so NO projection write
+    // ever runs and the terminal merge write is the FIRST reader of the
+    // pre-existing corrupt bytes (the realistic "previous run crashed and
+    // left a corrupt cache" case). The final write must preserve-aside and
+    // skip rather than silently replace the evidence with `{}`.
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "state.json"), CORRUPT);
+    const g = graph();
+    g.policy = { authority: { paths: [], notPaths: [], models: ["allowed"] } };
+    g.tasks.forEach((t) => { t.model = "not-approved"; });
+    const res = await runScheduledHostEpisode({ graph: g, episodesRoot: root, grantedBy: "test", log: (l) => logs.push(l) });
+    assert.equal(res.admissions, 0, JSON.stringify({ d: res.denials }));
+    const files = await readdir(dir);
+    const aside = files.filter((f) => f.includes(".unreadable-"));
+    assert.equal(aside.length, 1, `exactly one preserved copy (dir: ${files.join(", ")})`);
+    assert.equal(await readFile(join(dir, aside[0]!), "utf8"), CORRUPT, "the preserved copy holds the corrupt bytes verbatim");
+    assert.ok(!files.includes("state.json"), "the corrupt file was NOT replaced by a fresh terminal object");
+    assert.ok(logs.some((l) => l.includes("SKIPPED")), `the skipped terminal write is disclosed (log: ${logs.join(" | ")})`);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("schedule entry: ledger-backed admission refuses unapproved models before scripted loop", async () => {

@@ -1,5 +1,68 @@
 # HANDOFF
 
+## 2026-11-11 — M2 audit cycle 3: state.json writers follow the W1-M7 preserve-aside rule
+
+Cycle-3 worker for the implement-audit `m2-finds` workstream. Starting HEAD
+`9dac80a` (tree verified CLEAN). Fixes the ONE bug the cycle-2 audit raised.
+Not pushed (the orchestrator syncs). No Telegram (the orchestrator reports).
+
+**The bug** (audit-c2, repro `logs/c2-audit/corrupt-probe.mjs`): the R2
+mid-run `state.json` slots projection (`src/host/supervise.ts`,
+`writeSlotsProjection`) read the file with `catch { existing = undefined }`
+and then OVERWROTE it — so a corrupt/unreadable `state.json` was silently
+destroyed mid-run, destroying forensic evidence. The established W1-M7 rule
+(`runPark`, same file) instead renames unreadable bytes aside and skips the
+durable write. The pre-c2 terminal write had the same blind `{}` fallback.
+
+**The fix** (`src/host/supervise.ts`, two write sites):
+1. `writeSlotsProjection`: ENOENT → fresh object (unchanged). Any OTHER read
+   error → rename to `${statePath}.unreadable-<ts>`, log one line, SKIP this
+   projection write (never throws — the scheduler's admission/terminal path
+   is unaffected; `state.json` is a cache, S6).
+2. The FINAL terminal write: same rule, with the choice made explicit in a
+   code comment — **preserve-aside + skip the merge write entirely**
+   (matching `runPark`'s precedent), NOT "write a fresh object after
+   preserving". The corrupt bytes are evidence and the terminal write is a
+   derived cache refresh, so there is nothing worth reconstructing at the
+   cost of producing a file that looks like a clean terminal state.
+
+Both sites are AFTER the scheduler loop returns — no new await on any
+admission path, so the F1 stop-flag window stays closed. Scope:
+`src/host/supervise.ts` + `test/host-schedule-entry.test.ts` +
+`docs/20 §7/§12` one-liners. No refactors; `src/supervisor/schedule.ts`
+untouched (the hook contract was fine).
+
+**Tests** (`test/host-schedule-entry.test.ts`, both W1-M7-named):
+- *mid-run*: a task's loop corrupts `state.json`; the next projection
+  publish leaves exactly one `.unreadable-*` copy holding the corrupt bytes
+  verbatim, logs the SKIPPED write, and the episode still completes with
+  both tasks `done` (scheduler unaffected). Deterministic: a bounded spin
+  first waits for the admission projection to SETTLE — the c2 auditor's
+  probe corrupted during an in-flight write and lost that race, which is a
+  lost update (a successful RMW), not the W1-M7 read-failure branch.
+- *final write*: no task is admitted (both models unapproved), so the
+  terminal merge write is the FIRST reader of a pre-existing corrupt
+  `state.json` — deterministic, no write-chain race. Asserts the aside
+  exists with the corrupt bytes and `state.json` was NOT replaced.
+Mutation-checked: reverting each site to its buggy `catch`/`{}` fallback
+fails exactly its own test (mid-run mutation → mid-run test fails; final
+mutation → final test fails).
+
+Probe: `.tre/implement-audit/m2-finds/logs/c3-worker/case1-probe.mjs`
+(fixed-behavior, hard-asserting, exit 0/1) — PASSES 3/3 consecutive runs
+against the rebuilt `dist`. The c2 auditor's probe is left as-is (it is
+written for the buggy behavior and its corruption timing lands in the
+lost-update window on ANY build, so it cannot observe the aside).
+
+docs/20 §7/§12 updated: the HOST's `state.json` writers (`runPark`, the
+slots projection, the terminal merge write) all follow the W1-M7
+preserve-aside rule. (Deliberately scoped to the host writers — the
+runner's `readState` treats a corrupt cache as absent by its own documented
+F6 contract, which is out of this finding's scope.)
+
+Gate: `npm run build` 0 errors; full `npm test` **2700 tests, 2686 pass,
+0 fail, 14 skipped** (baseline 2698/2684/0/14 — +2 new tests).
+
 ## 2026-11-11 — M2 audit cycle 2: `--max-parallel` gate, live state.json slots, F1/F2/F3 probes
 
 Cycle-2 worker for the implement-audit `m2-finds` workstream. Starting HEAD
