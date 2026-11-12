@@ -419,7 +419,7 @@ injected once per scheduling decision like the ledger fold does.
    productivity measures — slot utilization is explicitly NOT a success
    metric). Observer contention: N loops investigating simultaneously
    under the fairness queue, served by the single global observer slot
-   (m2c7 DOC: the earlier "0/1 observer slot" phrasing described a
+   (m2c7 DOC: the earlier zero-vs-one-slot phrasing described a
    zero-slot mode that does NOT exist and is not an acceptance mode —
    the D1 clamp in src/supervisor/schedule.ts makes one slot binding; a
    multi-slot observer is a post-M2 option, out of acceptance scope).
