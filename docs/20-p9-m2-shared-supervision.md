@@ -468,7 +468,15 @@ the decision record; each is now BINDING for the code round.
    3-code exit map stays; the journal carries the per-task breakdown.
 4. **Worktree retention.** **RESOLVED: keep finished-task worktrees
    until episode cleanup**, as proposed; auto-removal at task `done` is
-   M3 scope at the earliest.
+   M3 scope at the earliest. **SUPERSEDED (M3, 2026-11-12): accepted-`done`
+   auto-removal shipped** — the scheduler calls the host's `worktrees.release`
+   on an ACCEPTED done only (failed/parked worktrees stay as evidence);
+   the host maps it to an UNFORCED P6 `removeTaskWorktree` (dirty, locked,
+   foreign-branch or stale registration → KEPT and journaled as `{kept}`;
+   branches are never deleted — P12 territory). Every outcome is one
+   `sched-worktree` journal record; release is disclosure-only and can
+   never alter a fate. Un-accepted finishes and episode-cleanup retention
+   are unchanged.
 5. **P20 lease scope.** **RESOLVED: lease name stays `host.lease`** for
    both paths, as proposed (one supervisor per episode regardless of task
    count; takeover compat preserved).

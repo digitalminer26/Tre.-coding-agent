@@ -56,7 +56,7 @@ export type SchedStopReason = (typeof SCHED_STOP_REASONS)[number];
 
 /** The scheduler's CLOSED journal kinds (docs/20 §9 — additive superset
  *  of docs/18 §8.4's loop kinds; the scheduler appends nothing else). */
-export const SCHED_JOURNAL_KINDS = ['sched-admit', 'sched-deny', 'sched-observer-grant', 'scope-overlap'] as const;
+export const SCHED_JOURNAL_KINDS = ['sched-admit', 'sched-deny', 'sched-observer-grant', 'sched-worktree', 'scope-overlap'] as const;
 export type SchedJournalKind = (typeof SCHED_JOURNAL_KINDS)[number];
 
 /** The CLOSED capacity disclosure tokens (docs/20 §4.1) — exactly these;
@@ -520,8 +520,13 @@ export interface SchedulerDeps {
   /** episode ceiling — can only LOWER the capacity file (docs/20 §12). */
   maxParallel?: number;
   /** P6 worktree provisioning per admitted task (docs/20 §3.2.3); a
-   *  refusal PARKS that task, siblings unaffected. */
-  worktrees?: { ensure(taskId: string): Promise<{ path?: string; refused?: string }>; release?(taskId: string): Promise<void> };
+   *  refusal PARKS that task, siblings unaffected. M3 (D4 lift):
+   *  `release` is called on an ACCEPTED `done` only (never failed /
+   *  parked) and MUST be conservative — the host maps it to an UNFORCED
+   *  `removeTaskWorktree` (dirty → kept). A returned `{ kept }` records
+   *  a conservative refusal in the journal; throwing is disclosed as
+   *  `release-threw`. Neither changes the task's fate. */
+  worktrees?: { ensure(taskId: string): Promise<{ path?: string; refused?: string }>; release?(taskId: string): Promise<{ kept?: string; detail?: string } | void> };
   /** P8 headroom view (docs/20 §3.2.4 + §6: reserve-first doctrine —
    *  the scheduler asks the ledger for standing coverage, never an
    *  estimate of its own invention). */
@@ -744,7 +749,7 @@ export async function runSchedulerEpisode(
   const lastDenial = new Map<string, string>();
   // scope-overlap pairs already journaled this episode (AUDIT F4, round 2)
   const overlapJournalized = new Set<string>();
-  let admissions = 0; let schedSeq = 0; let observerSeq = 0; let denySeq = 0;
+  let admissions = 0; let schedSeq = 0; let observerSeq = 0; let denySeq = 0; let worktreeSeq = 0;
   let shutdownRequested = false;
   // AUDIT C1-2 (round 3): ANY await since the shutdown flag was last
   // polled can let host state flip — journal appends (including the
@@ -837,6 +842,30 @@ export async function runSchedulerEpisode(
       denials: denialsFor(t.id),
     });
     lastDenial.delete(t.id);
+    // M3 (D4 lift): auto-removal at ACCEPTED done. The scheduler never
+    // touches git itself — it calls the host's release seam, which is a
+    // CONSERVATIVE P6 removeTaskWorktree (unforced: a dirty worktree is
+    // kept and disclosed, task branches outlive removal). Only `done`
+    // releases; failed/parked worktrees stay as evidence. Release is
+    // disclosure-only: it can never alter the fate or fail the episode,
+    // and every outcome (released / kept / threw) is journaled.
+    if (status === 'done' && deps.worktrees?.release !== undefined) {
+      worktreeSeq += 1;
+      const actionId = `sched-${actPrefix}${graph.episodeId}-${t.id}-worktree-${worktreeSeq}`;
+      let outcome: string;
+      let detail: string | undefined;
+      try {
+        const r = await deps.worktrees.release(t.id);
+        outcome = 'released';
+        const d = (r as { kept?: string; detail?: string } | undefined)?.kept ?? (r as { detail?: string } | undefined)?.detail;
+        if (typeof d === 'string' && d.length > 0) detail = sstr(d);
+      } catch (e) {
+        outcome = 'release-threw';
+        detail = sstr(`${(e as { code?: string })?.code ?? (e as Error)?.name ?? 'error'}`);
+      }
+      await journal('sched-worktree', { taskId: t.id, actionId, outcome, ...(detail !== undefined ? { detail } : {}) });
+      log(`sched-worktree ${t.id}: ${outcome}${detail !== undefined ? ` (${detail})` : ''}`);
+    }
     // NOW the task is terminal: drop it from the live set and free its
     // slot (admission-lifetime, §4.3), then wake the wall.
     if (running.get(t.id) === held) running.delete(t.id);

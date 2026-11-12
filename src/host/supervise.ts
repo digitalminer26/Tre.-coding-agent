@@ -3907,6 +3907,23 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
           paths.set(taskId, wt.path);
           return { path: wt.path };
         } catch (e) { return { refused: String((e as { code?: string }).code ?? "provision-failed") }; }
+      },
+      // M3 (D4 lift): conservative auto-removal on accepted `done`.
+      // UNFORCED removeTaskWorktree — a dirty tree, a lock, a foreign
+      // branch or a stale registration is KEPT and returned as `{ kept }`
+      // for the scheduler's journal; the branch is NEVER deleted (P12
+      // territory). Removal failure can never fail the task: the fate
+      // was already decided; this only reclaims disk.
+      release: async (taskId) => {
+        if (provisioner === undefined) return; // nothing was ever provisioned
+        try {
+          const rep = await (await provisioner).removeTaskWorktree({ episodeId: graph.episodeId, taskId });
+          paths.delete(taskId);
+          return rep.noop ? { kept: "noop", detail: "no registered worktree" } : undefined;
+        } catch (e) {
+          const code = String((e as { code?: string }).code ?? "remove-failed");
+          return { kept: code };
+        }
       } };
     } else {
       disclosures.push("NO per-task isolation: policy.repoPath absent; tasks run in the shared tree");

@@ -171,7 +171,7 @@ test("mirror: the scheduler's closed sets equal the real exports (drift guard)",
   assert.deepEqual([...TASK_STATUSES_MIRROR], [...TASK_STATUSES]);
   assert.deepEqual([...LOOP_STOP_REASONS_MIRROR], [...STOP_REASONS]);
   assert.deepEqual([...SCHED_STOP_REASONS], ["quiesced-complete", "quiesced-blocked", "shutdown"]);
-  assert.deepEqual([...SCHED_JOURNAL_KINDS], ["sched-admit", "sched-deny", "sched-observer-grant", "scope-overlap"]);
+  assert.deepEqual([...SCHED_JOURNAL_KINDS], ["sched-admit", "sched-deny", "sched-observer-grant", "sched-worktree", "scope-overlap"]);
   assert.deepEqual([...CAPACITY_DISCLOSURES], [
     "capacity:missing", "capacity:invalid", "capacity:stale", "capacity:bad-entry", "capacity:full",
   ]);
@@ -459,6 +459,86 @@ test("episode: a worktree refusal PARKS only that task, siblings run (§3.2.3)",
   assert.match(res.tasks.a?.detail ?? "", /worktree-refused:path-exists/);
   assert.equal(res.tasks.b?.status, "done");
   assert.ok(h.journalAppends.some((r) => r["kind"] === "sched-deny" && r["taskId"] === "a" && r["reason"] === "worktree-refused"));
+});
+
+// ── M3 (D4 lift): worktree auto-removal on accepted `done` ─────────────────
+
+test("M3 release: an accepted done releases the worktree, journals sched-worktree released", async () => {
+  const released: string[] = [];
+  const h = harness([t("a"), t("b")], {
+    worktrees: {
+      async ensure(id: string) { return { path: `/wt/${id}` }; },
+      async release(id: string) { released.push(id); },
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done");
+  assert.equal(res.tasks.b?.status, "done");
+  assert.deepEqual(released.sort(), ["a", "b"], "both accepted tasks released");
+  const recs = h.journalAppends.filter((r) => r["kind"] === "sched-worktree");
+  assert.equal(recs.length, 2);
+  assert.deepEqual(new Set(recs.map((r) => r["outcome"])), new Set(["released"]));
+  // actionIds unique per record
+  assert.equal(new Set(recs.map((r) => r["actionId"])).size, 2);
+});
+
+test("M3 release: a kept (conservative-refusal) release is journaled with its code, fate unchanged", async () => {
+  const h = harness([t("a")], {
+    worktrees: {
+      async ensure() { return { path: "/wt/a" }; },
+      async release() { return { kept: "dirty" }; },
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done", "a kept worktree never changes the accepted fate");
+  const rec = h.journalAppends.find((r) => r["kind"] === "sched-worktree");
+  assert.deepEqual([rec?.["outcome"], rec?.["detail"], rec?.["taskId"]], ["released", "dirty", "a"]);
+});
+
+test("M3 release: a throwing release is disclosed (release-threw) and never fails the episode", async () => {
+  const h = harness([t("a")], {
+    worktrees: {
+      async ensure() { return { path: "/wt/a" }; },
+      async release() { throw new Error("EIO"); },
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done", "disk-reclaim failure cannot undo an accepted task");
+  const rec = h.journalAppends.find((r) => r["kind"] === "sched-worktree");
+  assert.equal(rec?.["outcome"], "release-threw");
+});
+
+test("M3 release: only accepted done releases — failed and parked tasks keep their worktrees as evidence", async () => {
+  const released: string[] = [];
+  const h = harness([t("a"), t("b"), t("c")], {
+    worktrees: {
+      async ensure(id: string) { return id === "b" ? { refused: "path-exists" } : { path: `/wt/${id}` }; },
+      async release(id: string) { released.push(id); },
+    },
+    script: {
+      // accepted-finish on 'a'; 'b' parks before its loop; 'c' stops failed.
+      c: async () => ({ stopped: "max-iterations" }),
+    },
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "done");
+  assert.equal(res.tasks.b?.status, "parked");
+  assert.notEqual(res.tasks.c?.status, "done");
+  assert.deepEqual(released, ["a"], "only the accepted task's worktree is reclaimed");
+});
+
+test("M3 release: an unaccepted done (verdict != complete) does NOT release", async () => {
+  const released: string[] = [];
+  const h = harness([t("a")], {
+    worktrees: {
+      async ensure() { return { path: "/wt/a" }; },
+      async release(id: string) { released.push(id); },
+    },
+    acceptanceFor: async () => "incomplete",
+  });
+  const res = await runSchedulerEpisode({ episodeId: "ep-sched" }, h.deps);
+  assert.equal(res.tasks.a?.status, "failed");
+  assert.deepEqual(released, [], "an unaccepted finish keeps the worktree");
 });
 
 test("episode (D5): a headroom denial rides the LEDGER's codes — never a false capacity:full", async () => {

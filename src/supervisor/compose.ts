@@ -575,6 +575,25 @@ export async function runSupervisorEpisode(cfg: SupervisorConfig, ports: Compose
           const m = /^model:([A-Za-z0-9][A-Za-z0-9._-]{0,255})$/.exec(t ?? '');
           // R4/F21: a superseded override is recorded, never silently lost.
           if (m) {
+            // M3 swap allowlist: a steer override is a human intent to
+            // swap, NOT an authority grant — it must land inside the
+            // approved pool (docs/11 §14.7 authority.models), the same
+            // set the planner's elSwap filters candidates against and
+            // the ledger gates with `model-not-approved`. An override
+            // outside the pool is refused HERE (journalized), because
+            // the loop rewrites plan.model/strategyId downstream and
+            // would otherwise smuggle an unapproved model past the
+            // planner (the executor's gate check on the swap reservation
+            // still backstops it — but the refusal belongs at the door,
+            // with the reason attached to the steer, not at reserve).
+            const approvedPool = Array.isArray((cfg.authority as { models?: unknown } | undefined)?.models)
+              ? (cfg.authority as { models: unknown[] }).models.filter((x): x is string => typeof x === 'string')
+              : [];
+            const steerModel = m[1]!;
+            if (!approvedPool.includes(steerModel)) {
+              await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-unapproved`, acked: false, progress: 'none', notes: `supervisor: steer model:${steerModel} refused — model-not-approved (absent from authority.models)` });
+              continue;
+            }
             if (overrideModel !== undefined) {
               await journalAppend({ ...envelope(), kind: 'decision-outcome', actionId: `sup-${idScope}steer-${seq}-${overrideModel}`, acked: false, progress: 'none', notes: `supervisor: steer model:${overrideModel} superseded by a later model override` });
             }

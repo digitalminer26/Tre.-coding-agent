@@ -1,3 +1,59 @@
+## 2026-11-12 — M3 parked small items shipped: worktree auto-removal at accepted `done` + steer model-swap allowlist
+
+The two items the M3 review parked as "small, self-contained" (docs/11
+§11.4 M3 row), shipped together:
+
+**1. Worktree auto-removal at accepted `done` (docs/20 §13.4 D4 lifted).**
+The scheduler (src/supervisor/schedule.ts) gained a terminal-transition
+step: when a task's fate is an ACCEPTED `done` (acceptance verdict
+`complete`), it calls the host seam `worktrees.release(taskId)`. Failed,
+parked, and unaccepted-finish tasks keep their worktrees as evidence
+until episode cleanup (the old D4 behavior is the fallback for every
+non-accepted fate). The act is disclosure-only: it runs AFTER the fate
+map is written, wrapped so a throwing release can never change the fate
+or fail the episode, and each outcome is journaled as one new closed
+`sched-worktree` record (outcome `released` / `kept:<code>` /
+`release-threw`, unique actionId `sched-<act>-<ep>-<task>-worktree-<n>`;
+SCHED_JOURNAL_KINDS grows by one, mirror pin updated). The host
+(src/host/supervise.ts) maps release to an UNFORCED P6
+`removeTaskWorktree`: a dirty / locked / foreign-branch / stale worktree
+is KEPT and disclosed as `{ kept }` (never forced — force discards
+uncommitted work, which is an operator call); the task branch is NEVER
+deleted (branch lifecycle stays P12/merge territory). `paths.delete`
+keeps the tree map honest if a later task id were ever re-admitted.
+
+**2. The steer model-swap allowlist (docs/18 §4).** The steering
+`model:<id>` override rewrote plan.model + strategyId AFTER the planner
+with no authority check: it could name a model outside
+`authority.models`, laundering a human steer into a swap the planner's
+elSwap pool would never have offered (the reserve gate would still deny
+it, but the intent was smuggled past the decision with the denial
+arriving late and unattributed). The override is now validated AT THE
+POLL against `cfg.authority.models` — the same pool the planner filters
+swap candidates against and the ledger gates with `model-not-approved`,
+including the parity rule that an empty/absent pool approves none. A
+refusal journals `steer model:<id> refused — model-not-approved
+(absent from authority.models)` and the planner's own target survives.
+The executor's gate check remains the backstop (unchanged).
+
+Tests: +5 host-schedule (released-on-done both tasks; kept disclosed
+with fate intact; throw disclosed episode-intact; failed/parked never
+release; unaccepted never release) + 3 supervisor-compose (unapproved
+override refused + journaled + plan survives; approved override still
+lands; empty pool = none approved). cfgBase in the compose tests now
+declares its models pool (parity: no pool means no overrides).
+
+Docs: docs/20 §13 D4 superseded-note; docs/18 §4 allowlist paragraph;
+docs/11 change-ledger row.
+
+Gate: quality-check OK; tsc clean; full suite **2716 / 2702 pass / 0
+fail / 14 skipped**.
+
+Deliberately NOT in this increment (M3 remainder, needs the docs/21
+contract first): swap-approval tiers beyond the pool (pre-authorized vs
+sign-off), fresh-session handoffs, broader decomposition, P12 merge
+wiring, richer P13 views.
+
 ## 2026-11-12 — M2 audit c5f (Sol round 3, final): freshEpisode registers teardown (temp-dir leak closed)
 
 Sol round 3 (audit-c5f.md): NO production bugs remain in the chain — the c5e

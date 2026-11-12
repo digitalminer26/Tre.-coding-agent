@@ -179,6 +179,12 @@ Step 4 consumes ONE steering request per iteration via the queue port:
 - steering NEVER bypasses the gate: it changes what is planned, not
   whether the gate is asked. A steer that would violate budget is
   denied by the gate like any action, and the denial is journalized.
+- M3 (swap allowlist): a `model:<id>` override is a human INTENT, not
+  an authority grant — it is refused at the poll (journalized
+  `steer model:<id> refused — model-not-approved`) unless `<id>` is in
+  `authority.models`, the same pool the planner's elSwap filters
+  against and the ledger gates with `model-not-approved`. An empty or
+  absent pool approves none (parity with the ledger's rule).
 
 ---
 

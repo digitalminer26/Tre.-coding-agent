@@ -171,7 +171,7 @@ const cfgBase = (over: Partial<SupervisorConfig> = {}): SupervisorConfig => ({
   taskId: "t1",
   grantedBy: "supervisor",
   worker: { session: "s-0" },
-  authority: { paths: [], notPaths: [] },
+  authority: { paths: [], notPaths: [], models: ["alpha", "beta", "gamma"] },
   ...over,
 });
 
@@ -313,6 +313,40 @@ test("§4/F21: a superseded steering model override is journaled, not silently l
   f.steerPolls.push({ texts: ["model:alpha", "model:beta"] });
   await run(cfgBase(), f, scripted(planOf("hold")).planner);
   assert.ok(f.jrec.some((r) => String(r.notes).includes("model:alpha superseded")));
+});
+
+test("M3 swap allowlist: a steer model override OUTSIDE authority.models is refused and journaled", async () => {
+  const f = mkFakes({ exitCode: 1 });
+  f.steerPolls.push({ texts: ["model:delta", "ignore me"] }); // delta NOT in {alpha,beta,gamma}
+  const s = scripted(planOf("model-swap", { model: "beta" }), planOf("hold"));
+  const res = await run(cfgBase(), f, s.planner);
+  assert.equal(res.stopped, "hold");
+  const plan = f.execCaptured[0]!.plan;
+  // The refused override must NOT land: the planner's own target survives.
+  assert.equal(plan.model, "beta", "an unapproved override never rewrites the plan");
+  assert.equal(plan.strategyId, "swap:model:beta:v1");
+  assert.ok(f.jrec.some((r) => String(r.notes).includes("model:delta refused") && String(r.notes).includes("model-not-approved")),
+    "the refusal is durable at the door, citing model-not-approved");
+});
+
+test("M3 swap allowlist: an approved steer override still lands (allowlist = pool, no stricter)", async () => {
+  const f = mkFakes({ exitCode: 1 });
+  f.steerPolls.push({ texts: ["model:gamma"] }); // gamma IS in the pool
+  const s = scripted(planOf("model-swap", { model: "beta" }), planOf("hold"));
+  await run(cfgBase(), f, s.planner);
+  const plan = f.execCaptured[0]!.plan;
+  assert.equal(plan.model, "gamma");
+  assert.equal(plan.strategyId, "swap:model:gamma:v1");
+  assert.ok(!f.jrec.some((r) => String(r.notes).includes("refused")), "an approved override is not refused");
+});
+
+test("M3 swap allowlist: no models in authority = NO override approved (parity with ledger 'Absent = none')", async () => {
+  const f = mkFakes({ exitCode: 1 });
+  f.steerPolls.push({ texts: ["model:beta"] });
+  const s = scripted(planOf("model-swap", { model: "beta" }), planOf("hold"));
+  await run(cfgBase({ authority: { paths: [], notPaths: [] } }), f, s.planner);
+  assert.ok(f.jrec.some((r) => String(r.notes).includes("model:beta refused")),
+    "with an empty pool every override is refused (same semantics as the ledger's model-not-approved)");
 });
 
 test("§9/F22-R4-2: an executor-side spawn reservation closes 'settled' on a proven exit", async () => {
