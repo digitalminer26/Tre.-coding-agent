@@ -1,3 +1,36 @@
+## 2026-11-15 — P9/M2 ACCEPTANCE CLOSED (Sol rounds c6–c9, m2c6–m2c9): clean PASS 0/0
+
+The two open acceptance items from the 2026-11-12 c5f entry are both
+DONE. (1) The un-re-audited c5f fix entered the acceptance loop as
+round c6. (2) The docs/11 §11.4 M2 exit-evidence benchmark now exists
+with recorded, counter-proof-verified runs:
+`test/m2-acceptance-bench.test.ts` — 6 tests through the real
+`runSchedulerEpisode`: {1,2,3}-worker fixed 6-task workload with
+barrier-gated overlap (peak overlap asserted 1/2/3 — a sequential
+harness fails), observer fairness under observed contention
+(maxWaiting≥2, every grant within W=3), single-slot comparison that
+proves the D1 clamp binds (requests observerSlots:3, asserts
+peakInside=1), and parked-independence asserting the quiescence
+CLASS (`quiesced-blocked`) against a 10s hang guard.
+
+Round trajectory (Sol, fresh adversarial context each round, prompts/logs
+`~/.tre/audits/m2c{6,7,8,9}-sol-*`): c6 PASS WITH MINORS (0 blockers, 5
+acceptance-evidence minors — all closed `2ab6dda` incl. the
+freshEpisode teardown-necessity sentinel sweep, mutant-verified); c7
+PASS WITH MINORS (M1/M2/M3/M5 counter-proof-verified; M4's rendezvous
+closure failed its own counter-proof — contention arises naturally —
+rewritten to the assertion that bears the proof `edaa31a`; docs/20
+§11.3 zero-slot phrasing corrected `c201827`/`b76695f`/`6cfbd74`); c8
+PASS WITH MINORS (1 doc item, closed); **c9 PASS, 0 blockers / 0
+minors**: "M2 acceptance: CLOSED — all m2c6/c7/c8 minors verified with
+counter-proofs." Trajectory 5 minors → 2 → 1 → 0.
+
+Ledger (docs/11) updated: new 2026-11-15 close row + the P9 milestone
+row now reads ACCEPTANCE CLOSED. Full suite 2743/2729/0/14,
+quality-check OK, HEAD `6cfbd74`+ pushed. No open M2 items remain;
+next workstream is Hong's pick (M3 surfaces beyond the provisioner
+already closed rounds 5–9, or the next P-milestone).
+
 ## 2026-11-14 — M3 audit fix round 6 (Sol, m3fix6): PASS WITH MINORS — the routing guard survived; four claim/test-fidelity minors closed
 
 A SIXTH hostile audit (prompt `~/.tre/audits/m3fix6-sol-prompt.txt`,
