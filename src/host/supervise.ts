@@ -168,20 +168,41 @@ export interface HostEpisodeResult {
 
 const now = () => Date.now();
 
-/** True when `p` exists (any stat failure — ENOENT or worse — reads as
- *  "cannot prove it is free"). */
-const exists = async (p: string): Promise<boolean> => stat(p).then(() => true, () => false);
-
-/** W1-M7 preserve-aside name. `now()` is millisecond-granular and the three
- *  aside sites can fire for the same base in the same ms; POSIX `rename`
- *  REPLACES its target, so a collision would silently destroy the earlier
- *  preserved bytes. Deterministically probe `<base>.unreadable-<ts>[.N]`
- *  and return the first candidate that is NOT taken. */
-export async function asideName(base: string, ts: number = now()): Promise<string> {
-  const stem = `${base}.unreadable-${String(ts)}`;
-  let name = stem;
-  for (let n = 1; await exists(name); n++) name = `${stem}.${String(n)}`;
-  return name;
+/** W1-M7 preserve-aside (M2 audit c5): MOVE `statePath` to the first free
+ *  `<statePath>.unreadable-<ts>[.N]` and return that name. `now()` is
+ *  millisecond-granular and the three aside sites can fire for the same base
+ *  in the same ms, so the name must be claimed ATOMICALLY. `link` is the
+ *  POSIX primitive that does it: it fails with EEXIST when the name is
+ *  taken, so a second writer cannot slip in between the probe and the move
+ *  the way the old check-then-`rename` did (`rename` REPLACES its target,
+ *  silently destroying the earlier preserved bytes). EEXIST is the ONLY
+ *  tolerated probe failure; any OTHER `link` error (a filesystem without
+ *  hardlink support, a cross-device aside, a vanished source) is NOT proof
+ *  the name is free, so the probe stops and falls back to the old plain
+ *  `rename` (same filesystem in practice — keep it simple). Bounded: `cap`
+ *  probes, then the plain-rename fallback, never a hang. Throws only when
+ *  the fallback move itself fails — the caller then logs the honest
+ *  "preserve failed — NOTHING overwritten". */
+export async function preserveAside(statePath: string, ts: number = now(), cap = 500): Promise<string> {
+  const stem = `${statePath}.unreadable-${String(ts)}`;
+  for (let n = 0; n < cap; n++) {
+    const candidate = n === 0 ? stem : `${stem}.${String(n)}`;
+    try {
+      await link(statePath, candidate); // atomic claim: EEXIST = taken
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code === "EEXIST") continue; // try the next candidate
+      await rename(statePath, candidate); // no hardlink here: plain-rename fallback
+      return candidate;
+    }
+    // The link holds the bytes under the claimed name; drop the original
+    // name. A failed unlink leaves BOTH names — the bytes are preserved
+    // either way, so it is not a preserve failure.
+    await unlink(statePath).catch(() => {});
+    return candidate;
+  }
+  const last = `${stem}.${String(cap)}`; // cap same-ms collisions: bounded fallback
+  await rename(statePath, last);
+  return last;
 }
 
 function assertId(v: string, what: string): string {
@@ -2892,9 +2913,9 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
         // `state = fresh` overwrote it silently. Fail closed: move
         // the bytes aside (never destroyed), skip the durable write,
         // disclose on the host log.
-        const preserve = await asideName(statePath);
-        try { await rename(statePath, preserve); log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, durable park write SKIPPED`); }
-        catch { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, durable park write SKIPPED`); }
+        const preserve = await preserveAside(statePath).catch(() => undefined);
+        if (preserve === undefined) { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, durable park write SKIPPED`); }
+        else { log(`park: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, durable park write SKIPPED`); }
         return;
       }
     }
@@ -3918,9 +3939,9 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
             // only and the scheduler's admission/terminal path must be
             // unaffected (state.json is a cache, S6).
             if (code !== "ENOENT") {
-              const preserve = await asideName(statePath);
-              try { await rename(statePath, preserve); log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, slots projection write SKIPPED`); }
-              catch { log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, slots projection write SKIPPED`); }
+              const preserve = await preserveAside(statePath).catch(() => undefined);
+              if (preserve === undefined) { log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, slots projection write SKIPPED`); }
+              else { log(`state.json projection: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, slots projection write SKIPPED`); }
               return;
             }
             existing = undefined;
@@ -4078,9 +4099,9 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
           // log, and the terminal merge write is skipped; the episode
           // result below is unaffected (state.json is a cache, S6).
           finalWritable = false;
-          const preserve = await asideName(finalPath);
-          try { await rename(finalPath, preserve); log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, terminal merge write SKIPPED`); }
-          catch { log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, terminal merge write SKIPPED`); }
+          const preserve = await preserveAside(finalPath).catch(() => undefined);
+          if (preserve === undefined) { log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) AND preserve failed — NOTHING overwritten, terminal merge write SKIPPED`); }
+          else { log(`state.json final write: state.json unreadable (${code ?? (e as Error)?.name ?? "parse"}) — preserved as ${preserve}, terminal merge write SKIPPED`); }
         }
         finalState = undefined;
       }

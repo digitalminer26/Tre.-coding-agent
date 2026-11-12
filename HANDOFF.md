@@ -1,5 +1,50 @@
 # HANDOFF
 
+## 2026-11-11 — M2 audit cycle 5: the preserve-aside move is atomic (link+unlink)
+
+Cycle-5 worker for the implement-audit `m2-finds` workstream (FINAL cycle).
+Starting HEAD `725bd1a` (tree verified CLEAN). Addresses the ONE
+recommendation the cycle-4 audit raised (non-blocking, not reproduced).
+Not pushed (the orchestrator syncs). No Telegram (the orchestrator reports).
+
+**The finding** (audit-c4): the cycle-4 `asideName(base)` was check-then-act
+— an `exists()` (stat) probe picked a free `<base>.unreadable-<ts>[.N]` name
+and the caller then `rename`d onto it. The two steps are not atomic, and
+POSIX `rename` REPLACES its target, so a second writer that creates the same
+candidate between the stat and the rename would still be destroyed. Within
+one process it cannot happen (the scheduler's `stateWrite` chain serializes
+the projection and final writes; `runPark` runs before the scheduler starts),
+so this is a hard-guarantee hardening, not a reproduced bug.
+
+**The fix** (`src/host/supervise.ts`, ~22 net lines): `asideName` is
+replaced by an exported `preserveAside(statePath, ts = now(), cap = 500)`
+that MOVES the source and returns the claimed name in ONE atomic step —
+`link(statePath, candidate)` claims the candidate (fails `EEXIST` if taken,
+which is the ONLY tolerated probe failure: the loop tries the next
+`<stem>.<n>`), then `unlink(statePath)` drops the original name (a failed
+unlink leaves BOTH names — the bytes are preserved either way, so it is not
+a preserve failure). Any OTHER `link` error is NOT proof the name is free,
+so the probe stops and falls back to the old plain `rename` (documented:
+filesystems without hardlink support / cross-device aside; same filesystem
+in practice, keep it simple). Bounded at `cap` probes, then a plain-rename
+fallback — never a hang. Throws only when the fallback move itself fails.
+
+All three sites (`runPark` ~2916, the slots projection ~3942, the final
+terminal write ~4102) now call `preserveAside(...).catch(() => undefined)`
+and keep their EXACT disclosure strings: `undefined` → the "AND preserve
+failed — NOTHING overwritten" branch, otherwise the "preserved as <name>"
+branch. The normal case (a free bare ts name, source moved, bytes under
+it) is byte-identical to cycle 4; the removed `stat`-based `exists()` helper
+was used nowhere else, so the import list is unchanged (no new imports —
+`link` and `unlink` were already imported). The unit test in
+`test/host-schedule-entry.test.ts` now drives the REAL `preserveAside` (not
+just the name) and asserts the atomic semantics: the source is consumed
+(ENOENT after the call), the returned name holds the bytes, a same-ms second
+aside lands on `.1` with the FIRST copy byte-intact, and a third on `.2` —
+verified discriminating by mutating dist's `EEXIST` skip to `if (false)`
+(1 fail, then rebuilt). Gate: `npm run build` rc=0; FULL `npm test` rc=0 —
+2701 tests, 2687 pass, 0 fail, 14 skipped (unchanged from cycle 4).
+
 ## 2026-11-11 — M2 audit cycle 4: the preserve-aside name is collision-proof
 
 Cycle-4 worker for the implement-audit `m2-finds` workstream. Starting HEAD

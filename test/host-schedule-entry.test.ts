@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activate, exitCodeForStop, parseActivateArgs } from "../src/host/activate.js";
-import { asideName, runHostEpisode, runScheduledHostEpisode } from "../src/host/supervise.js";
+import { preserveAside, runHostEpisode, runScheduledHostEpisode } from "../src/host/supervise.js";
 import { DecisionJournal, readEpisodeState, type EpisodeGraph } from "../src/episode/journal.js";
 import type { SupervisorConfig, ComposePorts } from "../src/supervisor/compose.js";
 
@@ -180,21 +180,35 @@ test("schedule entry: a corrupt state.json mid-run is preserved aside, never ove
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("schedule entry: two asides of the same base within one millisecond never collide (M2 audit c4)", async () => {
+test("schedule entry: two asides of the same base within one millisecond never collide, and the move is atomic (M2 audit c4/c5)", async () => {
   // Audit c3 finding: `${base}.unreadable-${now()}` is ms-granular and a
   // POSIX rename REPLACES its target — a same-ms second aside would destroy
-  // the first preserved copy. asideName() probes deterministically.
+  // the first preserved copy. Audit c4 then flagged that the c4 fix was
+  // still check-then-rename (stat probe + rename = two steps). c5 makes the
+  // claim atomic: link() the source to the candidate (EEXIST = taken, try
+  // the next), then unlink the source. This test pins BOTH the naming and
+  // the atomicity: every call leaves the SOURCE REMOVED and the returned
+  // candidate holding the bytes — there is no window in which a candidate
+  // name is chosen but unclaimed.
   const dir = await mkdtemp(join(tmpdir(), "aside-name-"));
   const base = join(dir, "state.json");
   const TS = 1_700_000_000_000;
   try {
-    // No occupant: the bare ts name is used (unchanged shape).
-    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}`);
-    // Occupy exactly that name, as a first aside would.
-    await writeFile(`${base}.unreadable-${TS}`, "first");
-    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}.1`, "the taken ms name is skipped, not replaced");
-    await writeFile(`${base}.unreadable-${TS}.1`, "second");
-    assert.equal(await asideName(base, TS), `${base}.unreadable-${TS}.2`, "probes upward past every occupant");
+    // First aside: the bare ts name, source consumed, bytes under the name.
+    await writeFile(base, "first");
+    assert.equal(await preserveAside(base, TS), `${base}.unreadable-${TS}`);
+    assert.equal(await readFile(`${base}.unreadable-${TS}`, "utf8"), "first");
+    await assert.rejects(readFile(base, "utf8"), /ENOENT/, "the source was moved, not copied");
+    // Second aside of the same ms: the taken name is skipped (.1), and the
+    // first copy is byte-intact — never replaced by the second.
+    await writeFile(base, "second");
+    assert.equal(await preserveAside(base, TS), `${base}.unreadable-${TS}.1`, "the taken ms name is skipped, not replaced");
+    assert.equal(await readFile(`${base}.unreadable-${TS}`, "utf8"), "first", "the earlier preserved copy survives the collision");
+    assert.equal(await readFile(`${base}.unreadable-${TS}.1`, "utf8"), "second");
+    // Third: probes upward past every occupant.
+    await writeFile(base, "third");
+    assert.equal(await preserveAside(base, TS), `${base}.unreadable-${TS}.2`, "probes upward past every occupant");
+    assert.equal(await readFile(`${base}.unreadable-${TS}.2`, "utf8"), "third");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
