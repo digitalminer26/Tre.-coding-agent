@@ -58,6 +58,21 @@ flip (argv-shape + pinned-status; the callsite count is a wiring pin).
 Provisioner suite 68/68; full suite **2736 total / 2722 pass / 0 fail /
 14 skipped**; quality-check OK. Residue unchanged.
 
+Round-8 (m3fix8, log `~/.tre/audits/m3fix8b-sol-out.txt`, PASS WITH
+MINORS on 7e25b53: text-only scope AST-confirmed, all six wording sites
++ witness closure verified, 12-case wording probe honest) filed one
+minor — this HANDOFF attributed the round-7 verdict to cf31da1 instead
+of 644dabc — fixed in `a0b6a8b` (one line). Round-9 (m3fix9, log
+`~/.tre/audits/m3fix9-sol-out.txt`, **PASS — 0 blockers, 0 minors** on
+a0b6a8b): one-line diff scope confirmed, every base-ref in rounds 5–8
+cross-verified against the audit logs and git objects, and the auditor
+recorded the convergence statement — "converged — no unprobed runtime
+defect class identified" (bounded by the accepted force-discard,
+terminal-task TOCTOU, and poisoned-tree-residue decisions). The
+worktree-provisioner audit loop is CLOSED: rounds 7→8→9 went 1 minor →
+1 minor → 0 minors, both minors wording/attribution fidelity, never
+runtime behavior.
+
 ## 2026-11-14 — M3 audit fix round 5 (Sol, m3fix5): the worktree's OWN config re-routed the proof — honest-routing guard + `--work-tree=` pins on every gate call
 
 A FIFTH hostile audit (prompt `~/.tre/audits/m3fix5-sol-prompt.txt`,
