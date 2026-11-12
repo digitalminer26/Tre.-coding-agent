@@ -36,6 +36,7 @@ import {
   taskBranchName,
   listWorktrees,
   assertSafeComponent,
+  routeArgs,
 } from "../src/worktree/provision.js";
 
 const execFileAsync = promisify(execFile);
@@ -1204,9 +1205,22 @@ test("remove: routing poison with the MAIN REPO as target would read clean pre-f
   // Fooled view: status from the worktree cwd reads the MAIN repo —
   // clean — while this registered dir holds the payload...
   assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "pre-fix gate view must read clean (the audit finding)");
-  // ...while the PINNED view sees this tree honestly.
-  const pinned = await git(wt.path, `--work-tree=${wt.path}`, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all");
+  // ...while the PINNED view sees this tree honestly — built with the
+  // SHIPPED routeArgs (sol R6 minor 3: a hand-rolled pin here would
+  // keep passing even if every shipped call dropped its pin; binding
+  // the witness to routeArgs makes the pin layer test-necessary).
+  const pin = routeArgs(wt.path);
+  assert.equal(pin.length, 1, "routeArgs must yield exactly one top-level option");
+  assert.equal(pin[0], `--work-tree=${wt.path}`, "routeArgs must emit the absolute --work-tree= option");
+  const pinned = await git(wt.path, ...pin, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all");
   assert.match(pinned, /unique\.bak/, "pinned status must see this tree's payload");
+  // And the SHIPPED gate's work-tree-resolving calls carry routeArgs
+  // at the exact positions (sol R6 minor 3: source-bound necessity —
+  // patching routeArgs() to [] flips this too, closing the mutation
+  // gap where removing every shipped pin left all tests green).
+  const src = await readFile(new URL("../../src/worktree/provision.ts", import.meta.url), "utf-8");
+  const callsites = src.split("\n").filter((l) => /routeArgs\(entry\.path\)/.test(l) && /\b(git|gitWithEnv)\(/.test(l));
+  assert.equal(callsites.length, 4, `expected the 4 pinned gate callsites (ls-files -v, ls-files -s, read-tree, status) to route via routeArgs(entry.path), got ${callsites.length}`);
   // And our removal refuses through the guard rather than trusting either view.
   await assert.rejects(
     prov.removeTaskWorktree({ episodeId: "epRt2", taskId: "t1" }),
@@ -1224,20 +1238,65 @@ test("remove: clean worktree still removes with the --work-tree pins (no regress
   assert.equal((await listWorktrees(repo)).length, 1, "only the main worktree remains");
 });
 
-test("remove: routing poison survives an unfixable realpath (symlinked registered path) — refuses, never removes (sol R5 B1 fail-closed)", async () => {
-  // Registered path IS a symlink whose realpath differs from the
-  // literal path the entry carries: the guard cannot canonicalize a
-  // mismatch pair trivially; it must still resolve honestly — toplevel
-  // realpath vs entry realpath — and a redirect mismatch refuses.
-  const { prov, base } = await setup();
+test("remove: routing poison through a SYMLINKED core.worktree alias — honest alias keeps, foreign alias refuses (sol R6 minor 2)", async () => {
+  // Round-6 audit minor 2: the previous 'symlinked registered path'
+  // test created no symlink. This exercises the guard's REALpath
+  // comparison with symlinks in the routing (probe m3f7):
+  const { prov, repo, base } = await setup();
   const wt = await prov.ensureTaskWorktree({ episodeId: "epRt4", taskId: "t1", baseCommit: base });
-  await poisonRouting(wt.path, await freshDir("rt-target-"));
-  // Sanity: git itself now resolves the checkout elsewhere...
-  const seen = await git(wt.path, "rev-parse", "--show-toplevel");
-  assert.notEqual(seen, wt.path, "redirect must move the resolution (precondition)");
+  await writeFile(join(wt.path, "unique.bak"), "PAYLOAD-DO-LOSE\n");
+  await git(wt.path, "config", "extensions.worktreeConfig", "true");
+
+  // (a) HONEST poison: core.worktree set to a symlink alias that
+  // canonicalizes BACK to the registered dir. The guard compares
+  // REALpaths, so resolution survives the alias (no false refusal on
+  // the routing) and the ordinary content gate then refuses on the
+  // payload — kept, never destroyed through the alias.
+  const aliasSelf = join(dirname(wt.path), "alias-self");
+  await symlink(wt.path, aliasSelf);
+  await git(wt.path, "config", "--worktree", "core.worktree", aliasSelf);
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epRt4", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "dirty"); return true; },
+    "honest symlink alias must NOT false-refuse as routing-poisoned; the payload gate refuses",
+  );
+  assert.equal(existsSync(wt.path), true, "honest alias: tree kept via the dirty gate");
+  assert.equal(await readFile(join(wt.path, "unique.bak"), "utf-8"), "PAYLOAD-DO-LOSE\n");
+
+  // (b) FOREIGN poison: core.worktree via a symlink alias to another
+  // checkout (the main repo). realpath mismatch — the guard refuses
+  // even under force, payload intact.
+  const aliasForeign = join(dirname(wt.path), "alias-foreign");
+  await symlink(repo, aliasForeign);
+  await git(wt.path, "config", "--worktree", "core.worktree", aliasForeign);
   await assert.rejects(
     prov.removeTaskWorktree({ episodeId: "epRt4", taskId: "t1", force: true }),
     (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
   );
-  assert.equal(existsSync(wt.path), true);
+  assert.equal(existsSync(join(wt.path, "unique.bak")), true, "foreign alias: payload NOT destroyed");
+  await rm(aliasSelf, { force: true }).catch(() => {});
+  await rm(aliasForeign, { force: true }).catch(() => {});
+});
+
+test("remove: unobservable routing (worktree-local core.bare=true) refuses as routing-poisoned BOTH paths (sol R6 minor 1)", async () => {
+  // Round-6 audit minor 1: a resolution that FAILS (core.bare=true
+  // kills 'rev-parse --show-toplevel': "this operation must be run in
+  // a work tree", exit 128 — probe-verified on git 2.54) previously
+  // leaked the generic git-failed code; the claim promised
+  // routing-poisoned. Unobservable routing IS the poisoned condition —
+  // fail closed with our code, normal AND force path, payload intact.
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epRt5", taskId: "t1", baseCommit: base });
+  await writeFile(join(wt.path, "unique.bak"), "PAYLOAD-DO-LOSE\n");
+  await git(wt.path, "config", "extensions.worktreeConfig", "true");
+  await git(wt.path, "config", "--worktree", "core.bare", "true");
+  for (const force of [false, true]) {
+    await assert.rejects(
+      prov.removeTaskWorktree({ episodeId: "epRt5", taskId: "t1", force }),
+      (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
+      `force=${force}: failed routing resolution must translate to routing-poisoned (not git-failed)`,
+    );
+  }
+  assert.equal(existsSync(wt.path), true, "tree kept — unobservable routing refuses");
+  assert.equal(await readFile(join(wt.path, "unique.bak"), "utf-8"), "PAYLOAD-DO-LOSE\n", "unique payload NOT destroyed");
 });

@@ -146,8 +146,11 @@ const PINNED_NEUTRALIZING_CONFIG: ReadonlyArray<readonly [string, string]> = [
  *  still names .git/worktrees/<id>/index). Every gate call on a task
  *  worktree carries the pin so the PROOF reads this tree even if a
  *  config race slips past the routing guard. Env stripping (round 4)
- *  cannot reach file-based config — both layers are needed. */
-function routeArgs(absWorkTree: string): string[] {
+ *  cannot reach file-based config — both layers are needed.
+ *  EXPORTED for the round-7 pinned-view witness test (sol R6 minor 3:
+ *  the witness must exercise the SHIPPED routeArgs so patching it to
+ *  [] flips the test — the pin layer's independent necessity). */
+export function routeArgs(absWorkTree: string): string[] {
   return [`--work-tree=${absWorkTree}`];
 }
 
@@ -163,7 +166,20 @@ function routeArgs(absWorkTree: string): string[] {
  *  operating through a poisoned routing (an operator repairs config
  *  or removes manually). Empty/failed resolution fails closed. */
 async function assertHonestRouting(worktreePath: string, path: string): Promise<void> {
-  const out = await git(worktreePath, ["rev-parse", "--show-toplevel"]);
+  // Sol round-6 (audit m3fix6) minor 1: a resolution that FAILS (e.g.
+  // a worktree-local core.bare=true makes 'rev-parse --show-toplevel'
+  // die) is the same fail-closed fact as a mismatch — the checkout's
+  // routing is not observable, so translate the failure into
+  // routing-poisoned instead of leaking the generic git-failed code
+  // (an unobservable routing IS the poisoned condition, per the claim
+  // in HANDOFF/ledger; keeping the raw code contradicted it).
+  let out: string;
+  try {
+    out = await git(worktreePath, ["rev-parse", "--show-toplevel"]);
+  } catch (err) {
+    if (err instanceof WorktreeProvisionError && err.code === "routing-poisoned") throw err;
+    throw new WorktreeProvisionError("routing-poisoned", `worktree ${path}: 'rev-parse --show-toplevel' FAILED (${err instanceof Error ? err.message.split("\n")[0] : String(err)}) — checkout resolution is not observable, refusing (fail-closed)`);
+  }
   const seen = out.trim();
   if (seen === "") {
     throw new WorktreeProvisionError("routing-poisoned", `worktree ${path}: 'rev-parse --show-toplevel' resolved to an EMPTY path — checkout resolution is not observable, refusing (fail-closed)`);

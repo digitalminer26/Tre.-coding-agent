@@ -1,3 +1,46 @@
+## 2026-11-14 — M3 audit fix round 6 (Sol, m3fix6): PASS WITH MINORS — the routing guard survived; four claim/test-fidelity minors closed
+
+A SIXTH hostile audit (prompt `~/.tre/audits/m3fix6-sol-prompt.txt`,
+log `~/.tre/audits/m3fix6-sol-out.txt`, verdict **PASS WITH MINORS** on
+cf31da1: **0 blockers** — the round-5 guard held against direct attack
+(no equal-realpath/different-content bypass on git 2.54; honest
+controls pass without over-refusal; force+locked ordering refuses
+poison before double-force removal; post-guard config race classified
+inside the accepted terminal-task TOCTOU). Four minors — all
+fidelity-of-claims or test-quality, no live vulnerability — closed
+here:
+
+1. **Guard-error translation (provision.ts):** a resolution that
+   FAILS (worktree-local `core.bare=true` makes `rev-parse
+   --show-toplevel` die, exit 128 — probe-verified) previously leaked
+   the generic `git-failed` code while the claim promised
+   `routing-poisoned`. The guard's catch now translates ANY
+   resolution failure into `routing-poisoned` — an unobservable
+   routing IS the poisoned condition (fail-closed, both paths).
+2. **Honest symlink test (replaces the fake one):** the old
+   "symlinked registered path" test created no symlink. The new test
+   arms `core.worktree` through REAL symlinks both ways: an alias
+   resolving BACK to the registered dir is honest (realpath guard
+   passes routing; the dirty gate keeps the payload — no false
+   routing refusal), an alias to the MAIN repo refuses
+   `routing-poisoned` under force, payload intact.
+3. **Pin-layer test necessity:** `routeArgs` is now exported; the
+   pinned-view witness asserts the shipped function's exact argv,
+   runs the honest-view status THROUGH it, and source-binds the four
+   pinned gate callsites (count asserted) — patching `routeArgs` to
+   `[]` now flips the witness, closing the mutation gap the audit
+   demonstrated (removing every shipped pin left 67/67 green).
+   Sol's suggested deterministic poison-after-guard race test was
+   deliberately NOT added: concurrent poisoning during release lives
+   inside the accepted TOCTOU precondition — binding the tests to
+   the shipped pins closes the proven gap without asserting a race as
+   supported behavior.
+4. **Count wording:** round-5's "2735 pass" → "2735 total / 2721
+   pass".
+
+Provisioner suite 68/68; full suite **2736 total / 2722 pass / 0 fail /
+14 skipped**; quality-check OK. Residue unchanged.
+
 ## 2026-11-14 — M3 audit fix round 5 (Sol, m3fix5): the worktree's OWN config re-routed the proof — honest-routing guard + `--work-tree=` pins on every gate call
 
 A FIFTH hostile audit (prompt `~/.tre/audits/m3fix5-sol-prompt.txt`,
@@ -53,8 +96,8 @@ namespace but env stripping CANNOT reach file-based config:
    with the guard, routing is now additionally PROVEN from the
    registered path before any proof is consumed.
 
-Provisioner suite 67/67; full suite **2735 pass / 0 fail / 14
-skipped**. Disclosed residue unchanged; NEW accepted residue: a
+Provisioner suite 67/67; full suite **2735 total / 2721 pass / 0 fail /
+14 skipped**. Disclosed residue unchanged; NEW accepted residue: a
 poisoned worktree is never auto-removed (kept until an operator
 repairs config or removes manually) — the cost of the guard, stated.
 
