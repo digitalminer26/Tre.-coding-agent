@@ -95,6 +95,7 @@ export type ProvisionErrorCode =
   | "prune-refused"             // stale entries exist outside our wtRoot
   | "branch-in-use"             // deleteBranch refused: branch checked out in another worktree
   | "locked"                    // worktree is `git worktree lock`ed — explicit unlock required
+  | "routing-poisoned"          // remove refused: the worktree's OWN file-based config (extensions.worktreeConfig + config.worktree core.worktree, or common core.worktree) re-routes git's checkout resolution away from the registered directory — no cleanliness proof through git would read THIS tree (audit-sol round-5 B1)
   | "bad-wt-root"               // wtRoot exists as a non-directory (open() refuses)
   | "git-failed";               // any other git failure (command + stderr attached)
 
@@ -134,8 +135,50 @@ const PINNED_NEUTRALIZING_CONFIG: ReadonlyArray<readonly [string, string]> = [
   ["core.fileMode", "true"],
 ];
 
-/** `--`-separate a rev-like operand (option injection: a leading "-"
- *  stays a positional rev with a real `--` separator, not a prefixed token). */
+/** Sol round-5 (audit m3f5) B1, layer 2: the top-level `--work-tree=`
+ *  option. A worktree's OWN file-based config can re-route checkout
+ *  resolution: `extensions.worktreeConfig=true` arms
+ *  `.git/worktrees/<id>/config.worktree`, whose `core.worktree` is
+ *  consumed during repository SETUP and BEATS a `-c core.worktree=`
+ *  pin (verified on git 2.54) — only the command-line `--work-tree=`
+ *  option wins (and it keeps the admin-dir/index resolution on THIS
+ *  worktree; verified: `rev-parse --git-path index` under the pin
+ *  still names .git/worktrees/<id>/index). Every gate call on a task
+ *  worktree carries the pin so the PROOF reads this tree even if a
+ *  config race slips past the routing guard. Env stripping (round 4)
+ *  cannot reach file-based config — both layers are needed. */
+function routeArgs(absWorkTree: string): string[] {
+  return [`--work-tree=${absWorkTree}`];
+}
+
+/** Sol round-5 (audit m3f5) B1, layer 1: honest-routing guard. Run
+ *  the UNPINNED checkout resolution from the task worktree; if the
+ *  worktree's own config (config.worktree via extensions.worktreeConfig)
+ *  resolves the checkout ANYWHERE OTHER than the registered directory,
+ *  no cleanliness proof through git can be trusted and git's OWN
+ *  removal check is fooled too (pre-fix E1: a routed tree holding a
+ *  unique ignored payload removed cleanly). Refuses `routing-poisoned`
+ *  for BOTH the normal and the force path — force discards this
+ *  tree's uncommitted work by contract, it does not authorize
+ *  operating through a poisoned routing (an operator repairs config
+ *  or removes manually). Empty/failed resolution fails closed. */
+async function assertHonestRouting(worktreePath: string, path: string): Promise<void> {
+  const out = await git(worktreePath, ["rev-parse", "--show-toplevel"]);
+  const seen = out.trim();
+  if (seen === "") {
+    throw new WorktreeProvisionError("routing-poisoned", `worktree ${path}: 'rev-parse --show-toplevel' resolved to an EMPTY path — checkout resolution is not observable, refusing (fail-closed)`);
+  }
+  let seenReal: string;
+  let wantReal: string;
+  try {
+    [seenReal, wantReal] = await Promise.all([realpath(seen), realpath(path)]);
+  } catch {
+    throw new WorktreeProvisionError("routing-poisoned", `worktree ${path}: routing check cannot canonicalize ${JSON.stringify(seen)} vs ${JSON.stringify(path)} — refusing (fail-closed)`);
+  }
+  if (seenReal !== wantReal) {
+    throw new WorktreeProvisionError("routing-poisoned", `worktree ${path} does NOT resolve to itself: git resolves this checkout at ${seenReal} — its file-based config (extensions.worktreeConfig + config.worktree core.worktree, or a poisoned common core.worktree) re-routes EVERY git view away from the registered directory; no cleanliness proof is valid and git's own removal check is fooled (audit-sol round-5 B1). Refusing; repair the worktree's config (git config --worktree --unset core.worktree; git config --unset extensions.worktreeConfig) or remove manually`);
+  }
+}
 function revArgs(rev: string): string[] {
   return rev.startsWith("-") ? ["--", rev] : [rev];
 }
@@ -803,6 +846,19 @@ export class WorktreeProvisioner {
       throw new WorktreeProvisionError("locked", `worktree ${path} is locked (\`git worktree lock\`) — unlock it, or pass force (force discards uncommitted work AND overrides the lock)`);
     }
 
+    // Sol round-5 (audit m3f5) B1: routing guard BEFORE any content
+    // gate, on BOTH the normal and the force path (see
+    // assertHonestRouting). Verified pre-fix (m3f6-probe reproductions):
+    // a worktree whose own config.worktree re-routes the checkout makes
+    // `git status` read the REDIRECT TARGET (empty over a real payload
+    // in the registered dir), and `git worktree remove` then destroys
+    // the registered tree while its own fool-able check passes (E1).
+    // The top-level `--work-tree=` pin restores honest resolution for
+    // the gate calls but does NOT re-arm git's removal check, so this
+    // guard — refuse the operation entirely — is the load-bearing
+    // protection; the pins (below) are the belt for the proof itself.
+    await assertHonestRouting(entry.path, path);
+
     // Content gates, unforced only (force = the operator's explicit
     // discard, documented on the force option). ORDER: index-flag
     // gates read the REAL index first (they inspect index BITS which a
@@ -844,7 +900,11 @@ export class WorktreeProvisioner {
     // release runs exclusively after an accepted-done fate — the worker
     // is provably stopped by the scheduler before release is called.
     if (!force) {
-      const tagged = await git(entry.path, ["-c", "core.fsmonitor=false", "ls-files", "-v"]);
+      // Sol round-5 B1 belt (layer 2): the `--work-tree=` pin so this
+      // proof reads THIS tree's files even if a config race slips past
+      // the routing guard above (verified: the pin wins over
+      // config.worktree on git 2.54 and keeps the admin index).
+      const tagged = await git(entry.path, [...routeArgs(entry.path), "-c", "core.fsmonitor=false", "ls-files", "-v"]);
       const flagged = tagged.split("\n").filter((l) => l !== "" && l[0] !== "H");
       if (flagged.length > 0) {
         const kinds = [...new Set(flagged.map((l) => l[0] ?? "?"))].sort().join(",");
@@ -865,7 +925,7 @@ export class WorktreeProvisioner {
       // error). Refuse explicitly with OUR code — protection must not
       // rest on git's incident. (Mode stays the first column even at
       // conflict stages — verified against git 2.54 staged output.)
-      const stages = await git(entry.path, ["-c", "core.fsmonitor=false", "ls-files", "-s"]);
+      const stages = await git(entry.path, [...routeArgs(entry.path), "-c", "core.fsmonitor=false", "ls-files", "-s"]);
       if (stages.split("\n").some((l) => l.startsWith("160000 "))) {
         throw new WorktreeProvisionError("has-submodules", `worktree ${path} contains submodule entries — agent worktrees do not carry submodules and git cannot remove them safely; refusing`);
       }
@@ -915,13 +975,13 @@ export class WorktreeProvisioner {
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_CONFIG_GLOBAL: "/dev/null",
         };
-        await gitWithEnv(entry.path, [...pins, "read-tree", "HEAD"], freshEnv);
+        await gitWithEnv(entry.path, [...routeArgs(entry.path), ...pins, "read-tree", "HEAD"], freshEnv);
         // `--ignore-submodules=none`: per-submodule
         // `submodule.<n>.ignore=all` hides a populated child's modified
         // bytes from status (supervise R5-B1 — proven empty over
         // modified child/a WITH the config set; only the command-line
         // flag beats it).
-        status = await gitWithEnv(entry.path, [...pins, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all", "--ignore-submodules=none"], freshEnv);
+        status = await gitWithEnv(entry.path, [...routeArgs(entry.path), ...pins, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all", "--ignore-submodules=none"], freshEnv);
       } finally {
         // The index file is a throwaway; nothing downstream needs it.
         if (freshIdxDir !== null) void rm(freshIdxDir, { recursive: true, force: true }).catch(() => {});

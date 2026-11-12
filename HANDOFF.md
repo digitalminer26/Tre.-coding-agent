@@ -1,3 +1,63 @@
+## 2026-11-14 — M3 audit fix round 5 (Sol, m3fix5): the worktree's OWN config re-routed the proof — honest-routing guard + `--work-tree=` pins on every gate call
+
+A FIFTH hostile audit (prompt `~/.tre/audits/m3fix5-sol-prompt.txt`,
+log `~/.tre/audits/m3fix5-sol-out.txt`, verdict **FAIL** on 29f661d:
+1 blocker; reproduced by the auditor in
+`.tre/review-probes/m3f5-loss.mjs`). Round 4 stripped the env
+namespace but env stripping CANNOT reach file-based config:
+
+1. **B1 — a worktree's OWN config re-routed the checkout resolution
+   away from its registered directory.** `extensions.worktreeConfig=
+   true` arms `.git/worktrees/<id>/config.worktree`, whose
+   `core.worktree=<clean main repo>` is consumed during repository
+   SETUP and BEATS a `-c core.worktree=` pin (verified git 2.54). The
+   gate's status then reads the REDIRECT TARGET (clean) while the
+   registered tree holds an info/exclude-ignored unique payload — and
+   git's OWN removal check is fooled the same way, so the unforced
+   remove DESTROYED the tree with its payload (auditor's repro:
+   `worktreeRemoved:true`, payload gone). Fix, two layers:
+   (a) **layer 1 (load-bearing): `assertHonestRouting()`** — before
+   ANY content gate and on BOTH the normal and the force path, run
+   the UNPINNED `rev-parse --show-toplevel` from the worktree and
+   compare its realpath against the registered path's realpath; any
+   mismatch (or empty/failed resolution, or uncanonicalizable pair)
+   refuses NEW code `routing-poisoned`. Refusing on force too: force
+   discards THIS tree's work by contract, it does not authorize
+   operating through poisoned routing (operator repairs config or
+   removes manually). (b) **layer 2 (belt): the top-level
+   `--work-tree=` option** (the ONLY CLI construct that beats
+   config.worktree — verified; and `rev-parse --git-path index` under
+   the pin still names the worktree's ADMIN index, so the fresh-index
+   proof semantics are unchanged) now rides the four work-tree-
+   resolving gate calls (`ls-files -v`, `ls-files -s`, `read-tree`,
+   status). Pinned probes during this round proved the belt alone is
+   NOT sufficient: `git worktree remove` runs from repoRoot with the
+   TARGET's config unpinable, and adding `--work-tree=<repoRoot>` to
+   the remove call did NOT re-arm git's fooled check — which is why
+   the guard refuses the operation instead of relying on the pin.
+2. **Regressions** (+4, provisioner suite 67/67): poison refuses
+   `routing-poisoned` and the payload survives on BOTH paths (force
+   included); a git-level mutation witness reproduces the fooled
+   pre-fix view (plain status reads EMPTY over the payload while the
+   PINNED status sees `?? unique.bak`); clean worktree still removes
+   through the pins (no over-refusal); a redirect mismatch under
+   force still refuses. **Mutation-checked against a HEAD-built
+   pre-fix module** (`.tre/review-probes/m3f5-e1-witness.mjs`):
+   PRE-FIX resolves `worktreeRemoved=true`, payload destroyed;
+   POST-FIX refuses `routing-poisoned`, payload intact — and the
+   auditor's own `.tre/review-probes/m3f5-loss.mjs` repro now throws
+   `routing-poisoned` against the fixed dist.
+3. **Claim correction (Sol round-5 note, applied here):** round 4's
+   HANDOFF/ledger wording "routing comes from `cwd` alone" is
+   env-complete but config-blind — annotated in place in both docs;
+   with the guard, routing is now additionally PROVEN from the
+   registered path before any proof is consumed.
+
+Provisioner suite 67/67; full suite **2735 pass / 0 fail / 14
+skipped**. Disclosed residue unchanged; NEW accepted residue: a
+poisoned worktree is never auto-removed (kept until an operator
+repairs config or removes manually) — the cost of the guard, stated.
+
 ## 2026-11-13 — M3 audit fix round 4 (Sol, m3fix3): ambient GIT_* re-routed the whole proof — every provisioner git call now runs on a GIT_*-stripped env
 
 A FOURTH hostile audit (prompt `~/.tre/audits/m3fix3-sol-prompt.txt`,
@@ -26,6 +86,12 @@ environment:
    already strips an explicit list — this module goes further because
    the provisioner performs only local, non-networked calls, so
    nothing legitimate rides in GIT_*: no GIT_SSH_COMMAND etc. needed.)
+   **Round-5 claim correction:** "routing from cwd alone" described
+   the ENV layer only — a worktree's OWN file-based config
+   (`extensions.worktreeConfig` + `config.worktree core.worktree`)
+   re-routes checkout resolution THROUGH the cwd and beats `-c
+   core.worktree=`; solved in round 5 (next section) by an
+   honest-routing guard + the top-level `--work-tree=` option.
 2. **Regression** `ambient GIT_WORK_TREE cannot re-route the
    cleanliness proof (audit-sol round-4 B1)`: linked worktree +
    info/exclude-ignored unique payload + ambient

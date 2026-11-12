@@ -1151,3 +1151,93 @@ async function walkTs(dir: string): Promise<string[]> {
   }
   return out.sort();
 }
+
+// ---------------------------------------------------------------------------
+// Sol round-5 (audit m3f5) B1 — routing poison: worktreeConfig redirect
+// ---------------------------------------------------------------------------
+
+/** Poison helper: arm extensions.worktreeConfig and re-route the
+ *  worktree's checkout resolution to `target` via its OWN
+ *  .git/worktrees/<id>/config.worktree. This is file-based config —
+ *  env stripping (round 4) and `-c core.worktree=` pins cannot beat it
+ *  (verified git 2.54); ONLY the top-level `--work-tree=` option does. */
+async function poisonRouting(wtPath: string, target: string): Promise<void> {
+  await git(wtPath, "config", "extensions.worktreeConfig", "true");
+  await git(wtPath, "config", "--worktree", "core.worktree", target);
+}
+
+test("remove: config.worktree routing poison refuses as routing-poisoned, payload survives BOTH paths (sol R5 B1)", async () => {
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epRt1", taskId: "t1", baseCommit: base });
+  const dir = await freshDir("rt-target-");
+  await poisonRouting(wt.path, dir);
+  // The registered tree holds a unique payload the redirect target lacks.
+  await writeFile(join(wt.path, "unique.bak"), "PAYLOAD-DO-LOSE\n");
+
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epRt1", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "poisoned worktree kept intact");
+  assert.equal(await readFile(join(wt.path, "unique.bak"), "utf-8"), "PAYLOAD-DO-LOSE\n");
+
+  // Force does NOT authorize operating through poisoned routing.
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epRt1", taskId: "t1", force: true }),
+    (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true, "force path keeps the tree — routing refusal outranks force");
+  assert.equal(await readFile(join(wt.path, "unique.bak"), "utf-8"), "PAYLOAD-DO-LOSE\n", "unique payload NOT destroyed");
+});
+
+test("remove: routing poison with the MAIN REPO as target would read clean pre-fix (sol R5 B1 mutation witness)", async () => {
+  // Pre-fix behavior witness WITHOUT touching the guard: reproduce the
+  // fooled git view at the git level. Redirect to the main repo root,
+  // then run the EXACT pre-fix gate command (plain status, no pin):
+  // git reads the TARGET (clean) while the registered dir holds an
+  // ignored payload — the pre-fix proof passed and remove destroyed
+  // the tree (E1, reproduced during the round-5 audit).
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epRt2", taskId: "t1", baseCommit: base });
+  await poisonRouting(wt.path, repo);
+  await writeFile(join(wt.path, "unique.bak"), "PAYLOAD-DO-LOSE\n");
+  // Fooled view: status from the worktree cwd reads the MAIN repo —
+  // clean — while this registered dir holds the payload...
+  assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "pre-fix gate view must read clean (the audit finding)");
+  // ...while the PINNED view sees this tree honestly.
+  const pinned = await git(wt.path, `--work-tree=${wt.path}`, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all");
+  assert.match(pinned, /unique\.bak/, "pinned status must see this tree's payload");
+  // And our removal refuses through the guard rather than trusting either view.
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epRt2", taskId: "t1" }),
+    (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
+  );
+  assert.equal(existsSync(join(wt.path, "unique.bak")), true);
+});
+
+test("remove: clean worktree still removes with the --work-tree pins (no regression, sol R5 B1)", async () => {
+  const { prov, repo, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epRt3", taskId: "t1", baseCommit: base });
+  const rep = await prov.removeTaskWorktree({ episodeId: "epRt3", taskId: "t1" });
+  assert.equal(rep.worktreeRemoved, true);
+  assert.equal(existsSync(wt.path), false);
+  assert.equal((await listWorktrees(repo)).length, 1, "only the main worktree remains");
+});
+
+test("remove: routing poison survives an unfixable realpath (symlinked registered path) — refuses, never removes (sol R5 B1 fail-closed)", async () => {
+  // Registered path IS a symlink whose realpath differs from the
+  // literal path the entry carries: the guard cannot canonicalize a
+  // mismatch pair trivially; it must still resolve honestly — toplevel
+  // realpath vs entry realpath — and a redirect mismatch refuses.
+  const { prov, base } = await setup();
+  const wt = await prov.ensureTaskWorktree({ episodeId: "epRt4", taskId: "t1", baseCommit: base });
+  await poisonRouting(wt.path, await freshDir("rt-target-"));
+  // Sanity: git itself now resolves the checkout elsewhere...
+  const seen = await git(wt.path, "rev-parse", "--show-toplevel");
+  assert.notEqual(seen, wt.path, "redirect must move the resolution (precondition)");
+  await assert.rejects(
+    prov.removeTaskWorktree({ episodeId: "epRt4", taskId: "t1", force: true }),
+    (e: unknown) => { expectCode(e, "routing-poisoned"); return true; },
+  );
+  assert.equal(existsSync(wt.path), true);
+});
