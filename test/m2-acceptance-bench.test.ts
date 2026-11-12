@@ -38,7 +38,7 @@ const cap4 = {
 function deps(
   tasks: SchedTaskLike[],
   script: Record<string, (hooks: SchedulerLoopHooks, task: SchedTaskLike) => Promise<SchedLoopResultLike>>,
-  opts: { maxParallel?: number; investigate?: SchedulerDeps["investigate"] } = {},
+  opts: { maxParallel?: number; observerSlots?: number; investigate?: SchedulerDeps["investigate"] } = {},
 ): SchedulerDeps {
   return {
     graph: { async read() { return { episodeId: "ep-bench", tasks }; } },
@@ -51,6 +51,7 @@ function deps(
     loopPorts: (task: SchedTaskLike, hooks: SchedulerLoopHooks) => ({ taskId: task.id, hooks }),
     capacity: cap4,
     maxParallel: opts.maxParallel,
+    ...(opts.observerSlots !== undefined ? { observerSlots: opts.observerSlots } : {}),
     ...(opts.investigate !== undefined ? { investigate: opts.investigate } : {}),
     activation: "bench-act-1",
     journal: { async append() {} },
@@ -91,13 +92,18 @@ for (const workers of [1, 2, 3]) {
 }
 
 test("M2 acceptance benchmark: observer fairness — queued investigations granted within W", async () => {
-  // All three investigations hold the slot INSIDE the critical section at
-  // once, so the waiting set is genuinely non-empty (m2c6 M4): maxWaiting
-  // ≥ 2 proves contention, and every request granted within W=3 proves
-  // the no-starvation bound (docs/20 §5).
+  // m2c6 M4 / m2c7 closure: contention is OBSERVED (maxWaiting ≥ 2 — it
+  // arises naturally at maxParallel=3; the rendezvous pins it so the
+  // proof never depends on scheduling luck), the no-starvation bound is
+  // ASSERTED (every request granted within W=3), and the single-slot
+  // DISCIPLINE is asserted: observer calls NEVER overlap (peakInside ≤ 1;
+  // m2c7 counter-proof: raising the ObserverQueue clamp in a dist scratch
+  // fails this assertion, so it has genuine necessity).
   const order: string[] = [];
   let waiting = 0;
   let maxWaiting = 0;
+  let inside = 0;
+  let peakInside = 0;
   const grantDone: Record<string, () => void> = {};
   const granted: Record<string, Promise<void>> = {};
   for (const id of ["a", "b", "c"]) {
@@ -119,27 +125,35 @@ test("M2 acceptance benchmark: observer fairness — queued investigations grant
     {
       maxParallel: 3,
       investigate: async (task: SchedTaskLike) => {
+        inside += 1;
+        peakInside = Math.max(peakInside, inside);
         order.push(task.id);
         await tick(); // hold the slot briefly so the next waiter visibly waits
+        inside -= 1;
         return { class: "unknown", confidence: 0 };
       },
     },
   );
   const res = await runSchedulerEpisode({ episodeId: "ep-bench" }, d);
   assert.equal(Object.values(res.tasks).filter((f) => f.status === "done").length, 3, "all 3 accepted");
-  console.log(`M2-BENCH fairness order=${order.join(",")} maxWaiting=${maxWaiting} grants=${order.length}`);
+  console.log(`M2-BENCH fairness order=${order.join(",")} maxWaiting=${maxWaiting} grants=${order.length} peakInside=${peakInside}`);
   assert.ok(maxWaiting >= 2, `expected real contention (maxWaiting ${maxWaiting})`);
+  assert.equal(peakInside, 1, "single global observer slot: investigations never overlap (D1 clamp)");
   for (const id of ["a", "b", "c"]) {
     const first = order.indexOf(id);
     assert.ok(first >= 0 && first < 3, `${id} granted within W=3 (order ${order.join(",")})`);
   }
 });
 
-test("M2 acceptance benchmark: observerSlots=1 does not reduce acceptance (docs/20 §11.3 comparison)", async () => {
-  // The §11.3 shape is "0/1 observer slot vs N loops investigating
-  // simultaneously": with the accepted single slot, all tasks that need
-  // investigation still investigate and still accept.
+test("M2 acceptance benchmark: observer slot comparison — 1 slot (docs/20 §11.3; m2c7: no 0-slot config exists, clamp is binding)", async () => {
+  // docs/20 §11.3's "0/1 slot" phrasing: the shipped design (D1) CLAMPS
+  // observerSlots to exactly 1 (schedule.ts ObserverQueue ctor) — a
+  // zero-slot observer cannot exist by construction, so the measurable
+  // comparison is "N loops × the single slot": all 6 tasks still
+  // investigate, serialize, and accept.
   const investigated: string[] = [];
+  let inside = 0;
+  let peakInside = 0;
   const ids = ["t1", "t2", "t3", "t4", "t5", "t6"];
   const res = await runSchedulerEpisode(
     { episodeId: "ep-bench" },
@@ -151,8 +165,16 @@ test("M2 acceptance benchmark: observerSlots=1 does not reduce acceptance (docs/
       }])),
       {
         maxParallel: 3,
+        // D1 binding clamp: REQUEST 3 slots — the queue serves exactly 1.
+        // (m2c7 counter-proof: loosening the ObserverQueue ctor to honor
+        // the request drives peakInside > 1 and fails this test.)
+        observerSlots: 3,
         investigate: async (task: SchedTaskLike) => {
+          inside += 1;
+          peakInside = Math.max(peakInside, inside);
           investigated.push(task.id);
+          await tick();
+          inside -= 1;
           return { class: "unknown", confidence: 0 };
         },
       },
@@ -160,6 +182,7 @@ test("M2 acceptance benchmark: observerSlots=1 does not reduce acceptance (docs/
   );
   assert.equal(Object.values(res.tasks).filter((f) => f.status === "done").length, 6);
   assert.equal(investigated.length, 6, "every task investigated under the single slot");
+  assert.equal(peakInside, 1, "the single slot serializes all 6 (no overlap even at maxParallel=3)");
 });
 
 test("M2 acceptance benchmark: parked task does not block independent work", async (tst) => {
