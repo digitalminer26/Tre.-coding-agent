@@ -41,7 +41,7 @@ here:
    pass".
 
 Round-7 re-verification (m3fix7, log `~/.tre/audits/m3fix7-sol-out.txt`,
-verdict **PASS WITH MINORS** on cf31da1: all three runtime closures
+verdict **PASS WITH MINORS** on 644dabc: all three runtime closures
 independently mutation-confirmed; malformed-entry probes —
 prunable-but-present payload dir, redirected gitfiles, missing gitdir —
 all refused, payloads intact). Its one new minor closed here: the
