@@ -41,6 +41,17 @@ let root: string;
 const runners: AttemptRunner[] = [];
 const strays = new Set<number>(); // pids discovered by fixtures; swept in after()
 
+/** Register a forked handle's pid for the after() sweep AT DISCOVERY —
+ *  before any assertion can fail. Audited (Sol R1 F1): registering after
+ *  assertions leaks real process groups on the failure path (an
+ *  unregistered survivor keeps writing a deleted tmpdir forever).
+ *  Group leaders make the sweep kill -PGID, so in-group descendants
+ *  (W4's grandchild) are covered by the leader's registration. */
+function track<H extends { pid?: number }>(h: H): H {
+  if (h.pid !== undefined) strays.add(h.pid);
+  return h;
+}
+
 const delay = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
 
 /** REAL detached group-leader worker running a /bin/sh script. */
@@ -138,7 +149,7 @@ describe("W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL
     const runner = await openRunner(episodeId, shellSpawner(`trap '' TERM; while :; do sleep 0.2; done`), 150);
     const task: AttemptTask = { episodeId, taskId: "t1", session: ses };
 
-    const h = await runner.run(task);
+    const h = track(await runner.run(task));
     assert.ok(h.pid !== undefined, "worker forked");
     assert.equal(h.detached, true, "detached group leader (G1)");
     await waitPid(h.pid, "alive");
@@ -173,7 +184,7 @@ describe("W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL
 
     // I1 is satisfied by REAL evidence, so the takeover proceeds WITHOUT
     // confirmStopped — the kill-window recovery path end to end.
-    const h2 = await runner.run(task);
+    const h2 = track(await runner.run(task));
     assert.equal(h2.attemptId, "t1-a2", "takeover gets fresh attempt identity (counter advances)");
     assert.notEqual(h2.pid, h.pid);
     assert.notEqual(h2.pid, undefined);
@@ -193,7 +204,7 @@ describe("W3: worker SIGKILLed, supervisor restarts — journal-first reconcile 
     const runner = await openRunner(episodeId, spawner);
     const task: AttemptTask = { episodeId, taskId: "t1", session };
 
-    const h = await runner.run(task);
+    const h = track(await runner.run(task));
     const pid = h.pid!;
     await waitPid(pid, "alive");
 
@@ -216,10 +227,9 @@ describe("W3: worker SIGKILLed, supervisor restarts — journal-first reconcile 
     assert.equal(rec.ownership.latest?.live, undefined, "not a child of the RESTARTED supervisor (no waitpid-class claim)");
 
     // The fence admits the takeover with a fresh identity.
-    const h2 = await runner2.run(task);
+    const h2 = track(await runner2.run(task));
     assert.equal(h2.attemptId, "t1-a2");
     assert.notEqual(h2.pid, pid);
-    strays.add(h2.pid!);
     const stop2 = await runner2.stop(h2);
     assert.equal(stop2.stopped, true);
 
@@ -244,7 +254,7 @@ describe("W4: REAL group survivor — leader SIGKILLed, grandchild keeps the ses
     const runner = await openRunner(episodeId, survivorSpawner, 150);
     const task: AttemptTask = { episodeId, taskId: "t1", session };
 
-    const h = await runner.run(task);
+    const h = track(await runner.run(task));
     const leader = h.pid!;
     await waitPid(leader, "alive");
     await waitFor(async () => (await fileLines(session)) > 0, "grandchild starts writing");
@@ -288,9 +298,8 @@ describe("W4: REAL group survivor — leader SIGKILLed, grandchild keeps the ses
     // The tuple is closed: reconcile releases, takeover spawns.
     const rec2 = await runner.reconcile(task);
     assert.equal(rec2.decision.action, "spawn");
-    const h2 = await runner.run(task);
+    const h2 = track(await runner.run(task));
     assert.equal(h2.attemptId, "t1-a2");
-    strays.add(h2.pid!);
     const stop2 = await runner.stop(h2);
     assert.equal(stop2.stopped, true);
   });
@@ -356,6 +365,7 @@ describe("W0/W1: the fork-then-crash windows — force-close inside the spawn tr
     const runner = await openRunner(ep, shellSpawner(`echo $$ > ${pf}; sleep 120`), 5000, crashAt("forked", (h) => {
       crashed = true;
       forkPid = h.pid ?? -1;
+      if (forkPid > 0) strays.add(forkPid); // register AT DISCOVERY, pre-crash
       // The supervisor dies with a REAL child alive and NO ok record.
       try { runner.close(true); } catch { /* already closed */ }
     }));
@@ -374,7 +384,6 @@ describe("W0/W1: the fork-then-crash windows — force-close inside the spawn tr
     const oracle = await waitForPidfile(pf, 2000);
     assert.ok(oracle !== undefined, "the worker really forked (pidfile oracle)");
     assert.equal(oracle, forkPid, "the barrier saw the REAL child pid");
-    strays.add(forkPid);
     await waitPid(forkPid, "alive");
 
     // Restart over the same journal: a REAL worker may hold the session,
@@ -411,8 +420,8 @@ describe("F17: hostile state.json row vs journal + REAL ps truth", () => {
     const t1: AttemptTask = { episodeId, taskId: "t1", session: session1 };
     const t2: AttemptTask = { episodeId, taskId: "t2", session: session2 };
 
-    const dead = await runner.run(t1);   // the cohort we will prove dead
-    const decoy = await runner.run(t2);  // a REAL live process (different session)
+    const dead = track(await runner.run(t1));   // the cohort we will prove dead
+    const decoy = track(await runner.run(t2));  // a REAL live process (different session)
     await waitPid(dead.pid!, "alive");
     await waitPid(decoy.pid!, "alive");
 
