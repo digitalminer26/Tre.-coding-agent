@@ -858,7 +858,8 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   assert.equal(res.stopped, false, "a survivor under a reaped leader is NOT confirmed stopped");
   assert.equal(res.groupStatus, "unknown", "ownership of the leaderless group is unprovable");
   assert.equal(res.escalated, false, "no SIGKILL escalation after the leader was reaped");
-  assert.ok(!sent.some((s) => s.startsWith(`-${leaderPid}:`) && s.endsWith(":9")), `no SIGKILL to the reaped group number, got ${JSON.stringify(sent)}`);
+  // exact match on the recorded "<target>:<signal>" form (F2, cycle-4 review)
+  assert.ok(!sent.includes(`${-leaderPid}:SIGKILL`), `no SIGKILL to the reaped group number, got ${JSON.stringify(sent)}`);
   // Operator path: the survivor is swept with positive evidence, then stop() confirms.
   realKill(-leaderPid, "SIGKILL");
   for (let i = 0; i < 100; i++) { try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); } catch { break; } }

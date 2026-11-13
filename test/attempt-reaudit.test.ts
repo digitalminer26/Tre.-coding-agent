@@ -269,3 +269,58 @@ describe("F1 (cycle-3 review): group signalling authority is gated at the kill(2
     });
   });
 });
+
+// ── cycle-4 review (F1 hang, F3 concurrency): the integration path.
+// These drive the REAL terminate()/exit race/probe logic of two concurrent
+// stop() calls and a denied-KILL stop(); only process.kill and the probe
+// verdicts are injected.
+describe("F3/F1 (cycle-4 review): real stop() integration under concurrency and denied signals", () => {
+  it("two CONCURRENT stop() calls on a live leader: one probe, a latch, no SIGKILL, both honest", async () => {
+    await withRecordedKill(async (sent) => {
+      const entry = rigEntry();
+      // Scripted probe sequence: the first ESRCH latches; any later "alive"
+      // (a stranger in a recycled group) must never be consulted.
+      const script: Verdict[] = ["reaped", "alive", "alive"];
+      let probes = 0;
+      const r = rigRunner([]);
+      r.groupAlive = (): Verdict => { probes++; return script.shift() ?? "alive"; };
+      (r as unknown as Record<string, unknown>).__entry = entry;
+      const a = r.stop({ session: "s" });
+      const b = r.stop({ session: "s" });
+      // The leader is reaped while BOTH stops are suspended in terminate().
+      entry.exited = true;
+      (entry.settle as (v: unknown) => void)({ code: 0, signal: null });
+      const [ra, rb] = await Promise.all([a, b]);
+      assert.equal(ra.stopped, true);
+      assert.equal(rb.stopped, true, "the second stop sees the latch, not a stranger 'alive'");
+      assert.equal(probes, 1, "exactly one group probe: the latch answered the other");
+      assert.deepEqual(sent.filter((x) => x.endsWith(":SIGKILL")), [], "no SIGKILL under concurrency");
+    });
+  });
+
+  it("a DENIED KILL (EPERM) on a leader that never exits still returns, bounded, as unknown", async () => {
+    const realKill = process.kill.bind(process);
+    const sent: string[] = [];
+    (process as { kill: unknown }).kill = ((target: number, sig?: number | string) => {
+      sent.push(`${String(target)}:${String(sig ?? 0)}`);
+      if (sig === "SIGKILL") throw Object.assign(new Error("denied"), { code: "EPERM" });
+      return true;
+    }) as typeof process.kill;
+    try {
+      const entry = rigEntry();
+      const r = rigRunner(["alive"]);
+      (r as unknown as Record<string, unknown>).__entry = entry;
+      (r as unknown as Record<string, unknown>).stopTimeoutMs = 10;
+      const t0 = Date.now();
+      const res = await r.stop({ session: "s" });
+      const took = Date.now() - t0;
+      assert.equal(res.stopped, false);
+      assert.equal(res.groupStatus, "unknown", "an un-killable, un-exited leader is unknown, not swept");
+      assert.equal(res.escalated, true, "the escalation was attempted");
+      assert.ok(took < 4000, `bounded by POST_KILL_EXIT_WAIT_MS, took ${took}ms`);
+      assert.ok(sent.includes("-424242:SIGKILL"), "the KILL was attempted (and denied)");
+    } finally {
+      (process as { kill: unknown }).kill = realKill;
+    }
+  });
+});

@@ -12,9 +12,14 @@ of the cycle-2 fixes — 2 findings, both REAL and fixed this cycle).
 - **Central gate:** `signalGroup` is the only place group signals are sent.
   It refuses unless the leader is unreaped AND group death is not latched.
   The check and the `kill(2)` are synchronous.
-- **Latch:** `probeGroup` is the only group probe. Once death is confirmed
-  (ESRCH) the number is never probed or signalled again. A concurrent stop
-  that was already in flight cannot signal or re-probe a latched number.
+- **Latch:** `probeGroup` is the only probe used on the stop() path. Once
+  death is confirmed (ESRCH) the number is never probed or signalled again
+  by stop(). A concurrent stop already in flight cannot signal or re-probe a
+  latched number. (reconcile/confirm keep their own non-latching probes.)
+- **Denied KILL:** an escalation is *attempted* whether or not the kernel
+  accepts the KILL; the bounded exit wait keys off the attempt, so a
+  permission-denied KILL on an un-exited leader returns `unknown` within
+  POST_KILL_EXIT_WAIT_MS instead of hanging.
 - **Live path:** no SIGKILL is sent after the leader is reaped. A group that
   is still "alive" then is reported `unknown` (ownership unprovable, W4), not
   swept.
@@ -22,10 +27,11 @@ of the cycle-2 fixes — 2 findings, both REAL and fixed this cycle).
   TERM-ignoring grandchild survives is no longer SIGKILLed by `stop()`. The
   survivor is reported `unknown` and swept only by the operator path. The
   C1-F7 test was rewritten to this contract.
-- **Tests:** three deterministic regressions (concurrent latch, TERM-window
-  reap, central gate) use a recording `process.kill` stub and fail on the
-  pre-fix code. A real-process test asserts no SIGKILL reaches the reaped
-  group.
+- **Tests:** deterministic regressions (central gate, TERM-window reap,
+  two concurrent real `stop()` calls with one probe, denied-KILL bounded
+  return) use a recording `process.kill` stub. The gate and TERM-window
+  tests fail on the pre-fix code. A real-process test asserts exact
+  `SIGKILL` names are never sent to a reaped group.
 
 ### F2 (MEDIUM): attempt-confirmed evidence must be attested, not inferred
 

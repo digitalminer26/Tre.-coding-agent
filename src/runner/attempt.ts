@@ -922,14 +922,12 @@ export class AttemptRunner {
     // retires signalling authority — the post-exit path only verifies.
     if (entry.exited) return this.verifyExitedGroup(entry);
     let escalated = await this.terminate(entry);
-    // F1 (cycle-3 review): terminate() may have seen the leader exit. From
-    // here on signalling authority over the group number is only valid
-    // while the leader is unreaped — the signalGroup gate enforces that.
-    // E (audit): after an escalation the leader may be UNSIGNALABLE
-    // (EPERM swallowed by signalGroup) — `await exitPromise` alone is
-    // then a hang, not a stop. Bound the post-SIGKILL exit wait: on
-    // timeout report the honest verdict (stopped:false / "unknown")
-    // and return; the child stays tracked and the fence stays closed.
+    // E (audit) / F1 (cycle-4 review): after an escalation ATTEMPT the
+    // leader may be UNSIGNALABLE (the KILL was denied, or delivered to a
+    // leader that never reaps) — `await exitPromise` alone is then a hang,
+    // not a stop. The bound keys off the attempt, not off delivery: on
+    // timeout report the honest verdict (stopped:false / "unknown") and
+    // return; the child stays tracked and the fence stays closed.
     const exit = await Promise.race([
       entry.exitPromise,
       escalated ? delay(POST_KILL_EXIT_WAIT_MS).then(() => undefined) : new Promise<never>(() => {}),
@@ -967,12 +965,13 @@ export class AttemptRunner {
       // SIGTERM did not take while the leader was still unreaped: the
       // group number is still pinned by that leader, so a SIGKILL sweep is
       // sound. Bounded poll: kernel reaping of killed members is async.
+      // The poll runs whether or not the kernel accepted the KILL — a
+      // denied KILL simply leaves the group "alive" and reports unknown.
       escalated = true;
-      if (this.signalGroup(entry, "SIGKILL")) {
-        for (let i = 0; i < 25 && verdict === "alive"; i++) {
-          await delay(20);
-          verdict = this.probeGroup(entry);
-        }
+      this.signalGroup(entry, "SIGKILL");
+      for (let i = 0; i < 25 && verdict === "alive"; i++) {
+        await delay(20);
+        verdict = this.probeGroup(entry);
       }
     }
     // F1 (cycle-3): "alive" after the leader was reaped is UNPROVABLE
@@ -2035,7 +2034,11 @@ export class AttemptRunner {
       entry.exitPromise.then(() => { clearTimeout(timer); res(false); });
     });
     if (timedOut && !entry.exited) {
-      return this.signalGroup(entry, "SIGKILL");
+      // Escalation is ATTEMPTED here whether or not the kernel accepts the
+      // KILL (EPERM is swallowed by signalGroup). The caller bounds its exit
+      // wait on this attempt, so a denied KILL cannot hang stop().
+      this.signalGroup(entry, "SIGKILL");
+      return true;
     }
     return false;
   }
@@ -2069,7 +2072,9 @@ export class AttemptRunner {
   }
 
   /** Latch-aware group probe (kill(-pgid,0), never signals). Once death is
-   *  latched the number is not probed again; a fresh ESRCH sets the latch. */
+   *  latched the number is not probed again; a fresh ESRCH sets the latch.
+   *  Used by every stop() continuation; reconcile/confirm keep their own
+   *  (non-signalling) groupAlive probes, which do not sign or latch. */
   private probeGroup(entry: ChildEntry): "reaped" | "alive" | "unknown" {
     if (entry.groupDeathConfirmed) return "reaped";
     if (!entry.pgid) return "unknown";

@@ -121,3 +121,6 @@ test/probes/
 .tre/audit-round2*.md
 .tre/current-audit-diff.txt
 .tre/r4-*.log
+
+# test/audit run logs (cycle-3/4)
+.tre/*.log
