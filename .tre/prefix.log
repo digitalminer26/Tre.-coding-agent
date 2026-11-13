@@ -1,0 +1,125 @@
+TAP version 13
+# Subtest: A2: stop() sweeps the tracked group after the leader has exited
+    # Subtest: leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+    ok 1 - leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+      ---
+      duration_ms: 46.22475
+      ...
+    1..1
+ok 1 - A2: stop() sweeps the tracked group after the leader has exited
+  ---
+  duration_ms: 47.409292
+  type: 'suite'
+  ...
+# Subtest: A3: a stale handle cannot act on a successor attempt
+    # Subtest: stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+    ok 1 - stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+      ---
+      duration_ms: 178.240125
+      ...
+    1..1
+ok 2 - A3: a stale handle cannot act on a successor attempt
+  ---
+  duration_ms: 178.737625
+  type: 'suite'
+  ...
+# Subtest: A1: close(true) keeps the writer slot until accepted journal writes drain
+    # Subtest: a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+    ok 1 - a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+      ---
+      duration_ms: 161.999375
+      ...
+    1..1
+ok 3 - A1: close(true) keeps the writer slot until accepted journal writes drain
+  ---
+  duration_ms: 162.429209
+  type: 'suite'
+  ...
+# Subtest: F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+    # Subtest: a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+    not ok 1 - a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+      ---
+      duration_ms: 1.111583
+      location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:240:5'
+      failureType: 'testCodeFailure'
+      error: 'r.probeGroup is not a function'
+      code: 'ERR_TEST_FAILURE'
+      name: 'TypeError'
+      stack: |-
+        file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:245:28
+        withRecordedKill (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:220:15)
+        TestContext.<anonymous> (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:241:15)
+        Test.runInAsyncScope (node:async_hooks:206:9)
+        Test.run (node:internal/test_runner/test:796:25)
+        Test.start (node:internal/test_runner/test:702:17)
+        node:internal/test_runner/test:1133:71
+        node:internal/per_context/primordials:482:82
+        new Promise (<anonymous>)
+        new SafePromise (node:internal/per_context/primordials:450:29)
+      ...
+    # Subtest: stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+    not ok 2 - stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+      ---
+      duration_ms: 0.652
+      location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:252:5'
+      failureType: 'testCodeFailure'
+      error: 'TERM must be permitted while the leader is unreaped'
+      code: 'ERR_TEST_FAILURE'
+      stack: |-
+        r.terminate (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:262:27)
+        AttemptRunner.stop (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/src/runner/attempt.js:713:36)
+        file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:267:33
+        withRecordedKill (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:220:15)
+        TestContext.<anonymous> (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:253:15)
+        Test.runInAsyncScope (node:async_hooks:206:9)
+        Test.run (node:internal/test_runner/test:796:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:526:18)
+        Test.postRun (node:internal/test_runner/test:889:19)
+        Test.run (node:internal/test_runner/test:835:12)
+      ...
+    # Subtest: signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+    not ok 3 - signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+      ---
+      duration_ms: 1.57125
+      location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:275:5'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+        + actual - expected
+        
+        + undefined
+        - false
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: false
+      operator: 'strictEqual'
+      stack: |-
+        file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:282:20
+        withRecordedKill (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:220:15)
+        TestContext.<anonymous> (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:276:15)
+        Test.runInAsyncScope (node:async_hooks:206:9)
+        Test.run (node:internal/test_runner/test:796:25)
+        Suite.processPendingSubtests (node:internal/test_runner/test:526:18)
+        Test.postRun (node:internal/test_runner/test:889:19)
+        Test.run (node:internal/test_runner/test:835:12)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:526:7)
+      ...
+    1..3
+not ok 4 - F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+  ---
+  duration_ms: 4.076875
+  type: 'suite'
+  location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:239:1'
+  failureType: 'subtestsFailed'
+  error: '3 subtests failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..4
+# tests 6
+# suites 4
+# pass 3
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 443.536209

@@ -922,6 +922,9 @@ export class AttemptRunner {
     // retires signalling authority — the post-exit path only verifies.
     if (entry.exited) return this.verifyExitedGroup(entry);
     let escalated = await this.terminate(entry);
+    // F1 (cycle-3 review): terminate() may have seen the leader exit. From
+    // here on signalling authority over the group number is only valid
+    // while the leader is unreaped — the signalGroup gate enforces that.
     // E (audit): after an escalation the leader may be UNSIGNALABLE
     // (EPERM swallowed by signalGroup) — `await exitPromise` alone is
     // then a hang, not a stop. Bound the post-SIGKILL exit wait: on
@@ -959,24 +962,23 @@ export class AttemptRunner {
     // in some sandboxes, and its failure was being converted to "no
     // survivors"): ESRCH ⇒ group confirmed gone; 0 ⇒ survivors → one
     // SIGKILL sweep + re-verify; EPERM ⇒ undeterminable.
-    let verdict = this.groupAlive(entry.pgid);
-    if (verdict === "alive") {
-      // F7 (audit): this post-exit sweep IS a SIGKILL escalation of the
-      // stop — SIGTERM did not take (a grandchild survived the group
-      // TERM) — so `escalated` reports true even when terminate()
-      // returned false on an immediate leader exit.
+    let verdict = this.probeGroup(entry);
+    if (verdict === "alive" && !entry.exited) {
+      // SIGTERM did not take while the leader was still unreaped: the
+      // group number is still pinned by that leader, so a SIGKILL sweep is
+      // sound. Bounded poll: kernel reaping of killed members is async.
       escalated = true;
-      this.signalGroup(entry, "SIGKILL");
-      // Bounded poll: a SIGKILL'd member's exit reaping is async in the
-      // kernel; kill(-pgid,0) may still answer "alive" for a moment
-      // after the sweep. Poll to ESRCH instead of gambling on one sleep.
-      for (let i = 0; i < 25 && verdict === "alive"; i++) {
-        await delay(20);
-        verdict = this.groupAlive(entry.pgid);
+      if (this.signalGroup(entry, "SIGKILL")) {
+        for (let i = 0; i < 25 && verdict === "alive"; i++) {
+          await delay(20);
+          verdict = this.probeGroup(entry);
+        }
       }
     }
+    // F1 (cycle-3): "alive" after the leader was reaped is UNPROVABLE
+    // ownership — report unknown, never SIGKILL a historical number.
+    if (verdict === "alive" && entry.exited) verdict = "unknown";
     const stopped = verdict === "reaped";
-    if (stopped) entry.groupDeathConfirmed = true; // F1 latch: this number is never probed/signalled again
     return { attemptId: entry.attemptId, stopped, escalated, code, signal, groupStatus: verdict };
   }
 
@@ -1033,8 +1035,7 @@ export class AttemptRunner {
     if (!entry.pgid) {
       return { attemptId: entry.attemptId, stopped: false, escalated: false, code, signal, groupStatus: "unknown" };
     }
-    const verdict = this.groupAlive(entry.pgid);
-    if (verdict === "reaped") entry.groupDeathConfirmed = true; // latch: never probe this number again
+    const verdict = this.probeGroup(entry);
     // F1: "alive" is downgraded to "unknown" — ownership of a live group
     // under a leaderless number is unprovable, and it must never be
     // answered with a signal. stopped stays false (fence holds).
@@ -2025,30 +2026,34 @@ export class AttemptRunner {
    *  alive (F5). Returns whether escalation happened. ESRCH is the
    *  outcome we wanted (group already gone), never an error. */
   private async terminate(entry: ChildEntry): Promise<boolean> {
+    // F1 (cycle-3): after the leader is reaped nothing is signalled — the
+    // signalGroup gate refuses; survivors are reported by stop() as unknown.
     this.signalGroup(entry, "SIGTERM");
-    if (entry.exited) {
-      // leader died immediately — still verify the group (F5).
-      if (entry.pgid && this.groupAlive(entry.pgid) === "alive") {
-        this.signalGroup(entry, "SIGKILL");
-        return true;
-      }
-      return false;
-    }
+    if (entry.exited) return false;
     const timedOut = await new Promise<boolean>((res) => {
       const timer = setTimeout(() => res(true), this.stopTimeoutMs);
       entry.exitPromise.then(() => { clearTimeout(timer); res(false); });
     });
     if (timedOut && !entry.exited) {
-      this.signalGroup(entry, "SIGKILL");
-      return true;
+      return this.signalGroup(entry, "SIGKILL");
     }
     return false;
   }
 
-  private signalGroup(entry: ChildEntry, sig: NodeJS.Signals): void {
+  /** F1 (cycle-2 HIGH, cycle-3 review): the ONLY place group signals are
+   *  sent, and the authority gate lives here — not in callers, which
+   *  could go stale across an await. A group number may be signalled only
+   *  while its leader is unreaped (a live leader pins the number against
+   *  reuse) and group death has not been latched. The check and the
+   *  kill(2) are synchronous, so nothing can interleave. Returns whether a
+   *  signal was issued. */
+  private signalGroup(entry: ChildEntry, sig: NodeJS.Signals): boolean {
+    if (entry.exited || entry.groupDeathConfirmed) return false;
     try {
       if (entry.pgid) process.kill(-entry.pgid, sig);
       else if (entry.child.pid) process.kill(entry.child.pid, sig);
+      else return false;
+      return true;
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       // C2-1 (cycle-2 audit): EPERM means the group holds FOREIGN-uid
@@ -2057,9 +2062,20 @@ export class AttemptRunner {
       // honest verdict (stopped:false / groupStatus:"unknown"), never
       // throw, or a caller treating a throw as "not stopped" could
       // loop into kill-then-rationalize. ESRCH = already gone (wanted).
-      if (code === "ESRCH" || code === "EPERM") return;
+      if (code === "ESRCH" || code === "EPERM") return false;
       throw e;
     }
+    return false;
+  }
+
+  /** Latch-aware group probe (kill(-pgid,0), never signals). Once death is
+   *  latched the number is not probed again; a fresh ESRCH sets the latch. */
+  private probeGroup(entry: ChildEntry): "reaped" | "alive" | "unknown" {
+    if (entry.groupDeathConfirmed) return "reaped";
+    if (!entry.pgid) return "unknown";
+    const verdict = this.groupAlive(entry.pgid);
+    if (verdict === "reaped") entry.groupDeathConfirmed = true;
+    return verdict;
   }
 
   /** Group liveness via kill(-pgid, 0) (F5): signal 0 performs every

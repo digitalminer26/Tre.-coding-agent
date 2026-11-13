@@ -823,9 +823,13 @@ test("C1-F6: corrupt, half-written and wrong-identity state.json degrade to jour
   r2.close();
 });
 
-// C1-F7: stop() with a TERM-ignoring SURVIVING GRANDCHILD: the
-// post-exit SIGKILL sweep must be reported as an escalation.
-test("C1-F7: surviving grandchild after group SIGTERM — stop() reports escalated:true and confirmed group reap", async (t) => {
+// C1-F7 (rewritten cycle-3 review, finding 2): a TERM-ignoring SURVIVING
+// GRANDCHILD whose leader dies from the group SIGTERM. The leader is
+// reaped by OUR signal, so group signalling authority is retired: stop()
+// must NOT SIGKILL the historical group number (it may be recycled for a
+// stranger once empty). The verdict is honest: unknown, stopped:false,
+// no escalation. The survivor is swept only by the operator path.
+test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — stop() never SIGKILLs the reaped group number", async (t) => {
   const { root, session } = await fixture();
   const marker = join(root, "grandchild-ready");
   const grandchild = `trap '' TERM; touch '${marker}'; i=0; while [ $i -lt 200000000 ]; do i=$((i+1)); done`;
@@ -839,17 +843,28 @@ test("C1-F7: surviving grandchild after group SIGTERM — stop() reports escalat
   const h = await runner.run(task(session));
   const leaderPid = h.pid!;
   t.after(() => { try { process.kill(-leaderPid, "SIGKILL"); } catch { /* gone */ } });
-  // readiness-synchronized: wait for the grandchild's marker
   for (let i = 0; i < 250 && !existsSync(marker); i++) await new Promise((r) => setTimeout(r, 20));
   assert.ok(existsSync(marker), "grandchild reported readiness");
-  const res = await runner.stop(h);
-  assert.equal(res.stopped, true, "stop completes only on confirmed group death");
-  assert.equal(res.escalated, true, "the post-exit SIGKILL sweep IS an escalation (audit: was reported false)");
-  assert.equal(res.groupStatus, "reaped", "group verified reaped via kill(-pgid,0) ESRCH");
-  // the grandchild is really gone
-  let survivors = 0;
-  try { process.kill(-leaderPid, 0); survivors = 1; } catch { survivors = 0; }
-  assert.equal(survivors, 0, "no survivor after the sweep");
+
+  const realKill = process.kill.bind(process);
+  const sent: string[] = [];
+  (process as { kill: unknown }).kill = ((target: number, sig?: number | string) => {
+    if (typeof sig === "string" && sig !== "SIGTERM" && sig !== "SIGKILL" && sig !== "0") throw new Error("unexpected signal " + sig);
+    sent.push(`${String(target)}:${String(sig ?? 0)}`);
+    return realKill(target as never, sig as never);
+  }) as typeof process.kill;
+  let res: Awaited<ReturnType<typeof runner.stop>>;
+  try { res = await runner.stop(h); } finally { (process as { kill: unknown }).kill = realKill; }
+  assert.equal(res.stopped, false, "a survivor under a reaped leader is NOT confirmed stopped");
+  assert.equal(res.groupStatus, "unknown", "ownership of the leaderless group is unprovable");
+  assert.equal(res.escalated, false, "no SIGKILL escalation after the leader was reaped");
+  assert.ok(!sent.some((s) => s.startsWith(`-${leaderPid}:`) && s.endsWith(":9")), `no SIGKILL to the reaped group number, got ${JSON.stringify(sent)}`);
+  // Operator path: the survivor is swept with positive evidence, then stop() confirms.
+  realKill(-leaderPid, "SIGKILL");
+  for (let i = 0; i < 100; i++) { try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); } catch { break; } }
+  const again = await runner.stop(h);
+  assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
+  assert.equal(again.groupStatus, "reaped");
 });
 
 // C2-B (cycle-2 audit): an unresolved intent whose spawn crashed BEFORE

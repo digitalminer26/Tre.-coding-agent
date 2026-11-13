@@ -5,21 +5,27 @@
 Source of truth: `~/.tre/audits/killwin2-sol-out.txt` (clean-slate review
 of the cycle-2 fixes — 2 findings, both REAL and fixed this cycle).
 
-### F1 (HIGH): a post-exit stop() must never treat a historical group number as continuing ownership
+### F1 (HIGH): group signalling authority is gated at the kill(2) site
 
-- The cycle-2 sweep re-introduced a pgid-reuse kill window: after the leader
-  is reaped the OS may reassign the group number to a stranger group, and a
-  later `stop()` would SIGTERM/SIGKILL it.
-- `stop()` post-exit is now **verify-only** (`verifyExitedGroup`): it probes
-  `kill(-pgid,0)` and NEVER signals. Group ESRCH => `reaped` + stopped;
-  group alive under a leaderless number => `stopped:false`,
-  `groupStatus:"unknown"` — ownership unprovable, honest over complete (W4).
-- **Permanent latch** (`groupDeathConfirmed`): once group death is proven
-  the number is retired from all signalling authority — later stops answer
-  the recorded verdict with ZERO kill(2) calls. The live-path
-  SIGKILL-escalation verdict latches too.
-- Test pins with a `process.kill` spy: the leaderless stop issues only
-  probe-0 (never a signal); the post-latch stop issues NO kill(2) at all.
+- Cycle-2 re-introduced a pgid-reuse kill window: after the leader is
+  reaped, the OS may recycle the group number for a stranger group.
+- **Central gate:** `signalGroup` is the only place group signals are sent.
+  It refuses unless the leader is unreaped AND group death is not latched.
+  The check and the `kill(2)` are synchronous.
+- **Latch:** `probeGroup` is the only group probe. Once death is confirmed
+  (ESRCH) the number is never probed or signalled again. A concurrent stop
+  that was already in flight cannot signal or re-probe a latched number.
+- **Live path:** no SIGKILL is sent after the leader is reaped. A group that
+  is still "alive" then is reported `unknown` (ownership unprovable, W4), not
+  swept.
+- **Behaviour change:** a leader that dies from the group SIGTERM while a
+  TERM-ignoring grandchild survives is no longer SIGKILLed by `stop()`. The
+  survivor is reported `unknown` and swept only by the operator path. The
+  C1-F7 test was rewritten to this contract.
+- **Tests:** three deterministic regressions (concurrent latch, TERM-window
+  reap, central gate) use a recording `process.kill` stub and fail on the
+  pre-fix code. A real-process test asserts no SIGKILL reaches the reaped
+  group.
 
 ### F2 (MEDIUM): attempt-confirmed evidence must be attested, not inferred
 
@@ -33,8 +39,8 @@ of the cycle-2 fixes — 2 findings, both REAL and fixed this cycle).
   attestation naming a different attempt.
 
 ### Verification (this cycle)
-- `npx tsc` clean; full suite (`bash test/run.sh`) green: **2,764 tests,
-  0 fail** (2,750 pass, 14 skipped), up from 2,757.
+- `npx tsc` clean; full suite (`node --test dist/test/*.test.js`) green:
+  **2,767 tests, 0 fail** (2,753 pass, 14 skipped).
 
 ## 2026-08-04 — cycle 2: close re-audit A1/A2/A3 (commit 9b82d74)
 

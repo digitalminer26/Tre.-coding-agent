@@ -1,0 +1,68 @@
+TAP version 13
+# Subtest: A2: stop() sweeps the tracked group after the leader has exited
+    # Subtest: leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+    ok 1 - leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+      ---
+      duration_ms: 46.610292
+      ...
+    1..1
+ok 1 - A2: stop() sweeps the tracked group after the leader has exited
+  ---
+  duration_ms: 47.784375
+  type: 'suite'
+  ...
+# Subtest: A3: a stale handle cannot act on a successor attempt
+    # Subtest: stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+    ok 1 - stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+      ---
+      duration_ms: 181.095666
+      ...
+    1..1
+ok 2 - A3: a stale handle cannot act on a successor attempt
+  ---
+  duration_ms: 181.544292
+  type: 'suite'
+  ...
+# Subtest: A1: close(true) keeps the writer slot until accepted journal writes drain
+    # Subtest: a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+    ok 1 - a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+      ---
+      duration_ms: 161.57125
+      ...
+    1..1
+ok 3 - A1: close(true) keeps the writer slot until accepted journal writes drain
+  ---
+  duration_ms: 161.978333
+  type: 'suite'
+  ...
+# Subtest: F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+    # Subtest: a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+    ok 1 - a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+      ---
+      duration_ms: 0.7305
+      ...
+    # Subtest: stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+    ok 2 - stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+      ---
+      duration_ms: 0.84525
+      ...
+    # Subtest: signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+    ok 3 - signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+      ---
+      duration_ms: 0.233833
+      ...
+    1..3
+ok 4 - F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+  ---
+  duration_ms: 2.596166
+  type: 'suite'
+  ...
+1..4
+# tests 6
+# suites 4
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 439.965917

@@ -182,3 +182,90 @@ describe("A1: close(true) keeps the writer slot until accepted journal writes dr
     }
   });
 });
+
+// ── cycle-3 review (findings 1 & 2): signalling authority is gated centrally.
+// Deterministic: process.kill is replaced by a recorder for the whole test
+// (restored in finally), so NO real process group can ever be signalled and
+// the test proves exactly which kill(2) the runner would have sent.
+type Verdict = "reaped" | "alive" | "unknown";
+interface RigRunner {
+  groupAlive(pgid: number): Verdict;
+  signalGroup(e: unknown, sig: string): boolean;
+  probeGroup(e: unknown): Verdict;
+  stop(h: unknown): Promise<{ stopped: boolean; groupStatus: string; escalated: boolean }>;
+}
+async function withRecordedKill(body: (sent: string[]) => Promise<void>): Promise<void> {
+  const realKill = process.kill.bind(process);
+  const sent: string[] = [];
+  (process as { kill: unknown }).kill = ((target: number, sig?: number | string) => {
+    sent.push(`${String(target)}:${sig === undefined || sig === 0 || sig === "0" ? "probe0" : String(sig)}`);
+    if (sig === undefined || sig === 0 || sig === "0") {
+      // probe: answered by the injected verdict queue in the rig, never by the OS
+      return true;
+    }
+    return true; // recorded, never delivered
+  }) as typeof process.kill;
+  try { await body(sent); } finally { (process as { kill: unknown }).kill = realKill; }
+}
+function rigEntry(): Record<string, unknown> & { settle: (v: unknown) => void } {
+  let settle!: (v: unknown) => void;
+  const exitPromise = new Promise((r) => { settle = r; });
+  return { attemptId: "t-a1", pgid: 424242, exited: false, child: { pid: 424242 }, task: {}, exitPromise, settle };
+}
+function rigRunner(verdicts: Verdict[]): RigRunner {
+  const r = Object.create(AttemptRunner.prototype) as RigRunner & Record<string, unknown>;
+  (r as unknown as Record<string, unknown>).assertOpen = (): void => {};
+  (r as unknown as Record<string, unknown>).stopTimeoutMs = 50;
+  (r as unknown as Record<string, unknown>).resolveTarget = (): unknown => (r as unknown as Record<string, unknown>).__entry;
+  r.groupAlive = (): Verdict => verdicts.shift() ?? "reaped";
+  return r;
+}
+
+describe("F1 (cycle-3 review): group signalling authority is gated at the kill(2) site", () => {
+  it("a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe", async () => {
+    await withRecordedKill(async (sent) => {
+      const entry = rigEntry();
+      const r = rigRunner(["reaped", "alive"]);
+      (r as unknown as Record<string, unknown>).__entry = entry;
+      assert.equal(r.probeGroup(entry), "reaped", "sibling observes ESRCH");
+      assert.equal(entry.groupDeathConfirmed, true, "first ESRCH latches");
+      assert.equal(r.signalGroup(entry, "SIGKILL"), false, "latched: signalGroup refuses");
+      assert.equal(r.probeGroup(entry), "reaped", "latched: the stranger-'alive' answer is never consulted");
+      assert.deepEqual(sent, [], "no kill(2) of any kind reached the number");
+    });
+  });
+
+  it("stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent", async () => {
+    await withRecordedKill(async (sent) => {
+      const entry = rigEntry();
+      // TERM was sent while alive (recorded); the leader is then reaped; the group probes alive.
+      const r = rigRunner(["alive", "alive", "alive"]);
+      (r as unknown as Record<string, unknown>).__entry = entry;
+      (r as unknown as Record<string, unknown>).terminate = async (e: Record<string, unknown>): Promise<boolean> => {
+        // The REAL gate sends the TERM while the leader is unreaped: the
+        // recorder sees it because signalGroup calls process.kill.
+        if (!r.signalGroup(e, "SIGTERM")) throw new Error("TERM must be permitted while the leader is unreaped");
+        e.exited = true; (e.settle as (v: unknown) => void)({ code: 0, signal: null }); // reaped in the window
+        return false;
+      };
+      const res = await r.stop({ session: "s" });
+      assert.equal(res.stopped, false);
+      assert.equal(res.groupStatus, "unknown", "alive under a reaped leader is unprovable");
+      assert.equal(res.escalated, false, "no escalation after the leader was reaped");
+      assert.deepEqual(sent.filter((x) => x.endsWith(":SIGKILL")), [], "no SIGKILL to the historical number");
+      assert.deepEqual(sent.filter((x) => x.endsWith(":SIGTERM")), ["-424242:SIGTERM"], "only the pre-reap TERM was ever sent");
+    });
+  });
+
+  it("signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)", async () => {
+    await withRecordedKill(async (sent) => {
+      const reaped = rigEntry(); reaped.exited = true;
+      const latched = rigEntry(); latched.groupDeathConfirmed = true;
+      const r = rigRunner([]);
+      assert.equal(r.signalGroup(reaped, "SIGTERM"), false);
+      assert.equal(r.signalGroup(reaped, "SIGKILL"), false);
+      assert.equal(r.signalGroup(latched, "SIGKILL"), false);
+      assert.deepEqual(sent, [], "the gate refused before any kill(2)");
+    });
+  });
+});

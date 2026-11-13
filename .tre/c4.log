@@ -1,0 +1,1067 @@
+TAP version 13
+# Subtest: W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL group SIGKILL
+    # Subtest: stop() kills the group for real, reports confirmed group death with the real pids, and the fence releases without confirmStopped (journal-first: proven mode + real group death)
+    ok 1 - stop() kills the group for real, reports confirmed group death with the real pids, and the fence releases without confirmStopped (journal-first: proven mode + real group death)
+      ---
+      duration_ms: 376.087084
+      ...
+    1..1
+ok 1 - W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL group SIGKILL
+  ---
+  duration_ms: 377.840541
+  type: 'suite'
+  ...
+# Subtest: W3: worker SIGKILLed, supervisor restarts — journal-first reconcile releases on REAL ps truth
+    # Subtest: a fresh runner over the same journal probes the real dead pid (journal-first), decides spawn, and re-spawns under a new attemptId
+    ok 1 - a fresh runner over the same journal probes the real dead pid (journal-first), decides spawn, and re-spawns under a new attemptId
+      ---
+      duration_ms: 33.37475
+      ...
+    1..1
+ok 2 - W3: worker SIGKILLed, supervisor restarts — journal-first reconcile releases on REAL ps truth
+  ---
+  duration_ms: 33.528458
+  type: 'suite'
+  ...
+# Subtest: W4: REAL group survivor — leader SIGKILLed, grandchild keeps the session open
+    # Subtest: the fence parks on REAL group liveness; an external kill -9 -PGID + confirmStopped releases it
+    ok 1 - the fence parks on REAL group liveness; an external kill -9 -PGID + confirmStopped releases it
+      ---
+      duration_ms: 1099.330583
+      ...
+    1..1
+ok 3 - W4: REAL group survivor — leader SIGKILLed, grandchild keeps the session open
+  ---
+  duration_ms: 1099.488125
+  type: 'suite'
+  ...
+# Subtest: W0/W1: the fork-then-crash windows — force-close inside the spawn transaction
+    # Subtest: W0: crash between the durable intent and the fork — no process ever existed, the intent parks with zero fabricated identity
+    ok 1 - W0: crash between the durable intent and the fork — no process ever existed, the intent parks with zero fabricated identity
+      ---
+      duration_ms: 330.791125
+      ...
+    # Subtest: W1: crash after the fork but before the ok resolve — a REAL worker holds the session while the journal has NO identity: park, fabricate nothing, confirm nothing
+    ok 2 - W1: crash after the fork but before the ok resolve — a REAL worker holds the session while the journal has NO identity: park, fabricate nothing, confirm nothing
+      ---
+      duration_ms: 62.864708
+      ...
+    1..2
+ok 4 - W0/W1: the fork-then-crash windows — force-close inside the spawn transaction
+  ---
+  duration_ms: 394.174709
+  type: 'suite'
+  ...
+# Subtest: F17: hostile state.json row vs journal + REAL ps truth
+    # Subtest: a cache row naming a REAL live decoy cannot make a dead cohort live, cannot be confirmed past, and is never killed
+    ok 1 - a cache row naming a REAL live decoy cannot make a dead cohort live, cannot be confirmed past, and is never killed
+      ---
+      duration_ms: 61.8145
+      ...
+    1..1
+ok 5 - F17: hostile state.json row vs journal + REAL ps truth
+  ---
+  duration_ms: 62.019291
+  type: 'suite'
+  ...
+# Subtest: T-A: barrier-phase rejection WITHOUT close() — crash-injection stays a test-hook contract
+    # Subtest: intent-phase throw: exactly the unresolved intent is durable (NO failed-resolve — the barrier is outside the C2-C catch) and the runner stays usable
+    ok 1 - intent-phase throw: exactly the unresolved intent is durable (NO failed-resolve — the barrier is outside the C2-C catch) and the runner stays usable
+      ---
+      duration_ms: 51.245334
+      ...
+    # Subtest: forked-phase throw: a LIVE tracked child behind the unresolved tuple — the fence holds until stop() (the sanctioned cleanup) discharges it
+    ok 2 - forked-phase throw: a LIVE tracked child behind the unresolved tuple — the fence holds until stop() (the sanctioned cleanup) discharges it
+      ---
+      duration_ms: 52.666709
+      ...
+    1..2
+ok 6 - T-A: barrier-phase rejection WITHOUT close() — crash-injection stays a test-hook contract
+  ---
+  duration_ms: 105.375166
+  type: 'suite'
+  ...
+# Subtest: T-B: barrier rejection AFTER close(true) — detach semantics, no journal mutation, reopen stays fenced
+    # Subtest: close(true) inside the barrier unrefs the tracked child (does NOT kill it); the closure gate drops the ok append; a reopened runner fences the intent
+    ok 1 - close(true) inside the barrier unrefs the tracked child (does NOT kill it); the closure gate drops the ok append; a reopened runner fences the intent
+      ---
+      duration_ms: 77.001208
+      ...
+    1..1
+ok 7 - T-B: barrier rejection AFTER close(true) — detach semantics, no journal mutation, reopen stays fenced
+  ---
+  duration_ms: 77.133167
+  type: 'suite'
+  ...
+# Subtest: T-C: suspended barrier — the F3 serialization holds queued spawns, ordinary close(), and force-close/reopen
+    # Subtest: a barrier suspended past the fork holds the transaction: queued run() is queued-not-run, close() refuses, close(true)+reopen fences, and both transactions end with ONE intent and no ok
+    ok 1 - a barrier suspended past the fork holds the transaction: queued run() is queued-not-run, close() refuses, close(true)+reopen fences, and both transactions end with ONE intent and no ok
+      ---
+      duration_ms: 106.880125
+      ...
+    1..1
+ok 8 - T-C: suspended barrier — the F3 serialization holds queued spawns, ordinary close(), and force-close/reopen
+  ---
+  duration_ms: 107.020834
+  type: 'suite'
+  ...
+# Subtest: T-D: the F6 exited-own-child probe is EVIDENCE ONLY — it cannot flip the decision
+    # Subtest: injected POSITIVE verdict (pid-reuse shape): recorded as evidence, decision still spawn
+    ok 1 - injected POSITIVE verdict (pid-reuse shape): recorded as evidence, decision still spawn
+      ---
+      duration_ms: 13.399542
+      ...
+    # Subtest: injected INCONCLUSIVE verdict: recorded (if defined), decision still spawn
+    ok 2 - injected INCONCLUSIVE verdict: recorded (if defined), decision still spawn
+      ---
+      duration_ms: 13.19175
+      ...
+    # Subtest: injected NEGATIVE verdict: the honest case, decision spawn
+    ok 3 - injected NEGATIVE verdict: the honest case, decision spawn
+      ---
+      duration_ms: 12.171542
+      ...
+    1..3
+ok 9 - T-D: the F6 exited-own-child probe is EVIDENCE ONLY — it cannot flip the decision
+  ---
+  duration_ms: 39.106084
+  type: 'suite'
+  ...
+# Subtest: (+) W2 trap-readiness: escalated:true with a READY marker written AFTER the trap is installed
+    # Subtest: stop() escalation cannot be an artifact of TERM arriving before the trap exists
+    ok 1 - stop() escalation cannot be an artifact of TERM arriving before the trap exists
+      ---
+      duration_ms: 163.832
+      ...
+    1..1
+ok 10 - (+) W2 trap-readiness: escalated:true with a READY marker written AFTER the trap is installed
+  ---
+  duration_ms: 163.975709
+  type: 'suite'
+  ...
+# Subtest: A2: stop() sweeps the tracked group after the leader has exited
+    # Subtest: leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+    ok 1 - leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches
+      ---
+      duration_ms: 67.108583
+      ...
+    1..1
+ok 11 - A2: stop() sweeps the tracked group after the leader has exited
+  ---
+  duration_ms: 68.346875
+  type: 'suite'
+  ...
+# Subtest: A3: a stale handle cannot act on a successor attempt
+    # Subtest: stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+    ok 1 - stop()/waitForExit() with an old attemptId refuse; the current attempt is untouched; session-only stays explicit
+      ---
+      duration_ms: 216.956417
+      ...
+    1..1
+ok 12 - A3: a stale handle cannot act on a successor attempt
+  ---
+  duration_ms: 217.173875
+  type: 'suite'
+  ...
+# Subtest: A1: close(true) keeps the writer slot until accepted journal writes drain
+    # Subtest: a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+    ok 1 - a reopen joins the drain: the replacement never observes the journal before the in-flight append lands
+      ---
+      duration_ms: 157.816625
+      ...
+    1..1
+ok 13 - A1: close(true) keeps the writer slot until accepted journal writes drain
+  ---
+  duration_ms: 157.958917
+  type: 'suite'
+  ...
+# Subtest: F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+    # Subtest: a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+    ok 1 - a sibling stop latches death; a concurrent stop still in flight sends no kill(2) and does not re-probe
+      ---
+      duration_ms: 0.274333
+      ...
+    # Subtest: stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+    not ok 2 - stop() whose leader is reaped while its TERM window is open: a survivor probe is 'unknown' and no SIGKILL is sent
+      ---
+      duration_ms: 1.676541
+      location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:252:5'
+      failureType: 'testCodeFailure'
+      error: |-
+        only the pre-reap TERM was ever sent
+        + actual - expected
+        
+        + []
+        - [
+        -   '-424242:15'
+        - ]
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected:
+        0: '-424242:15'
+      actual:
+      operator: 'deepStrictEqual'
+      stack: |-
+        file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:269:20
+        async withRecordedKill (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:220:9)
+        async TestContext.<anonymous> (file:///Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:253:9)
+        async Test.run (node:internal/test_runner/test:797:9)
+        async Suite.processPendingSubtests (node:internal/test_runner/test:526:7)
+      ...
+    # Subtest: signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+    ok 3 - signalGroup refuses every signal once the leader is reaped or death is latched (the single authority gate)
+      ---
+      duration_ms: 0.120042
+      ...
+    1..3
+not ok 14 - F1 (cycle-3 review): group signalling authority is gated at the kill(2) site
+  ---
+  duration_ms: 2.429083
+  type: 'suite'
+  location: '/Users/xilcilus/projects/Tre.-coding-agent/dist/test/attempt-reaudit.test.js:239:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: attemptId allocation: numeric max over ALL candidates, never lexicographic (§14.1)
+ok 15 - attemptId allocation: numeric max over ALL candidates, never lexicographic (§14.1)
+  ---
+  duration_ms: 0.52825
+  ...
+# Subtest: treWorkerSpawner: CLI-compatible argv (F8) — XOR --session/--resume, no --attempt-id; identity via env
+ok 16 - treWorkerSpawner: CLI-compatible argv (F8) — XOR --session/--resume, no --attempt-id; identity via env
+  ---
+  duration_ms: 0.940791
+  ...
+# Subtest: run(): intent durable before spawn, resolve 'ok' after, S6 hint written; stop() gives exit evidence
+ok 17 - run(): intent durable before spawn, resolve 'ok' after, S6 hint written; stop() gives exit evidence
+  ---
+  duration_ms: 76.446334
+  ...
+# Subtest: run(): exit code surfaces via waitForExit (own-child evidence beats pid hints)
+ok 18 - run(): exit code surfaces via waitForExit (own-child evidence beats pid hints)
+  ---
+  duration_ms: 55.12875
+  ...
+# Subtest: run(): attemptId derives from durable records, state hint, AND caller proposal (§14.1)
+ok 19 - run(): attemptId derives from durable records, state hint, AND caller proposal (§14.1)
+  ---
+  duration_ms: 51.075291
+  ...
+# Subtest: stop(): stubborn worker escalates to SIGKILL of the process group
+ok 20 - stop(): stubborn worker escalates to SIGKILL of the process group
+  ---
+  duration_ms: 195.480584
+  ...
+# Subtest: stop()/waitForExit(): refuse for sessions this instance never spawned
+ok 21 - stop()/waitForExit(): refuse for sessions this instance never spawned
+  ---
+  duration_ms: 14.210417
+  ...
+# Subtest: fence: run() refuses while a live child owns the session; resume of the same live attempt is already-running
+ok 22 - fence: run() refuses while a live child owns the session; resume of the same live attempt is already-running
+  ---
+  duration_ms: 30.015416
+  ...
+# Subtest: fence: discovered-RUNNING pid hint (probe) blocks a fresh spawn — park, never take over by killing (I1)
+ok 23 - fence: discovered-RUNNING pid hint (probe) blocks a fresh spawn — park, never take over by killing (I1)
+  ---
+  duration_ms: 27.264875
+  ...
+# Subtest: fence: FOREIGN-uid hit on our pid hint is unprovable → park (I3: silence is not evidence)
+ok 24 - fence: FOREIGN-uid hit on our pid hint is unprovable → park (I3: silence is not evidence)
+  ---
+  duration_ms: 18.383833
+  ...
+# Subtest: fence: probe says the hint pid is GONE (ps answered) — disproof; a new attempt may spawn
+ok 25 - fence: probe says the hint pid is GONE (ps answered) — disproof; a new attempt may spawn
+  ---
+  duration_ms: 29.856416
+  ...
+# Subtest: unresolved spawn intent: no blind re-spawn; park; confirmStopped(evidence) unblocks the next attempt
+ok 26 - unresolved spawn intent: no blind re-spawn; park; confirmStopped(evidence) unblocks the next attempt
+  ---
+  duration_ms: 39.145042
+  ...
+# Subtest: confirmStopped: evidence is REQUIRED; refuses unknown / already-failed attempts; cannot confirm a live child
+ok 27 - confirmStopped: evidence is REQUIRED; refuses unknown / already-failed attempts; cannot confirm a live child
+  ---
+  duration_ms: 26.111958
+  ...
+# Subtest: resume(): same attemptId gets a new intent/resolve pair under the SAME tuple; unknown attempt refused; session binding enforced (§14.1)
+ok 28 - resume(): same attemptId gets a new intent/resolve pair under the SAME tuple; unknown attempt refused; session binding enforced (§14.1)
+  ---
+  duration_ms: 32.889792
+  ...
+# Subtest: one runner per episode per process (exclusive journal writer); close refuses while a child is live
+ok 29 - one runner per episode per process (exclusive journal writer); close refuses while a child is live
+  ---
+  duration_ms: 18.0065
+  ...
+# Subtest: bad input is rejected before any mutation: episode mismatch, unsafe taskId, malformed attemptId, taskRevision < 1
+ok 30 - bad input is rejected before any mutation: episode mismatch, unsafe taskId, malformed attemptId, taskRevision < 1
+  ---
+  duration_ms: 6.436917
+  ...
+# Subtest: spawn-failed: bad spawner spec and missing binary resolve the intent as 'failed' (no dangling unresolved)
+ok 31 - spawn-failed: bad spawner spec and missing binary resolve the intent as 'failed' (no dangling unresolved)
+  ---
+  duration_ms: 21.84125
+  ...
+# Subtest: validateSupervisorRecord accepts every record shape P7 writes (P4 journal is the authority)
+ok 32 - validateSupervisorRecord accepts every record shape P7 writes (P4 journal is the authority)
+  ---
+  duration_ms: 19.397459
+  ...
+# Subtest: F4: run with an UNCANONICAL session spelling is the SAME identity as the canonical one (.. traversal)
+ok 33 - F4: run with an UNCANONICAL session spelling is the SAME identity as the canonical one (.. traversal)
+  ---
+  duration_ms: 22.055167
+  ...
+# Subtest: F6: a resolved 'failed' outcome is negative evidence — never blocks reconcile or a later spawn
+ok 34 - F6: a resolved 'failed' outcome is negative evidence — never blocks reconcile or a later spawn
+  ---
+  duration_ms: 24.375333
+  ...
+# Subtest: F3: confirmStopped of an OLD tuple keeps a newer tuple's live claim (generation, not ts, decides ownership)
+ok 35 - F3: confirmStopped of an OLD tuple keeps a newer tuple's live claim (generation, not ts, decides ownership)
+  ---
+  duration_ms: 35.872125
+  ...
+# Subtest: F5: stop() reports groupStatus via kill(-pgid,0): group reaped ⇒ stopped:true; SIGKILL escalation on a TERM-ignoring leader
+ok 36 - F5: stop() reports groupStatus via kill(-pgid,0): group reaped ⇒ stopped:true; SIGKILL escalation on a TERM-ignoring leader
+  ---
+  duration_ms: 472.75925
+  ...
+# Subtest: F5b: leader self-exits leaving a live group: reconcile parks, run/confirmStopped refuse — across reopen (pgid consulted, not just pid)
+ok 37 - F5b: leader self-exits leaving a live group: reconcile parks, run/confirmStopped refuse — across reopen (pgid consulted, not just pid)
+  ---
+  duration_ms: 52.919458
+  ...
+# Subtest: F9: writeStateHint advances to a legitimately newer attempt, refuses a stale rewind
+ok 38 - F9: writeStateHint advances to a legitimately newer attempt, refuses a stale rewind
+  ---
+  duration_ms: 30.757959
+  ...
+# Subtest: F8: validateSpawnSpec refuses --attempt-id and --resume+--session argv
+ok 39 - F8: validateSpawnSpec refuses --attempt-id and --resume+--session argv
+  ---
+  duration_ms: 0.089791
+  ...
+# Subtest: Fg: concurrent AttemptRunner.open() for the same episode yields ONE instance (no double journal writer)
+ok 40 - Fg: concurrent AttemptRunner.open() for the same episode yields ONE instance (no double journal writer)
+  ---
+  duration_ms: 6.26925
+  ...
+# Subtest: C1-F1: a future-ts failed record cannot hide a live resumed generation across reopen (causal selection, not wall clock)
+ok 41 - C1-F1: a future-ts failed record cannot hide a live resumed generation across reopen (causal selection, not wall clock)
+  ---
+  duration_ms: 21.391959
+  ...
+# Subtest: C1-F1: equal-ts intent/outcome pair resolves by JOURNAL POSITION, not id/ts — reconcile spawns, never parks
+ok 42 - C1-F1: equal-ts intent/outcome pair resolves by JOURNAL POSITION, not id/ts — reconcile spawns, never parks
+  ---
+  duration_ms: 26.148125
+  ...
+# Subtest: C1-F2: legacy gen-0 — confirmation of a dead old tuple never supersedes a live newer tuple (log position + liveness, not ts)
+ok 43 - C1-F2: legacy gen-0 — confirmation of a dead old tuple never supersedes a live newer tuple (log position + liveness, not ts)
+  ---
+  duration_ms: 43.09225
+  ...
+# Subtest: C1-F3: close() refuses during an active AND a queued spawn transaction; succeeds after they settle
+ok 44 - C1-F3: close() refuses during an active AND a queued spawn transaction; succeeds after they settle
+  ---
+  duration_ms: 40.975875
+  ...
+# Subtest: C1-F4: confirmStopped serializes with resume — stale confirmation cannot clobber a live same-attempt resume or its hint
+ok 45 - C1-F4: confirmStopped serializes with resume — stale confirmation cannot clobber a live same-attempt resume or its hint
+  ---
+  duration_ms: 34.478167
+  ...
+# Subtest: C1-F5: EPERM/unknown group liveness parks reconcile AND refuses run/resume (every fence branch agrees)
+ok 46 - C1-F5: EPERM/unknown group liveness parks reconcile AND refuses run/resume (every fence branch agrees)
+  ---
+  duration_ms: 20.671416
+  ...
+# (node:73042) TreStateCacheWarning: AttemptRunner[ep-p7]: state.json unreadable (state /var/folders/8l/93gb73md5wz7jfm22_f85w_40000gn/T/tre-p7-lhmRVV/ep-p7/state.json: not valid JSON (Unexpected end of JSON input)) — ignoring the cache, deriving from the journal
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# (node:73042) TreStateCacheWarning: AttemptRunner[ep-p7]: state.json episodeId "ep-someone-elses" does not match runner episode "ep-p7" — ignoring the cache, deriving from the journal
+# Subtest: C1-F6: corrupt, half-written and wrong-identity state.json degrade to journal-led recovery with a warning
+ok 47 - C1-F6: corrupt, half-written and wrong-identity state.json degrade to journal-led recovery with a warning
+  ---
+  duration_ms: 33.358084
+  ...
+# Subtest: C1-F7: surviving grandchild after the leader dies from group SIGTERM — stop() never SIGKILLs the reaped group number
+ok 48 - C1-F7: surviving grandchild after the leader dies from group SIGTERM — stop() never SIGKILLs the reaped group number
+  ---
+  duration_ms: 68.944208
+  ...
+# Subtest: C2-B: unresolved intent without journalled pgid — confirm refuses unless the unrecorded group is disproven (ESRCH)
+ok 49 - C2-B: unresolved intent without journalled pgid — confirm refuses unless the unrecorded group is disproven (ESRCH)
+  ---
+  duration_ms: 28.8215
+  ...
+# Subtest: C2-D (G1): detached:false violates the group-leader contract — spawn refuses, no legacy survivor in new journals
+ok 50 - C2-D (G1): detached:false violates the group-leader contract — spawn refuses, no legacy survivor in new journals
+  ---
+  duration_ms: 12.036375
+  ...
+# Subtest: G1 survivor: legacy non-detached ok tuple keeps ownership after leader exit — reconcile/run/confirm all refuse
+ok 51 - G1 survivor: legacy non-detached ok tuple keeps ownership after leader exit — reconcile/run/confirm all refuse
+  ---
+  duration_ms: 24.277875
+  ...
+# Subtest: G1 survivor cannot be superseded (legacy ordering)
+ok 52 - G1 survivor cannot be superseded (legacy ordering)
+  ---
+  duration_ms: 14.899958
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (legacy, mode=undefined)
+ok 53 - G3 resume uses current mode, not old detached evidence (legacy, mode=undefined)
+  ---
+  duration_ms: 14.536125
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (legacy, mode=false)
+ok 54 - G3 resume uses current mode, not old detached evidence (legacy, mode=false)
+  ---
+  duration_ms: 14.950333
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (legacy, mode=true)
+ok 55 - G3 resume uses current mode, not old detached evidence (legacy, mode=true)
+  ---
+  duration_ms: 19.424958
+  ...
+# Subtest: G2 historical ok cannot authenticate an unresolved resume (legacy)
+ok 56 - G2 historical ok cannot authenticate an unresolved resume (legacy)
+  ---
+  duration_ms: 22.649917
+  ...
+# Subtest: G2 confirmed never-ok fresh attempt cannot supersede an inconclusive owner (legacy)
+ok 57 - G2 confirmed never-ok fresh attempt cannot supersede an inconclusive owner (legacy)
+  ---
+  duration_ms: 17.456208
+  ...
+# Subtest: G1 survivor cannot be superseded (generation ordering)
+ok 58 - G1 survivor cannot be superseded (generation ordering)
+  ---
+  duration_ms: 17.96525
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (generation, mode=undefined)
+ok 59 - G3 resume uses current mode, not old detached evidence (generation, mode=undefined)
+  ---
+  duration_ms: 16.72425
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (generation, mode=false)
+ok 60 - G3 resume uses current mode, not old detached evidence (generation, mode=false)
+  ---
+  duration_ms: 15.842041
+  ...
+# Subtest: G3 resume uses current mode, not old detached evidence (generation, mode=true)
+ok 61 - G3 resume uses current mode, not old detached evidence (generation, mode=true)
+  ---
+  duration_ms: 18.521458
+  ...
+# Subtest: G2 historical ok cannot authenticate an unresolved resume (generation)
+ok 62 - G2 historical ok cannot authenticate an unresolved resume (generation)
+  ---
+  duration_ms: 28.9385
+  ...
+# Subtest: G2 confirmed never-ok fresh attempt cannot supersede an inconclusive owner (generation)
+ok 63 - G2 confirmed never-ok fresh attempt cannot supersede an inconclusive owner (generation)
+  ---
+  duration_ms: 20.866958
+  ...
+# Subtest: G1 historical survivor survives a later resume in the same tuple
+ok 64 - G1 historical survivor survives a later resume in the same tuple
+  ---
+  duration_ms: 18.424333
+  ...
+# Subtest: G1 historical survivor survives a later confirmation in the same tuple
+ok 65 - G1 historical survivor survives a later confirmation in the same tuple
+  ---
+  duration_ms: 27.1285
+  ...
+# Subtest: G2 legacy success anchor does NOT supersede an inconclusive older tuple (H2-3 strict doctrine)
+ok 66 - G2 legacy success anchor does NOT supersede an inconclusive older tuple (H2-3 strict doctrine)
+  ---
+  duration_ms: 35.290208
+  ...
+# Subtest: confirmation refuses foreign-UID running pid evidence
+ok 67 - confirmation refuses foreign-UID running pid evidence
+  ---
+  duration_ms: 12.589666
+  ...
+# Subtest: detached pid-only ok record retains its surviving real process group
+ok 68 - detached pid-only ok record retains its surviving real process group
+  ---
+  duration_ms: 17.931375
+  ...
+# Subtest: H1-M1: live historical ok pid hidden behind a later dead resume is discovered and blocks run/confirm
+ok 69 - H1-M1: live historical ok pid hidden behind a later dead resume is discovered and blocks run/confirm
+  ---
+  duration_ms: 14.126833
+  ...
+# Subtest: H1-M3: historical detached group alive under a reaped latest group refuses confirmation
+ok 70 - H1-M3: historical detached group alive under a reaped latest group refuses confirmation
+  ---
+  duration_ms: 21.518958
+  ...
+# Subtest: H2-1: live historical pid under a later FAILED latest IN THE SAME TUPLE blocks reconcile/run
+ok 71 - H2-1: live historical pid under a later FAILED latest IN THE SAME TUPLE blocks reconcile/run
+  ---
+  duration_ms: 14.4675
+  ...
+# Subtest: H2-2: ok pid-only tuple with no journalled group identity is survivor-class (legacy)
+ok 72 - H2-2: ok pid-only tuple with no journalled group identity is survivor-class (legacy)
+  ---
+  duration_ms: 34.203583
+  ...
+# Subtest: H2-2: ok pid-only tuple with no journalled group identity is survivor-class (generation)
+ok 73 - H2-2: ok pid-only tuple with no journalled group identity is survivor-class (generation)
+  ---
+  duration_ms: 35.165625
+  ...
+# Subtest: H3-6: historical pid with INCONCLUSIVE probe under a failed latest parks and refuses on inconclusive wording
+ok 74 - H3-6: historical pid with INCONCLUSIVE probe under a failed latest parks and refuses on inconclusive wording
+  ---
+  duration_ms: 23.784709
+  ...
+# Subtest: H3-7/R4: generation supersedes despite reversed append order (anchor appended first)
+ok 75 - H3-7/R4: generation supersedes despite reversed append order (anchor appended first)
+  ---
+  duration_ms: 31.067875
+  ...
+# Subtest: H3-R1: a later-generation proven record cannot launder an earlier identifier-less claim (PID reuse)
+ok 76 - H3-R1: a later-generation proven record cannot launder an earlier identifier-less claim (PID reuse)
+  ---
+  duration_ms: 16.035459
+  ...
+# Subtest: H3-R1b: same-cohort ok resolve enriches the mode-unrecorded intent (no survivor class)
+ok 77 - H3-R1b: same-cohort ok resolve enriches the mode-unrecorded intent (no survivor class)
+  ---
+  duration_ms: 18.509583
+  ...
+# Subtest: H3-F1: a failed latest does not exempt an identifier-less observed-ok tuple from blocking
+ok 78 - H3-F1: a failed latest does not exempt an identifier-less observed-ok tuple from blocking
+  ---
+  duration_ms: 25.46975
+  ...
+# Subtest: H3-R2: identifier-less observed-ok tuple is never superseded by a later anchor (reopen-stable)
+ok 79 - H3-R2: identifier-less observed-ok tuple is never superseded by a later anchor (reopen-stable)
+  ---
+  duration_ms: 18.537209
+  ...
+# Subtest: H3-F6: a newer cohort's identifiers cannot launder an older cohort's observed-ok claim
+ok 80 - H3-F6: a newer cohort's identifiers cannot launder an older cohort's observed-ok claim
+  ---
+  duration_ms: 16.357459
+  ...
+# Subtest: H3-F6 companion: same-cohort enrichment (pid on the ok record's own cohort) discharges the claim
+ok 81 - H3-F6 companion: same-cohort enrichment (pid on the ok record's own cohort) discharges the claim
+  ---
+  duration_ms: 32.949459
+  ...
+# Subtest: R4-F10: hint never back-assigns past a failed generation — the older ok-without-pid cohort stays protected
+ok 82 - R4-F10: hint never back-assigns past a failed generation — the older ok-without-pid cohort stays protected
+  ---
+  duration_ms: 20.358333
+  ...
+# Subtest: R4-F11: explicit pgid without pid is probeable identity — deterministic group death discharges the ok claim
+ok 83 - R4-F11: explicit pgid without pid is probeable identity — deterministic group death discharges the ok claim
+  ---
+  duration_ms: 26.431833
+  ...
+# Subtest: R4-F12: hint-enriched ok tuple — confirm and analyze agree (confirm then run proceeds)
+ok 84 - R4-F12: hint-enriched ok tuple — confirm and analyze agree (confirm then run proceeds)
+  ---
+  duration_ms: 36.037292
+  ...
+# Subtest: R4-F12 guard: unresolved intent with hint-only identity still refuses (G3 doctrine holds)
+ok 85 - R4-F12 guard: unresolved intent with hint-only identity still refuses (G3 doctrine holds)
+  ---
+  duration_ms: 14.545875
+  ...
+# Subtest: R4-F17: group-only death accepted by the spawn fence directly — run() proceeds with pgid-ESRCH and no pid, no confirm needed
+ok 86 - R4-F17: group-only death accepted by the spawn fence directly — run() proceeds with pgid-ESRCH and no pid, no confirm needed
+  ---
+  duration_ms: 21.672209
+  ...
+# Subtest: R4-F15: a confirmation copying gen-2 identity cannot launder a gen-1 identifier-less ok claim (no positional laundering)
+ok 87 - R4-F15: a confirmation copying gen-2 identity cannot launder a gen-1 identifier-less ok claim (no positional laundering)
+  ---
+  duration_ms: 20.340875
+  ...
+# Subtest: R4-F15b: confirmation of a hint-identified tuple stamps the probed identity — closure is reopen-stable
+ok 88 - R4-F15b: confirmation of a hint-identified tuple stamps the probed identity — closure is reopen-stable
+  ---
+  duration_ms: 29.794958
+  ...
+# Subtest: R4-F16: every accepted hint row is confirmation evidence — a live row under another task key blocks confirm
+ok 89 - R4-F16: every accepted hint row is confirmation evidence — a live row under another task key blocks confirm
+  ---
+  duration_ms: 38.589667
+  ...
+# Subtest: R4-F16b: an inconclusive accepted-hint probe refuses confirmation (deterministic negative required for every accepted identity)
+ok 90 - R4-F16b: an inconclusive accepted-hint probe refuses confirmation (deterministic negative required for every accepted identity)
+  ---
+  duration_ms: 15.739416
+  ...
+# Subtest: R5-1: a refresh queued AFTER a confirmation cannot recreate the hint after the tuple closes
+ok 91 - R5-1: a refresh queued AFTER a confirmation cannot recreate the hint after the tuple closes
+  ---
+  duration_ms: 22.137792
+  ...
+# Subtest: R7-1: a refresh queued BEFORE confirmation blocks the confirmation with the refreshed live identity
+ok 92 - R7-1: a refresh queued BEFORE confirmation blocks the confirmation with the refreshed live identity
+  ---
+  duration_ms: 18.455458
+  ...
+# Subtest: R5-2: accepted cross-task hint inserted during confirmation invalidates the snapshot
+ok 93 - R5-2: accepted cross-task hint inserted during confirmation invalidates the snapshot
+  ---
+  duration_ms: 18.348584
+  ...
+# Subtest: R5-3: journalled pid plus live matching hint blocks analyze, run, and confirmation consistently
+ok 94 - R5-3: journalled pid plus live matching hint blocks analyze, run, and confirmation consistently
+  ---
+  duration_ms: 16.39725
+  ...
+# Subtest: R4-F18: writeStateHint refuses a pid refresh over a CLOSED (confirmed) tuple — no identity re-creation
+ok 95 - R4-F18: writeStateHint refuses a pid refresh over a CLOSED (confirmed) tuple — no identity re-creation
+  ---
+  duration_ms: 35.248417
+  ...
+# Subtest: R4-F19: every ownership refusal cites the offense record's UUID and ISO timestamp
+ok 96 - R4-F19: every ownership refusal cites the offense record's UUID and ISO timestamp
+  ---
+  duration_ms: 20.779459
+  ...
+# Subtest: R6-1: own child exited + independent live hint → reconcile parks, run refuses, confirm refuses
+ok 97 - R6-1: own child exited + independent live hint → reconcile parks, run refuses, confirm refuses
+  ---
+  duration_ms: 23.720792
+  ...
+# Subtest: R6-1 companion: exited own child + independent INCONCLUSIVE hint → run refuses (no bypass)
+ok 98 - R6-1 companion: exited own child + independent INCONCLUSIVE hint → run refuses (no bypass)
+  ---
+  duration_ms: 23.832625
+  ...
+# Subtest: R6-2: confirmStopped against a different session path is refused before any probe or append
+ok 99 - R6-2: confirmStopped against a different session path is refused before any probe or append
+  ---
+  duration_ms: 14.100583
+  ...
+# Subtest: P7 guard: nothing outside src/runner/ imports the attempt runner yet (primitives only)
+ok 100 - P7 guard: nothing outside src/runner/ imports the attempt runner yet (primitives only)
+  ---
+  duration_ms: 32.356459
+  ...
+# Subtest: §2: garbage plans are refused by shape with nothing touched
+ok 101 - §2: garbage plans are refused by shape with nothing touched
+  ---
+  duration_ms: 1.340209
+  ...
+# Subtest: §2: hold sentinel → held, nothing journaled, nothing acted
+ok 102 - §2: hold sentinel → held, nothing journaled, nothing acted
+  ---
+  duration_ms: 0.101667
+  ...
+# Subtest: §2: unknown action refused even with every other field consistent
+ok 103 - §2: unknown action refused even with every other field consistent
+  ---
+  duration_ms: 0.088125
+  ...
+# Subtest: §2: strategy-template mismatch refused (repeat-budget discipline)
+ok 104 - §2: strategy-template mismatch refused (repeat-budget discipline)
+  ---
+  duration_ms: 0.095625
+  ...
+# Subtest: §2: model-swap strategy naming a DIFFERENT model is refused (bypass)
+ok 105 - §2: model-swap strategy naming a DIFFERENT model is refused (bypass)
+  ---
+  duration_ms: 0.064958
+  ...
+# Subtest: §2: model-swap requires a valid model
+ok 106 - §2: model-swap requires a valid model
+  ---
+  duration_ms: 0.111459
+  ...
+# Subtest: §2: rung and decision must equal the canonical table values
+ok 107 - §2: rung and decision must equal the canonical table values
+  ---
+  duration_ms: 0.087792
+  ...
+# Subtest: §2: authority classes validated and never inverted
+ok 108 - §2: authority classes validated and never inverted
+  ---
+  duration_ms: 0.257583
+  ...
+# Subtest: §2: missing/false notAPermission = absent provenance = refusal
+ok 109 - §2: missing/false notAPermission = absent provenance = refusal
+  ---
+  duration_ms: 0.105875
+  ...
+# Subtest: §2: oversized / sparse / non-string list fields refused per field
+ok 110 - §2: oversized / sparse / non-string list fields refused per field
+  ---
+  duration_ms: 0.142334
+  ...
+# Subtest: §2: external repair keeps the TEMPLATE strategyId with the rung-3 override
+ok 111 - §2: external repair keeps the TEMPLATE strategyId with the rung-3 override
+  ---
+  duration_ms: 0.110208
+  ...
+# Subtest: §2: the old '+external' strategyId suffix is NOT accepted (repairGate truth)
+ok 112 - §2: the old '+external' strategyId suffix is NOT accepted (repairGate truth)
+  ---
+  duration_ms: 0.056333
+  ...
+# Subtest: §2: hostile plan fence — throwing getters and Proxy never throw out
+ok 113 - §2: hostile plan fence — throwing getters and Proxy never throw out
+  ---
+  duration_ms: 0.121916
+  ...
+# Subtest: §1: resume without ctx.attemptId is refused (nothing to attach to)
+ok 114 - §1: resume without ctx.attemptId is refused (nothing to attach to)
+  ---
+  duration_ms: 0.128709
+  ...
+# Subtest: §3: every missing required port is a refusal that journals nothing
+ok 115 - §3: every missing required port is a refusal that journals nothing
+  ---
+  duration_ms: 0.906459
+  ...
+# Subtest: §3: missing journal port refuses before any derivation
+ok 116 - §3: missing journal port refuses before any derivation
+  ---
+  duration_ms: 0.137375
+  ...
+# Subtest: §3: merge is always refused (P12 unwired by contract)
+ok 117 - §3: merge is always refused (P12 unwired by contract)
+  ---
+  duration_ms: 0.073167
+  ...
+# Subtest: §4: idempotent actionId — identical plan content clones hash equal
+ok 118 - §4: idempotent actionId — identical plan content clones hash equal
+  ---
+  duration_ms: 0.205667
+  ...
+# Subtest: §4: same content in the SAME journal → already-executed, port untouched
+ok 119 - §4: same content in the SAME journal → already-executed, port untouched
+  ---
+  duration_ms: 0.087958
+  ...
+# Subtest: §4: executionSeq is the ONLY legitimate disambiguator
+ok 120 - §4: executionSeq is the ONLY legitimate disambiguator
+  ---
+  duration_ms: 0.160625
+  ...
+# Subtest: §4: open intent refuses re-issue (I5) without touching act ports
+ok 121 - §4: open intent refuses re-issue (I5) without touching act ports
+  ---
+  duration_ms: 0.108167
+  ...
+# Subtest: §4: un-acked outcome WITHOUT the no-effect marker is not replayable
+ok 122 - §4: un-acked outcome WITHOUT the no-effect marker is not replayable
+  ---
+  duration_ms: 0.142208
+  ...
+# Subtest: §4: no-effect outcome permits replay with a DISTINCT journal id
+ok 123 - §4: no-effect outcome permits replay with a DISTINCT journal id
+  ---
+  duration_ms: 0.281042
+  ...
+# Subtest: §4: journal read failure fails closed (no action, no intent)
+ok 124 - §4: journal read failure fails closed (no action, no intent)
+  ---
+  duration_ms: 0.116583
+  ...
+# Subtest: §4: hostile journal records (throwing getter) fail closed too
+ok 125 - §4: hostile journal records (throwing getter) fail closed too
+  ---
+  duration_ms: 0.066375
+  ...
+# Subtest: §4: intent append failure BLOCKS the act — zero port calls
+ok 126 - §4: intent append failure BLOCKS the act — zero port calls
+  ---
+  duration_ms: 0.119
+  ...
+# Subtest: §14.3: the intent record carries the full field set
+ok 127 - §14.3: the intent record carries the full field set
+  ---
+  duration_ms: 0.126459
+  ...
+# Subtest: nudge: scoped steer carries attemptId scope and actionId requestId
+ok 128 - nudge: scoped steer carries attemptId scope and actionId requestId
+  ---
+  duration_ms: 0.075417
+  ...
+# Subtest: nudge: a stray model field on a non-swap plan never leaks anywhere
+ok 129 - nudge: a stray model field on a non-swap plan never leaks anywhere
+  ---
+  duration_ms: 0.097584
+  ...
+# Subtest: backoff-retry: delay lands BETWEEN intent and gate; size from attempt number
+ok 130 - backoff-retry: delay lands BETWEEN intent and gate; size from attempt number
+  ---
+  duration_ms: 0.46975
+  ...
+# Subtest: backoff-retry: without attemptId the base delay is 1000 ms
+ok 131 - backoff-retry: without attemptId the base delay is 1000 ms
+  ---
+  duration_ms: 0.055334
+  ...
+# Subtest: backoff: delay port failure → failed@backoff with a no-effect outcome
+ok 132 - backoff: delay port failure → failed@backoff with a no-effect outcome
+  ---
+  duration_ms: 0.082542
+  ...
+# Subtest: model-swap: model goes to the GATE and the runner task; never self-approved
+ok 133 - model-swap: model goes to the GATE and the runner task; never self-approved
+  ---
+  duration_ms: 0.135834
+  ...
+# Subtest: model-swap: gate denial refuses and the runner is never spawned
+ok 134 - model-swap: gate denial refuses and the runner is never spawned
+  ---
+  duration_ms: 0.081541
+  ...
+# Subtest: gate: check throwing → refused gate-check-failed with a no-effect record
+ok 135 - gate: check throwing → refused gate-check-failed with a no-effect record
+  ---
+  duration_ms: 0.065125
+  ...
+# Subtest: gate: reserve revoke (throws after allowed) → gate-denied, nothing runs
+ok 136 - gate: reserve revoke (throws after allowed) → gate-denied, nothing runs
+  ---
+  duration_ms: 0.074417
+  ...
+# Subtest: reconcile running → already-running, no second spawn (P7 fence)
+ok 137 - reconcile running → already-running, no second spawn (P7 fence)
+  ---
+  duration_ms: 0.048125
+  ...
+# Subtest: reconcile park → refused parked (next plan escalates)
+ok 138 - reconcile park → refused parked (next plan escalates)
+  ---
+  duration_ms: 0.046334
+  ...
+# Subtest: evidence-nudge-resume: ledger action 'resume', ctx.attemptId reaches runner.resume
+ok 139 - evidence-nudge-resume: ledger action 'resume', ctx.attemptId reaches runner.resume
+  ---
+  duration_ms: 0.046542
+  ...
+# Subtest: investigate: dispatch once; port evidence string-checked and carried
+ok 140 - investigate: dispatch once; port evidence string-checked and carried
+  ---
+  duration_ms: 0.076542
+  ...
+# Subtest: task-rewrite: revision bump from the port becomes evidence
+ok 141 - task-rewrite: revision bump from the port becomes evidence
+  ---
+  duration_ms: 0.07275
+  ...
+# Subtest: escalate: channel from the port becomes evidence
+ok 142 - escalate: channel from the port becomes evidence
+  ---
+  duration_ms: 0.045
+  ...
+# Subtest: kill: runner.stop by session; confirmed stop acks, unconfirmed is act-unknown
+ok 143 - kill: runner.stop by session; confirmed stop acks, unconfirmed is act-unknown
+  ---
+  duration_ms: 0.0895
+  ...
+# Subtest: accept-finish: record-only — no ports beyond the journal are needed
+ok 144 - accept-finish: record-only — no ports beyond the journal are needed
+  ---
+  duration_ms: 0.049125
+  ...
+# Subtest: accept-finish without evidence still records evidenceRefs ['none']
+ok 145 - accept-finish without evidence still records evidenceRefs ['none']
+  ---
+  duration_ms: 0.03275
+  ...
+# Subtest: §6: outcome is progress:'none' + acked=delivery on every executed act
+ok 146 - §6: outcome is progress:'none' + acked=delivery on every executed act
+  ---
+  duration_ms: 0.039375
+  ...
+# Subtest: §5: act port throws → failed@act, outcome never claims a delivered act
+ok 147 - §5: act port throws → failed@act, outcome never claims a delivered act
+  ---
+  duration_ms: 0.084875
+  ...
+# Subtest: §5: runner.run throws after the reservation → failed@act, never retried
+ok 148 - §5: runner.run throws after the reservation → failed@act, never retried
+  ---
+  duration_ms: 0.063
+  ...
+# Subtest: §6/E6: outcome-append failure → executed with outcomeDurable:false, no re-run
+ok 149 - §6/E6: outcome-append failure → executed with outcomeDurable:false, no re-run
+  ---
+  duration_ms: 0.0895
+  ...
+# Subtest: §5: describeError is field-by-field (P14 S-F5): throwing message must not escape
+ok 150 - §5: describeError is field-by-field (P14 S-F5): throwing message must not escape
+  ---
+  duration_ms: 0.117041
+  ...
+# Subtest: §5: stringly-thrown values are described as {name:'error'}
+ok 151 - §5: stringly-thrown values are described as {name:'error'}
+  ---
+  duration_ms: 0.054959
+  ...
+# Subtest: §5: hostile ctx (throwing Proxy) never rejects — fails closed at context
+ok 152 - §5: hostile ctx (throwing Proxy) never rejects — fails closed at context
+  ---
+  duration_ms: 0.047917
+  ...
+# Subtest: §1: context validation matrix refuses with stage 'context'
+ok 153 - §1: context validation matrix refuses with stage 'context'
+  ---
+  duration_ms: 0.240666
+  ...
+# Subtest: §5: injected throws at EVERY stage never reject (stage → status map)
+ok 154 - §5: injected throws at EVERY stage never reject (stage → status map)
+  ---
+  duration_ms: 0.536416
+  ...
+# Subtest: §1: executedAt echoes ctx.now — never a second clock read
+ok 155 - §1: executedAt echoes ctx.now — never a second clock read
+  ---
+  duration_ms: 0.039458
+  ...
+# Subtest: guard: src/executor imports NOTHING — not even node: (pure-ports, docs/15 §0.5)
+ok 156 - guard: src/executor imports NOTHING — not even node: (pure-ports, docs/15 §0.5)
+  ---
+  duration_ms: 7.883084
+  ...
+# Subtest: guard: only the P16 host entry imports the executor (wired by src/host/supervise.ts)
+ok 157 - guard: only the P16 host entry imports the executor (wired by src/host/supervise.ts)
+  ---
+  duration_ms: 13.393417
+  ...
+# Subtest: drift guard: executor mirror tables are deep-equal to the REAL planner exports
+ok 158 - drift guard: executor mirror tables are deep-equal to the REAL planner exports
+  ---
+  duration_ms: 0.10075
+  ...
+# Subtest: mirror pin: executor action enum matches the journal + planner enums 1:1
+ok 159 - mirror pin: executor action enum matches the journal + planner enums 1:1
+  ---
+  duration_ms: 0.028375
+  ...
+# Subtest: drift guard: model-swap instantiates swap:model:<id>:v1 (the swapTemplate shape)
+ok 160 - drift guard: model-swap instantiates swap:model:<id>:v1 (the swapTemplate shape)
+  ---
+  duration_ms: 0.038292
+  ...
+# Subtest: F1: plan-carried identity is verified against ctx (confused-deputy refused)
+ok 161 - F1: plan-carried identity is verified against ctx (confused-deputy refused)
+  ---
+  duration_ms: 0.247625
+  ...
+# Subtest: F3: revoked-Proxy error values never escape the §5 fence
+ok 162 - F3: revoked-Proxy error values never escape the §5 fence
+  ---
+  duration_ms: 0.187084
+  ...
+# Subtest: F5: journal read() resolving garbage → journal-unreadable (no dedup bypass)
+ok 163 - F5: journal read() resolving garbage → journal-unreadable (no dedup bypass)
+  ---
+  duration_ms: 0.107167
+  ...
+# Subtest: F6: mid-flight ctx mutation cannot split identity (frozen single-read snapshot)
+ok 164 - F6: mid-flight ctx mutation cannot split identity (frozen single-read snapshot)
+  ---
+  duration_ms: 0.068458
+  ...
+# Subtest: F9: unknown reconcile decision refuses (spawn only on literal 'spawn')
+ok 165 - F9: unknown reconcile decision refuses (spawn only on literal 'spawn')
+  ---
+  duration_ms: 0.141
+  ...
+# Subtest: F7: kill (no strategy template) journals an intent the REAL schema accepts
+ok 166 - F7: kill (no strategy template) journals an intent the REAL schema accepts
+  ---
+  duration_ms: 0.039375
+  ...
+# Subtest: integration: executor → REAL DecisionJournal, all 12 actions + dedup on disk
+ok 167 - integration: executor → REAL DecisionJournal, all 12 actions + dedup on disk
+  ---
+  duration_ms: 182.867333
+  ...
+# Subtest: R1-G1: hostile denials array (throwing element getter) → clean gate-denied with no-effect outcome
+ok 168 - R1-G1: hostile denials array (throwing element getter) → clean gate-denied with no-effect outcome
+  ---
+  duration_ms: 0.293708
+  ...
+# Subtest: R1-G3: journal records are frozen before handoff (retaining port cannot mutate the record)
+ok 169 - R1-G3: journal records are frozen before handoff (retaining port cannot mutate the record)
+  ---
+  duration_ms: 0.12725
+  ...
+# Subtest: R2-G2: gate result with a throwing 'allowed' getter (live Proxy) → refused, no stranded intent
+ok 170 - R2-G2: gate result with a throwing 'allowed' getter (live Proxy) → refused, no stranded intent
+  ---
+  duration_ms: 0.129209
+  ...
+# Subtest: R2-G4: kill with a smuggled junk strategyId — omitted from the intent (not template-verified for kill)
+ok 171 - R2-G4: kill with a smuggled junk strategyId — omitted from the intent (not template-verified for kill)
+  ---
+  duration_ms: 0.056833
+  ...
+# Subtest: R3-B1: an act that threw AFTER landing is not replayable (no second spawn)
+ok 172 - R3-B1: an act that threw AFTER landing is not replayable (no second spawn)
+  ---
+  duration_ms: 0.170458
+  ...
+# Subtest: R3-B2: a delivered escalate whose result read throws stays non-replayable
+ok 173 - R3-B2: a delivered escalate whose result read throws stays non-replayable
+  ---
+  duration_ms: 0.101417
+  ...
+# Subtest: R3-B4/R4-B: the rationale is refused at plan time, not silently truncated
+ok 174 - R3-B4/R4-B: the rationale is refused at plan time, not silently truncated
+  ---
+  duration_ms: 0.083834
+  ...
+# Subtest: R4-A: an UNCONFIRMED kill is act-unknown, never replayable
+ok 175 - R4-A: an UNCONFIRMED kill is act-unknown, never replayable
+  ---
+  duration_ms: 0.49675
+  ...
+# Subtest: R4-A: a hostile `stopped` getter is unconfirmed, not a second kill
+ok 176 - R4-A: a hostile `stopped` getter is unconfirmed, not a second kill
+  ---
+  duration_ms: 0.103167
+  ...
+# Subtest: A3: a kill with ctx.attemptId pins the stop handle and the evidence says attempt
+ok 177 - A3: a kill with ctx.attemptId pins the stop handle and the evidence says attempt
+  ---
+  duration_ms: 0.156375
+  ...
+# Subtest: F2 (cycle-2): stopped:true from a runner that ignores the attestation is NEVER attempt-confirmed
+ok 178 - F2 (cycle-2): stopped:true from a runner that ignores the attestation is NEVER attempt-confirmed
+  ---
+  duration_ms: 0.09
+  ...
+# Subtest: F2 (cycle-2): attestation naming a DIFFERENT attempt (a successor) is unconfirmed
+ok 179 - F2 (cycle-2): attestation naming a DIFFERENT attempt (a successor) is unconfirmed
+  ---
+  duration_ms: 0.060166
+  ...
+# Subtest: A3: a runner refusing a stale pin throws after the act began — act-unknown, never retried
+ok 180 - A3: a runner refusing a stale pin throws after the act began — act-unknown, never retried
+  ---
+  duration_ms: 0.104917
+  ...
+1..180
+# tests 186
+# suites 14
+# pass 185
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3274.116625
