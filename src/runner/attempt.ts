@@ -921,7 +921,7 @@ export class AttemptRunner {
     // A2/F1 (cycle-2 re-audit): a leader that exited BEFORE this call
     // retires signalling authority — the post-exit path only verifies.
     if (entry.exited) return this.verifyExitedGroup(entry);
-    let escalated = await this.terminate(entry);
+    const escalated = await this.terminate(entry);
     // E (audit) / F1 (cycle-4 review): after an escalation ATTEMPT the
     // leader may be UNSIGNALABLE (the KILL was denied, or delivered to a
     // leader that never reaps) — `await exitPromise` alone is then a hang,
@@ -958,24 +958,20 @@ export class AttemptRunner {
     // The exit event reaps the DIRECT child; the group may still hold
     // grandchildren (F5). Verify with kill(-pgid,0) — NOT `ps` (blocked
     // in some sandboxes, and its failure was being converted to "no
-    // survivors"): ESRCH ⇒ group confirmed gone; 0 ⇒ survivors → one
-    // SIGKILL sweep + re-verify; EPERM ⇒ undeterminable.
+    // survivors"): ESRCH ⇒ group confirmed gone; 0 ⇒ survivors under a
+    // reaped leader (ownership unprovable — never swept here); EPERM ⇒
+    // undeterminable.
     let verdict = this.probeGroup(entry);
-    if (verdict === "alive" && !entry.exited) {
-      // SIGTERM did not take while the leader was still unreaped: the
-      // group number is still pinned by that leader, so a SIGKILL sweep is
-      // sound. Bounded poll: kernel reaping of killed members is async.
-      // The poll runs whether or not the kernel accepted the KILL — a
-      // denied KILL simply leaves the group "alive" and reports unknown.
-      escalated = true;
-      this.signalGroup(entry, "SIGKILL");
-      for (let i = 0; i < 25 && verdict === "alive"; i++) {
-        await delay(20);
-        verdict = this.probeGroup(entry);
-      }
-    }
-    // F1 (cycle-3): "alive" after the leader was reaped is UNPROVABLE
-    // ownership — report unknown, never SIGKILL a historical number.
+    // Post-exit survivor handling (cycle-4 audit): reaching this line with
+    // the group still "alive" means the LEADER was reaped — every path that
+    // resolves exitPromise (the child's "exit" event; a test rig settling
+    // it) sets entry.exited first, and the signalGroup authority gate
+    // would refuse a sweep of a reaped leader's number anyway. That state
+    // is F1 (cycle-3) UNPROVABLE ownership: report unknown, never SIGKILL
+    // a historical number. (The pre-cycle-5 "SIGTERM did not take while
+    // the leader is still unreaped → sweep" branch lived here too; it was
+    // unreachable — leader-unreaped stops return at the bounded
+    // exit-race above, having already escalated inside terminate().)
     if (verdict === "alive" && entry.exited) verdict = "unknown";
     const stopped = verdict === "reaped";
     return { attemptId: entry.attemptId, stopped, escalated, code, signal, groupStatus: verdict };
@@ -2021,9 +2017,10 @@ export class AttemptRunner {
   }
 
   /** SIGTERM the group (or bare pid), escalate SIGKILL after
-   *  stopTimeoutMs OR when the direct child died but the group is still
-   *  alive (F5). Returns whether escalation happened. ESRCH is the
-   *  outcome we wanted (group already gone), never an error. */
+   *  stopTimeoutMs if the direct child is still un-exited. Returns whether
+   *  escalation was ATTEMPTED (a KILL decision reached — delivery is not
+   *  implied: signalGroup swallows EPERM/ESRCH). ESRCH is the outcome we
+   *  wanted (group already gone), never an error. */
   private async terminate(entry: ChildEntry): Promise<boolean> {
     // F1 (cycle-3): after the leader is reaped nothing is signalled — the
     // signalGroup gate refuses; survivors are reported by stop() as unknown.

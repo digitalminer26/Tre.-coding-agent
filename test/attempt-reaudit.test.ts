@@ -312,7 +312,20 @@ describe("F3/F1 (cycle-4 review): real stop() integration under concurrency and 
       (r as unknown as Record<string, unknown>).__entry = entry;
       (r as unknown as Record<string, unknown>).stopTimeoutMs = 10;
       const t0 = Date.now();
-      const res = await r.stop({ session: "s" });
+      // Independent deadline: a regressed stop() (bounded wait disabled)
+      // would hang forever, and node:test's default timeout is infinite —
+      // race against our own deadline so the failure is deterministic and
+      // self-explanatory instead of a suite-wide stall.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error("stop() exceeded the 4s bounded deadline — denied-KILL hang regression")), 4000);
+      });
+      let res: Awaited<ReturnType<typeof r.stop>>;
+      try {
+        res = await Promise.race([r.stop({ session: "s" }), deadline]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       const took = Date.now() - t0;
       assert.equal(res.stopped, false);
       assert.equal(res.groupStatus, "unknown", "an un-killable, un-exited leader is unknown, not swept");

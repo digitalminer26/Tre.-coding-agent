@@ -46,7 +46,13 @@ of the cycle-2 fixes — 2 findings, both REAL and fixed this cycle).
 
 ### Verification (this cycle)
 - `npx tsc` clean; full suite (`node --test dist/test/*.test.js`) green:
-  **2,767 tests, 0 fail** (2,753 pass, 14 skipped).
+  **2,769 tests, 0 fail** (2,755 pass, 14 skipped).
+- Cycle-5 follow-up (post-commit audit of `6c0e769`): the denied-KILL test
+  races an independent 4 s deadline (a hang regression now fails loudly at
+  the deadline — verified against the pre-`6c0e769` source); the
+  post-exit "sweep while unreaped" branch in `stop()` was removed as
+  unreachable (the `signalGroup` gate would refuse it and the bounded
+  exit-race returns first) with comments corrected.
 
 ## 2026-08-04 — cycle 2: close re-audit A1/A2/A3 (commit 9b82d74)
 
