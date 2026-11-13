@@ -459,6 +459,13 @@ interface ChildEntry {
   signal: NodeJS.Signals | null;
   /** process-group id captured at 'spawn' (detached ⇒ pgid === pid). */
   pgid?: number;
+  /** F1 (cycle-2 audit, HIGH): permanent latch — set the first time this
+   *  entry's group death is CONFIRMED (kill(-pgid,0) → ESRCH) by ANY
+   *  observation (stop's post-exit verification, a concurrent stop, or
+   *  the post-exit observation path). Once set the number must never be
+   *  probed or signalled AGAIN: after full reap the pgid can be recycled
+   *  for a stranger group, and a later kill(-pgid,…) would signal it. */
+  groupDeathConfirmed?: boolean;
   settle: (v: { code: number | null; signal: NodeJS.Signals | null }) => void;
   exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
@@ -911,10 +918,9 @@ export class AttemptRunner {
   async stop(handle: StopTarget): Promise<StopResult> {
     this.assertOpen();
     const entry = this.resolveTarget(handle, "stop");
-    // A2 (re-audit): the leader's exit does not end the group. A tracked
-    // group that still has members is this runner's own to sweep, so
-    // stop() stays available after the direct child has exited.
-    if (entry.exited) return this.sweepExitedGroup(entry);
+    // A2/F1 (cycle-2 re-audit): a leader that exited BEFORE this call
+    // retires signalling authority — the post-exit path only verifies.
+    if (entry.exited) return this.verifyExitedGroup(entry);
     let escalated = await this.terminate(entry);
     // E (audit): after an escalation the leader may be UNSIGNALABLE
     // (EPERM swallowed by signalGroup) — `await exitPromise` alone is
@@ -970,6 +976,7 @@ export class AttemptRunner {
       }
     }
     const stopped = verdict === "reaped";
+    if (stopped) entry.groupDeathConfirmed = true; // F1 latch: this number is never probed/signalled again
     return { attemptId: entry.attemptId, stopped, escalated, code, signal, groupStatus: verdict };
   }
 
@@ -999,36 +1006,39 @@ export class AttemptRunner {
     return entry;
   }
 
-  /** A2 (re-audit): the direct child has exited; sweep what remains of its
-   *  recorded process group. Group identity is this runner's own (pgid
-   *  journalled at spawn), so the sweep is bounded to that group. An
-   *  unproven group (no pgid, inherited) is reported as unknown, never
-   *  swept. Each call re-verifies with kill(-pgid,0) so a retry after a
-   *  `stopped:false` verdict is meaningful. */
-  private async sweepExitedGroup(entry: ChildEntry): Promise<StopResult> {
+  /** A2/F1 (cycle-2 re-audit): the direct child exited BEFORE this stop()
+   *  was called. Group signalling authority retired at that moment: the
+   *  recorded pgid is a historical number, and after our whole group was
+   *  reaped the OS may recycle it for a stranger — so this path only
+   *  PROBES (kill(-pgid,0) never signals) and latches:
+   *    - death already confirmed earlier (this runner observed ESRCH once)
+   *      ⇒ re-answers the latched verdict WITHOUT re-probing (a re-probe
+   *      of a recycled number could answer "alive" for a stranger);
+   *    - first probe ESRCH ⇒ confirmed gone, latch set, stopped:true;
+   *    - "alive" ⇒ reported "unknown" with stopped:false — a live group
+   *      under our number cannot be proven ours any more (our leader is
+   *      reaped), so no signal is ever sent and the fence stays closed;
+   *      a survivor sweep then requires the operator path reconcile +
+   *      confirmStopped against positive evidence (W4), not a blind kill;
+   *    - EPERM/undeterminable ⇒ unknown.
+   *  Signalling authority exists ONLY while the leader is (or was, inside
+   *  one stop call) alive: a live leader pins the number against reuse,
+   *  which is what the live path in stop() relies on. */
+  private async verifyExitedGroup(entry: ChildEntry): Promise<StopResult> {
     const exit = await entry.exitPromise;
     const { code, signal } = exit;
+    if (entry.groupDeathConfirmed) {
+      return { attemptId: entry.attemptId, stopped: true, escalated: false, code, signal, groupStatus: "reaped" };
+    }
     if (!entry.pgid) {
       return { attemptId: entry.attemptId, stopped: false, escalated: false, code, signal, groupStatus: "unknown" };
     }
-    let verdict = this.groupAlive(entry.pgid);
-    let escalated = false;
-    if (verdict === "alive") {
-      escalated = true;
-      this.signalGroup(entry, "SIGTERM");
-      for (let i = 0; i < 25 && verdict === "alive"; i++) {
-        await delay(20);
-        verdict = this.groupAlive(entry.pgid);
-      }
-      if (verdict === "alive") {
-        this.signalGroup(entry, "SIGKILL");
-        for (let i = 0; i < 25 && verdict === "alive"; i++) {
-          await delay(20);
-          verdict = this.groupAlive(entry.pgid);
-        }
-      }
-    }
-    return { attemptId: entry.attemptId, stopped: verdict === "reaped", escalated, code, signal, groupStatus: verdict };
+    const verdict = this.groupAlive(entry.pgid);
+    if (verdict === "reaped") entry.groupDeathConfirmed = true; // latch: never probe this number again
+    // F1: "alive" is downgraded to "unknown" — ownership of a live group
+    // under a leaderless number is unprovable, and it must never be
+    // answered with a signal. stopped stays false (fence holds).
+    return { attemptId: entry.attemptId, stopped: verdict === "reaped", escalated: false, code, signal, groupStatus: verdict === "reaped" ? "reaped" : "unknown" };
   }
 
   // ─────────────────────────── reconcile (I1/I2) ────────────────────────────

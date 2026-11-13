@@ -171,8 +171,13 @@ export interface RunnerPort {
   run(task: object): Promise<{ attemptId: string; pid?: number }>;
   resume(task: object, attemptId: string): Promise<{ attemptId: string; pid?: number }>;
   /** A3 (re-audit): `attemptId` pins the stop to the attempt the plan
-   *  targets — a runner must refuse to act on a successor attempt. */
-  stop(handle: { session: string; attemptId?: string }): Promise<{ stopped: boolean }>;
+   *  targets — a runner must refuse to act on a successor attempt.
+   *  F2 (cycle-2): a CONFIRMED answer must ATTEST the target: the
+   *  response's `attemptId` is the attempt actually stopped. A pinned
+   *  execution trusts `stopped:true` only when the attestation matches
+   *  ctx.attemptId — a runner that ignores the pin can never make the
+   *  journal claim a pinned confirmation. */
+  stop(handle: { session: string; attemptId?: string }): Promise<{ stopped: boolean; attemptId?: string }>;
 }
 
 /** Mirror of the P8 gate (docs/12 §4 check→reserve composition lives in
@@ -952,12 +957,22 @@ export async function executeRecoveryAction(
           effectStarted = true;
           const r = await runner!.stop({ session: ctx.session, ...(ctx.attemptId !== undefined ? { attemptId: ctx.attemptId } : {}) });
           const stopped = portField(r, 'stopped'); // fence-safe: hostile getter → undefined
-          acked = stopped === true;              // delivery = confirmed stop
+          // F2 (cycle-2): a pinned stop is only CONFIRMED when the
+          // response attests which attempt it stopped. `stopped:true`
+          // from a runner that ignored the pin (or names a different
+          // attempt — including a successor it killed) stays UNCONFIRMED:
+          // acked=false, act-unknown, non-replayable. An unreadable
+          // attemptId getter is handled by the same fence (undefined).
+          const attested = portField(r, 'attemptId');
+          const attestedStr = isStr(attested, MAX_STR) ? attested : undefined;
+          const pinApplied = ctx.attemptId !== undefined;
+          const confirmed = stopped === true && (!pinApplied || attestedStr === ctx.attemptId);
+          acked = confirmed;                     // delivery = confirmed stop
           if (!acked) actNotes = 'act-unknown: stop-unconfirmed';
-          // Evidence names the pin actually applied: an attempt-pinned
-          // stop says `stop:attempt-*`; a session-scoped stop (no
-          // attemptId in the plan) says `stop:session-*` (R4-E).
-          actEvidence = [`stop:${ctx.attemptId !== undefined ? 'attempt' : 'session'}-${acked ? 'confirmed' : 'unconfirmed'}`];
+          // Evidence names the pin actually applied AND attested (R4-E):
+          // an attempt-pinned, attempt-attested confirmed stop says
+          // `stop:attempt-confirmed`; anything else is unconfirmed.
+          actEvidence = [`stop:${pinApplied ? 'attempt' : 'session'}-${acked ? 'confirmed' : 'unconfirmed'}`];
           break;
         }
         case 'accept-finish': {

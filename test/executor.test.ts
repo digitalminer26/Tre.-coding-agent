@@ -1292,7 +1292,7 @@ test("A3: a kill with ctx.attemptId pins the stop handle and the evidence says a
       reconcile: async () => ({ decision: { action: "spawn", reasons: [] } }),
       run: async () => ({ attemptId: "a1" }),
       resume: async () => ({ attemptId: "a1" }),
-      stop: async (h: { session: string; attemptId?: string }) => { seen = h; return { stopped: true }; },
+      stop: async (h: { session: string; attemptId?: string }) => { seen = h; return { stopped: true, attemptId: h.attemptId }; },
     },
   } as unknown as ExecutorPorts;
   const res = await executeRecoveryAction(planFor("kill"), ctx({ session: "sess-1", attemptId: "task-1-a1" }), ports);
@@ -1300,6 +1300,49 @@ test("A3: a kill with ctx.attemptId pins the stop handle and the evidence says a
   assert.deepEqual(seen, { session: "sess-1", attemptId: "task-1-a1" }, "the runner receives the attempt pin");
   const o = kept.filter((r) => r.kind === "decision-outcome")[0]!;
   assert.deepEqual(o.evidenceRefs, ["stop:attempt-confirmed"]);
+});
+
+test("F2 (cycle-2): stopped:true from a runner that ignores the attestation is NEVER attempt-confirmed", async () => {
+  // A structurally compatible runner may accept {session, attemptId} and
+  // answer {stopped:true} without attesting WHICH attempt it stopped (or
+  // attest a successor). The journal may not claim a pinned confirmation
+  // it cannot prove: acked=false, act-unknown, non-replayable.
+  const kept: Rec[] = [];
+  const ports = {
+    journal: { append: async (r: object) => { kept.push(r as Rec); }, read: async () => ({ records: kept.slice() }) },
+    runner: {
+      reconcile: async () => ({ decision: { action: "spawn", reasons: [] } }),
+      run: async () => ({ attemptId: "a1" }),
+      resume: async () => ({ attemptId: "a1" }),
+      stop: async () => ({ stopped: true }), // no attemptId attestation
+    },
+  } as unknown as ExecutorPorts;
+  const res = await executeRecoveryAction(planFor("kill"), ctx({ session: "sess-1", attemptId: "task-1-a1" }), ports);
+  assert.equal(res.status, "executed");
+  const o = kept.filter((r) => r.kind === "decision-outcome")[0]!;
+  assert.equal(o.acked, false, "confirmation requires the attestation to match the pin");
+  assert.match(String(o.notes), /^act-unknown: stop-unconfirmed/);
+  assert.deepEqual(o.evidenceRefs, ["stop:attempt-unconfirmed"]);
+  const again = await executeRecoveryAction(planFor("kill"), ctx({ session: "sess-1", attemptId: "task-1-a1" }), ports);
+  assert.equal(again.status, "refused", "unconfirmed acts are never replayed");
+});
+
+test("F2 (cycle-2): attestation naming a DIFFERENT attempt (a successor) is unconfirmed", async () => {
+  const kept: Rec[] = [];
+  const ports = {
+    journal: { append: async (r: object) => { kept.push(r as Rec); }, read: async () => ({ records: kept.slice() }) },
+    runner: {
+      reconcile: async () => ({ decision: { action: "spawn", reasons: [] } }),
+      run: async () => ({ attemptId: "a1" }),
+      resume: async () => ({ attemptId: "a1" }),
+      stop: async () => ({ stopped: true, attemptId: "task-1-a2" }), // stopped a successor
+    },
+  } as unknown as ExecutorPorts;
+  const res = await executeRecoveryAction(planFor("kill"), ctx({ session: "sess-1", attemptId: "task-1-a1" }), ports);
+  assert.equal(res.status, "executed");
+  const o = kept.filter((r) => r.kind === "decision-outcome")[0]!;
+  assert.equal(o.acked, false);
+  assert.deepEqual(o.evidenceRefs, ["stop:attempt-unconfirmed"]);
 });
 
 test("A3: a runner refusing a stale pin throws after the act began — act-unknown, never retried", async () => {

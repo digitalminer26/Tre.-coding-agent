@@ -59,14 +59,13 @@ after(async () => {
 });
 
 describe("A2: stop() sweeps the tracked group after the leader has exited", () => {
-  it("TERM-ignoring grandchild survives a SIGKILLed leader; stop() sweeps the real group and a retry is truthful", async () => {
+  it("leader SIGKILLed pre-stop: stop() VERIFIES only (never signals a leaderless pgid), reports the honest unknown, then confirms after the operator sweep and latches", async () => {
     const episodeId = "ra-a2";
     const ses = join(root, "sessions", "a2.jsonl");
     const ready = join(root, "a2.ready");
-    const grandpid = join(root, "a2.grand");
     await mkdir(join(root, "sessions"), { recursive: true });
     const runner = await openRunner(episodeId, shellSpawner(
-      `sh -c 'trap "" TERM; echo $$ > ${grandpid}; : > ${ready}; while :; do sleep 1; done' & wait`));
+      `sh -c 'trap "" TERM; : > ${ready}; while :; do sleep 1; done' & wait`));
     const task: AttemptTask = { episodeId, taskId: "t1", session: ses };
     const h = await runner.run(task);
     strays.add(h.pid!);
@@ -75,17 +74,44 @@ describe("A2: stop() sweeps the tracked group after the leader has exited", () =
     await h.exited;
     assert.ok(groupAlive(h.pid!), "precondition: the real group still has a grandchild");
 
-    const first = await runner.stop(h);
+    // F1 (cycle-2): the leader is reaped, so this stop must NOT signal
+    // the group number (it may one instant be recycled for strangers).
+    // Spy on process.kill to prove ZERO signals leave this call.
+    const origKill = process.kill.bind(process);
+    const signals: string[] = [];
+    (process as { kill: unknown }).kill = ((target: number, sig?: number | string) => {
+      signals.push(`${String(target)}:${String(sig ?? "signal0")}`);
+      return origKill(target as never, sig as never);
+    }) as typeof process.kill;
+    let first: Awaited<ReturnType<typeof runner.stop>>;
+    try { first = await runner.stop(h); } finally { (process as { kill: unknown }).kill = origKill; }
     assert.equal(first.attemptId, h.attemptId);
-    assert.equal(first.stopped, true, "group swept and confirmed gone");
-    assert.equal(first.groupStatus, "reaped");
-    assert.equal(first.escalated, true, "TERM-ignoring survivor forces the SIGKILL sweep");
-    assert.equal(groupAlive(h.pid!), false, "kill(-pgid,0) confirms the real group is gone");
+    assert.equal(first.stopped, false, "a live group under a leaderless number is NOT ours to kill");
+    assert.equal(first.groupStatus, "unknown", "ownership unprovable => unknown, never swept, never reaped-laundered");
+    assert.equal(first.escalated, false, "no escalation happened — nothing was signalled");
+    assert.deepEqual(signals.filter((s) => !s.endsWith(":0")), [], "only probe-0 touched the group — no signal was ever sent to a leaderless number");
+    assert.ok(groupAlive(h.pid!), "the grandchild survived untouched");
 
-    // Retry after the group is gone: honest, not a not-running dead end.
-    const again = await runner.stop(h);
-    assert.equal(again.groupStatus, "reaped");
-    assert.equal(again.stopped, true);
+    // Operator path (W4 doctrine): sweep the group with positive
+    // evidence, then stop() PROVES death by probe and latches.
+    try { process.kill(-h.pid!, "SIGKILL"); } catch { /* gone */ }
+    for (let i = 0; groupAlive(h.pid!) && i < 60; i++) await delay(25);
+    const second = await runner.stop(h);
+    assert.equal(second.stopped, true, "kill(-pgid,0) -> ESRCH: confirmed gone");
+    assert.equal(second.groupStatus, "reaped");
+
+    // Latch: after confirmation the number is NEVER probed or signalled
+    // again — a recycled pgid can never be reached by stop().
+    const signals2: string[] = [];
+    (process as { kill: unknown }).kill = ((target: number, sig?: number | string) => {
+      signals2.push(`${String(target)}:${String(sig ?? "signal0")}`);
+      return origKill(target as never, sig as never);
+    }) as typeof process.kill;
+    let third: Awaited<ReturnType<typeof runner.stop>>;
+    try { third = await runner.stop(h); } finally { (process as { kill: unknown }).kill = origKill; }
+    assert.equal(third.groupStatus, "reaped", "the latched verdict re-answers");
+    assert.equal(third.stopped, true);
+    assert.deepEqual(signals2, [], "post-latch stop performs NO kill(2) at all — the number is retired");
   });
 });
 
