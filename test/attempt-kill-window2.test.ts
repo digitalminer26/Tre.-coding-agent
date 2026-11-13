@@ -370,7 +370,9 @@ describe("(+) W2 trap-readiness: escalated:true with a READY marker written AFTE
     const ready = join(root, "sessions", `${ep}.ready`);
     // The marker is written strictly AFTER the TERM trap is installed:
     // escalated:true can then only mean the TERM was ignored on purpose.
-    const runner = await openRunner(ep, shellSpawner(`trap '' TERM; : > ${ready}; while :; do sleep 0.2; done`), { stopTimeoutMs: 150 });
+    // Raised from 150 to 600 after 1 full-suite load flake (5/5 isolation passed)
+    // — window headroom; semantics unchanged.
+    const runner = await openRunner(ep, shellSpawner(`trap '' TERM; : > ${ready}; while :; do sleep 0.2; done`), { stopTimeoutMs: 600 });
     const task: AttemptTask = { episodeId: ep, taskId: "t1", session: join(root, "sessions", `${ep}.jsonl`) };
 
     const h = track(await runner.run(task));
