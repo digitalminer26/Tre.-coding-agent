@@ -1,4 +1,37 @@
-# STATUS — attempt-lifecycle hardening (kill-window audit workstream)
+# STATUS — attempt-lifecycle hardening (kill-window audit workstream) — CLOSED
+
+## CLOSED — 2026-11-13: workstream converged and published
+
+The kill-window audit workstream is **closed**. Five review cycles ran; the
+last full-finding cycle (4) produced 2 real findings (both fixed in
+`6c0e769`), the post-commit audit of it produced only LOW cleanup items
+(all fixed in `a9ed772`), and the re-audit of those produced none — the
+finding rate has gone to zero, so no further cycles will be run.
+
+- **Published chain (origin/main = `a9ed772`):**
+  `1737421` cycle-3 fixes → `fa46b26` STATUS → `dfaf936` kill(2)-site gate
+  + death latch → `6c0e769` bounded stop on attempted escalation, exact
+  signal assertion, concurrency integration test, log cleanup →
+  `a9ed772` dead-branch removal + deadline-guarded denied-KILL test.
+- **Final invariants** (see cycle-3 entry): all group signals flow through
+  the single `signalGroup` gate (unreaped leader AND unlatched death,
+  synchronously checked at the `kill(2)`); escalation is reported as
+  attempted, and every escalation bounds its exit wait; a reaped leader's
+  group number is never probed again or signalled — survivors there are
+  `unknown` and swept only by the operator path.
+- **Verification at close:** `npx tsc` clean; quality gate OK; full suite
+  **2,769 tests, 0 fail** (2,755 pass, 14 skipped).
+- **Residual known limitations (accepted, by design — not open bugs):**
+  - A group that is "alive" under a reaped leader is ownership-UNPROVABLE;
+    `stop()` reports `unknown` and never sweeps a historical pgid (W4).
+    Reclaiming such a group requires the operator path with positive
+    evidence.
+  - Non-detached (inherited-group) children can never yield
+    `stopped:true`/`reaped` from `stop()`; their survivor fence stays
+    closed until descendant ownership is independently disproven (G1).
+  - A KILL denied by EPERM leaves the child running and tracked; the
+    session stays fenced and the verdict honest (`unknown`) rather than
+    optimistic.
 
 ## 2026-08-04 — cycle 3: post-review fixes (F1 pgid-reuse kill removed, F2 confirmed-evidence attestation)
 
