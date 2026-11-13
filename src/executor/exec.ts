@@ -170,7 +170,9 @@ export interface RunnerPort {
   reconcile(task: object): Promise<{ decision: { action: 'spawn' | 'park' | 'running'; reasons: string[] } }>;
   run(task: object): Promise<{ attemptId: string; pid?: number }>;
   resume(task: object, attemptId: string): Promise<{ attemptId: string; pid?: number }>;
-  stop(handle: { session: string }): Promise<{ stopped: boolean }>;
+  /** A3 (re-audit): `attemptId` pins the stop to the attempt the plan
+   *  targets — a runner must refuse to act on a successor attempt. */
+  stop(handle: { session: string; attemptId?: string }): Promise<{ stopped: boolean }>;
 }
 
 /** Mirror of the P8 gate (docs/12 §4 check→reserve composition lives in
@@ -939,12 +941,23 @@ export async function executeRecoveryAction(
           // both recorded as "no effect"). §14.3/I5: unconfirmed is
           // UNKNOWN — never re-issued blindly. The comment that used to sit
           // here claimed the opposite of what the code did.
+          // A3 (re-audit): the stop ALSO carries ctx.attemptId when the
+          // plan targets one, so the runner can refuse (throw) a stop
+          // whose attemptId no longer matches the tracked attempt — a
+          // stale plan can never signal a successor. The refusal throws
+          // AFTER `effectStarted` (nothing was sent, but the executor
+          // cannot prove the port refused rather than partially acted),
+          // so the catch records act-unknown — non-replayable, which is
+          // exactly the conservative outcome an unobservable act wants.
           effectStarted = true;
-          const r = await runner!.stop({ session: ctx.session });
+          const r = await runner!.stop({ session: ctx.session, ...(ctx.attemptId !== undefined ? { attemptId: ctx.attemptId } : {}) });
           const stopped = portField(r, 'stopped'); // fence-safe: hostile getter → undefined
           acked = stopped === true;              // delivery = confirmed stop
           if (!acked) actNotes = 'act-unknown: stop-unconfirmed';
-          actEvidence = [acked ? 'stop:session-confirmed' : 'stop:session-unconfirmed'];
+          // Evidence names the pin actually applied: an attempt-pinned
+          // stop says `stop:attempt-*`; a session-scoped stop (no
+          // attemptId in the plan) says `stop:session-*` (R4-E).
+          actEvidence = [`stop:${ctx.attemptId !== undefined ? 'attempt' : 'session'}-${acked ? 'confirmed' : 'unconfirmed'}`];
           break;
         }
         case 'accept-finish': {

@@ -11,7 +11,10 @@
  *
  * The kills land in the windows of the attempt transaction:
  *   W2   fully running (SIGTERM-ignoring worker; runner stop() escalates
- *        to a REAL process-group SIGKILL and reports confirmed group death)
+ *        to a REAL process-group SIGKILL and reports confirmed group death
+ *        — the worker writes a READY marker strictly AFTER installing the
+ *        TERM trap, so escalated:true can never be an artifact of TERM
+ *        arriving before the trap exists)
  *   W3   worker killed while the supervisor "restarts" (close + reopen:
  *        journal-first reconcile releases on the real ps truth)
  *   W4   group survivor (leader SIGKILLed, grandchild keeps writing the
@@ -146,16 +149,23 @@ describe("W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL
 
   it("stop() kills the group for real, reports confirmed group death with the real pids, and the fence releases without confirmStopped (journal-first: proven mode + real group death)", async () => {
     const ses = join(root, "sessions", "w2.jsonl");
-    const runner = await openRunner(episodeId, shellSpawner(`trap '' TERM; while :; do sleep 0.2; done`), 150);
+    const ready = join(root, "sessions", "w2.ready");
+    // READY handshake (Sol R2 audit): the marker is written STRICTLY
+    // AFTER the TERM trap is installed, so stop() never races trap
+    // installation — `escalated:true` can only mean the trap was in
+    // place and TERM was ignored on purpose, never that TERM arrived
+    // before the trap existed.
+    const runner = await openRunner(episodeId, shellSpawner(`trap '' TERM; : > ${ready}; while :; do sleep 0.2; done`), 150);
     const task: AttemptTask = { episodeId, taskId: "t1", session: ses };
 
     const h = track(await runner.run(task));
     assert.ok(h.pid !== undefined, "worker forked");
     assert.equal(h.detached, true, "detached group leader (G1)");
+    await waitFor(async () => { try { await readFile(ready, "utf8"); return true; } catch { return false; } }, "worker announced TERM-trap readiness");
     await waitPid(h.pid, "alive");
 
-    // The worker IGNORES SIGTERM — so `escalated:true` proves the
-    // SIGKILL group sweep is what actually killed it.
+    // The trap-ready worker IGNORES SIGTERM — so `escalated:true` proves
+    // the SIGKILL group sweep is what actually killed it.
     const stop = await runner.stop(h);
     assert.equal(stop.escalated, true, "TERM-ignoring worker forces the SIGKILL sweep");
     assert.equal(stop.stopped, true, "child + group confirmed gone (kill(-pgid,0) -> ESRCH)");
@@ -405,9 +415,13 @@ describe("W0/W1: the fork-then-crash windows — force-close inside the spawn tr
     assert.ok(c.rejected, "an intent with no identity has nothing to probe (I3: silence is not evidence)");
     assert.equal(c.error?.code, "ownership-fence", c.error?.message);
 
-    // Sweep the real survivor the window discovered.
+    // Sweep the real survivor the window discovered — the sweep claims
+    // the WHOLE GROUP (kill -9 -PGID) and its success is asserted on
+    // group truth: kill(-pgid,0) -> ESRCH, not merely the leader's death.
+    assert.ok(groupAlive(forkPid), "the group is alive up to the sweep");
     try { process.kill(-forkPid, "SIGKILL"); } catch { /* gone */ }
-    await waitPid(forkPid, "dead");
+    await waitGroupGone(forkPid);
+    assert.ok(!groupAlive(forkPid), "whole group gone: no in-group survivor outlived the sweep");
   });
 });
 

@@ -380,6 +380,14 @@ export interface AttemptHandle {
   stateWarning?: string;
 }
 
+/** A3 (re-audit): what stop()/waitForExit() act on. `session` alone is the
+ *  explicit session-scoped target; passing the handle's `attemptId` pins
+ *  the action to that attempt so a stale handle cannot reach a successor. */
+export interface StopTarget {
+  session: string;
+  attemptId?: string;
+}
+
 export interface StopResult {
   attemptId: string;
   /** true ONLY when the direct child exited AND (detached spawns) the
@@ -680,6 +688,11 @@ function seqMapOf(records: SupervisorRecord[]): Map<string, number> {
 }
 
 const runners = new Map<string, AttemptRunner | Promise<AttemptRunner>>();
+// A1 (re-audit): a closed runner whose accepted journal/state writes are
+// still in flight keeps the episode's writer slot reserved until those
+// writes settle. Reopening joins the drain instead of racing the old
+// writer onto the same journal.
+const draining = new Map<string, Promise<void>>();
 
 /**
  * Controlled worker spawn/stop for managed attempts + lost-supervisor
@@ -725,6 +738,9 @@ export class AttemptRunner {
     if (typeof opts.root !== "string" || opts.root.length === 0) throw new RunnerError("bad-input", "root must be a non-empty string");
     const normalized: AttemptRunnerOptions = { ...opts, root: canonicalPath(opts.root) };
     const dir = episodeDir(normalized.root, normalized.episodeId); // validates the episodeId component
+    // A1: never hand the journal to a new writer while a closed predecessor
+    // still has accepted mutations in flight.
+    for (let d = draining.get(dir); d !== undefined; d = draining.get(dir)) await d;
     const existing = runners.get(dir);
     if (existing) {
       if (existing instanceof Promise) {
@@ -777,7 +793,29 @@ export class AttemptRunner {
     if (!force && this.hasLiveChildren) throw new RunnerError("ownership-fence", "refusing to close while a child is live — stop() first (or close(true) to detach tracking)");
     if (force) for (const e of this.children.values()) if (!e.exited) { try { e.child.unref(); } catch { /* already reaped */ } }
     this.closed = true;
-    runners.delete(this.dir());
+    const dir = this.dir();
+    // A1: writes accepted before close() may still be inside fsync. Keep
+    // the slot reserved (draining) until they settle; only then may a new
+    // writer open this journal.
+    if (this.inflight.size > 0) {
+      const d: Promise<void> = this.drainInflight().then(() => { if (draining.get(dir) === d) draining.delete(dir); });
+      draining.set(dir, d);
+    }
+    runners.delete(dir);
+  }
+
+  /** A1: accepted mutations (journal append, state.json write) tracked
+   *  until they settle — close() must not release the writer past them. */
+  private readonly inflight = new Set<Promise<unknown>>();
+  private track<T>(fn: () => Promise<T>): Promise<T> {
+    const p = fn();
+    this.inflight.add(p);
+    const done = (): void => { this.inflight.delete(p); };
+    p.then(done, done);
+    return p;
+  }
+  private async drainInflight(): Promise<void> {
+    while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
   }
 
   /** Read every durable record (schema-validated by the journal). */
@@ -870,10 +908,13 @@ export class AttemptRunner {
    * (the fence holds), and an undeterminable group reports "unknown" —
    * never a silent stopped:true over survivors (audit F-5).
    */
-  async stop(handle: Pick<AttemptHandle, "session">): Promise<StopResult> {
+  async stop(handle: StopTarget): Promise<StopResult> {
     this.assertOpen();
-    const entry = this.children.get(canonicalPath(handle.session));
-    if (!entry || entry.exited) throw new RunnerError("not-running", `no live child for session ${JSON.stringify(handle.session)} started by this runner instance`);
+    const entry = this.resolveTarget(handle, "stop");
+    // A2 (re-audit): the leader's exit does not end the group. A tracked
+    // group that still has members is this runner's own to sweep, so
+    // stop() stays available after the direct child has exited.
+    if (entry.exited) return this.sweepExitedGroup(entry);
     let escalated = await this.terminate(entry);
     // E (audit): after an escalation the leader may be UNSIGNALABLE
     // (EPERM swallowed by signalGroup) — `await exitPromise` alone is
@@ -934,11 +975,60 @@ export class AttemptRunner {
 
   /** Await the child's exit evidence without stopping it. Resolves
    *  immediately for an already-exited child of THIS instance. */
-  async waitForExit(handle: Pick<AttemptHandle, "session">): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  async waitForExit(handle: StopTarget): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
     this.assertOpen();
-    const entry = this.children.get(canonicalPath(handle.session));
-    if (!entry) throw new RunnerError("not-running", `no child (this instance) for session ${JSON.stringify(handle.session)}`);
+    const entry = this.resolveTarget(handle, "waitForExit");
     return entry.exitPromise;
+  }
+
+  /** A3 (re-audit): resolve the tracked child a caller means. A handle
+   *  that names an attemptId must match the CURRENT tracked attempt on
+   *  that session: a stale handle from an earlier attempt that has since
+   *  been replaced must never act on its successor. A session-only
+   *  target (no attemptId) is the explicit, session-scoped operation and
+   *  keeps its old meaning for callers that do not hold a handle. */
+  private resolveTarget(handle: StopTarget, op: "stop" | "waitForExit"): ChildEntry {
+    const session = canonicalPath(handle.session);
+    const entry = this.children.get(session);
+    if (!entry) {
+      throw new RunnerError("not-running", `no child (this instance) for session ${JSON.stringify(handle.session)}`);
+    }
+    if (handle.attemptId !== undefined && handle.attemptId !== entry.attemptId) {
+      throw new RunnerError("not-running", `${op}: handle names attempt ${handle.attemptId}, but the tracked child on this session is ${entry.attemptId} — refusing to act on a successor attempt`, { attemptId: handle.attemptId, trackedAttemptId: entry.attemptId });
+    }
+    return entry;
+  }
+
+  /** A2 (re-audit): the direct child has exited; sweep what remains of its
+   *  recorded process group. Group identity is this runner's own (pgid
+   *  journalled at spawn), so the sweep is bounded to that group. An
+   *  unproven group (no pgid, inherited) is reported as unknown, never
+   *  swept. Each call re-verifies with kill(-pgid,0) so a retry after a
+   *  `stopped:false` verdict is meaningful. */
+  private async sweepExitedGroup(entry: ChildEntry): Promise<StopResult> {
+    const exit = await entry.exitPromise;
+    const { code, signal } = exit;
+    if (!entry.pgid) {
+      return { attemptId: entry.attemptId, stopped: false, escalated: false, code, signal, groupStatus: "unknown" };
+    }
+    let verdict = this.groupAlive(entry.pgid);
+    let escalated = false;
+    if (verdict === "alive") {
+      escalated = true;
+      this.signalGroup(entry, "SIGTERM");
+      for (let i = 0; i < 25 && verdict === "alive"; i++) {
+        await delay(20);
+        verdict = this.groupAlive(entry.pgid);
+      }
+      if (verdict === "alive") {
+        this.signalGroup(entry, "SIGKILL");
+        for (let i = 0; i < 25 && verdict === "alive"; i++) {
+          await delay(20);
+          verdict = this.groupAlive(entry.pgid);
+        }
+      }
+    }
+    return { attemptId: entry.attemptId, stopped: verdict === "reaped", escalated, code, signal, groupStatus: verdict };
   }
 
   // ─────────────────────────── reconcile (I1/I2) ────────────────────────────
@@ -1359,7 +1449,10 @@ export class AttemptRunner {
         supervisorPid: state.supervisorPid ?? process.pid,
         tasks: { ...state.tasks, [t.taskId]: row },
       };
-      await writeEpisodeState(join(this.dir(), "state.json"), next);
+      // A1: a closed runner never writes the cache (close(true) may land
+      // between the reads above and this write).
+      this.assertOpen();
+      await this.track(() => writeEpisodeState(join(this.dir(), "state.json"), next));
       return undefined;
     } catch (e) {
       return `state.json hint write failed (journal authority intact): ${msg(e)}`;
@@ -2031,7 +2124,7 @@ export class AttemptRunner {
     // (or a close between the last gate and this append) must still
     // stop writes dead rather than interleave with a reopened writer.
     this.assertOpen();
-    try { await this.journal.append(record); }
+    try { await this.track(() => this.journal.append(record)); }
     catch (e) { throw new RunnerError("journal-failed", `journal append failed: ${msg(e)}`, { record, cause: msg(e) }); }
   }
 }

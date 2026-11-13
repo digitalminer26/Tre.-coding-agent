@@ -1280,3 +1280,48 @@ test("R4-A: a hostile `stopped` getter is unconfirmed, not a second kill", async
   assert.equal(second.status, "refused");
   assert.equal(stops, 1);
 });
+
+// ── A3 (re-audit): the kill carries the attempt pin ──
+
+test("A3: a kill with ctx.attemptId pins the stop handle and the evidence says attempt", async () => {
+  let seen: { session: string; attemptId?: string } | undefined;
+  const kept: Rec[] = [];
+  const ports = {
+    journal: { append: async (r: object) => { kept.push(r as Rec); }, read: async () => ({ records: kept.slice() }) },
+    runner: {
+      reconcile: async () => ({ decision: { action: "spawn", reasons: [] } }),
+      run: async () => ({ attemptId: "a1" }),
+      resume: async () => ({ attemptId: "a1" }),
+      stop: async (h: { session: string; attemptId?: string }) => { seen = h; return { stopped: true }; },
+    },
+  } as unknown as ExecutorPorts;
+  const res = await executeRecoveryAction(planFor("kill"), ctx({ session: "sess-1", attemptId: "task-1-a1" }), ports);
+  assert.equal(res.status, "executed");
+  assert.deepEqual(seen, { session: "sess-1", attemptId: "task-1-a1" }, "the runner receives the attempt pin");
+  const o = kept.filter((r) => r.kind === "decision-outcome")[0]!;
+  assert.deepEqual(o.evidenceRefs, ["stop:attempt-confirmed"]);
+});
+
+test("A3: a runner refusing a stale pin throws after the act began — act-unknown, never retried", async () => {
+  let stops = 0;
+  const kept: Rec[] = [];
+  const ports = {
+    journal: { append: async (r: object) => { kept.push(r as Rec); }, read: async () => ({ records: kept.slice() }) },
+    runner: {
+      reconcile: async () => ({ decision: { action: "spawn", reasons: [] } }),
+      run: async () => ({ attemptId: "a1" }),
+      resume: async () => ({ attemptId: "a1" }),
+      stop: async () => { stops++; throw Object.assign(new Error("refusing to act on a successor attempt"), { code: "not-running" }); },
+    },
+  } as unknown as ExecutorPorts;
+  const c = ctx({ session: "sess-1", attemptId: "task-1-a9" });
+  const plan = planFor("kill");
+  const first = await executeRecoveryAction(plan, c, ports);
+  assert.equal(first.status, "failed");
+  assert.equal(first.stage, "act");
+  const o = kept.filter((r) => r.kind === "decision-outcome")[0]!;
+  assert.match(String(o.notes), /^act-unknown:/, "a post-marker throw never claims no-effect");
+  const second = await executeRecoveryAction(plan, c, ports);
+  assert.equal(second.status, "refused");
+  assert.equal(stops, 1, "the refused kill is never re-issued");
+});

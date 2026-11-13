@@ -2918,7 +2918,7 @@ export async function runHostEpisode(opts: HostEpisodeOptions): Promise<HostEpis
     run: async (t) => runner.run({ episodeId: graph.episodeId, taskId: t.taskId, session: t.session || sessionFor(t), ...(t.attemptId ? { attemptId: t.attemptId } : {}), ...(t.model ? { model: t.model } : {}), ...((t.worktreePath ?? opts.worktreePath) ? { worktreePath: t.worktreePath ?? opts.worktreePath } : {}) }),
     reconcile: async (t) => runner.reconcile({ episodeId: graph.episodeId, taskId: (t as { taskId: string }).taskId, session: (t as { session?: string }).session ?? sessionFor(t as { taskId?: string }) }),
     resume: async (t, attemptId) => runner.resume({ episodeId: graph.episodeId, taskId: (t as { taskId: string }).taskId, session: (t as { session?: string }).session ?? sessionFor(t as { taskId?: string }) }, attemptId),
-    stop: async (h) => runner.stop({ session: h.session }),
+    stop: async (h) => runner.stop({ session: h.session, ...(h.attemptId !== undefined ? { attemptId: h.attemptId } : {}) }),
     // docs/18 step A: preflight reports open intents (reconcile territory
     // stays with P7; the host only surfaces what the journal shows).
     preflight: async () => {
@@ -4095,7 +4095,7 @@ export async function runScheduledHostEpisode(opts: HostScheduleEpisodeOptions):
               model = target;
               return runner.resume({ episodeId: graph.episodeId, taskId: t.id, session, model, worktreePath: treeFor(t.id) }, attemptId);
             },
-            stop: (h) => runner.stop({ session: h.session }),
+            stop: (h) => runner.stop({ session: h.session, ...(h.attemptId !== undefined ? { attemptId: h.attemptId } : {}) }),
           };
           const discloseDelivery = (r: { channel: string }): void => {
             log(`${t.id}: ${r.channel.startsWith("escalation:") ? "question NOT delivered" : "question dispatched"} (${r.channel})`);

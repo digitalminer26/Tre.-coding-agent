@@ -102,7 +102,9 @@ export interface RunnerPort {
   /** P7 reconcile — passed through to the executor untouched. */
   reconcile?(task: object): Promise<{ decision?: { action?: string } } & object>;
   resume?(task: object, attemptId: string): Promise<AttemptHandleLike>;
-  stop?(handle: { session: string }): Promise<{ stopped?: boolean } | unknown>;
+  /** A3 (re-audit): `attemptId` pins the stop to one attempt — the host
+   *  forwards it to P7, which refuses to signal a successor attempt. */
+  stop?(handle: { session: string; attemptId?: string }): Promise<{ stopped?: boolean } | unknown>;
   /** host preflight: drainPendingIntents / reconcile (docs/18 step A). */
   preflight?(ctx: { episodeId: string; taskId: string }): Promise<unknown>;
 }
