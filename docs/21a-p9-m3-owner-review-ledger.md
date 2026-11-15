@@ -5854,7 +5854,16 @@ findings register as deferred items"):
 - Subject: the cumulative change set 1425a69 (DC-1 artifact + ledger
   round + F19 test-side fix + C1-F7 hardening + repo docs) plus its
   in-round fold commits, audited commit-vs-specs (docs/21 S-J2-R/
-  S-A1-R, this ledger, runner contract, artifact header).
+  S-A1-R, this ledger, runner contract, artifact header). SCOPE
+  QUALIFICATION (B2-fold, cycle B2 finding 2): "audited" means the
+  cycles' query-driven verification of extracted claims — NOT a
+  complete line-by-line audit of the added reference implementation
+  or all registrations; A4's own report says so explicitly ("a
+  bounded review, not a complete audit"), A2 likewise disclosed its
+  requested full diff / staleness sweep were not completed, and A7b
+  its coverage limits (below). Anywhere this appendix or the F19
+  bracket says the A round "is its scoped audit", read it with this
+  qualification.
 - Cycles: A1 CHANGES REQUESTED (4 MAJOR + 1 MINOR, all CODEFIX-ABLE);
   A2 CHANGES REQUESTED (3 MAJOR against the COMMITTED tree — the same
   three sites A1 folded; the report itself notes the working tree
@@ -5897,11 +5906,16 @@ findings register as deferred items"):
   round. Deferred backlog UNCHANGED (purge-exception draft, Q-J2-h
   protocol exit, f1 attribution — all owner-direction, untouched).
 - Verification: per saved reports, the Python suite (89/89) and the
-  attempt-runner suite (86/86, dist build; incl. hardened C1-F7)
-  were both run independently by auditors A1, A3, A5, A6, A7b; A2
-  and A4 did NOT run the suites (A2 disclosed them among its
-  limitations; A4 said so explicitly) (B0-fold correction: this line
-  formerly claimed 89/89 "by A4-A7b auditors" — audit finding 2).
+  attempt-runner suite (86/86, dist build) were both run
+  independently by auditors A1, A3, A5, A6, A7b; A2 and A4 did NOT
+  run the suites (A2 disclosed them among its limitations; A4 said
+  so explicitly) (B0-fold correction: this line formerly claimed
+  89/89 "by A4-A7b auditors" — audit finding 2). Precision on the
+  C1-F7 hardening (B2-fold, cycle B2 finding 1): the ESRCH-only
+  sweep landed IN the A round at 5b0f8a8, so A1's run predates the
+  hardened assertion (it ran, and passed, the pre-fix version whose
+  error-classification it flagged); the post-hardening runs are
+  A3's, A5's, A6's and A7b's (plus the harness gate at each fold).
   The full
   npm gate (2755 pass / 0 fail / 14 skipped) was green at each fold
   commit and re-verified by the harness on the final committed tree;
@@ -5910,8 +5924,13 @@ findings register as deferred items"):
   independently reproduced the exact F19 race counts (mechanism and
   qualitative direction confirmed by source reading in multiple
   cycles); owner-transcript fidelity (ratification wording, deferral
-  counts) is verifiable only against this ledger's own record; A7's
-  restart means cycle-7 evidence is A7b's bounded CONFIRMING pass.
+  counts) is verifiable only against this ledger's own record; the
+  bounded-coverage limits the auditors themselves declared — A4's
+  "not a complete audit of the newly added reference implementation
+  or all ledger registrations" and its skipped suites, A2's
+  undisclosed-to-appendix limits (full diff, staleness sweep, suites
+  not run), and A7's endpoint hang (restart, disclosed) mean
+  cycle-7 evidence is A7b's bounded CONFIRMING pass.
   Further, per A7b's own saved report (B1-fold, cycle B1 finding 2):
   A7b did NOT complete the requested independent probe experiment,
   the full targeted ledger/artifact staleness and attribution sweep,
