@@ -76,16 +76,23 @@ P15 rows). Next step after committing the current workstream: draft
 the G1 finding-record schema as docs/11 §14.N, then G2/G3 ride the
 episode state (S6) + P13.
 
-**UPDATE (2026-11-15, later same day): G1 drafted — docs/11 §14.10.**
-`kind:"audit-finding"` record for the S5 decision log: closed class
-(code-defect / spec-gap / spec-ambiguity / residual-risk-accepted),
-severity, verdictBasis (repro > evidence-only > opinion; opinion alone
-cannot hold a sign-off), mandatory repro for non-minor code-defects
-(`finding-intake-invalid` otherwise), ≥1 evidenceRefs, append-only
-disposition transitions with orchestrator/owner attribution. DRAFT,
-owner review open, not implemented (post-P0 additive, Change Ledger
-row landed first per §14.9's own rule). Next: owner review of §14.10,
-then G2/G3 (norm state + convergence) riding S6/P13.
+**UPDATE-2 (2026-11-15): G1 owner review round 1 DONE — §14.10 at DRAFT
+v2.** Owner decisions R1–R8 folded and recorded verbatim in §14.10.4:
+R1-B route×surface two-dimensional classification (`route:code-fix|
+human-review` is what the orchestrator routes on; `surface:code|test|
+doc|spec` is the artifact domain the live R5 round already used);
+R2-A second kind `audit-finding-update` fully specified (one supersede
+encoding; update-on-closed refused); R3 emission authority (auditors
+append findings only via supervisor intake, supervisor sole appender of
+updates, owner-dispositions require the TTY-confirmed channel ref —
+closes self-downgrade); R4 minors never auto-hold a sign-off (owner
+decides escalations), `accepted-fix` binds to repro-green; R5-A bounded
+claim + REQUIRED `findingRef` -> episode `findings/`; R6 `affectedNorm`
+object {doc, anchor, sha256?} (digest rule deferred to G2); R7 ULID
+mint at intake; R8 opinion-enforcement moved to G3.
+`residual-risk-accepted` became the `closed-residual` DISPOSITION with
+mandatory authority. STILL DRAFT, NOT IMPLEMENTED. Next per owner:
+docs/21 D1–D9 ratification pass (presented 2026-11-15), then G2/G3.
 
 ## 2026-11-15 — M3 scoping: contract `docs/21` at DRAFT v9 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, cycles 2–4 confirming dispositions folded, D1–D9 pending
 
