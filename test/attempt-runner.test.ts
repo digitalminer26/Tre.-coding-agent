@@ -870,8 +870,18 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   // EXISTS until its last member is reaped). Fail loudly with the reason
   // instead of intermittently failing the assertion below.
   let groupGone = false;
-  for (let i = 0; i < 400; i++) { try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); } catch { groupGone = true; break; } }
-  assert.ok(groupGone, "operator sweep never cleared the group within 10s (load-starved reap) — cannot assert the confirming probe");
+  for (let i = 0; i < 400; i++) {
+    try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); }
+    catch (e) {
+      // Only ESRCH proves the group is gone (runner contract:
+      // kill(-pgid,0) ESRCH => confirmed GONE; EPERM/other => unknown
+      // and MUST NOT be counted as proof). (A1-fold, cycle A1 finding 3.)
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") throw new Error(`operator sweep probe returned ${String(code)} — not proof of group death`);
+      groupGone = true; break;
+    }
+  }
+  assert.ok(groupGone, "operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis) — cannot assert the confirming probe");
   const again = await runner.stop(h);
   assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
   assert.equal(again.groupStatus, "reaped");

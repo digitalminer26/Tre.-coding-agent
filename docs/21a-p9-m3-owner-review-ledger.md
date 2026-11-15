@@ -5239,14 +5239,27 @@ runs, cause unknown, tracked not hidden). [RESOLVED 2026-07-27
 post-decision-round, owner "debug F19": ROOT CAUSE FOUND — the suite's
 own F19 contention test forks racing Ledger constructors on ONE dir;
 the startup probe is a once-per-directory contract and leg 4's census
-check fails by construction when two probes overlap (the rival's
-healthy transient .probe-* names read as a phantom second visible
-name). Deterministic repro: 8x400 concurrent probes on one dir =
+check carries a BASELINE/CENSUS RACE against a concurrent sibling
+probe: the baseline is taken before leg 4, and only names created
+AFTER it (still visible at the post-rename census, neither ours nor
+in baseline) trip the refusal — so overlap makes false refusal RACES
+the common outcome, not every overlap fails unconditionally (A1-fold,
+cycle A1 finding 2: wording precision; the probe contract itself is
+unchanged). Observed runs: 8x400 concurrent probes on one dir =
 3168/3200 leg4 fails; serial 3000 = 0 fails. Fix is TEST-SIDE (racer
 children construct with probe=False; the append-flock contention
 under test is unaffected; every spawned dir is still probed once by
-the parent): F19 10/10, full Python suite 89/89 x3, probe.py and
-ledger.py UNTOUCHED (no spec change).]
+the parent): F19 10/10, full Python suite 89/89 x3. "probe.py and
+ledger.py UNTOUCHED" means UNCHANGED BY THIS F19 FIX relative to the
+pre-fix working state (A1-fold, cycle A1 finding 1: commit-relative
+scope claim corrected) — the commit itself ADDS the reference
+implementation (ledger.py, probe.py, test_ledger.py are new files in
+this commit; they carry the spec-bearing probe/flock contracts).
+AUDIT SURFACE DISCLOSURE: the E/F rounds audited the ENUMERATION
+artifact against this ledger, NOT this reference implementation line-
+by-line (the v38 code rounds audited the earlier lineage of the same
+code). THIS A round (7 cycles, commit 1425a69) is its scoped audit;
+findings fold here. No spec change.]
 
 FOUR-TIER ATTRIBUTION ANCHOR (REV-51, cycle-69 recommendation;
 standing standard for EVERY attribution in this ledger):

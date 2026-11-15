@@ -20,6 +20,18 @@ kill-window close; quality gate green.
 
 ## Findings status — code audits closed; the docs/21 CONTRACT round is OPEN
 
+> **[HISTORICAL SNAPSHOT — do not read as current; A1-fold cycle A1
+> finding 4.]** Everything in this section describes state as of
+> 2026-11-13. Since then docs/21 advanced through the full adversarial
+> rounds to the v37/v38 body + V33 FIXTURE TABLE with owner rulings
+> (REV 36 / REV 45) recorded in
+> `docs/21a-p9-m3-owner-review-ledger.md` (~5800 lines, rev 52 +
+> appendices), the refusal enumeration `docs/21a-refusal-enumeration.md`
+> was **RATIFIED by the owner** (DC-1), and the reference
+> implementation `reference/p9m3/` (89-test suite, green) landed.
+> Current-state anchors: the ledger's OWNER DECISION ROUND entry and
+> the artifact header. The v4 text below stays as written history.
+
 No CODE audit has an open finding: the R-series (attempt-runner R4–R8)
 closed 2026-11-02; the M3 fix series closed at round 9; the M2
 acceptance loop closed at c9; the kill-window series closed converged.

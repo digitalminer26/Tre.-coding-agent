@@ -580,14 +580,16 @@ class TestFixtures(Base):
             def racer():
                 # F19 FLAKE FIX (root-caused 2026-07-27): the FS probe
                 # is a ONCE-PER-DIRECTORY contract (probe.py docstring),
-                # and leg 4's census check refuses when a SECOND live
-                # probe shares the directory (the rival's healthy
-                # transient .probe-* names read as "rename left a second
-                # visible name"). This test forks racing constructors on
-                # ONE directory -> overlapping probes -> deterministic
-                # leg4 failure under scheduling overlap (repro: 8x400
-                # concurrent run_probe on one dir = 3168/3200 leg4
-                # fails; serial = 0/3000). The contention UNDER TEST is
+                # and leg 4's census check carries a baseline/census
+                # RACE against a concurrent sibling probe: names created
+                # by the rival after our baseline (still visible at the
+                # post-rename census) read as "rename left a second
+                # visible name" — overlap makes false refusal the common
+                # outcome (observed run: 8x400 concurrent run_probe on
+                # one dir = 3168/3200 leg4 fails; serial = 0/3000; not
+                # every overlap fails unconditionally). This test forks
+                # racing constructors on ONE directory -> overlapping
+                # probes. The contention UNDER TEST is
                 # the append flock, not the probe; every workdir here
                 # was already probed once by the parent (seeded_dir's
                 # Ledger(d) / the parent-side Ledger before spawn), so
