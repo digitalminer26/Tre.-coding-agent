@@ -5982,12 +5982,17 @@ findings register as deferred items"):
   with "# pass 2755 / # fail 0 / # skipped 14" in the same record;
   the "# tests 2769" total is NOT in that record — D1-fold
   correction) and a097555 (C1, line 12446: gate passed with the
-  full count set incl. "# tests 2769"). For the remaining fold commits (1425a69, 5b0f8a8,
-  0733023, 0a04c4f, 81a36c9, b339426, b17392e, 29339f7, 72cc30f,
-  760c0a3, e519873, 28073e9, 3fe3813, 1dc5d29) the retained logs
-  carry the "OK — committed" line but NOT the accompanying gate
-  verdict (and for 81a36c9 and 1dc5d29 no contemporaneous commit
-  tool-result was located in the session logs searched — earlier
+  full count set incl. "# tests 2769"). For the remaining fold
+  commits, in two groups (E-fold correction of this paragraph's
+  earlier self-contradiction, E-cycle finding 2): twelve with
+  located commit tool-result records carrying the "OK — committed"
+  line but NOT the accompanying gate verdict (1425a69, 5b0f8a8,
+  0733023, 0a04c4f, b339426, b17392e, 29339f7, 72cc30f, 760c0a3,
+  e519873, 28073e9, 3fe3813); and two for which no contemporaneous
+  commit tool-result was located in the session logs searched
+  (81a36c9, 1dc5d29 — E-fold correction: these two therefore do
+  NOT belong in the "retained logs carry the OK — committed line"
+  group; earlier
   matches for those hashes exist BELOW the D0 forensics region but
   are narrative/git-log references, not commit tool-results (e.g.
   a commit-list tool result at log line 12382 / 12472), and the
@@ -6177,8 +6182,12 @@ own"):
   ONLY for e2e295c and a097555); C4 appendix-credit scoped to the
   then-existing A/B appendix; tsc listed-not-observed corrected;
   BLANKET QUALIFICATION RULE registered; per-fold retained gate
-  output began (gate-postD0.txt onward — recorded with per-command
-  exit statuses, unlike gate-postC0.txt).
+  output began (gate-postD0.txt onward — recorded WITH observed
+  command outputs and real exit statuses for the python and tsc
+  steps; the npm step's recorded status is PIPELINE-QUALIFIED where
+  the command was piped through tail — E-fold correction of the D
+  appendix's earlier unqualified "per-command exit statuses"
+  claim, which the retained files do not support for npm/D0).
 - Distinct findings folded at D1 (commit 8049271): (1) MAJOR — the
   D0 paragraph attributed the "# tests 2769" total to the e2e295c
   log record; that record carries pass/fail/skipped but not the
@@ -6206,10 +6215,39 @@ own"):
   overstatements IN the correction round itself — consistent with
   the pattern that motivated the 5-cycle mandate; convergence
   held only after that correction.
+- SCOPE NOTE (E-fold, E-cycle finding 3): D2-D5 audited tree
+  8049271 (D0+D1 only). The D-ROUND RESULT APPENDIX itself was
+  registered LATER, at 79671ef, and was NOT covered by any
+  confirming cycle — the confirmation above does not extend to
+  this appendix's own text. A post-D audit (E cycle) found one
+  MAJOR in it (the unqualified "per-command exit statuses" claim
+  the retained gate files do not support) and two MINORs (this
+  appendix's inventory contradiction with the evidence-status
+  paragraph; this missing scope note) — all corrected in the E
+  fold.
+- E0 GATE EVENT (registered, not hidden): the first gate run for
+  this fold (gate-postE0.txt, first section) went RED — test 274
+  (C1-F7) hit its designed loud-failure path ("operator sweep
+  probe returned EPERM — not proof of group death"), 2754 pass /
+  1 fail / 14 skipped, npm exit 1. Investigation appended to the
+  same file: 5 isolated runs of the test file all green (86 ok /
+  0 notok) + 1 full npm rerun green (2755/0/14). Verdict:
+  transient, load/environment-sensitive confirming-probe failure
+  — EPERM observed once in 6 full-suite-equivalent observations
+  this session (D0/D1/D2 gates green, E0 first run red, E0 rerun
+  green). The test worked as designed (fail loudly rather than
+  silently flake); whether the ESRCH-only probe should treat EPERM
+  as retryable-unknown is a TEST-SEMANTICS question left open for
+  the owner (test-side change, CODEFIX-ABLE class, not folded
+  here). The fold commit below landed only after the green rerun;
+  the red run is retained above per the no-hidden-evidence rule.
 - Residual limitations (auditor-disclosed, D1-D5): all cycles
   targeted/query-driven, not serial exhaustive ledger reviews;
-  suites were run by the orchestrator pre-fold (retained with exit
-  statuses in gate-postD0/D1.txt), NOT by the D auditors; F19 race
+  suites were run by the orchestrator pre-fold (retained in
+  gate-postD0/D1.txt — real observed exits for the python and tsc
+  steps; the npm step's recorded exit is pipeline-qualified where
+  piped through tail, per the E-fold correction above), NOT by the
+  D auditors; F19 race
   counts not reproduced; owner-conversation fidelity verifiable
   only against this ledger; pre-1425a69 artifact bytes not
   externally establishable; D2-D5 session-log scans bounded to the
