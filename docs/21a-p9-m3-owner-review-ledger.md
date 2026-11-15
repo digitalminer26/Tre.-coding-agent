@@ -5734,7 +5734,11 @@ postfold-E1..E4c.txt; prompts/logs ~/.tre/audits/enum-*.
 Residual coverage limit (auditor-disclosed every cycle): query-
 driven, not a serial full-ledger audit; the artifact makes no such
 claim. Artifact status: CLEAN pending owner read; DC-1 enumeration
-deliverable stands.
+deliverable stands. [SNAPSHOT — this round-result conclusion predates
+the OWNER DECISION ROUND entry below ("OWNER DECISION ROUND (post-F-
+round, session of 2026-07-27...)"): the owner READ and RATIFIED the
+artifact as written; DC-1 is DISCHARGED. Read no status from this
+line (B6-fold, cycle B6 finding 1).]
 
 F-ROUND RESULT APPENDIX (appended to the DC-1 status entry; work
 item bookkeeping, not a finding): SEVEN-CYCLE ADVERSARIAL AUDIT OF
@@ -5773,7 +5777,11 @@ AFTER F7's verdict and are verified by the local mechanical sweep
 (14 absent, all declared; table/refs clean), NOT by the auditor —
 same class-of-scope statement that F1-F4 exist to enforce. Artifact
 status: CLEAN pending owner read; DC-1 enumeration deliverable
-stands. Residual coverage limit (auditor-disclosed every cycle):
+stands. [SNAPSHOT — same supersession as the E-round line above: the
+OWNER DECISION ROUND entry below ("OWNER DECISION ROUND (post-F-
+round, session of 2026-07-27...)") records the owner read +
+ratification; DC-1 DISCHARGED (B6-fold, cycle B6 finding 1).] Residual coverage
+limit (auditor-disclosed every cycle):
 query-driven, not a serial full-ledger audit.
 
 OWNER DECISION ROUND (post-F-round, session of 2026-07-27 — direct owner
