@@ -5978,18 +5978,23 @@ findings register as deferred items"):
   the commit on failure (tool design, asserted here). Contemporaneous
   per-commit evidence in the saved orchestrator session log
   (tre-20261113-110312-29516.jsonl) exists for TWO fold commits
-  only — e2e295c (B3) and a097555 (C1) — where the same retained
-  tool-result record carries "git-commit: gate passed" together with
-  the full count set (# tests 2769 / # pass 2755 / # fail 0 / #
-  skipped 14). For the remaining fold commits (1425a69, 5b0f8a8,
+  only — e2e295c (B3, log line 12318: "git-commit: gate passed"
+  with "# pass 2755 / # fail 0 / # skipped 14" in the same record;
+  the "# tests 2769" total is NOT in that record — D1-fold
+  correction) and a097555 (C1, line 12446: gate passed with the
+  full count set incl. "# tests 2769"). For the remaining fold commits (1425a69, 5b0f8a8,
   0733023, 0a04c4f, 81a36c9, b339426, b17392e, 29339f7, 72cc30f,
   760c0a3, e519873, 28073e9, 3fe3813, 1dc5d29) the retained logs
   carry the "OK — committed" line but NOT the accompanying gate
   verdict (and for 81a36c9 and 1dc5d29 no contemporaneous commit
-  tool-result was located in the session logs searched — the only
-  matches for those two hashes postdate this D0 fold and are this
-  session's own forensic output, which is not evidence of the
-  original commits). Accordingly "the gate ran
+  tool-result was located in the session logs searched — earlier
+  matches for those hashes exist BELOW the D0 forensics region but
+  are narrative/git-log references, not commit tool-results (e.g.
+  a commit-list tool result at log line 12382 / 12472), and the
+  later matches are this D session's own forensic echoes, neither
+  of which evidences the original commit's gate run — D1-fold
+  correction of the looser D0 wording "the only matches postdate
+  this fold"). Accordingly "the gate ran
   green at each fold" and "git tree clean at each fold" are recorded
   here as UNVERIFIED historical assertions — plausible from the
   tool's configured behavior, but not evidenced per-run. Clean-start
@@ -6096,9 +6101,14 @@ themselves the primary audit subject; gpt-6.1-terra; saved reports
   artifact bytes are not independently establishable from repo
   state. Harness gate: the commit tooling is configured to run the
   gate before each fold commit (harness behavior, asserted here from
-  the tool's design — per-run evidence was NOT retained for the
-  individual fold commits, C1-fold cycle C1 finding 1). The one
-  retained gate output, ~/.tre/audits/gate-postC0.txt, is a SUMMARY
+  the tool's design — contemporaneous per-run gate evidence was
+  retained in the session log only for e2e295c and a097555; for the
+  other fold commits it was NOT, C1-fold cycle C1 finding 1, as
+  qualified by the D0-fold gate & tree-clean evidence-status
+  paragraph above). Beyond those log records, the retained
+  gate-output FILES are the single-run summaries
+  ~/.tre/audits/gate-postC0.txt and the per-fold
+  gate-postD*.txt series. gate-postC0.txt is a SUMMARY
   OF ONE RUN against tree e519873 plus that correcting commit's
   uncommitted doc edits: it records commands and counts (Python
   89/89 OK; npm 2755 pass / 0 fail / 14 skipped; the tsc command is
