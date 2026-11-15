@@ -5888,7 +5888,10 @@ findings register as deferred items"):
   (sibling names created after baseline and still visible at census),
   not unconditional "fails by construction"; the 3168/3200 vs 0/3000
   numbers relabeled as observed runs (auditors could not reproduce
-  the exact counts; mechanism confirmed independently in A2-A7b);
+  the exact counts; mechanism confirmed independently by the
+  COMPLETED cycles A2-A7b — stalled A7 excluded (B5-fold, cycle B5
+  finding 1): its transcript ends at the invocation of its probe
+  experiment with no recorded result, per :5878 above);
   (3) C1-F7 sweep now accepts ONLY ESRCH as group-death proof (other
   errno throws; timeout message states the observation, not a
   diagnosis) — per the runner contract EPERM/other = unknown, never
@@ -5932,9 +5935,12 @@ findings register as deferred items"):
   counts) is verifiable only against this ledger's own record; the
   bounded-coverage limits the auditors themselves declared — A4's
   "not a complete audit of the newly added reference implementation
-  or all ledger registrations" and its skipped suites, A2's
-  undisclosed-to-appendix limits (full diff, staleness sweep, suites
-  not run), and A7's endpoint hang (restart, disclosed) mean
+  or all ledger registrations" and its skipped suites, A2's limits
+  (full diff, staleness sweep, suites not run — recorded here at
+  B0+/B2+ and in A2's own report under "Audit limitations"; the
+  phrase "undisclosed-to-appendix" described the appendix only
+  BEFORE those folds and is itself retired — B5-fold, cycle B5
+  finding 2), and A7's endpoint hang (restart, disclosed) mean
   cycle-7 evidence is A7b's bounded CONFIRMING pass.
   Further, per A7b's own saved report (B1-fold, cycle B1 finding 2):
   A7b did NOT complete the requested independent probe experiment,
