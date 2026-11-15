@@ -6067,3 +6067,42 @@ themselves the primary audit subject; gpt-6.1-terra; saved reports
   no per-command exit statuses and no staged-tree hash — counts
   only, not independently verifiable exits, and it evidences only
   that single test, not the per-fold history above.
+
+C-ROUND RESULT APPENDIX (4 cycles on the CUMULATIVE change set
+1425a69..HEAD — record-truthfulness round after the post-B audit;
+gpt-6.1-terra; saved reports ~/.tre/audits/commitC-C1..C4-out.txt;
+owner instruction of 2026-07-28 "address the findings. terra is the
+auditor. run 4 cycles"):
+- Verdicts: C1 CHANGES REQUESTED (1 MAJOR + 1 MINOR); C2 CHANGES
+  REQUESTED (1 MAJOR + 1 MINOR); C3 CONFIRMING (0 findings, bounded
+  pass); C4 CONFIRMING (0 findings, bounded pass; explicitly says
+  the appendix's own claims now match gate-postC0.txt).
+  DECISIONS-REQUIRED: 0 in every cycle — no normative or ratified
+  text change required; nothing new for the deferred backlog.
+- Distinct findings folded: (1) gate-postC0.txt was characterized as
+  proving per-fold runs and a staged-tree hash it does not record —
+  claim re-scoped to what the file says (one-run summary, counts not
+  exits, e519873+uncommitted doc edits); (2) the three R13
+  action-item/TERMINATION conclusions lacked SNAPSHOT annotations —
+  added (text-anchored); (3) the A appendix's gate claims ("green at
+  each fold", "re-verified on final committed tree") were stronger
+  than retained evidence — qualified to harness-configured behavior
+  with non-retention disclosed; (4) "mechanism confirmed
+  independently by A2-A7b" conflated source review with experiment —
+  split: source review by completed cycles, A5's scratch run
+  (320/320 concurrent / 0/100 serial) as the sole confirmation-in-
+  kind, A2/A7b disclaimers recorded. Fold commits: a097555 (C1),
+  3fe3813 (C2); C3/C4 needed no folds.
+- Convergence: findings per cycle 2/2/0/0 — TWO consecutive bounded
+  CONFIRMING passes with zero findings. Both auditors disclosed
+  bounded, keyword-driven coverage (not serial exhaustive review);
+  "0 findings" means none found in their targeted checks, not
+  certification of exhaustive cleanliness. The residual error CLASS
+  (record-overstatement/stale-status) has now survived three rounds
+  of targeted hunting (post-B, C1, C2 fixes) without producing a
+  code-behavior or normative finding in either the B or C round.
+- Standing limitations unchanged: owner-conversation fidelity is
+  verifiable only against this ledger; pre-ratification artifact
+  bytes not externally establishable; suites not run by C auditors
+  (C3/C4 expressly; C1 no; C2 no — gate evidence remains
+  gate-postC0.txt + the per-fold harness behavior qualification).
