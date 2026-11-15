@@ -6252,14 +6252,17 @@ own"):
   silently flake). OWNER DECISION (F2 fold, post-F1 audit): the
   ESRCH-only probe now treats EPERM as RETRYABLE-UNKNOWN — the poll
   loop keeps iterating on EPERM (it proves nothing either way) and
-  still confirms only on ESRCH or fails at the 10s timeout, with the
+  still confirms only on ESRCH or fails when the poll budget is
+  spent (400 attempts with 25ms sleeps — an attempt budget, not a
+  wall-clock deadline), with the
   EPERM retry count reported in the failure message; any other
   errno remains a hard failure. The code cannot distinguish a
   transient EPERM from a persistent one: every EPERM is retried
   until ESRCH or the 400-iteration poll budget is spent, and a
   budget-exhausted run fails loudly with the EPERM count. The
-  poll discipline is a pure helper (pollForGroupDeath) with
-  deterministic tests (test "F2: poll discipline"), and C1-F7
+  poll discipline is an injectable helper (pollForGroupDeath —
+  injected probe/sleep, deterministically tested, test "F2: poll
+  discipline"), and C1-F7
   calls that same helper.
   The fold commit below landed only after the green rerun;
   the red run is retained above per the no-hidden-evidence rule.

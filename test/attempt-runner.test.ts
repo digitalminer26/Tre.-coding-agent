@@ -114,11 +114,20 @@ test("F2: poll discipline — EPERM is retryable, ESRCH confirms, other errno is
   assert.equal(b.groupGone, false, "EPERM alone must never prove group death");
   assert.equal(b.permRetries, 5);
   assert.equal(b.hardError, undefined);
-  // Unexpected errno fails immediately, not retried.
-  const c = await pollForGroupDeath(seq(["EACCES", "ESRCH"]), 10, noSleep);
+  // Unexpected errno fails immediately, not retried: exactly ONE probe
+  // call and NO sleep before the hard failure is returned.
+  let cProbes = 0;
+  let cSleeps = 0;
+  const c = await pollForGroupDeath(
+    () => { cProbes++; return cProbes === 1 ? "EACCES" : "ESRCH"; },
+    10,
+    async () => { cSleeps++; },
+  );
   assert.equal(c.groupGone, false);
   assert.equal(c.hardError, "EACCES");
   assert.equal(c.permRetries, 0);
+  assert.equal(cProbes, 1, "a hard errno must stop probing immediately");
+  assert.equal(cSleeps, 0, "a hard errno must not sleep/retry");
   // Group alive (probe succeeds) for the whole budget: not confirmed.
   const d = await pollForGroupDeath(() => null, 4, noSleep);
   assert.equal(d.groupGone, false);
@@ -923,7 +932,7 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   }, 400);
   if (sweep.hardError !== undefined)
     throw new Error(`operator sweep probe returned ${sweep.hardError} — not proof of group death`);
-  assert.ok(sweep.groupGone, `operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis; ${sweep.permRetries} EPERM retr${sweep.permRetries === 1 ? "y" : "ies"} observed) — cannot assert the confirming probe`);
+  assert.ok(sweep.groupGone, `operator sweep never observed ESRCH for the group within its 400-attempt budget (25ms sleeps; observation, not a diagnosis; ${sweep.permRetries} EPERM retr${sweep.permRetries === 1 ? "y" : "ies"} observed) — cannot assert the confirming probe`);
   const again = await runner.stop(h);
   assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
   assert.equal(again.groupStatus, "reaped");
