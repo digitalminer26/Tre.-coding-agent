@@ -6182,12 +6182,19 @@ own"):
   ONLY for e2e295c and a097555); C4 appendix-credit scoped to the
   then-existing A/B appendix; tsc listed-not-observed corrected;
   BLANKET QUALIFICATION RULE registered; per-fold retained gate
-  output began (gate-postD0.txt onward — recorded WITH observed
-  command outputs and real exit statuses for the python and tsc
-  steps; the npm step's recorded status is PIPELINE-QUALIFIED where
-  the command was piped through tail — E-fold correction of the D
-  appendix's earlier unqualified "per-command exit statuses"
-  claim, which the retained files do not support for npm/D0).
+  output began. Per-file, what the retained files establish (E1
+  correction; supersedes the E0 wording, which the second audit
+  found still overstated): gate-postD0.txt — Python exit captured
+  via PIPESTATUS[0] (the Python command's own status), tsc exit
+  recorded, npm run piped through tail so its "npm test exit" is
+  the TAIL pipeline's status. gate-postD1.txt — Python run piped
+  through tail, so "python-suite exit" is the TAIL pipeline's
+  status; NO tsc step was run; npm piped through tail (pipeline
+  status). gate-postD2.txt — Python piped through tail (pipeline
+  status); tsc exit recorded; npm piped through tail (pipeline
+  status). The "Ran 89 tests … OK" lines appear in all three
+  files; they do not by themselves establish the Python command's
+  exit status in D1 or D2.
 - Distinct findings folded at D1 (commit 8049271): (1) MAJOR — the
   D0 paragraph attributed the "# tests 2769" total to the e2e295c
   log record; that record carries pass/fail/skipped but not the
@@ -6231,11 +6238,15 @@ own"):
   probe returned EPERM — not proof of group death"), 2754 pass /
   1 fail / 14 skipped, npm exit 1. Investigation appended to the
   same file: 5 isolated runs of the test file all green (86 ok /
-  0 notok) + 1 full npm rerun green (2755/0/14). Verdict:
-  transient, load/environment-sensitive confirming-probe failure
-  — EPERM observed once in 6 full-suite-equivalent observations
-  this session (D0/D1/D2 gates green, E0 first run red, E0 rerun
-  green). The test worked as designed (fail loudly rather than
+  0 notok) + 1 full npm rerun green (2755/0/14). E1 correction of
+  the counts and cause (E0 wording overstated both): the EPERM
+  failure was observed in ONE of FIVE full npm runs this session
+  (D0, D1, D2, E0 first run, E0 rerun — only E0 first run failed;
+  the five isolated file runs are a separate kind of observation
+  and are not counted as full-suite runs). Cause: UNDETERMINED —
+  the evidence shows one transient failure followed by passing
+  reruns and does NOT establish load or environment as the cause.
+  The test worked as designed (fail loudly rather than
   silently flake); whether the ESRCH-only probe should treat EPERM
   as retryable-unknown is a TEST-SEMANTICS question left open for
   the owner (test-side change, CODEFIX-ABLE class, not folded
@@ -6244,9 +6255,8 @@ own"):
 - Residual limitations (auditor-disclosed, D1-D5): all cycles
   targeted/query-driven, not serial exhaustive ledger reviews;
   suites were run by the orchestrator pre-fold (retained in
-  gate-postD0/D1.txt — real observed exits for the python and tsc
-  steps; the npm step's recorded exit is pipeline-qualified where
-  piped through tail, per the E-fold correction above), NOT by the
+  gate-postD0/D1/D2.txt; per-file exit status provenance is as
+  stated in the D0-fold paragraph above, E1 correction), NOT by the
   D auditors; F19 race
   counts not reproduced; owner-conversation fidelity verifiable
   only against this ledger; pre-1425a69 artifact bytes not
