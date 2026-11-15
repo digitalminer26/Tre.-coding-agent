@@ -1,4 +1,4 @@
-## 2026-11-16 — P9/M3 reference impl (v38 cycle-5) LANDED in working tree; next goal: AUTOMATE the audit-fix loop — ORCHESTRATION GAP documented (not yet built)
+## 2026-11-15 — P9/M3 reference impl (v38 cycle-5) LANDED in working tree; next goal: AUTOMATE the audit-fix loop — ORCHESTRATION GAP documented (not yet built)
 
 **Current workstream (p9m3 reference ledger/probe — `reference/p9m3/`,
 spec doc `docs/21`):** cycle-5 owner decisions D1-A/D2-A/D3-B/D4-B/
@@ -75,6 +75,17 @@ docs/11 §14 additions (contract-first, same discipline as P13/P14/
 P15 rows). Next step after committing the current workstream: draft
 the G1 finding-record schema as docs/11 §14.N, then G2/G3 ride the
 episode state (S6) + P13.
+
+**UPDATE (2026-11-15, later same day): G1 drafted — docs/11 §14.10.**
+`kind:"audit-finding"` record for the S5 decision log: closed class
+(code-defect / spec-gap / spec-ambiguity / residual-risk-accepted),
+severity, verdictBasis (repro > evidence-only > opinion; opinion alone
+cannot hold a sign-off), mandatory repro for non-minor code-defects
+(`finding-intake-invalid` otherwise), ≥1 evidenceRefs, append-only
+disposition transitions with orchestrator/owner attribution. DRAFT,
+owner review open, not implemented (post-P0 additive, Change Ledger
+row landed first per §14.9's own rule). Next: owner review of §14.10,
+then G2/G3 (norm state + convergence) riding S6/P13.
 
 ## 2026-11-15 — M3 scoping: contract `docs/21` at DRAFT v9 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, cycles 2–4 confirming dispositions folded, D1–D9 pending
 

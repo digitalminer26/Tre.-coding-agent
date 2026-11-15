@@ -146,6 +146,7 @@ cite the row):
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v4→v5→v6 through two more adversarial rounds (no module touched).** v5 (confirming round on v4, 2 blockers + 4 majors + 1 minor): v4's layout-marker new-vs-missing heuristic REJECTED every legitimate first admission (host creates the episode layout before any ledger exists, `supervise.ts:2781`) and fleet discovery via `BudgetLedger.open` MUTATED foreign ledgers (`repairTail` truncates+fsyncs, `ledger.ts:1581,1674`) — replaced by an explicit durable init protocol + read-only `BudgetLedger.inspect`; `RootDiscovery[]` required projection input; redelivery coverage on the FULL P8 reservation identity; dedup/recovery pinned BEFORE the `M == E` shortcut; sticky `refused(already-executed)` terminal replay. v6 (cycle-1 confirming round on v5, auditor gpt-6.1-terra, 4 blockers + 7 majors + 4 minors, all verified vs `src/` + git 2.54 byte-dumps): init evidence becomes a SIDECAR marker `events/budget-init.json` (atomic rename; the v5 in-file header was rejected by the UNCHANGED owner reader — not a `LedgerRecord`, `ledger.ts:354-365` — and conflated never-init with deleted-with-spend; ledger line format stays byte-unchanged, legacy ledgers need an explicit operator `adopt:true`); worktree-probe grammar re-pinned to REAL `worktree list --porcelain -z` bytes (`branch refs/heads/main\0\0` — v5's separator spec fails on every normal repo); five-state EOF-tail classification replaces the `tornTail` boolean with cut/ambiguous ⇒ consult indeterminate (omitted tail may be a live append); recovery paths read main+journal only (moved/deleted branch cannot strand an open intent); `recovered` landings are terminal `merged` records; rollback provenance adds `merge-base --is-ancestor C main` + `already-rolled-back` no-op; §2.2 coverage closed to set-equality rules (i)–(iv) with the single current-episode exception. **Loop status: cycle-2 fresh audit of v6 in flight; D1–D9 sign-off bar = two more confirming rounds with no blocker/major** | M3 scoping (docs/21 draft v6) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
+| 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -1231,6 +1232,89 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
+| audit-finding records (§14.10) | G1 draft (2026-11-15) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
+
+### 14.10 Audit-finding records (G1 — the loop's classification hinge)
+
+**Status: DRAFT (2026-11-15), owner review open. Post-P0 additive wire
+shape per the §14.9 closure rule — a Change Ledger row precedes any
+implementation. No module is touched by this section.**
+
+**Purpose.** The autonomous audit-fix loop (HANDOFF 2026-11-15, owner
+goal) hinges on routing: an auditor's finding must carry a machine-
+checkable CLASS so the orchestrator can route without interpreting
+prose — code-defects re-enter the implementation loop, spec findings
+become human-review items, accepted residuals are recorded and never
+re-litigated. §14.3's kinds cover what the supervisor decides and
+observes about its own actions; none represents an audit finding. This
+section adds one record kind, emitted by auditor workers into the
+episode's decision log (S5, `events/decisions.jsonl`), same envelope,
+same durability discipline. §0.7 holds unchanged: control logic keys on
+the closed fields only; free-text fields are advisory, never parsed.
+
+#### 14.10.1 Wire shape
+
+One JSONL line per finding, discriminator `kind:"audit-finding"`. All
+records carry the common envelope `{schema:"tre-supervisor/1", id, ts,
+episodeId}` (taskId optional — a finding may name the contract, not a
+task).
+
+```jsonc
+{ "kind":"audit-finding", "id":"f-0061", "ts":1730231300000,
+  "schema":"tre-supervisor/1", "episodeId":"…", "taskId":"t2",
+  "cycle":4,                          // audit round that produced it
+  "auditor":{ "endpoint":"gpt-6.1-terra", "sessionId":"…" },
+  "class":"code-defect | spec-gap | spec-ambiguity | residual-risk-accepted",
+  "severity":"blocker | major | minor",
+  "verdictBasis":"repro | evidence-only | opinion",
+  "claim":"…",                        // ≤2000 chars, single line
+  "repro":{ "kind":"probe|fixture|session-log|none", "command":"…",
+            "preFixObserved":"…", "postFixExpected":"…" },
+  "evidenceRefs":["sessions/t2.jsonl#<entryId>"],      // ≥1 required
+  "affectedNorm":"docs/21 §1.1 (c) step (2)",          // or null
+  "disposition":"open | accepted-fix | rejected-duplicate | superseded",
+  "dispositionBy":"orchestrator | owner",
+  "dispositionTs":null }
+```
+
+Field rules (closed vocabulary; an unknown value makes the record
+invalid — the receiver refuses the line and surfaces it, never silently
+drops it):
+
+- `class` — exactly the four values HANDOFF G1 names. `code-defect`
+  routes to a fix cycle; `spec-gap`/`spec-ambiguity` route to the
+  human ledger (G2's norm state — out of scope here);
+  `residual-risk-accepted` must cite its accepting authority (owner or
+  a pinned policy clause) in `dispositionBy` at open time — an
+  unbacked residual record is invalid.
+- `severity` — the repo's blocker/major/minor audit vocabulary.
+- `verdictBasis` — carries the established discipline that a finding
+  reproduced against pre-fix behavior outranks one argued from
+  reading; an `opinion`-basis finding may not by itself hold a cycle
+  sign-off open (it needs corroboration or a downgrade).
+- `claim` — bounded single line, no newlines (S5 record discipline).
+- `repro` — required (`kind` ≠ `none`) when `class:"code-defect"` AND
+  `severity` ≠ minor: an unfalsifiable blocker/major code finding is
+  refused at intake (`finding-intake-invalid`). Lesson of record: a
+  claim the next cycle cannot re-run wastes a full cycle (p9m3
+  findings fresh every cycle through 4).
+- `evidenceRefs` — ≥1 session-log or decision-log entry id. Forensics
+  rule (D-round): the orchestrator's own echoes are not evidence.
+- `disposition` lifecycle — a finding is never mutated; transitions
+  are NEW records referencing `id` (append-only bus, S1 principle),
+  `dispositionBy` distinguishing orchestrator routing from owner
+  decisions. `rejected-duplicate` must cite the surviving finding's id
+  via a `superseded-by` companion record.
+
+#### 14.10.2 What this section does NOT do
+
+- No routing implementation (consumer's job, post-G2).
+- No norm state: `affectedNorm` POINTS at ratified text; it does not
+  create, gate, or version it (G2, separate section).
+- No convergence/stop rule: G3 owns the k-consecutive-clean +
+  family-diversity condition; this record only supplies its input.
+- No autonomy claim: kickoff, design-cycle budget (G4), and finding
+  partitioning (G5) are separate open compartments.
