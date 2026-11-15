@@ -870,6 +870,7 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   // EXISTS until its last member is reaped). Fail loudly with the reason
   // instead of intermittently failing the assertion below.
   let groupGone = false;
+  let permRetries = 0;
   for (let i = 0; i < 400; i++) {
     try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); }
     catch (e) {
@@ -877,11 +878,19 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
       // kill(-pgid,0) ESRCH => confirmed GONE; EPERM/other => unknown
       // and MUST NOT be counted as proof). (A1-fold, cycle A1 finding 3.)
       const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ESRCH") throw new Error(`operator sweep probe returned ${String(code)} — not proof of group death`);
-      groupGone = true; break;
+      if (code === "ESRCH") { groupGone = true; break; }
+      // EPERM is retryable-unknown (owner decision, post-E round): it
+      // proves NOTHING about group death — not "gone" and not "alive"
+      // — so keep polling; the ESRCH-or-timeout discipline still gates
+      // the confirmation. Any OTHER errno stays a hard failure (it
+      // signals a broken probe contract, not a transient). The single
+      // observed EPERM (gate-postE0, cause undetermined) is why this
+      // retry exists; see ledger E0 GATE EVENT block.
+      if (code === "EPERM") { permRetries++; await new Promise((r) => setTimeout(r, 25)); continue; }
+      throw new Error(`operator sweep probe returned ${String(code)} — not proof of group death`);
     }
   }
-  assert.ok(groupGone, "operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis) — cannot assert the confirming probe");
+  assert.ok(groupGone, `operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis; ${permRetries} EPERM retry${permRetries === 1 ? "" : "ies"} observed) — cannot assert the confirming probe`);
   const again = await runner.stop(h);
   assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
   assert.equal(again.groupStatus, "reaped");

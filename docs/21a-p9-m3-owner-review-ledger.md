@@ -6249,10 +6249,14 @@ own"):
   the evidence shows one transient failure followed by passing
   reruns and does NOT establish load or environment as the cause.
   The test worked as designed (fail loudly rather than
-  silently flake); whether the ESRCH-only probe should treat EPERM
-  as retryable-unknown is a TEST-SEMANTICS question left open for
-  the owner (test-side change, CODEFIX-ABLE class, not folded
-  here). The fold commit below landed only after the green rerun;
+  silently flake). OWNER DECISION (F2 fold, post-F1 audit): the
+  ESRCH-only probe now treats EPERM as RETRYABLE-UNKNOWN — the poll
+  loop keeps iterating on EPERM (it proves nothing either way) and
+  still confirms only on ESRCH or fails at the 10s timeout, with the
+  EPERM retry count reported in the failure message; any other
+  errno remains a hard failure. The loud-failure property is kept
+  for real breakage: only the transient EPERM is no longer fatal.
+  The fold commit below landed only after the green rerun;
   the red run is retained above per the no-hidden-evidence rule.
   E2 correction (exact-tree limitation, second-E audit MINOR): the
   green E0 rerun happened BEFORE the E0 GATE EVENT block above was
