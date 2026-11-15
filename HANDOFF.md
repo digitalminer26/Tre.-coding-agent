@@ -1,3 +1,337 @@
+## 2026-11-16 — P9/M3 reference impl (v38 cycle-5) LANDED in working tree; next goal: AUTOMATE the audit-fix loop — ORCHESTRATION GAP documented (not yet built)
+
+**Current workstream (p9m3 reference ledger/probe — `reference/p9m3/`,
+spec doc `docs/21`):** cycle-5 owner decisions D1-A/D2-A/D3-B/D4-B/
+D5-A are fully implemented and evidenced: total-attempt cap (every
+REPAIR-INTENT consumes; only valid `durable:true` repaired resets),
+strict+global journal grammar (any damage -> `journal-unreadable`;
+ENOENT-only = fresh; O_NOFOLLOW), probe census `os.scandir(dir_fd)`
+(zero CWD side effect), lock dev/ino identity re-verification,
+`settle_in_lock` own-acquisition precondition. Pins F45 rewritten +
+F49-F52 new (F52 carries the STATIC no-chdir source pin — the fchdir
+round-trip is behaviorally invisible to a serial test; mutation M5 is
+caught ONLY by the static pin, documented so it is never "simplified"
+away). Suite 52/52 under `-W error::ResourceWarning`; mutation
+evidence M1-M7 all revert-to-red (Doc 21 "V38 CYCLE-5 DISPOSITIONS"
+appended, evidence table included). **NOT YET COMMITTED — `reference/`
+and `docs/21-...md` are untracked (`??`); finishing the current
+workstream = commit + (if owner wants) one more adversarial audit
+round on the cycle-5 build.**
+
+**Stated goal (owner, 2026-11-16):** replace the operator-driven
+p9m3-style loop with an autonomous one: orchestrator kicks the
+workstream -> N workers make CODE changes per requirements -> auditor
+(s) on specified endpoints -> orchestrator classifies findings
+(code-change vs spec-change), spec changes become human-review
+ledger items, code changes re-enter the loop -> end on cycle budget
+or no-more-code-flaws.
+
+**Gap assessment (vs what exists): the loop's hinge does not exist.**
+The machinery is ~80% there; the classification/routing layer is the
+missing compartment:
+
+  G1 (BLOCKING) — NO AUDIT-FINDING RECORD. Nothing in the schema set
+     (docs/11 S1-S7/P0, §14.3 records) represents an audit finding,
+     let alone its class. P15 diagnoses worker failure causes, P14
+     evaluates task acceptance evidence, P13 carries human blockers —
+     none is "finding vs spec/code". Needed: a closed-kind §14.3-style
+     record `{class: code-defect | spec-gap | spec-ambiguity |
+     residual-risk-accepted, repro, evidence, affected-norm}` emitted
+     as machine-checked JSONL by every auditor worker. Without a
+     mandatory machine-parseable class there is nothing to route on.
+
+  G2 — NO DRAFTED->RATIFIED STATE ON THE SPEC DOC. The loop routes
+     spec-change findings to human review, but the ratified text must
+     become the next code cycle's requirements. Today "PENDING owner
+     ratification" is prose (Doc 21); the orchestrator needs parseable
+     norm state (drafted/ratified/rejected per disposition) + an
+     ATOMIC transition (ratify -> regenerate worker prompts against
+     the new norm), or workers fix against stale text. P13's blocker
+     kind + structured answer parsing is the right reuse point
+     (additive kind: "ratify drafted norm X, option A/B").
+
+  G3 — CONVERGENCE CRITERION IS NOT DATA. "Auditor says clean" is
+     DISPROVEN as a stop condition in this repo's own history: P6
+     cycle-4 ACCEPT was overturned by an independent cycle-5; p9m3
+     produced fresh findings every cycle through cycle 4. The stop
+     rule must be state: k consecutive clean rounds AND family
+     diversity >= 2 auditors NOT sharing the implementer's family —
+     pinned as schema, not operator habit. Today family diversity is
+     manual (P6 c1-4 false-accept is the cautionary row).
+
+  G4 — BUDGET SEMANTICS. §14.7 recovery budgets are per-recovery
+     spend; the loop needs a DESIGN-CYCLE budget (rounds/wall-clock/
+     USD per workstream, checked at cycle boundary). Additive shape,
+     same ledger discipline.
+
+  G5 (minor) — WORKER FINDING PARTITIONING. Nothing in S3 models
+     whether findings are independent (parallelizable across N
+     workers) or interacting (serialize). Start with a conservative
+     rule: findings touching the same file/section serialize.
+
+**Loop status today:** runs the way p9m3 ran — one operator session
++ `~/.tre/audits/*-kick.sh` one-shots per cycle. All G1-G5 are
+docs/11 §14 additions (contract-first, same discipline as P13/P14/
+P15 rows). Next step after committing the current workstream: draft
+the G1 finding-record schema as docs/11 §14.N, then G2/G3 ride the
+episode state (S6) + P13.
+
+## 2026-11-15 — M3 scoping: contract `docs/21` at DRAFT v9 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, cycles 2–4 confirming dispositions folded, D1–D9 pending
+
+Supersedes the v8 entry below. **Cycle 4 on v8**
+(`m3v8c4-terra-*`: 3 blockers + 7 majors + 4 minors → v9) — the
+cycle-4 findings clustered on the DURABILITY and IDENTITY seams v8
+itself had introduced: the "per-creation" fsync chain could be
+published by a loser/retry that never established it (two blockers:
+EEXIST-loser marker over an un-fsynced winner entry; a valid-marker
+retry returning success on a marker whose link dir-fsync had FAILED —
+v9 makes durability PER-PUBLISHER and makes ANY success return mean
+the full chain is durable); rewind recovery reused the revert
+descendant test, which is vacuously TRUE pre-CAS — v9 proves rewind
+landing by TIP IDENTITY (`main == M`, disclosed ABA residue;
+crash-before-CAS ⇒ `intent-open`, never an ack); `executionSeq` was
+both caller-supplied and journal-allocated — demoted to an OPTIONAL
+EXPECTATION, `r` journal-allocated with the intent append as the
+atomic claim (`refused(execution-seq-mismatch)`, now in the union);
+the §3 "not-ancestor for BOTH modes" pin contradicted §1.2's
+revert-only scoping (pins split per mode; rewind currency =
+`expectedMainTip == candidateSha` ⇒ `rewind-blocked`); a second
+rollback IDENTITY could race an open intent — new 0a′ cross-identity
+guard indexes unresolved intents by PROMOTION actionId; adoption now
+inherits the FULL durability ordering, not just the link; the
+discovery-summary row split by ledger BYTES to match the crash table;
+the failure machine separates the link's EXPECTED `EEXIST` from
+fatal errors and dropped the impossible "no classification change"
+promise; `firstRecordTs` pinned diagnostic-only; header three/two
+count and the step-3 "canonical snapshot" exclusions corrected; the
+claimed-but-absent §3 rewind pins genuinely added.
+**Loop status:** CYCLE 5 (fresh adversarial audit of v9, same auditor
+model, detached `~/.tre/audits/m3v9c5-terra-*`, kick script
+`m3v9c5-terra-kick.sh`, pid in `m3v9c5-terra.pid`) IN FLIGHT at the
+time of writing. Trajectory: c1 4B/7M → c2 2B/6M → c3 3B/5M → c4
+3B/7M/4m — blocker count has never hit zero, so the "two consecutive
+clean confirming rounds" bar has NOT started. Doc-only; NO `src/`
+file touched. Next: read `m3v9c5-terra-out.txt`; clean (PASS /
+PASS WITH MINORS) starts the counter (one more clean round signs
+off), blockers → v10 + cycle 6.
+
+## 2026-11-15 — M3 scoping: contract `docs/21` at DRAFT v8 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, cycles 2–3 confirming dispositions folded, D1–D9 pending (SUPERSEDED by the v9 entry above)
+
+The adversarial loop kept biting:
+**cycle 2 on v6** (gpt-6.1-terra, `~/.tre/audits/m3v6c2-terra-*`: 2
+blockers + 6 majors + 3 minors → v7) and **cycle 3 on v7**
+(`m3v7c3-terra-*`: 3 blockers + 5 majors + 3 minors → v8). Both
+filed BLOCKERS — the "two consecutive clean confirming rounds"
+sign-off bar has NOT started counting. Headline fixes (full
+disposition tables at docs/21 foot):
+- **v7:** coverage rule (v) — every episode in a complete root's
+  enumeration appears as EXACTLY ONE input (one-directional rules
+  let discovered spend vanish from Σ); the marker/ledger crash
+  window's self-heal was a FICTION (a crashed process has no queued
+  write) replaced by durable ORDERING — complete ledger fsynced
+  before the marker links; zero-byte ledger = proof of zero spend ⇒
+  `init-pending` zero term, no permanent freeze; `CurrentEpisode`
+  parameter makes the single coverage exception REPRESENTABLE;
+  repeat rollback is journal-keyed lifecycle (`already-executed`),
+  tree equality demoted to the empty-difference no-op; marker
+  publication rename→`link()` (rename clobbered adoption evidence);
+  determinacy beats freshness — ANY population `unterminated-cut`/
+  `ambiguous` ⇒ WHOLE consult indeterminate; whitespace-EOF
+  UNSETTLED.
+- **v8:** the LEDGER'S DIRECTORY ENTRY is fsynced before the marker
+  link (a file fsync persists content, not an entry — the
+  deletion-detection proof needed this); adoption evidence gains
+  `adoptedSha256` (SHA-256 over the validated prefix) verified on
+  EVERY consult — first-record + length cannot stop a
+  same-first-record rewrite that omits later spend; coverage rule
+  (vi) requires EXACTLY ONE input matching `current` (empty
+  enumeration + `inputs=[]` is a refusal, never a zero-Σ admit);
+  `initEpisode` CLASSIFIES marker-first (a valid marker over an
+  absent ledger REFUSES — init never mints a zero ledger over a
+  deletion) while PUBLISHING ledger-first; logical `actionId`
+  (hashes the frozen request EXCLUDING pins/`executionSeq`)
+  separated from execution identity `actionId#r<n>` with durable
+  max+1 suffix allocation; rollback gains an explicit precedence
+  table — 0a own-record dedup/recovery → 0b promotion lifecycle
+  (sticky `already-executed` in BOTH modes, checked BEFORE the
+  ancestor test so a rewind cannot mask it behind
+  `unverified-provenance`) → 0c provenance/ancestor (revert-scoped)
+  → 0d empty-difference no-op; the §3 release bar reconciled
+  line-for-line with the body (four residual v7 contradictions);
+  `O_EXCL`/fsync/link failure paths get a convergent state machine
+  (any durability failure fails the ACT, never the classification).
+
+**Loop status:** CYCLE 4 (fresh adversarial audit of v8, same auditor
+model, detached `~/.tre/audits/m3v8c4-terra-*`) IN FLIGHT at the time
+of writing. Trajectory: c1 4B/7M → c2 2B/6M → c3 3B/5M — the doc is
+contract-only; NO `src/` file touched; nothing to build. Next: fold
+cycle 4 (if blockers → v9 + cycle 5), sign-off bar unchanged.
+
+## 2026-11-15 — M3 scoping: contract `docs/21` at DRAFT v6 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, cycle-1 confirming dispositions folded, D1–D9 pending (SUPERSEDED by the v8 entry above)
+
+Follows the 2026-11-13 entry below (which described v4; superseded by
+this one). The adversarial doc-review loop on docs/21 has run three
+rounds since: v4 → **v5** (first confirming round: 2 blockers + 4
+majors + 1 minor — the v4 layout-marker heuristic rejected every
+legitimate first admission because the host creates the episode
+layout BEFORE any ledger exists, `supervise.ts:2781`, and fleet
+discovery via `BudgetLedger.open` MUTATED foreign ledgers — `open()`
+runs `repairTail`, truncating+fsyncing, `ledger.ts:1581,1674`);
+v5 → **v6** (CYCLE 1 of the confirming round on v5, auditor
+gpt-6.1-terra detached session `~/.tre/audits/m3v5c1-terra-*`: 4
+blockers + 7 majors + 4 minors, every finding verified against
+`src/` and the git 2.54 byte-dumps before acceptance). Headline v6
+changes (full dispositions at docs/21 foot):
+- **Init evidence moves to a SIDECAR marker** `events/budget-init.json`
+  (atomic tmp+fsync+rename+dir-fsync; full crash/recovery table):
+  the v5 in-file header line was NOT a `LedgerRecord` — the UNCHANGED
+  owner reader validates every line (`ledger.ts:354-365`) and would
+  have failed every initialized ledger's own `open()`; the header
+  also could not distinguish a never-initialized episode from a
+  deleted-with-spend one (silently dropping spend from Σ). Ledger
+  line format stays byte-UNCHANGED; legacy (marker-absent +
+  ledger-present) = `unreadable(ledger-without-init)` until an
+  explicit operator `adopt:true` act.
+- **Worktree-probe grammar re-pinned to real git output** (v5's
+  `branch\0refs/heads/main\0` parse fails on every normal repo —
+  git emits `branch refs/heads/main\0\0`: attribute+value
+  SPACE-separated, records end with an empty field; byte-dumped on
+  2.54, attached/detached/bare fixtures).
+- **Five-state EOF-tail classification** (`clean | blank-suffix |
+  unterminated-kept | unterminated-cut | ambiguous`) replaces v5's
+  `tornTail` boolean; an observed cut/ambiguous tail makes the fleet
+  CONSULT indeterminate (an omitted tail may be a LIVE append —
+  smaller-Σ certainty requires a settled tail); inspect↔open
+  equivalence claim scoped to pure byte-classification.
+- **Recovery-path input rule:** open-tail/sticky-terminal replay
+  reads main + journal ONLY (a post-crash moved/deleted episode
+  branch must not strand its own open intent behind step-1 pin
+  failures); `recovered` landings are terminal `merged` records
+  (fully equivalent downstream incl. rollback provenance).
+- **Rollback provenance adds `merge-base --is-ancestor C main`**
+  (a rewound/rewritten promotion is no longer revertible) and the
+  second-rollback tree-equality no-op `already-rolled-back`.
+- **Closed-form fleet coverage** (§2.2 rules (i)–(iv)): declared
+  roots == discovery roots set-equality, no duplicate
+  `(root,episodeId)` inputs, single documented exception (the
+  current episode).
+- `RootDiscovery[]` (required param) — a failed enumeration can no
+  longer masquerade as an empty one.
+
+**Loop status:** CYCLE 2 (fresh adversarial audit of v6, same auditor
+model, detached `~/.tre/audits/m3v6c2-terra-*`) IN FLIGHT. Header bar:
+D1–D9 go to sign-off only after two more confirming rounds find no
+blocker/major (docs/16 precedent). No implementation started; no
+`src/` file touched by the contract.
+
+## 2026-11-13 — M3 scoping: contract `docs/21` at DRAFT v4 (promotion/rollback + fleet budget layer) — UNREVIEWED PROPOSAL, confirming-round dispositions folded, D1–D9 pending
+
+Workstream start after the M2 close (delegation plan
+`.tre/delegation/m3-scoping/plan.md`). The remaining named M3 items
+(docs/18 §10, docs/20 §14 — "staging/rollback + fleet budget layer")
+are scoped contract-first, docs/16 pattern, into
+`docs/21-p9-m3-promotion-rollback-fleet-budget.md` — **unreviewed
+proposal; no module touched; D1–D9 do NOT go to sign-off until an
+adversarial doc-review round on the contract itself passes.** v4 is
+draft 4: v1 failed a full-severity self-audit (2 blockers + 5
+majors + 1 minor); v2 then failed the adversarial round itself (2
+blockers + 4 majors + 1 minor — every finding verified against `src/`
+or reproduced on the lab git before acceptance); v3 then failed a
+confirming-round audit (1 blocker + 4 majors + 1 minor —
+unregistered-current-root hole, missing-ledger discovery gap,
+inexpressible projection inputs, duplicate-parent commit, redelivery
+double-count — each verified against `src/`/reproduced before
+acceptance),
+all dispositions tabled at docs/21 foot. Shape (v4):
+
+- **Slice A — promotion & rollback:** episode branch IS staging (P12
+  merges tested candidates onto it); the missing acts are episode→main
+  promotion and undo. New leaf `src/integration/promote.ts` (D1: P12's
+  audited "literal `main` refused" identity stays per-module).
+  Candidate-first sequence (v1 blocker fix): open-tail dedup/recovery
+  FIRST — sticky terminal replay `refused(already-executed)`; then the
+  no-op check `M == E` stops BEFORE commit construction with durable
+  `already-merged` (v5 — an open tail outranks the shortcut: recovered
+  ancestor ⇒ close the intent + `recovered`; tip equal by other means
+  ⇒ `refused(intent-open)`; v4 learned `commit-tree` ignores a duplicate
+  parent and mints a ONE-parent commit, reproduced on git 2.54, which
+  §1.2's two-parent provenance rule would reject at rollback — no gate
+  may ever run on a sha the module's own rules disown) → merge-tree →
+  commit-tree candidate `C` WITH `Tre-Promotion:` trailer → gate bound
+  to `C` (v1 gated the episode tip while advancing an untested merge
+  commit) → CAS `update-ref --no-deref refs/heads/main C M` with the docs/15 §4-step-7
+  no-effect-provability table; moved-`M` = operator re-issue with
+  bumped `executionSeq`, stale gate evidence never reused. Rollback
+  v2 (v1 blocker fix — `git revert` is worktree/sequencer-mutating
+  porcelain): journal+parentage+trailer PROVENANCE checklist before
+  any ref touch, object-store inverse merge via
+  `merge-tree --merge-base=<C>`, gated rollback commit, `rewind` only
+  while main HEAD == C (D3). Threat model stated: `grantedBy` is
+  attestation, human gate structural at the host (TTY-confirmed CLI
+  act), no claim rests on caller honesty (D2). **v3 (round-2 review
+  of v2 — 2 blockers + 4 majors + 1 minor, each verified against
+  `src/`/reproduced before acceptance):** the v2 promotion source
+  `agent/**` was P6's TASK namespace P12 keeps episode branches OUT of
+  (`merge.ts:25–27`; host grammar forbids `/`) — D8 rewritten to the
+  real P12 episode-branch rule (single element, out of `agent/**`,
+  no `main` case-fold); plain `update-ref` FOLLOWS a symbolic main
+  (reproduced on git 2.54: symref `main→other` — the CAS advanced
+  `other`) — every CAS now `--no-deref` + symref refusal at resolve
+  (P12 probe ported); checked-out `main` is a REFUSAL
+  (`main-checked-out`), not an operator assumption.
+- **Slice B — fleet budget layer:** machine-level USD-only cap file
+  (D4), capacity-file all-or-nothing validation; pure projection in
+  new `src/budget/fleet.ts` composing unchanged `projectLedger`
+  semantics. v2 fixes (audit majors): three-state file semantics —
+  ABSENT = unconfigured, BROKEN/STALE = **fail CLOSED on new
+  admission** (v1's silent fail-open would disable a configured cap,
+  D5-revised); admission is an explicit inequality incl. the
+  candidate estimate, A6 unknown-spend never grants headroom.
+  **v3 fixes (round-2 majors):** v2's per-episode refuse + "Σ lower
+  bound" admitted OTHER episodes against unknown spend and claimed a
+  bound no store can back — replaced by fleet-wide USD denial
+  (`fleet-indeterminate`) while any ledger in the population is
+  unreadable or unknown-priced; v2's overshoot formula ALSO withdrawn
+  (no numerical bound is claimed; hard cap = provider-side account
+  budget, out of surface — "sum episode caps under target" is not one
+  either); discovery enumerated `~/.tre/episodes` only, so
+  `--episodes-root` episodes spent invisibly outside the cap — now an
+  operator-declared `episodeRoots` registry in the fleet file, a
+  missing declared root fails closed.
+  **v4 fixes (confirming-round audit):** the CURRENT episode's own root
+  must be a registry entry (`fleet-root-unregistered` refusal — closes
+  the unregistered-custom-root hole v3 left open); discovery enumerates
+  episode DIRECTORIES with a host-layout-marker new-vs-missing ledger
+  distinction (marker-present-but-unreadable ⇒ `fleet-indeterminate`,
+  marker-absent ⇒ genuine-new zero term — the "directories holding a
+  ledger" phrasing let an existing-but-unreadable episode vanish from
+  Σ); `projectFleet`/`fleetSummary` take discriminated per-episode +
+  policy inputs (raw record arrays conflated unreadable with empty);
+  `M == E` is an `already-merged` no-op BEFORE commit construction
+  (`commit-tree` drops duplicate parents — reproduced on git 2.54);
+  recorded-reservation redelivery is P8-style coverage with zero
+  second estimate.
+- **Out of docs/21 with reasons logged (§0):** model swaps / worktree
+  release / P12 wiring (shipped+audited), richer P13 views (M4 plane),
+  fresh-session handoff + broader decomposition (need §11.4 operating
+  evidence / their own contract round), P3b enabling.
+- **D1–D9 (docs/21 §4) carry proposed resolutions; D7 proposes slice A
+  first;** each slice audits (code) to convergence per the
+  m3fix/M2-acceptance precedent, host wiring a separate increment,
+  docs/11 ledger flips only after the wiring round closes.
+
+Cited surfaces were re-read against `src/` (one path correction
+applied — the ledger lives at `<episodePath>/events/budget.jsonl`,
+`BudgetLedger.forEpisode`); that check is a name/signature scan, NOT
+a design review — the design review is the open adversarial round.
+Files: `docs/21-…` (new, now v4), `.tre/remaining-items-review.md`
+(item 1 → v4, confirming round pending), this entry, docs/11
+ledger row (wording downgraded to match).
+**Next: one CONFIRMING adversarial round on v4 → then Hong's
+D1–D9 sign-off → slice A implementation.** (Round-2 lesson recorded:
+the round must reproduce its findings and the review must attack the
+TEXT, not assume a fix that isn't in the prose.)
+
 ## 2026-11-15 — P9/M2 ACCEPTANCE CLOSED (Sol rounds c6–c9, m2c6–m2c9): clean PASS 0/0
 
 The two open acceptance items from the 2026-11-12 c5f entry are both

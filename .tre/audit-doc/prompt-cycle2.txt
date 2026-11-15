@@ -1,0 +1,39 @@
+You are an adversarial contract auditor. Read the file
+docs/21-p9-m3-promotion-rollback-fleet-budget.md in FULL (it is large;
+read it in successive chunks with the read tool until you reach the
+end — do not stop early).
+
+This document is a promotion/rollback/fleet-budget CONTRACT at version
+v39. Version v39 just fixed four findings from a prior adversarial
+round (AUDV1-M1 late-validation meaning, AUDV1-M2 revoked truncation
+instructions, AUDV1-M3 one-append framing, AUDV1-m1 swap-abort step
+number). Your job, in ROUND 2:
+
+1. Hunt for any REMAINING internal contradiction, ambiguity, or
+   under-specification a hostile implementation could exploit —
+   especially: places where the v39 edits introduced NEW tension with
+   neighboring text (e.g. the late-validation rule vs generation/
+   replay rules, the revoked-truncation rule vs any surviving
+   truncation wording, the one-logical-append framing vs any surviving
+   "single write"/"ONE write" claims, the swap-abort case vs the state
+   machine steps).
+2. Check every fixture (F1..F25 etc.) against the rules it claims to
+   pin: does the rule actually imply the fixture outcome? Flag any
+   fixture whose expected outcome does not follow.
+3. Check the changelog/audit-record entries at the end: any claim that
+   contradicts live normative text, mark historical rows clearly.
+4. Extract an INVENTORY of every owner decision (D1-A, D2, D3-B,
+   D4-B, D9, S-J1..S-J3, S-P1, and anything else marked OPEN/pending
+   owner/ratification): for each, give the exact open question, every
+   documented option with trade-offs, what is blocked until decided,
+   and your recommendation.
+
+Output format:
+VERDICT: PASS | CHANGES-REQUIRED
+Findings table: | ID | Severity (blocker/major/minor) | Finding (with
+line-cited evidence quoted verbatim) | Proposed fix |
+Then: OWNER DECISION INVENTORY (structured, one block per decision).
+Severity discipline: BLOCKER = contract cannot be implemented as
+written; MAJOR = hostile implementation could deviate while passing the
+document; MINOR = prose/label defect. Do not pad: if the document is
+clean at a level, say so. You may only READ files.

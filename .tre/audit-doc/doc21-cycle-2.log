@@ -1,0 +1,168 @@
+Getting started:
+  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)
+  tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.
+Behavior:
+  approval: auto-approve (default) — workspace-scoped work runs without a prompt
+  sandbox:  on (bash confined to the workspace + extra roots)
+  implicit root: /Users/xilcilus/.tre  (tre.'s own state dir — always read+write)
+  extra roots (durable, from tre.json): /Users/xilcilus/projects, /Users/xilcilus/.nvm, /Users/xilcilus/kubeconfigs  (read+write, in addition to the workspace)
+  turn budget: 80 turns/cycle × 4 cycles (default)  (--max-turns / --max-continuations, or tre.json)
+  skills:   12 available
+    · implement-audit — Run implement→audit cycles on a code change: a worker model …
+    · self-improve — MANDATORY protocol for making ANY code change in this reposi…
+    · git-commit — Commit the current codebase safely. Runs the quality gate on…
+    · llama-fork-build — Build and deploy the user's llama.cpp fork (with the ai-stac…
+    · llm-quality — Evaluate LLM output quality with oracle-graded structured re…
+    · parallel-delegation — Plan a workstream as a dependency graph and run independent …
+    · private-registry — Operate the private OCI image registry (llmsandbox VM, 192.1…
+    · task-delegation — Decompose a multi-part task into subtasks, assign each to a …
+    · telegram — Send and receive messages with the user via a Telegram bot. …
+    · tokenomics-reporter — Push this host's tre. session usage data to the tokenomics c…
+    · tre-deploy — Build and deploy the tre. coding agent to another machine WI…
+    · tre-release — Cut and publish a release of the Tre.-coding-agent repo — ve…
+  blocked:  system-level sensitive reads + destructive commands (across the board)
+  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)
+VERDICT: **CHANGES-REQUIRED**
+
+I read the document through its final line, **6694**, including the historical disposition tables. I did not read supporting documents or execute code, so this is an internal-document audit, not verification of the cited implementation or historical test results.
+
+## Findings
+
+| ID | Severity | Finding (with line-cited evidence quoted verbatim) | Proposed fix |
+|---|---|---|---|
+| R2-B1 | blocker | **The partial-tail recovery fixture requires mutually exclusive outcomes.** The live repair appends `ALL` at the current confirmation length: “`watermark:L_C, confirmGen:G_C`” (lines 2551–2553), and “offsets >= L_C … remain ACTIVE” (lines 2644–2648). Yet the v39 δ case says that after settlement and AUTH+REPAIR, “the ORIGINAL confirmation is ACTIVE again … with NO new confirmation” (lines 2785–2790); fixture e-8 repeats this at lines 5535–5541. An original confirmation already present when `L_C` is read lies **below** `L_C`, so the repair makes it inert. | Change δ and e-8 to require a new confirmation or ESRCH after the overlay repair. Correct the AUDV1-M2 disposition at lines 6678–6682, which claims the old outcome was preserved. |
+| R2-B2 | blocker | **Late validation and F24 require a generation binding that the specified AUTH and validity rule do not supply.** AUTH is `{t:"AUTH", authId … occurrences …, createdAt}` (lines 2659–2663); REPAIR validity checks only “`ALL.watermark <= current confirmation-log length`” (lines 2472–2477). Nevertheless, v39 requires growth “`IN THE SAME GENERATION the AUTH bound`” (lines 2493–2498), and F24 says growth in a different generation leaves R DEAD (lines 6363–6366). No AUTH generation field or comparison is defined, so the specified algorithm cannot enforce that result. | Add and validate a generation binding to AUTH, define equality against both REPAIR and the currently observed confirmation generation, and specify behavior across confirmation repair. Alternatively explicitly choose different semantics and revise F24 and the late-validation promise. |
+| R2-M1 | major | **The v39 late-AUTH activation scenario is not compatible with the normal authorization workflow as specified.** An AUTH uses a “`fresh ULID`” (lines 2650–2653), while F23 requires a previously appended REPAIR to name the exact future AUTH id and later says “a genuine AUTH A* … is appended” (lines 6359–6362). The contract gives no workflow for reserving or supplying that future ID, nor an exception to freshness. Separately, it says “NO operator command may make one contribute” while admitting contribution when “a new AUTH that happens to match” arrives (lines 2500–2504): authorizing is itself an operator command. | Define whether predeclared IDs are legal and how a genuine late AUTH is created and verified; otherwise mark F23 as injected/corruption-only or disallow late-AUTH activation. Replace the absolute command claim with the exact intended constraint. |
+| R2-M2 | major | **Revoked truncation and replacement instructions survive in the release bar.** The live rule says “NO PATH REWRITES THE CONSUMPTION LOG” (lines 2382–2387), but P13 still requires “an unsettled consumption tail during 4b is truncated IN PLACE” (lines 5550–5553). Other P13 fixtures demand a repair “published replacement” and composition (lines 5493–5508), and the supposedly live repair paragraph still prescribes `--repair-consumptions --from` and replacement composition (lines 2881–2911). The global historical notice at lines 2714–2718 does not clearly mark these separate release-bar instructions. | Mark each superseded passage and fixture historical, or rewrite it against settlement plus overlay. Make the current release bar explicitly exclude old replacement/inode schedules. Correct AUDV1-M2’s “every live truncation instruction REVOKED” claim (lines 6678–6682). |
+| R2-M3 | major | **The one-logical-append correction leaves an operative “single write” rule.** Framing declares “Nothing in this contract asserts one-SYSCALL atomicity anywhere” and claims all live sites were conformed (lines 2428–2435), but reserve-on-append still says “The reserve CHECK and the reserved single write execute” under the lock (lines 2450–2453). Earlier watermark instructions also require “`+ one write + fsync + close`” (lines 2290–2292), without clearly limiting that instruction to historical material. | Replace surviving consumption-log one-write prescriptions with the checked-loop framing and identify any genuinely separate confirmation-log atomic-write rule as scoped separately. Amend AUDV1-M3’s completeness claim at lines 6683–6687. |
+| R2-M4 | major | **F25’s crash result does not follow for every crash between loop syscalls.** The frame begins with `\n` (lines 2422–2426), and whitespace-only trailing bytes are ignored (lines 2455–2457). A first short write that writes only the leading newline, followed by a crash, leaves no nonblank unterminated tail. Yet the general framing says “a crash mid-loop leaves an unterminated tail” (lines 2428–2431), and F25 asserts the same result (lines 6367–6370). The specific three-byte F25 input is also not shown to contain a nonblank record prefix. | Enumerate zero-record-byte and whitespace-only crash prefixes separately from nonblank torn records. Specify whether the former is an absent append or requires other recovery evidence; make F25’s bytes explicit and test all boundaries. |
+| R2-M5 | major | **F13’s expected unmasked-malformed state is not implied by its setup.** F13 specifies only a REPAIR whose mask names a valid watermark, then expects “every occurrence it would have masked stays UNMASKED ⇒ `unmasked-malformed`” (lines 6345–6346). A valid watermark is not a malformed occurrence; the rule says a DEAD REPAIR “is NOT itself an occurrence” (lines 2475–2478). With no other malformed line, the result is `ok`, as the analogous F16 recognizes (lines 6350–6351). | Add a distinct unmasked malformed occurrence to F13’s setup and specify its mask relationship, or change the expected authority to `ok`. |
+| R2-M6 | major | **F20 promises reconstruction of information that is not specified on disk.** It requires a successor to re-derive “`durability-pending` from disk” after a killed process (lines 6355–6356); the rule likewise says “last append unresolved ⇒ pending” (lines 2612–2617). But the document defines durability by whether two fsyncs “have returned success” (lines 2597–2600), a process-local event not necessarily distinguishable from identical visible bytes after a crash. A later resolve-on-use can be conservative, but cannot infer that historical return state from those bytes alone. | Specify a durable pending protocol and its crash ordering, or require every successor to treat state as pending until an unconditional in-lock resolve succeeds, without claiming it reconstructs the previous fsync return. Align status and F20. |
+| R2-M7 | major | **The revised swap-abort branch still has incompatible sequencing.** Detection occurs “BEFORE ANY STEP-2 PUBLICATION” (lines 1460–1463); the cleanup branch says, if ownership is regained, “run the guarded ledger publish if still pending, remove OUR writer body if published” (lines 1470–1474). The v39 rewrite adds that an OURS body at cleanup “is the regained branch AFTER our own guarded step-2 replace completed” (lines 1500–1505), but the abort cleanup does not define such a replace, and an already-existing same-token body is not excluded. | Define whether an abort ever continues into writer-body publication; otherwise remove that path and identify ownership by invocation-specific evidence, not token alone. Add swap-back and pre-existing-body fixtures. |
+| R2-m1 | minor | **Version and decision status are misleading.** The opening says “`DRAFT v37`” (lines 3–4), although the footer calls this “V39 CONTRACT-PROSE AUDIT” (line 6667). The introduction says owner decisions 1A/2A/3A were “applied” (lines 799–802), while the owner record says they “await the owner's explicit confirmation” (lines 6392–6394). | Label the document v39 draft and consistently distinguish drafted operative proposals from owner-ratified decisions. |
+| R2-m2 | minor | **Historical audit rows contain superseded claims without local correction.** For example, C15-M3 says the writer body was “published at step 4” (line 6116), contradicted by v39’s step-2 correction (lines 1494–1498); C14-M4 says a stomp “never unsoundly deletes” (line 6097), contradicted by the live wholesale-loss explanation (lines 2993–3005). The sections are historical, but these rows lack the requested clear local supersession marker. | Add local “historical; superseded by …” annotations to materially contradicted dispositions, especially these two and other old repair/replay claims. |
+
+**Fixture coverage note:** I examined the named F1–F25 table and the surrounding P/e fixture text against the document’s stated rules. The findings above identify outcomes that do not follow or conflict. I cannot certify every implementation-level fixture property from prose alone; in particular, F23/F24 and F25 require the missing setup details identified above.
+
+## OWNER DECISION INVENTORY
+
+The document uses some labels both for older §4 decisions and newer reference-build decisions. I keep their namespaces separate. Where the document does **not** enumerate every option or expressly state a blocker, I say so rather than inventing one.
+
+### Original contract decisions D1–D9 — §4
+
+All are **proposed, not signed off**. The document says sign-off follows confirming rounds (lines 803–806), then implementation and separate wiring (lines 5704–5710).
+
+| Decision | Open question and documented options/trade-offs | Blocked / recommendation |
+|---|---|---|
+| **D1 — module shape** | New `promote.ts` leaf versus generalizing `integrateTestedCandidate`; the leaf preserves P12’s tested never-main identity and separate audit history (lines 5653–5656). | Slice A design/sign-off. **Recommend leaf.** |
+| **D2 — human gate** | Explicit TTY-confirmed operator CLI only in v1 versus a later automatic caller; `promoteToMain:"auto"` has no v1 host path (lines 4048–4060, 5657–5659). CLI gives structural human control; automation awaits operating evidence. | v1 caller/wiring approval. **Recommend CLI-only initially.** |
+| **D3 — rollback default** | Gated object-store revert by default versus narrow, ungated rewind while the promotion remains current (lines 5660–5663). Revert handles later main changes; rewind erases history and is narrowly applicable. | Slice A rollback approval. **Recommend revert default.** |
+| **D4 — fleet axes** | USD only versus including turns/wallclock; the stated rationale is that the latter do not compose well fleet-wide (lines 5664–5666). No alternative calculation is specified. | Slice B policy approval. **Recommend USD-only v1.** |
+| **D5 — invalid policy and unknown spend** | Absent means no cap; broken/stale fails closed; unreadable ledger or unknown-priced spend denies new USD admissions fleet-wide. Rejected alternatives are silent fail-open and per-episode refusal with a lower-bound Σ (lines 5667–5674). | Fleet admission semantics. **Recommend proposed fail-closed posture**, with operational alerts. |
+| **D6 — cap hardness** | Soft, admission-only cap with no numerical overshoot guarantee versus a cross-episode reservation transaction; provider-side limits are the stated route to a hard account budget (lines 5675–5681). Soft is simpler but can overshoot without a contract bound. | Fleet implementation choice. **Recommend soft only if the owner accepts that risk; use provider limits where a hard ceiling is required.** |
+| **D7 — order** | Slice A first, then B; separately audit and wire each, with docs/11 updated after wiring (lines 5682–5685). No detailed alternative order is documented. | Delivery sequencing. **Recommend proposed order**, subject to capacity. |
+| **D8 — source namespace** | P12-compatible single-element integration branch versus the rejected `agent/**` task namespace, which no P12 episode producer can supply (lines 5686–5693). | Promotion source approval. **Recommend P12-compatible rule.** |
+| **D9 — unborn main** | Refuse `no-main` and require operator creation versus specifying a no-old-value CAS and its own provability table (lines 5694–5697). | Unborn-main behavior. **Recommend refusal.** |
+
+### Consumption-overlay and reference-build decisions
+
+#### V37 0A — storage profile
+- **Status:** Owner confirmed local-only storage (lines 6392–6394).
+- **Question/options:** Local filesystem plus startup probe, or support storage with different locking/durability semantics. Network mounts are out of contract; lease-only is the stated cross-host path (lines 2410–2415, 6392–6395).
+- **Blocked:** Network-mounted deployment cannot claim this contract’s guarantees.
+- **Recommendation:** Retain local-only until a separately specified distributed-storage protocol exists.
+
+#### V37 1A — exclusion lock
+- **Status:** Drafted, awaiting explicit owner confirmation (lines 6392–6395).
+- **Question/options:** Exclusive `flock` sidecar spanning binding reads and mutations, versus leaving concurrency to another design. The documented choice closes read/append and cap-check races but introduces lock contention and local-filesystem dependence (lines 2393–2415).
+- **Blocked:** Ratification of the v37 mutation/decision protocol.
+- **Recommendation:** Ratify the lock, subject to resolving S-L1 and testing its failure behavior.
+
+#### V37 2A — resolve bound
+- **Status:** Drafted, awaiting owner confirmation (lines 6392–6395).
+- **Question/options:** Bound resolve rounds using `repair-attempt-cap`, then fail closed and escalate; no competing numeric bound is specified (lines 2612–2621).
+- **Blocked:** Final recovery behavior; R2-M6 also needs a reconstructible or conservative pending rule.
+- **Recommendation:** Ratify a persistent bound, after specifying crash-safe accounting and reset.
+
+#### V37 3A — DEAD REPAIR
+- **Status:** Drafted, awaiting owner confirmation (lines 6392–6395); v39 adds late-validation semantics.
+- **Question/options:** Inert and reported, with removal deferred to compaction, versus an alternative disposition not specified. The historical owner record says revival only via fresh AUTH plus fresh REPAIR, while v39 allows current-read late validation (lines 2481–2505, 6392–6395).
+- **Blocked:** Ratification of DEAD/late-validation semantics and F21/F23/F24.
+- **Recommendation:** Decide explicitly whether late activation is intended; bind generation and authorization identity before ratification.
+
+#### V37 decision 4 — next workstream
+- **Status:** Explicitly OPEN: “audit v37 prose vs build the reference implementation first vs both” (lines 6395–6396).
+- **Trade-offs:** Prose audit finds contract defects before code hardens them; reference implementation gives executable evidence; both combines coverage at greater effort.
+- **Blocked:** The record says no further audit runs without this decision. The present user-requested audit is not evidence of owner ratification.
+- **Recommendation:** **Both**, but resolve the blocker findings in prose before treating implementation tests as conformance evidence.
+
+#### V38 cycle-5 D1-A — repair attempt counting
+- **Status:** Listed as an owner decision (lines 6514–6530); the surrounding v38 amendments are drafted/pending ratification (lines 6398–6400).
+- **Question/options:** Count every durable REPAIR-INTENT, including orphan intents, versus counting only outcomes. Total counting prevents crashes from regaining slots, at the cost of conservative exhaustion; only a valid durable `repaired` outcome resets (lines 6518–6530).
+- **Blocked:** Final repair journal and attempt-cap semantics.
+- **Recommendation:** Count intents and retain conservative recovery; specify the reset and exhaustion operator path.
+
+#### V38 cycle-5 D2-A — journal grammar
+- **Status:** Owner decision in the cycle-5 record (lines 6532–6543), within the drafted amendment context.
+- **Question/options:** Strict global fail-closed journal validation versus per-record pairing/quarantine or keyword heuristics. Strict validation avoids forgiving damaged evidence but makes any damage block all ledger decisions.
+- **Blocked:** Journal reader/admission conformance and damage recovery.
+- **Recommendation:** Strict global validation, with a separately contracted forensic repair procedure.
+
+#### V38 cycle-5 D3-B — probe census
+- **Status:** Owner decision recorded (lines 6545–6554).
+- **Question/options:** `os.scandir(dir_fd)` versus `fchdir`/restore. The former avoids process-wide CWD races; the latter can affect unrelated threads.
+- **Blocked:** Probe implementation conformance.
+- **Recommendation:** Retain fd-anchored `scandir`.
+
+#### V38 cycle-5 D4-B — lock identity
+- **Status:** Owner decision recorded, but stronger ownership detection remains open as S-L1 (lines 6556–6571).
+- **Question/options:** Compare stored `(st_dev, st_ino)` with current fd identity versus a stronger ownership design. Identity detects different-inode reuse, not same-inode reopen or pathname replacement.
+- **Blocked:** A stronger lock-ownership guarantee; current code may claim only the narrow check.
+- **Recommendation:** Do not represent identity as proof of ownership; resolve S-L1 before relying on it as such.
+
+#### V38 cycle-5 D5-A — settlement precondition
+- **Status:** Recorded as “always-fix” (lines 6573–6577).
+- **Question/options:** Require the same instance’s verifiable lock acquisition for settlement; no alternative is presented as an open choice.
+- **Blocked:** Settlement conformance.
+- **Recommendation:** Keep the requirement, with tests for unheld and stale descriptors.
+
+### Explicit V38 sharpening questions
+
+#### S-L1 — lock trust boundary
+- **Open question:** Accept same-inode fd reuse and lock-path replacement as residual risks under the 0700/single-writer premise, or require a stronger ownership design (lines 6595–6600).
+- **Trade-off:** Acceptance is simpler but narrows the guarantee; stronger ownership needs a new specified mechanism.
+- **Blocked:** Any claim stronger than “not a different inode.”
+- **Recommendation:** Require an explicit owner risk acceptance at minimum; prefer a design that avoids externally closable/reusable lock descriptors and pathname replacement.
+
+#### S-J2 — repair journal capacity
+- **Open question:** On `journal-full`, permit archive/rotation under lock or introduce a new ledger epoch (lines 6602–6606).
+- **Trade-off:** Rotation needs preservation of attempt/spend evidence; an epoch needs a defined handoff and inherited state. Neither is currently specified.
+- **Blocked:** Further repairs; decisions fail closed while full.
+- **Recommendation:** Specify an auditable epoch transition with preserved counters and forensic archive before allowing automatic recovery.
+
+#### S-A1 — partial AUTH recovery
+- **Open question:** Operator-reset rewrite versus fresh AUTH file with the old one quarantined (lines 6608–6613).
+- **Trade-off:** Rewrite conflicts with the current no-truncation discipline unless separately authorized; quarantine preserves evidence but needs a safe binding and migration protocol.
+- **Blocked:** Authorization when a partial AUTH line makes the file malformed.
+- **Recommendation:** Quarantine the old file and create a new generation only under a separately specified, locked, auditable recovery protocol.
+
+#### S-J1 — duplicate journal member names
+- **Status/question:** “RATIFIED-IN-CODE pending owner ack”: reject duplicate JSON member names as `journal-unreadable`, rather than last-value-wins (lines 6615–6618).
+- **Blocked:** Owner acknowledgement of the stricter journal grammar.
+- **Recommendation:** Acknowledge strict rejection.
+
+#### S-P1 — probe scope
+- **Status/question:** Draft sharpening: contention must fail with EAGAIN/EWOULDBLOCK; the probe proves exclusion only at startup, not future behavior or crash durability (lines 6620–6623).
+- **Blocked:** Ratification of the probe’s precise acceptance criteria; no stronger future guarantee is documented.
+- **Recommendation:** Ratify the narrow claim and retain the stated limits.
+
+#### S-J3
+- **Inventory result:** The requested label is **not present in the portions of the document’s owner-decision record supplied here**; I cannot identify a documented S-J3 question or options without inventing them. If S-J3 is intended, add its decision record and status.
+
+### Other outstanding ratification and audit debt
+
+- **V38 cycle-3/cycle-4 amendments and V39 prose fold:** drafted pending owner ratification (lines 6398–6400, 6470–6473, 6667–6671). **Recommendation:** ratify only after correcting the findings above.
+- **AUTH inventory cap:** proposed maximum 1024 valid AUTH lines, with the 1025th making the file malformed and the producer refusing at capacity (lines 6413–6421, 6497–6501). A larger bound or lifecycle/compaction mechanism is not specified. **Blocked:** capacity recovery; **recommend** ratify only alongside a defined archival/reset path.
+- **Confirmation-log repair, malformed AUTH recovery, terminal caps, and compaction:** explicitly carried as open audit debt (lines 6315–6317, 6380–6381). Compaction is excluded until a future contract (lines 2382–2387). **Recommendation:** keep these visibly outside approval claims and specify operator recovery before production dependence.
+- **Focused/confirming audit:** v32 names specific effective-read, masking, crash, status, and fixture questions before sign-off (lines 6298–6302); the document also records the broader contract as unconfirmed (lines 6196–6203). **Recommendation:** after revision, run a fresh full-document adversarial round, including the confirmation-repair generation handoff, rather than treating historical “accepted” rows as current proof.
+telegram: poll error — backing off 1s: AbortError: The operation was aborted

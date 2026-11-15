@@ -1,0 +1,77 @@
+Getting started:
+  ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)
+  tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.
+Behavior:
+  approval: auto-approve (default) — workspace-scoped work runs without a prompt
+  sandbox:  on (bash confined to the workspace + extra roots)
+  implicit root: /Users/xilcilus/.tre  (tre.'s own state dir — always read+write)
+  extra roots (durable, from tre.json): /Users/xilcilus/projects, /Users/xilcilus/.nvm, /Users/xilcilus/kubeconfigs  (read+write, in addition to the workspace)
+  turn budget: 60 turns/cycle × 4 cycles (default)  (--max-turns / --max-continuations, or tre.json)
+  skills:   12 available
+    · implement-audit — Run implement→audit cycles on a code change: a worker model …
+    · self-improve — MANDATORY protocol for making ANY code change in this reposi…
+    · git-commit — Commit the current codebase safely. Runs the quality gate on…
+    · llama-fork-build — Build and deploy the user's llama.cpp fork (with the ai-stac…
+    · llm-quality — Evaluate LLM output quality with oracle-graded structured re…
+    · parallel-delegation — Plan a workstream as a dependency graph and run independent …
+    · private-registry — Operate the private OCI image registry (llmsandbox VM, 192.1…
+    · task-delegation — Decompose a multi-part task into subtasks, assign each to a …
+    · telegram — Send and receive messages with the user via a Telegram bot. …
+    · tokenomics-reporter — Push this host's tre. session usage data to the tokenomics c…
+    · tre-deploy — Build and deploy the tre. coding agent to another machine WI…
+    · tre-release — Cut and publish a release of the Tre.-coding-agent repo — ve…
+  blocked:  system-level sensitive reads + destructive commands (across the board)
+  optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)
+## Findings
+
+### MAJOR — A DEAD REPAIR can become valid without a new AUTH or REPAIR
+
+**Lines 2425–2449:** A REPAIR is valid when its `authId` names exactly one valid AUTH, its masks match that AUTH and the malformed occurrences, and its `ALL.watermark` is no greater than the current confirmation-log length. The same passage says a failed REPAIR is DEAD, “**NOT a latent authority awaiting operator action**,” and that “**NO operator command may make one contribute**”; the operator must use a “**NEW AUTH + fresh REPAIR**.”
+
+**Break:** A schema-valid REPAIR whose AUTH is not yet present is initially DEAD with reason `unknown-authId`. If a valid AUTH with that ID subsequently appears, and its occurrence list matches, the next full read evaluates the same REPAIR as VALID. No fresh REPAIR is appended. Similarly, a REPAIR whose watermark initially exceeds the confirmation-log length can become valid after the confirmation log grows.
+
+**Evidence:** Validity is recomputed against the **current** AUTH and confirmation logs at lines 2425–2432; the log is append-only and the algorithm has no persisted “was DEAD” fact. That directly contradicts the permanent-inertness promise at lines 2434–2443.
+
+**Minimal change:** Either make DEAD explicitly a *current-read classification* and specify the safety consequences of later activation, or introduce a durable, enforceable mechanism that prevents a previously DEAD record from ever becoming valid. Add fixtures for late AUTH appearance and confirmation-log growth.
+
+### MAJOR — The prescribed torn-tail recovery has incompatible live instructions
+
+**Lines 2232–2248:** The waiting 4b holder “**AUTOMATES**” settlement of an unsettled consumption tail and continues “**NO operator intervention**.”
+
+**Lines 2357–2364, 2533–2545:** The overlay rules say the consumption log is never truncated or rewritten; settlement appends `\n`, after which a malformed line requires a new operator AUTH.
+
+**Lines 2724–2730 and 5449–5452:** The crash table and release-bar fixture instead prescribe non-forced **truncation to the last complete line**.
+
+**Break:** A holder encounters a torn, syntactically incomplete watermark tail. One implementation truncates it and proceeds with the original confirmation; another appends a newline, creates a malformed occurrence, and waits for operator authorization. These produce different authority and recovery outcomes, and the truncation path violates the append-only rule.
+
+**Evidence:** The instructions above concern the same unsettled-tail condition; the truncation fixture is not labeled historical at its location.
+
+**Minimal change:** Mark every superseded crash-table and fixture instruction explicitly historical, and make the live recovery and release-bar fixture consistently require newline settlement followed by ordinary classification and, where necessary, operator authorization.
+
+### MAJOR — The “single write” cap and locking argument conflicts with the required short-write loop
+
+**Lines 2359–2373 and 2406–2416:** Every append is described as a “**SINGLE write**”; reserve checking and that write occur under one exclusion-lock acquisition, and the cap argument depends on that operation.
+
+**Lines 2503–2508:** Forced repair instead requires a write of the framed record and says to “**loop on short writes**.”
+
+**Break:** A short first write requires a second syscall to complete the REPAIR. An implementation following the single-write rule must stop; one following the short-write rule must issue another write. The contract does not specify whether a crash or error between those writes consumes the same reservation, what exact bytes are retried, or how this reconciles with the “single reserved write” claim.
+
+**Evidence:** The two requirements apply to the same REPAIR append. The exclusion lock can serialize multiple syscalls, but it does not make them one syscall or eliminate an intervening crash.
+
+**Minimal change:** Specify one model: preferably a bounded write loop under the same lock and reservation, with partial-write/crash behavior explicitly routed to unsettled-tail and durability resolution. Replace the single-syscall claims accordingly and pin an injected short-write fixture.
+
+### MINOR — Swap-abort narrative places writer publication both before and after detection
+
+**Lines 1391–1400:** Swap detection occurs “**BEFORE ANY STEP-2 PUBLICATION**.”
+
+**Lines 1444–1452:** The separately stated published-variant case says “**our staged writer body was published at step 4 (before the swap was observed)**.”
+
+**Break:** A reader implementing cleanup cannot determine whether a writer body from this invocation can exist at the specified detection point. The latter passage also assigns publication to step 4, whereas the state machine assigns writer replacement to step 2.
+
+**Minimal change:** Reconcile the published-variant case with the actual detection point and step numbering; distinguish artifacts published by this invocation from racing processes’ artifacts.
+
+## Verdict
+
+**CHANGES-REQUIRED.** Counts: **0 blockers, 3 majors, 1 minor.**
+
+**Audit completeness limitation:** This is not a completed execution of the requested method. The available tooling exposed file reads but no shell or Git execution, so I could not reproduce Git claims in scratch repositories or run the requested source-level and interleaving verification. Several long historical-disposition pages were also truncated by the read tool and were not fully reread. The findings above are independently checkable against the cited contract text; they should not be read as an exhaustive audit of the contract or its cited source behavior.

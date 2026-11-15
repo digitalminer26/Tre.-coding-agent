@@ -862,7 +862,16 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   assert.ok(!sent.includes(`${-leaderPid}:SIGKILL`), `no SIGKILL to the reaped group number, got ${JSON.stringify(sent)}`);
   // Operator path: the survivor is swept with positive evidence, then stop() confirms.
   realKill(-leaderPid, "SIGKILL");
-  for (let i = 0; i < 100; i++) { try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); } catch { break; } }
+  // Flake fix (2026-07-27): this poll must PROVE the group is gone before
+  // asserting stop()'s confirmation — a silent timeout here used to hand
+  // the next assertion an unproven state (under full-suite load the
+  // reparented zombie survivor can take >100x25ms to be reaped, and
+  // kill(-pgid,0) honestly answers "alive" for a zombie member: the group
+  // EXISTS until its last member is reaped). Fail loudly with the reason
+  // instead of intermittently failing the assertion below.
+  let groupGone = false;
+  for (let i = 0; i < 400; i++) { try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); } catch { groupGone = true; break; } }
+  assert.ok(groupGone, "operator sweep never cleared the group within 10s (load-starved reap) — cannot assert the confirming probe");
   const again = await runner.stop(h);
   assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
   assert.equal(again.groupStatus, "reaped");
