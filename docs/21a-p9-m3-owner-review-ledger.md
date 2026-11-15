@@ -6159,3 +6159,58 @@ auditor. run 4 cycles"):
   bytes not externally establishable; suites not run by C auditors
   (C3/C4 expressly; C1 no; C2 no — gate evidence remains
   gate-postC0.txt + the per-fold harness behavior qualification).
+
+D-ROUND RESULT APPENDIX (5 cycles on the CUMULATIVE change set
+1425a69..HEAD — record-truthfulness round after the post-C audit;
+gpt-6.1-terra; saved reports ~/.tre/audits/commitD-D1..D5-out.txt;
+owner instruction of 2026-07-28 "address the findings. terra is the
+auditor. run 5 cycles. please do it carefully since the supposed
+clear items come up with issues when i run the audit cycle on my
+own"):
+- Verdicts: D1 CHANGES REQUESTED (1 MAJOR + 2 MINOR); D2 CONFIRMING
+  (0 findings, bounded); D3 CONFIRMING (0 findings, bounded); D4
+  CONFIRMING (0 findings, bounded); D5 CONFIRMING (0 findings,
+  bounded). DECISIONS-REQUIRED: 0 in every cycle.
+- What D0 did BEFORE the cycles (fixing the post-C findings): gate &
+  tree-clean claims rewritten to evidence status from session-log
+  forensics (contemporaneous same-record gate-pass evidence exists
+  ONLY for e2e295c and a097555); C4 appendix-credit scoped to the
+  then-existing A/B appendix; tsc listed-not-observed corrected;
+  BLANKET QUALIFICATION RULE registered; per-fold retained gate
+  output began (gate-postD0.txt onward — recorded with per-command
+  exit statuses, unlike gate-postC0.txt).
+- Distinct findings folded at D1 (commit 8049271): (1) MAJOR — the
+  D0 paragraph attributed the "# tests 2769" total to the e2e295c
+  log record; that record carries pass/fail/skipped but not the
+  total — now distinguished per record with log line numbers; (2)
+  MINOR — "the only matches for 81a36c9/1dc5d29 postdate this fold"
+  was wrong: earlier matches exist but are narrative/commit-list
+  references, not commit tool-results — reworded; (3) MINOR — the B
+  appendix's "per-run evidence was NOT retained / the one retained
+  gate output" contradicted the D0 inventory — reconciled (two log
+  records + gate-postC0.txt + the gate-postD* file series).
+  Fold commit: 8049271 (D1); D2-D5 needed no folds.
+- Carefulness measures this round (owner-requested, per the standing
+  distrust of "clear" verdicts): clean-tree check before every kick
+  (all five started clean — D1 at 0d31d7c, D2-D5 at 8049271); the
+  prompt named the orchestrator's own forensic echoes as
+  non-evidence and required primary-source verification; each
+  finding was independently re-verified against the session log
+  (line 12318 lacks "# tests 2769"; line 12446 has it; narrative
+  matches at 12382/12472) BEFORE the fold was written.
+- Convergence: findings per cycle 3/0/0/0/0 — FOUR consecutive
+  bounded CONFIRMING passes with zero findings, and D2-D5 each
+  independently re-confirmed the corrected D0/D1 evidence
+  inventory from the primary session log (not from the ledger's
+  narrative). Note for the owner: D1 caught three residual
+  overstatements IN the correction round itself — consistent with
+  the pattern that motivated the 5-cycle mandate; convergence
+  held only after that correction.
+- Residual limitations (auditor-disclosed, D1-D5): all cycles
+  targeted/query-driven, not serial exhaustive ledger reviews;
+  suites were run by the orchestrator pre-fold (retained with exit
+  statuses in gate-postD0/D1.txt), NOT by the D auditors; F19 race
+  counts not reproduced; owner-conversation fidelity verifiable
+  only against this ledger; pre-1425a69 artifact bytes not
+  externally establishable; D2-D5 session-log scans bounded to the
+  pre-forensics region as instructed.
