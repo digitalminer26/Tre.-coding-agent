@@ -5844,3 +5844,61 @@ ACKNOWLEDGED GAP: T4-GAP COMPLETION MECHANISM DEFERRED
   above. The only phrase not appearing verbatim in the ledger is
   "third affirmation" — a count of the deferral events recorded
   here, not a new fact.
+
+---
+
+A-ROUND APPENDIX (post-DC-1; 7-cycle adversarial audit of commit
+1425a69 + folds, gpt-6.1-terra, owner instruction "audit the changes
+using gpt terra, implement the findings, run 7 cycles; spec-change
+findings register as deferred items"):
+- Subject: the cumulative change set 1425a69 (DC-1 artifact + ledger
+  round + F19 test-side fix + C1-F7 hardening + repo docs) plus its
+  in-round fold commits, audited commit-vs-specs (docs/21 S-J2-R/
+  S-A1-R, this ledger, runner contract, artifact header).
+- Cycles: A1 CHANGES REQUESTED (4 MAJOR + 1 MINOR, all CODEFIX-ABLE);
+  A2 CONFIRMING-with-dups against the pre-fold commit (same three
+  sites — fold already correct at HEAD); A3 CHANGES REQUESTED (2
+  MAJOR: DC-2 provenance pointed at a nonexistent artifact "§8"; the
+  REV-46 current-work list lacked a supersession pointer); A4
+  CONFIRMING (0 findings); A5 CONFIRMING (0 findings); A6 CHANGES
+  REQUESTED (1 MAJOR: delivery-era DC-1 status entry needed a
+  supersession annotation); A7 hung on the endpoint mid-experiment
+  (restart, disclosed); A7b CONFIRMING (0 findings). Fold commits:
+  5b0f8a8 (A1/A2), 0733023 (A3), 0a04c4f (A6), plus this appendix.
+- Findings folded, all registration/test-side precision — NO spec
+  change and NO production-behavior change in any fold: (1) "probe.py
+  and ledger.py UNTOUCHED" qualified (commit-relative vs pre-fix-
+  working-state) + audit-surface disclosure that 1425a69 ADDS the
+  reference implementation and the E/F rounds audited the artifact,
+  this A round is the scoped commit audit; (2) F19 leg-4 root cause
+  restated precisely: baseline/census RACE under overlapping probes
+  (sibling names created after baseline and still visible at census),
+  not unconditional "fails by construction"; the 3168/3200 vs 0/3000
+  numbers relabeled as observed runs (auditors could not reproduce
+  the exact counts; mechanism confirmed independently in A2-A7b);
+  (3) C1-F7 sweep now accepts ONLY ESRCH as group-death proof (other
+  errno throws; timeout message states the observation, not a
+  diagnosis) — per the runner contract EPERM/other = unknown, never
+  "gone"; (4) .tre/remaining-items-review.md got a HISTORICAL-SNAPSHOT
+  banner (its "docs/21 stands at v4" text is 2026-11-13 history, not
+  current state — anchors: this ledger's decision round + the
+  ratified artifact); (5) .gitignore scratch-rule comment corrected
+  (fallback-CWD rationale; the fixtures' own prefix is p9m3-* under
+  the system temp dir); (6) DC-2 provenance "§8" -> real §1
+  recovery-cell branch (iii) + §2 R-c residual; (7) supersession
+  pointers on the two stale current-status surfaces (REV-46 work
+  list, delivery-era DC-1 status entry).
+- DECISIONS-REQUIRED across all 7 cycles: 0. Every finding was fixable
+  without owner ratification; NO new deferred items arise from this
+  round. Deferred backlog UNCHANGED (purge-exception draft, Q-J2-h
+  protocol exit, f1 attribution — all owner-direction, untouched).
+- Verification at final HEAD: Python suite 89/89 (run independently
+  by A4-A7b auditors), node suite 86/86 in dist (attempt-runner incl.
+  hardened C1-F7; full npm gate was green at each fold commit), git
+  tree clean at each fold.
+- Residual audit limitations, stated honestly: no auditor
+  independently reproduced the exact F19 race counts (mechanism and
+  qualitative direction confirmed by source reading in multiple
+  cycles); owner-transcript fidelity (ratification wording, deferral
+  counts) is verifiable only against this ledger's own record; A7's
+  restart means cycle-7 evidence is A7b's bounded CONFIRMING pass.
