@@ -5492,6 +5492,13 @@ Q-ENUM-a canonical enumeration draft; (ii) the purge-exception
 artifact draft -> owner ratification -> standing deployment
 conditions; (iii) DC-1 and DC-2 written. Q-J2-h: deferred, recorded;
 DC-2 deliverable pending. Pins: unimplemented.
+[SNAPSHOT (B7-fold, cycle B7 finding 1): the standing-work list above
+is superseded by the OWNER DECISION ROUND entry below ("OWNER DECISION
+ROUND (post-F-round, session of 2026-07-27...)"): the enumeration
+draft shipped and was RATIFIED (DC-1 DISCHARGED); the purge-exception
+draft is DEFERRED by owner instruction (deferral is not approval);
+DC-2 was drafted with owner review open. Read no current status from
+this record.]
 
 R12 VERDICT RECORD (REV 49): cycle 64 (final closure verification,
 rev 48): CLEAN 0/0/0 within scope — cycle-63 contradictions resolved;
@@ -5509,6 +5516,10 @@ deployment conditions; (iii) DC-1 + DC-2 written. Q-J2-h: deferred
 (recorded; DC-2 pending). Pins: unimplemented. Known limits
 standing: no whole-ledger sweep, no complete code audit, F19 flake
 tracked.
+[SNAPSHOT — same supersession as the REV 48 record above (B7-fold,
+cycle B7 finding 1): DC-1 shipped+RATIFIED (DISCHARGED), purge draft
+DEFERRED by owner instruction, DC-2 drafted with owner review open;
+anchor is the OWNER DECISION ROUND entry below.]
 
 R13 — POST-R12 INDEPENDENT REVIEW + FOLD AT REV 50 (auditor GPT
 Terra; source: owner asked "audit the changes", orchestrator ran an
@@ -5899,7 +5910,9 @@ findings register as deferred items"):
   the exact counts; mechanism confirmed independently by the
   COMPLETED cycles A2-A7b — stalled A7 excluded (B5-fold, cycle B5
   finding 1): its transcript ends at the invocation of its probe
-  experiment with no recorded result, per :5878 above);
+  experiment with no recorded result; the A7 hang is recorded in the
+  Cycles line above ("A7 hung on the endpoint mid-experiment (restart,
+  disclosed)").
   (3) C1-F7 sweep now accepts ONLY ESRCH as group-death proof (other
   errno throws; timeout message states the observation, not a
   diagnosis) — per the runner contract EPERM/other = unknown, never
@@ -5957,3 +5970,61 @@ findings register as deferred items"):
   passing-test runs do not substitute for those checks — its
   CONFIRMING verdict covers the claims it examined, not the whole
   requested surface.
+
+B-ROUND RESULT APPENDIX (7 cycles on the CUMULATIVE change set
+1425a69..HEAD — the A round's own appendix and the B0 corrections are
+themselves the primary audit subject; gpt-6.1-terra; saved reports
+~/.tre/audits/commitB-B1..B7-out.txt; owner instruction of 2026-07-27
+"address the findings, terra is the auditor, run 7 cycles"):
+- Verdicts: B1 CHANGES REQUESTED (2 MAJOR); B2 CHANGES REQUESTED (2
+  MAJOR); B3 CHANGES REQUESTED (1 MINOR); B4 CHANGES REQUESTED (1
+  MAJOR — duplicate of the B3 fold, see process note); B5 CHANGES
+  REQUESTED (1 MAJOR + 1 MINOR); B6 CHANGES REQUESTED (1 MAJOR); B7
+  CHANGES REQUESTED (1 MAJOR + 1 MINOR). DECISIONS-REQUIRED: 0 in
+  every cycle — no finding required normative-text change; nothing
+  new to defer beyond the existing owner-deferred backlog.
+- Distinct findings folded: (1) remaining-items-review.md's
+  standalone "Recommended next step" pushed a superseded v4-era gate
+  with no historical banner — banner added; (2) the A-round appendix
+  omitted A7b's declared coverage limits — recorded; (3) appendix
+  attributed hardened-C1-F7 runs to A1, whose run predated the
+  hardening — corrected (post-fix runs A3/A5/A6/A7b + gate); (4)
+  round-level "audited" scope was unqualified — bounded-review
+  qualification added naming A4's/A2's declared limits; (5) stalled
+  A7's post-hardening Python pass unrecorded — added (Node run
+  recorded-not-verified, output truncated); (6) F19 mechanism
+  confirmation attributed "in A2-A7b" including stalled A7 —
+  completed-cycles-only attribution with explicit A7 exclusion; (7)
+  "undisclosed-to-appendix" phrase contradicted the appendix's own
+  (folded) disclosure — retired as historical phrasing; (8) E- and
+  F-round appendices' "CLEAN pending owner read" conclusions lacked
+  SNAPSHOT supersession annotations — added (anchored by text, not
+  line numbers, per this ledger's convention); (9) R12 REV 48/49
+  "Standing open work" conclusions lacked SNAPSHOT annotations —
+  added; (10) A7 cross-reference pointed at A2's text by line number
+  — re-anchored by name. Fold commits: b17392e (B1), 29339f7 (B2),
+  e2e295c (B3), 72cc30f (B5), 760c0a3 (B6); the B7 folds accompany
+  this appendix.
+- Process disclosure: B4 started BEFORE the B3 fold landed (ordering
+  mistake — it audited a tree without the B3 annotation), reported
+  the B3 fix as missing (its one MAJOR is that duplicate), and
+  disclosed the dirty-tree precondition violation in its own report;
+  B5-B7 all started clean. Convergence trend: findings per cycle
+  2/2/1/1/2/1/2 — the B round found NO repeat of an unfixed A
+  finding and NO code-behavior finding; every B finding was an
+  audit-record precision or stale-status-annotation issue,
+  consistent with the A round's conclusion that the code and
+  registrations themselves stand. Convergence to 0 was NOT
+  demonstrated at B7 — findings were still arriving, all of the
+  same annotation/precision class; whether further rounds are worth
+  running is a diminishing-returns judgment (this ledger's own R12
+  language) disclosed to the owner.
+- Residual limitations (auditor-disclosed per cycle, B1-B7): all
+  cycles query-driven targeted reviews, not serial full-ledger/
+  full-implementation audits; suites were run by B1 (89+86) and B2
+  (89+86), B4's transcript records the Python 89 pass, B3/B5/B6/B7
+  did not run suites; no cycle independently reproduced the F19 race
+  counts; secret scanning was path/filename-level; pre-ratification
+  artifact bytes are not independently establishable from repo
+  state. Harness gate after the B7 folds (this commit): tsc clean;
+  full npm gate and Python suite re-run — see the commit record.
