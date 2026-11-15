@@ -6254,8 +6254,13 @@ own"):
   loop keeps iterating on EPERM (it proves nothing either way) and
   still confirms only on ESRCH or fails at the 10s timeout, with the
   EPERM retry count reported in the failure message; any other
-  errno remains a hard failure. The loud-failure property is kept
-  for real breakage: only the transient EPERM is no longer fatal.
+  errno remains a hard failure. The code cannot distinguish a
+  transient EPERM from a persistent one: every EPERM is retried
+  until ESRCH or the 400-iteration poll budget is spent, and a
+  budget-exhausted run fails loudly with the EPERM count. The
+  poll discipline is a pure helper (pollForGroupDeath) with
+  deterministic tests (test "F2: poll discipline"), and C1-F7
+  calls that same helper.
   The fold commit below landed only after the green rerun;
   the red run is retained above per the no-hidden-evidence rule.
   E2 correction (exact-tree limitation, second-E audit MINOR): the

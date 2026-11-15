@@ -79,6 +79,52 @@ const stubbornSpawner = () => ({ kind: "test-stubborn", spawn: () => ({ command:
 
 const probe = (verdict: PidStatus | undefined) => async () => verdict;
 
+// Operator-sweep poll discipline (C1-F7), extracted so the EPERM branch is
+// testable deterministically. Only ESRCH proves group death; EPERM is
+// retryable-unknown (proves nothing either way) and is retried until the
+// poll budget is spent; any other errno is a hard failure.
+// `probeOnce` returns the errno code on a failed probe, or null on success
+// (group still exists => keep waiting). Returns the outcome; never sleeps
+// more than `budget` iterations.
+async function pollForGroupDeath(
+  probeOnce: () => string | null,
+  budget: number,
+  sleep: () => Promise<void> = () => new Promise((r) => setTimeout(r, 25)),
+): Promise<{ groupGone: boolean; permRetries: number; hardError?: string }> {
+  let permRetries = 0;
+  for (let i = 0; i < budget; i++) {
+    const code = probeOnce();
+    if (code === null) { await sleep(); continue; }
+    if (code === "ESRCH") return { groupGone: true, permRetries };
+    if (code === "EPERM") { permRetries++; await sleep(); continue; }
+    return { groupGone: false, permRetries, hardError: code };
+  }
+  return { groupGone: false, permRetries };
+}
+
+test("F2: poll discipline — EPERM is retryable, ESRCH confirms, other errno is a hard failure, timeout never confirms", async () => {
+  const noSleep = async () => {};
+  const seq = (codes: Array<string | null>) => { let i = 0; return () => codes[Math.min(i++, codes.length - 1)] ?? null; };
+  // EPERM then ESRCH: confirmed, with the EPERM counted.
+  const a = await pollForGroupDeath(seq([null, "EPERM", "EPERM", "ESRCH"]), 10, noSleep);
+  assert.equal(a.groupGone, true);
+  assert.equal(a.permRetries, 2);
+  // Persistent EPERM: never confirmed, bounded by budget.
+  const b = await pollForGroupDeath(() => "EPERM", 5, noSleep);
+  assert.equal(b.groupGone, false, "EPERM alone must never prove group death");
+  assert.equal(b.permRetries, 5);
+  assert.equal(b.hardError, undefined);
+  // Unexpected errno fails immediately, not retried.
+  const c = await pollForGroupDeath(seq(["EACCES", "ESRCH"]), 10, noSleep);
+  assert.equal(c.groupGone, false);
+  assert.equal(c.hardError, "EACCES");
+  assert.equal(c.permRetries, 0);
+  // Group alive (probe succeeds) for the whole budget: not confirmed.
+  const d = await pollForGroupDeath(() => null, 4, noSleep);
+  assert.equal(d.groupGone, false);
+  assert.equal(d.hardError, undefined);
+});
+
 async function openRunner(root: string, probes?: (pid: number) => Promise<PidStatus | undefined>) {
   return AttemptRunner.open({ root, episodeId: "ep-p7", spawner: sleepSpawner(), ...(probes ? { probes: { pidAlive: probes } } : {}) });
 }
@@ -869,28 +915,15 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   // kill(-pgid,0) honestly answers "alive" for a zombie member: the group
   // EXISTS until its last member is reaped). Fail loudly with the reason
   // instead of intermittently failing the assertion below.
-  let groupGone = false;
-  let permRetries = 0;
-  for (let i = 0; i < 400; i++) {
-    try { realKill(-leaderPid, 0); await new Promise((r) => setTimeout(r, 25)); }
-    catch (e) {
-      // Only ESRCH proves the group is gone (runner contract:
-      // kill(-pgid,0) ESRCH => confirmed GONE; EPERM/other => unknown
-      // and MUST NOT be counted as proof). (A1-fold, cycle A1 finding 3.)
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code === "ESRCH") { groupGone = true; break; }
-      // EPERM is retryable-unknown (owner decision, post-E round): it
-      // proves NOTHING about group death — not "gone" and not "alive"
-      // — so keep polling; the ESRCH-or-timeout discipline still gates
-      // the confirmation. Any OTHER errno stays a hard failure (it
-      // signals a broken probe contract, not a transient). The single
-      // observed EPERM (gate-postE0, cause undetermined) is why this
-      // retry exists; see ledger E0 GATE EVENT block.
-      if (code === "EPERM") { permRetries++; await new Promise((r) => setTimeout(r, 25)); continue; }
-      throw new Error(`operator sweep probe returned ${String(code)} — not proof of group death`);
-    }
-  }
-  assert.ok(groupGone, `operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis; ${permRetries} EPERM retry${permRetries === 1 ? "" : "ies"} observed) — cannot assert the confirming probe`);
+  // Probe via the shared discipline helper (F2): ESRCH confirms, EPERM is
+  // retryable-unknown, any other errno is a hard failure.
+  const sweep = await pollForGroupDeath(() => {
+    try { realKill(-leaderPid, 0); return null; }
+    catch (e) { return (e as NodeJS.ErrnoException).code ?? "UNKNOWN"; }
+  }, 400);
+  if (sweep.hardError !== undefined)
+    throw new Error(`operator sweep probe returned ${sweep.hardError} — not proof of group death`);
+  assert.ok(sweep.groupGone, `operator sweep never observed ESRCH for the group within 10s (observation, not a diagnosis; ${sweep.permRetries} EPERM retr${sweep.permRetries === 1 ? "y" : "ies"} observed) — cannot assert the confirming probe`);
   const again = await runner.stop(h);
   assert.equal(again.stopped, true, "after the operator sweep the probe confirms the group gone");
   assert.equal(again.groupStatus, "reaped");
