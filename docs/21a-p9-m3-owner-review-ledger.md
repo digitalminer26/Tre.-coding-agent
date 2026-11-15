@@ -5562,6 +5562,11 @@ addressed at rev 50; R13 cycles 65-70 verify):
   change beyond rulings already given — these are record-fidelity
   corrections. Action items unchanged (enumeration draft,
   purge-exception draft, DC-1, DC-2).
+[SNAPSHOT (C1-fold, cycle C1 finding 1): superseded by the OWNER
+DECISION ROUND entry below ("OWNER DECISION ROUND (post-F-round,
+session of 2026-07-27...)") — enumeration shipped+RATIFIED (DC-1
+DISCHARGED), purge draft DEFERRED by owner instruction, DC-2 drafted
+with owner review open.]
 
 R13 CLOSURE AT REV 51 (cycles 65-70; GPT Terra):
 - Cycle 65 PASS: rev-50 boundary exact; archived offer hash matches
@@ -5612,6 +5617,11 @@ R13 CLOSURE AT REV 51 (cycles 65-70; GPT Terra):
   acceptance stands as a TIER-(b) LABORED READING usable as ruling
   of record, repudiable by fresh owner statement; action items
   unchanged (enumeration draft, purge-exception draft, DC-1, DC-2);
+[SNAPSHOT (C1-fold, cycle C1 finding 2a): superseded by the OWNER
+DECISION ROUND entry below ("OWNER DECISION ROUND (post-F-round,
+session of 2026-07-27...)") — enumeration shipped+RATIFIED (DC-1
+DISCHARGED), purge draft DEFERRED by owner instruction, DC-2 drafted
+with owner review open.]
   non-claims preserved (no whole-ledger sweep, no complete code
   audit, pins unimplemented, F19 flake tracked). Further rounds on
   the attribution class are past diminishing returns; the standing
@@ -5653,6 +5663,12 @@ discipline applied to itself):
   purge-exception draft, DC-1, DC-2; Q-J2-h deferred. Non-claims
   preserved: no whole-ledger sweep, no complete code audit, pins
   unimplemented, F19 flake tracked-unexplained.
+[SNAPSHOT (C1-fold, cycle C1 finding 2b — a TERMINATION conclusion,
+hence annotated explicitly): superseded by the OWNER DECISION ROUND
+entry below ("OWNER DECISION ROUND (post-F-round, session of
+2026-07-27...)") — enumeration shipped+RATIFIED (DC-1 DISCHARGED),
+purge draft DEFERRED by owner instruction, DC-2 drafted with owner
+review open.]
 
 
 DC-1 STATUS ENTRY (appended; work item, not a finding): CANONICAL
@@ -6028,11 +6044,14 @@ themselves the primary audit subject; gpt-6.1-terra; saved reports
   did not run suites; no cycle independently reproduced the F19 race
   counts; secret scanning was path/filename-level; pre-ratification
   artifact bytes are not independently establishable from repo
-  state. Harness gate after the B7 folds: the commit tooling ran the
-  gate before each fold commit (tsc; npm test 2755 pass / 0 fail /
-  14 skipped; Python 89/89 — the post-B audit correctly noted the
-  commit MESSAGES themselves contain no gate evidence, so retained
-  output is at ~/.tre/audits/gate-postC0.txt: commands, counts and
-  tested tree recorded; it tests the staged tree of the correcting
-  commit, not the byte-final B7 commit — pre-commit testing of
-  equivalent staged content, per post-B audit finding 2).
+  state. Harness gate: the commit tooling is configured to run the
+  gate before each fold commit (harness behavior, asserted here from
+  the tool's design — per-run evidence was NOT retained for the
+  individual fold commits, C1-fold cycle C1 finding 1). The one
+  retained gate output, ~/.tre/audits/gate-postC0.txt, is a SUMMARY
+  OF ONE RUN against tree e519873 plus that correcting commit's
+  uncommitted doc edits: it records commands and counts (Python
+  89/89 OK; npm 2755 pass / 0 fail / 14 skipped; tsc no output) but
+  no per-command exit statuses and no staged-tree hash — counts
+  only, not independently verifiable exits, and it evidences only
+  that single test, not the per-fold history above.
