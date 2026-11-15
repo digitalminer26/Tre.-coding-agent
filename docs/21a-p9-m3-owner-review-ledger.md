@@ -5856,8 +5856,12 @@ findings register as deferred items"):
   in-round fold commits, audited commit-vs-specs (docs/21 S-J2-R/
   S-A1-R, this ledger, runner contract, artifact header).
 - Cycles: A1 CHANGES REQUESTED (4 MAJOR + 1 MINOR, all CODEFIX-ABLE);
-  A2 CONFIRMING-with-dups against the pre-fold commit (same three
-  sites — fold already correct at HEAD); A3 CHANGES REQUESTED (2
+  A2 CHANGES REQUESTED (3 MAJOR against the COMMITTED tree — the same
+  three sites A1 folded; the report itself notes the working tree
+  already carried the corrections, so no new fold was needed) (B0-fold
+  correction: this line formerly read "CONFIRMING-with-dups", which
+  misrecorded the saved report's explicit verdict — audit finding 1);
+  A3 CHANGES REQUESTED (2
   MAJOR: DC-2 provenance pointed at a nonexistent artifact "§8"; the
   REV-46 current-work list lacked a supersession pointer); A4
   CONFIRMING (0 findings); A5 CONFIRMING (0 findings); A6 CHANGES
@@ -5892,10 +5896,16 @@ findings register as deferred items"):
   without owner ratification; NO new deferred items arise from this
   round. Deferred backlog UNCHANGED (purge-exception draft, Q-J2-h
   protocol exit, f1 attribution — all owner-direction, untouched).
-- Verification at final HEAD: Python suite 89/89 (run independently
-  by A4-A7b auditors), node suite 86/86 in dist (attempt-runner incl.
-  hardened C1-F7; full npm gate was green at each fold commit), git
-  tree clean at each fold.
+- Verification: per saved reports, the Python suite (89/89) and the
+  attempt-runner suite (86/86, dist build; incl. hardened C1-F7)
+  were both run independently by auditors A1, A3, A5, A6, A7b; A2
+  and A4 did NOT run the suites (A2 disclosed them among its
+  limitations; A4 said so explicitly) (B0-fold correction: this line
+  formerly claimed 89/89 "by A4-A7b auditors" — audit finding 2).
+  The full
+  npm gate (2755 pass / 0 fail / 14 skipped) was green at each fold
+  commit and re-verified by the harness on the final committed tree;
+  git tree clean at each fold.
 - Residual audit limitations, stated honestly: no auditor
   independently reproduced the exact F19 race counts (mechanism and
   qualitative direction confirmed by source reading in multiple

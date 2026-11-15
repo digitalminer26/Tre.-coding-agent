@@ -86,6 +86,18 @@ adversarial round (docs/16 pattern) before D1–D9 go to sign-off.**
 
 ## Open decisions for the user (next workstream — Hong's pick)
 
+> **[HISTORICAL SNAPSHOT — same disclosure as the "Findings status"
+> section above; B0-fold, audit finding 3.]** Item 1 below describes
+> docs/21 as of 2026-11-13. It is NOT current: docs/21 advanced
+> through the full adversarial rounds to the v37/v38 body + V33
+> FIXTURE TABLE with owner rulings (REV 36 / REV 45) in
+> `docs/21a-p9-m3-owner-review-ledger.md`; the refusal enumeration
+> (`docs/21a-refusal-enumeration.md`) was RATIFIED by the owner
+> (DC-1); the reference implementation `reference/p9m3/` landed
+> (89-test suite, green). Current-state anchors: the ledger's OWNER
+> DECISION ROUND entry and the artifact header. The item-1 text
+> below stays as written history.
+
 Nothing is broken; everything below is **scope not yet started**, per
 the docs/11 build plan and docs/20 §14 (explicitly deferred from M2):
 
