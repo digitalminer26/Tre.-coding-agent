@@ -6240,10 +6240,12 @@ own"):
   same file: 5 isolated runs of the test file all green (86 ok /
   0 notok) + 1 full npm rerun green (2755/0/14). E1 correction of
   the counts and cause (E0 wording overstated both): the EPERM
-  failure was observed in ONE of FIVE full npm runs this session
-  (D0, D1, D2, E0 first run, E0 rerun — only E0 first run failed;
-  the five isolated file runs are a separate kind of observation
-  and are not counted as full-suite runs). Cause: UNDETERMINED —
+  failure was observed in ONE of the FIVE listed full npm runs
+  through the E0 rerun (D0, D1, D2, E0 first run, E0 rerun — only
+  E0 first run failed). Later E1 and E2 gate summaries each record
+  a further full npm run with zero failures; these are separate
+  from that five-run historical window. The five isolated file
+  runs are not full-suite runs. Cause: UNDETERMINED —
   the evidence shows one transient failure followed by passing
   reruns and does NOT establish load or environment as the cause.
   The test worked as designed (fail loudly rather than
