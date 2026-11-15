@@ -5923,12 +5923,17 @@ findings register as deferred items"):
   (sibling names created after baseline and still visible at census),
   not unconditional "fails by construction"; the 3168/3200 vs 0/3000
   numbers relabeled as observed runs (auditors could not reproduce
-  the exact counts; mechanism confirmed independently by the
-  COMPLETED cycles A2-A7b — stalled A7 excluded (B5-fold, cycle B5
+  the exact counts; mechanism confirmed by SOURCE REVIEW in the
+  completed cycles A2-A7b — stalled A7 excluded (B5-fold, cycle B5
   finding 1): its transcript ends at the invocation of its probe
   experiment with no recorded result; the A7 hang is recorded in the
   Cycles line above ("A7 hung on the endpoint mid-experiment (restart,
-  disclosed)").
+  disclosed)"); the one EXPERIMENTAL confirmation-in-kind is A5's
+  scratch run (320/320 leg-4 failures at 8 concurrent threads, 0/100
+  serial — in kind, not the historical 8x400 count) — the other
+  completed cycles confirmed by source reading only; A2 and A7b
+  expressly disclaimed completing independent probe experiments
+  (C2-fold, cycle C2 finding 2).
   (3) C1-F7 sweep now accepts ONLY ESRCH as group-death proof (other
   errno throws; timeout message states the observation, not a
   diagnosis) — per the runner contract EPERM/other = unknown, never
@@ -5955,15 +5960,22 @@ findings register as deferred items"):
   sweep landed IN the A round at 5b0f8a8, so A1's run predates the
   hardened assertion (it ran, and passed, the pre-fix version whose
   error-classification it flagged); the post-hardening runs are
-  A3's, A5's, A6's and A7b's (plus the harness gate at each fold;
+  A3's, A5's, A6's and A7b's (plus the harness gate at each fold —
+  configured behavior asserted from the tool's design; per-run
+  evidence for individual fold runs was NOT retained, so treat
+  "green at each fold" as harness behavior, not retained proof;
+  C2-fold, cycle C2 finding 1).
   B3-fold, cycle B3 finding 1: the stalled A7 transcript also
   records a post-hardening Python suite pass "Ran 89 tests … OK",
   and a Node invocation whose saved output is truncated before any
-  final count — recorded, not verified), A7 gaining no audit verdict
+  final count — recorded, not verified; A7 gains no audit verdict
   from it.
   The full
-  npm gate (2755 pass / 0 fail / 14 skipped) was green at each fold
-  commit and re-verified by the harness on the final committed tree;
+  npm gate (2755 pass / 0 fail / 14 skipped) ran green at each fold
+  per harness behavior (same non-retention qualification as above —
+  C2-fold), and the harness re-verified it on the final committed
+  tree at the A round's close (that single run likewise evidenced by
+  transcript in the session log, not a retained gate file);
   git tree clean at each fold.
 - Residual audit limitations, stated honestly: no auditor
   independently reproduced the exact F19 race counts (mechanism and
