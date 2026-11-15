@@ -5912,3 +5912,10 @@ findings register as deferred items"):
   cycles); owner-transcript fidelity (ratification wording, deferral
   counts) is verifiable only against this ledger's own record; A7's
   restart means cycle-7 evidence is A7b's bounded CONFIRMING pass.
+  Further, per A7b's own saved report (B1-fold, cycle B1 finding 2):
+  A7b did NOT complete the requested independent probe experiment,
+  the full targeted ledger/artifact staleness and attribution sweep,
+  secret-content inspection, or full change-surface review, and its
+  passing-test runs do not substitute for those checks — its
+  CONFIRMING verdict covers the claims it examined, not the whole
+  requested surface.

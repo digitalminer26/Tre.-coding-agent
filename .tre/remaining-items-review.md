@@ -147,6 +147,19 @@ the docs/11 build plan and docs/20 §14 (explicitly deferred from M2):
 
 ## Recommended next step
 
+> **[HISTORICAL SNAPSHOT — written 2026-11-13; B1-fold, cycle B1
+> finding 1.]** The gate recommended below (fresh confirming round on
+> docs/21 **v4**, then D1–D9 sign-off) has since been overtaken:
+> docs/21 advanced to the v37/v38 body + V33 FIXTURE TABLE through
+> the full adversarial rounds, the owner rulings REV 36 / REV 45
+> settled the decision items, the refusal enumeration was RATIFIED
+> (DC-1) and DC-2 was commissioned with owner review open. Current
+> work-state anchors: the ledger's OWNER DECISION ROUND entry and the
+> artifact header; the open-but-deferred backlog there (purge-
+> exception draft, Q-J2-h, f1) supersedes any reading of the text
+> below as the next step. Preserved as written history — read no
+> current direction from it.
+
 Run a FRESH CONFIRMING adversarial round on docs/21 v4 (docs/16 pattern —
 findings must be verified against `src/`/reproduced before acceptance,
 the round-2 discipline), then sign off (or amend) D1–D9 in docs/21 §4 —
