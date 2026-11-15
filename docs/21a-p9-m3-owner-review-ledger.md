@@ -5960,23 +5960,61 @@ findings register as deferred items"):
   sweep landed IN the A round at 5b0f8a8, so A1's run predates the
   hardened assertion (it ran, and passed, the pre-fix version whose
   error-classification it flagged); the post-hardening runs are
-  A3's, A5's, A6's and A7b's (plus the harness gate at each fold —
-  configured behavior asserted from the tool's design; per-run
-  evidence for individual fold runs was NOT retained, so treat
-  "green at each fold" as harness behavior, not retained proof;
-  C2-fold, cycle C2 finding 1).
+  A3's, A5's, A6's and A7b's (for the harness gate at the folds,
+  see the gate & tree-clean evidence-status paragraph below —
+  C2-fold cycle C2 finding 1, sharpened by the D0-fold of the
+  post-C audit finding 1).
   B3-fold, cycle B3 finding 1: the stalled A7 transcript also
   records a post-hardening Python suite pass "Ran 89 tests … OK",
   and a Node invocation whose saved output is truncated before any
   final count — recorded, not verified; A7 gains no audit verdict
   from it.
-  The full
-  npm gate (2755 pass / 0 fail / 14 skipped) ran green at each fold
-  per harness behavior (same non-retention qualification as above —
-  C2-fold), and the harness re-verified it on the final committed
-  tree at the A round's close (that single run likewise evidenced by
-  transcript in the session log, not a retained gate file);
-  git tree clean at each fold.
+  Gate & tree-clean evidence status (D0-fold, post-C audit finding
+  1 — this REPLACES the former categorical claims "ran green at each
+  fold", "re-verified on the final committed tree at the A round's
+  close", and "tree clean at each fold", which were orchestrator
+  session-memory assertions, not established evidence): The commit
+  harness is configured to run the gate before staging and refuse
+  the commit on failure (tool design, asserted here). Contemporaneous
+  per-commit evidence in the saved orchestrator session log
+  (tre-20261113-110312-29516.jsonl) exists for TWO fold commits
+  only — e2e295c (B3) and a097555 (C1) — where the same retained
+  tool-result record carries "git-commit: gate passed" together with
+  the full count set (# tests 2769 / # pass 2755 / # fail 0 / #
+  skipped 14). For the remaining fold commits (1425a69, 5b0f8a8,
+  0733023, 0a04c4f, 81a36c9, b339426, b17392e, 29339f7, 72cc30f,
+  760c0a3, e519873, 28073e9, 3fe3813, 1dc5d29) the retained logs
+  carry the "OK — committed" line but NOT the accompanying gate
+  verdict (and for 81a36c9 and 1dc5d29 no contemporaneous commit
+  tool-result was located in the session logs searched — the only
+  matches for those two hashes postdate this D0 fold and are this
+  session's own forensic output, which is not evidence of the
+  original commits). Accordingly "the gate ran
+  green at each fold" and "git tree clean at each fold" are recorded
+  here as UNVERIFIED historical assertions — plausible from the
+  tool's configured behavior, but not evidenced per-run. Clean-start
+  corroboration that does exist: the saved B5, B6 and B7 reports
+  each opened with a clean git status, and B4's own report
+  discloses its dirty-tree start (see process note below). The
+  "re-verified on the final committed tree at the A round's close"
+  run could not be identified in the retained logs and is likewise
+  UNVERIFIED; the separately retained one-run summary
+  gate-postC0.txt (described in the post-B note below) concerns
+  tree e519873 plus uncommitted doc edits and establishes nothing
+  about the other fold commits. Going forward (from this D0 fold):
+  each fold commit's gate output is retained to a per-fold file
+  under ~/.tre/audits/ before committing, so fold-commit gate
+  evidence no longer relies on assertion. BLANKET QUALIFICATION
+  RULE (D0): any gate/test/clean-tree/confirmation claim in this
+  ledger is to be read as an orchestrator assertion — NOT as
+  retained proof — unless it names identifiable retained evidence
+  (a saved output file under ~/.tre/audits/, or a tool-result
+  record in a saved session log). The per-cycle "suite 89 OK"
+  entries of the R6-R13 rounds are in-run observations recorded
+  contemporaneously in those rounds' session logs (p9m3-*,
+  sj2r-* files under ~/.tre/audits/) and are qualified by this
+  rule to the same extent: they are logs of what the harness
+  reported at the time, not independently re-verifiable now.
 - Residual audit limitations, stated honestly: no auditor
   independently reproduced the exact F19 race counts (mechanism and
   qualitative direction confirmed by source reading in multiple
@@ -6063,7 +6101,9 @@ themselves the primary audit subject; gpt-6.1-terra; saved reports
   retained gate output, ~/.tre/audits/gate-postC0.txt, is a SUMMARY
   OF ONE RUN against tree e519873 plus that correcting commit's
   uncommitted doc edits: it records commands and counts (Python
-  89/89 OK; npm 2755 pass / 0 fail / 14 skipped; tsc no output) but
+  89/89 OK; npm 2755 pass / 0 fail / 14 skipped; the tsc command is
+  listed but its output and exit status are unrecorded — post-C-fold
+  correction of finding 3) but
   no per-command exit statuses and no staged-tree hash — counts
   only, not independently verifiable exits, and it evidences only
   that single test, not the per-fold history above.
@@ -6075,8 +6115,11 @@ owner instruction of 2026-07-28 "address the findings. terra is the
 auditor. run 4 cycles"):
 - Verdicts: C1 CHANGES REQUESTED (1 MAJOR + 1 MINOR); C2 CHANGES
   REQUESTED (1 MAJOR + 1 MINOR); C3 CONFIRMING (0 findings, bounded
-  pass); C4 CONFIRMING (0 findings, bounded pass; explicitly says
-  the appendix's own claims now match gate-postC0.txt).
+  pass); C4 CONFIRMING (0 findings, bounded pass — its saved report
+  verifies the then-existing A/B appendix's characterization of the
+  gate file as a single-run summary; the C-round appendix you are
+  reading was written AFTER C4, at 1dc5d29, and was NOT itself
+  audited by C3 or C4 — post-C-fold correction of finding 2).
   DECISIONS-REQUIRED: 0 in every cycle — no normative or ratified
   text change required; nothing new for the deferred backlog.
 - Distinct findings folded: (1) gate-postC0.txt was characterized as
