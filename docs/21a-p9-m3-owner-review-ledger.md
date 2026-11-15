@@ -5646,6 +5646,14 @@ discipline applied to itself):
 
 DC-1 STATUS ENTRY (appended; work item, not a finding): CANONICAL
 REFUSAL ENUMERATION — DRAFT DELIVERED, AWAITING OWNER READ.
+[SUPERSEDED FOR STATUS by the OWNER DECISION ROUND entry below
+(2026-07-27): DC-1 read and RATIFIED as written, DISCHARGED; the
+purge draft below "STILL PENDING" is now DEFERRED by owner
+instruction; the DC-2 block "STILL PENDING" is now commissioned and
+written with owner review open; the F19 flake "tracked-unexplained"
+is RESOLVED (root-cause bracket above). This entry is preserved as
+delivery-era history — read no status from it (A6-fold, cycle A6
+finding 1).]
 - Artifact: `docs/21a-refusal-enumeration.md` ("Canonical refusal
   enumeration — P9-M3"), drafted against the rev-52 body (S-J2-R v10
   + S-A1-R v7 as ratified REV 36, rulings REV 36 + REV-45). It IS the
