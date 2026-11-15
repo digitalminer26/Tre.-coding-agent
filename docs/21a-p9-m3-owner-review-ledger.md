@@ -5915,7 +5915,12 @@ findings register as deferred items"):
   sweep landed IN the A round at 5b0f8a8, so A1's run predates the
   hardened assertion (it ran, and passed, the pre-fix version whose
   error-classification it flagged); the post-hardening runs are
-  A3's, A5's, A6's and A7b's (plus the harness gate at each fold).
+  A3's, A5's, A6's and A7b's (plus the harness gate at each fold;
+  B3-fold, cycle B3 finding 1: the stalled A7 transcript also
+  records a post-hardening Python suite pass "Ran 89 tests … OK",
+  and a Node invocation whose saved output is truncated before any
+  final count — recorded, not verified), A7 gaining no audit verdict
+  from it.
   The full
   npm gate (2755 pass / 0 fail / 14 skipped) was green at each fold
   commit and re-verified by the harness on the final committed tree;
