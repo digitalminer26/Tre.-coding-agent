@@ -6252,6 +6252,13 @@ own"):
   the owner (test-side change, CODEFIX-ABLE class, not folded
   here). The fold commit below landed only after the green rerun;
   the red run is retained above per the no-hidden-evidence rule.
+  E2 correction (exact-tree limitation, second-E audit MINOR): the
+  green E0 rerun happened BEFORE the E0 GATE EVENT block above was
+  written into this ledger — the retained run evidences the count
+  result (2755/0/14) but NO exact E0 pre-commit tree hash was
+  recorded and the run did NOT cover the final E0 ledger text.
+  The hash-verified staged-tree gate practice begins with the E1
+  fold (gate-postE1.txt).
 - Residual limitations (auditor-disclosed, D1-D5): all cycles
   targeted/query-driven, not serial exhaustive ledger reviews;
   suites were run by the orchestrator pre-fold (retained in
