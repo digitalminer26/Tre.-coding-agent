@@ -6022,9 +6022,17 @@ themselves the primary audit subject; gpt-6.1-terra; saved reports
 - Residual limitations (auditor-disclosed per cycle, B1-B7): all
   cycles query-driven targeted reviews, not serial full-ledger/
   full-implementation audits; suites were run by B1 (89+86) and B2
-  (89+86), B4's transcript records the Python 89 pass, B3/B5/B6/B7
+  (89+86); B4 did NOT run suites — its report discusses the STALLED
+  A7 transcript's recorded Python 89 pass (attributing that pass to
+  B4 was an error; corrected per post-B audit finding 1); B3/B5/B6/B7
   did not run suites; no cycle independently reproduced the F19 race
   counts; secret scanning was path/filename-level; pre-ratification
   artifact bytes are not independently establishable from repo
-  state. Harness gate after the B7 folds (this commit): tsc clean;
-  full npm gate and Python suite re-run — see the commit record.
+  state. Harness gate after the B7 folds: the commit tooling ran the
+  gate before each fold commit (tsc; npm test 2755 pass / 0 fail /
+  14 skipped; Python 89/89 — the post-B audit correctly noted the
+  commit MESSAGES themselves contain no gate evidence, so retained
+  output is at ~/.tre/audits/gate-postC0.txt: commands, counts and
+  tested tree recorded; it tests the staged tree of the correcting
+  commit, not the byte-final B7 commit — pre-commit testing of
+  equivalent staged content, per post-B audit finding 2).
