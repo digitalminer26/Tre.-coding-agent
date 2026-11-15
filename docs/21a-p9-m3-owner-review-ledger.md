@@ -5234,7 +5234,13 @@ of those rulings LANDED at REV-45 (see OWNER RULINGS REV-45) and
 were folded at REVS 45-46; the CURRENT standing open work is the
 DRAFTS + docs: (i) the Q-ENUM-a enumeration draft, (ii) the
 purge-exception artifact draft (then owner ratification, then the
-standing deployment conditions), (iii) DC-1 and DC-2.] Known intermittent: F19 fs-probe suite flake (twice in ~70
+standing deployment conditions), (iii) DC-1 and DC-2.] [SUPERSEDED for
+item (i)/(iii) STATUS by the OWNER DECISION ROUND below (2026-07-27):
+enumeration drafted, audited, and RATIFIED (DC-1 discharged); DC-2
+written, owner review open; the purge-exception draft (ii) DEFERRED by
+owner instruction — that item remains open-but-deferred, not pending
+drafting work. A3-fold, cycle A3 finding 2: the REV-46 bracket is
+history; that entry is the current work-state anchor.] Known intermittent: F19 fs-probe suite flake (twice in ~70
 runs, cause unknown, tracked not hidden). [RESOLVED 2026-07-27
 post-decision-round, owner "debug F19": ROOT CAUSE FOUND — the suite's
 own F19 contention test forks racing Ledger constructors on ONE dir;
@@ -5820,7 +5826,12 @@ ACKNOWLEDGED GAP: T4-GAP COMPLETION MECHANISM DEFERRED
   restore route and the gap statement itself are the ledger's DC-2
   registration text (the REV-45 DOCUMENTATION COMMITMENTS block,
   verbatim in force); the R-c cell + enumeration cross-reference are
-  the RATIFIED DC-1 artifact's §8 (audited CLEAN two rounds); the
+  the RATIFIED DC-1 artifact's §1 recovery-cell branch (iii)
+  (`journal-rotate-attest-failed`: attested-but-unpublished ⇒ pre-
+  rename T4 gate refuses, NO in-protocol completion) and its §2 R-c
+  residual discussion (audited CLEAN two rounds; A3-fold correction —
+  the pointer formerly read "§8", a section that does not exist in
+  the artifact);
   reconfirmed deferral is this session's owner-decision-round entry
   above. The only phrase not appearing verbatim in the ledger is
   "third affirmation" — a count of the deferral events recorded
