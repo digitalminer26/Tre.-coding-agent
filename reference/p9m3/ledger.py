@@ -399,24 +399,45 @@ class Ledger:
 
     def _clear_owed(self):
         """Fixed-width zero rewrite — NEVER an unlink (F10: the
-        protocol removes no names; a zeroed witness reads as none)."""
+        protocol removes no names; a zeroed witness reads as none).
+        AUD46-c3 (audit cycle 2, major 2): the ZERO TAIL is written
+        FIRST — a crash mid-clear leaves the nonzero OWED head, which
+        reads owed, instead of a zeroed head whose surviving tail
+        bytes a head-first writer can no longer distinguish from a
+        completed clear."""
         if os.path.exists(self._owed_side):
-            self._sidecar_write(self._owed_side, b"\0" * 16)
+            fd = os.open(self._owed_side, os.O_RDWR | os.O_NOFOLLOW)
+            try:
+                off = 4
+                while off < 16:       # tail first
+                    n = os.pwrite(fd, b"\0" * 12, off)
+                    if n <= 0:
+                        raise OSError(errno.EIO, "owed clear: zero progress")
+                    off += n
+                os.pwrite(fd, b"\0" * 4, 0)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def _owed_attempt(self):
         """True when a resolve attempt was started and never confirmed.
-        MISSING = none; zero-padded/legacy content = none (a never-
-        created witness and a cleared one read identically); a torn
-        creation ("OW" only) FAILS CLOSED as owed."""
+        MISSING = none; EXACTLY the 16-byte all-zero record = cleared
+        none; EVERYTHING ELSE FAILS CLOSED as owed (AUD46-c3, audit
+        cycle 2 majors 1+2): a torn creation — the name is visible the
+        instant O_CREAT returns, the bytes are not, so a zero-LENGTH
+        file is a torn creation, never a cleared record — partial or
+        garbage payloads, and over-long hostile records."""
         try:
             fd = os.open(self._owed_side, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
             return False
         try:
-            raw = os.pread(fd, 16, 0)
+            raw = os.pread(fd, 17, 0)     # 17: detect over-long too
         finally:
             os.close(fd)
-        return bool(raw.strip(b"\0"))
+        if len(raw) == 16:
+            return raw != b"\0" * 16
+        return True                     # torn/over-long: fail closed
 
     @staticmethod
     def _sidecar_write(path, payload):

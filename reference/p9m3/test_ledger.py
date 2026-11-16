@@ -3049,6 +3049,64 @@ class TestV38Cycle6Audit(Base):
         # the cleared witness reads identically to a never-created
         # one (zero-padded; F10: the protocol removes no names)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "resolve-owed")))
+        self.assertEqual(os.path.getsize(os.path.join(self.dir, "resolve-owed")),
+                         16)   # AUD46-C3-1: cleared = full 16 bytes, never 0
+
+    def test_F63_witness_content_space_fails_closed(self):
+        # AUD46-c3 (audit cycle 2, majors 1+2 folded): the witness's
+        # content space is CLOSED. MISSING = none; EXACTLY the 16-byte
+        # all-zero record = cleared-none; EVERYTHING ELSE — a torn
+        # creation (empty or partial payload: the name is visible the
+        # instant O_CREAT returns, the bytes are not), garbage, an
+        # over-long hostile record — FAILS CLOSED as owed. A torn
+        # CLEAR cannot erase the signature either: _clear_owed writes
+        # the ZERO TAIL first, so a mid-clear crash leaves a nonzero
+        # head that reads owed (the fix is the write ORDER, proven by
+        # the tail-first mutant below).
+        owed_path = os.path.join(self.dir, "resolve-owed")
+        self.assertFalse(self.mk()._owed_attempt())   # missing = none
+        for raw, want in ((b"", True), (b"OW", True), (b"OWED", True),
+                          (b"garbage", True), (b"\0" * 15, True),
+                          (b"\0" * 17, True),
+                          (b"OWED" + b"\0" * 12, True), (b"\0" * 16, False)):
+            with open(owed_path, "wb") as f:
+                f.write(raw)
+            os.chmod(owed_path, 0o600)   # the strict census requires 0600
+            led = self.mk()
+            self.assertEqual(led._owed_attempt(), want,
+                             "raw=%r owed=%s" % (raw, want))
+            st = led.status()
+            self.assertEqual(st["decision"],
+                             STATE_PENDING if want else STATE_OK,
+                             "raw=%r status disagrees" % (raw,))
+        # a torn CREATION (pwrite fault with the name already created)
+        # reads owed, not none:
+        d = self.dir
+        led = self.mk()
+        def torn(path, payload):
+            if path == os.path.join(d, "resolve-owed"):
+                with open(path, "wb"):
+                    pass
+                raise OSError("torn creation")
+        led._sidecar_write = torn
+        with self.assertRaises(OSError):
+            led._write_owed()
+        self.assertTrue(self.mk()._owed_attempt(),
+                        "zero-byte witness must read OWED")
+        after = self.mk()
+        self.assertEqual(after.status()["decision"], STATE_PENDING)
+        self.assertFalse(after.promotion_allowed())
+        # a torn CLEAR (tail-first write) leaves the OWED head nonzero:
+        owed2 = os.path.join(d, "resolve-owed")
+        with open(owed2, "wb") as f:
+            f.write(b"OWED" + b"\0" * 12)
+        # model a crash after writing ONLY the tail (offset 4..16):
+        with open(owed2, "r+b") as f:
+            f.seek(4)
+            f.write(b"\0" * 12)      # tail-first partial clear
+        led3 = self.mk()
+        self.assertTrue(led3._owed_attempt(),
+                        "tail-first clear crash keeps the owed head")
 
 if __name__ == "__main__":
     unittest.main()

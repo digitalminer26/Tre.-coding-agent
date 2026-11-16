@@ -6683,3 +6683,41 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     interleavings; two-instance concurrency; F10/probe conformance of
     the mid-protocol witness creation; per-mutant sweep of every owed
     writer/clearer/reader/status-check; full classify() paths.
+
+- CYCLE 3 (terra, 2026-11-18; transcript ~/.tre/audits/aud46-c3-out.txt):
+  - AUD46-C3-1 (MAJOR): torn witness CREATION read as no-owed. The
+    witness name is visible the instant O_CREAT returns but the bytes
+    are not; the old reader (`bool(raw.strip(b"\0"))`) read the
+    zero-LENGTH file exactly like a cleared record — auditor's
+    injected pwrite fault during creation produced
+    `raw=b'' counter=0 owed=False status=ok allowed=True`. FIXED:
+    `_owed_attempt` now reads 17 bytes and the content space is
+    CLOSED — MISSING = none, EXACTLY the 16-byte all-zero record =
+    cleared-none, EVERYTHING ELSE (zero-length, partial, garbage,
+    over-long) FAILS CLOSED as owed; status()/promotion snapshot
+    follow (new test_F63 pins all eight vectors + status agreement).
+  - AUD46-C3-2 (MAJOR): a torn `_clear_owed` could erase the OWED
+    signature before the clear completed (auditor injected a 4-byte
+    short write then OSError: head zeroed, tail already zero, next
+    instance served ok at counter 0). FIXED by write ORDER:
+    `_clear_owed` now writes the ZERO TAIL (offset 4..16) first and
+    the 4-byte head LAST — a crash mid-clear leaves the nonzero OWED
+    head, which reads owed; only the final 4-byte write can ever
+    complete the clear. F63 pins the tail-crash interleaving.
+    (The clear also bypasses `_sidecar_write` deliberately: it never
+    creates, so no dir-fsync is owed — fixed-width checked pwrite +
+    fsync retained.)
+  - AUD46-C3-3 (minor TEST, strength): a mutant recognizing ONLY the
+    full OWED prefix survived the suite (95 OK) while differing
+    observably for b"OW" (real: pending/False; mutant: ok/True).
+    SUBSUMED by the F63 content-space table (every non-canonical
+    vector pinned, fail-closed direction included).
+  - Verified: real suite 96 OK; the pre-fix reader+clear mutant turns
+    F63 RED; auditor's four raw-content probes re-run against the fix
+    (b''/OW/garbage -> owed pending snapshot False; 16 zeros -> ok).
+  - CYCLE INCOMPLETE remainders carried to cycle 4: full state-space
+    enumeration incl. pending-intent R/'-' arms; dir-fsync/exists-race
+    injections on the witness; two-instance concurrency incl.
+    promote-callback crash; F10/probe conformance of mid-protocol
+    creation; post-IO / clear-only-on-pending writer mutants; full
+    classify() paths.
