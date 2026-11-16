@@ -45,8 +45,11 @@ Modeling notes (reference-level choices where the spec is prose):
   (never before durability), so the window where bytes exist with no
   marker is eliminated (audit finding 1).
 - The resolve attempt bound writes a crash-durable attempt counter
-  BEFORE each resolve attempt (a crashed attempt counts); success
-  resets it. Exhaustion is STICKY (counter + flag in one sidecar
+  BEFORE each RECOVERY round (pending window: a crashed round counts);
+  a NO-PENDING resolve (AUD45-c3-1) is charged only when its IO
+  failure is CAUGHT (a crash mid-IO there leaves no window and the
+  same bytes, so nothing is owed), and success resets it. Exhaustion
+  is STICKY (counter + flag in one sidecar
   rewrite): once `resolve-exhausted`, no further automatic attempt is
   made — only the explicit operator path `operator_resolve_reset()`
   re-arms resolution (owner: exhaustion exits service, no silent pass).
@@ -1225,8 +1228,10 @@ class Ledger:
         NEVER a substitute for the durable resolution; its absence does
         not prove visible bytes are durable. Bounded by
         repair_attempt_cap per PENDING episode (v37 AUD36-M1): the
-        crash-durable counter is bumped BEFORE each attempt (a crashed
-        round counts). v38 cycle-2 fix 4: once the cap attempts are
+        crash-durable counter is bumped BEFORE each recovery round (a
+        crashed round counts); a no-pending resolve is charged ONLY on
+        a caught IO failure (AUD45-c3-1 — see the branch comment).
+        v38 cycle-2 fix 4: once the cap attempts are
         consumed the NEXT round REFUSES BEFORE ANY RESOLVE IO — a cap of
         N never permits an (N+1)-st automatic round, and exhaustion is
         persisted before the refusal raises. STICKY (v38 fix 4): the

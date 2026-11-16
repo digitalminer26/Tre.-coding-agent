@@ -6489,3 +6489,18 @@ committed; post-fold hashes read from the tree with BOTH labels.
   cycle folds) — mid-round folds record in 21a + 21b update blocks;
   the reference tree is the source of truth for behavior meanwhile
   (hashes per update, pinned).
+  1 finding, minor DOC, ACCEPTED after independent verification
+  (both stale docstring sites confirmed in source; the pending-path
+  pre-IO charge confirmed unchanged; auditor's interruption-injection
+  experiment reproduced the asymmetry 0-vs-1; suite 93 OK in its
+  copy):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c4-1 | minor | DOC | module header (~47) and _resolve_locked docstring (~1226) still claimed the counter is bumped BEFORE EACH resolve attempt "(a crashed attempt counts)" — untrue for the AUD45-c3-1 no-pending path, which charges only on a CAUGHT IO failure (pending rounds still charge pre-IO) | Both sites qualified: recovery rounds (pending window) charge pre-IO — a crashed round counts; no-pending resolves charge only on caught failure (a crash mid-IO there leaves no window and the same bytes, so nothing is owed) — behavior UNCHANGED, docstrings only |
+  Cycle self-declared INCOMPLETE (120 settlement/pending/fsync grep
+  matches screened, central prose 2735–2855 + framing 2588–2610
+  compared vs append/sidecar/resolve/settle paths; not every match,
+  intent-tag path, fsync-failure path, or cross-doc pin audited).
+  Post-fold tree: ledger.py sha1 92a3b45004b5… sha256
+  1a01e7d89abd… (test_ledger.py UNCHANGED 80eb7014ee1f…/
+  bed061d92495…); suite 93 OK, tsc clean.
