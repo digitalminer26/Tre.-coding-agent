@@ -1242,13 +1242,35 @@ class Ledger:
         if self._attempts_exhausted():
             raise LedgerError(STATE_EXHAUSTED)
         if not self.durability_pending():
-            # No pending window: the resolve is still owed (fix 1), but
-            # it is not a recovery ATTEMPT — no counter is consumed.
+            # AUD45-c3-1 (CODE fix): a FAILED no-pending resolve IS a
+            # bounded attempt. The v38 comment ("the resolve is owed
+            # but is not a recovery ATTEMPT — no counter is consumed")
+            # was true of SUCCESS only: a persistent resolve-IO fault
+            # on this path never consumed the counter, so the loop
+            # retried forever and the sticky exhaustion the spec
+            # requires ("Resolution attempts are BOUNDED per episode
+            # ... No schedule drives an unbounded loop") never
+            # arrived. NOW: the cap refusal precedes the IO (persist-
+            # first, same discipline as the recovery round below);
+            # the counter is consumed ONLY on IO failure — a
+            # successful ordinary resolve stays counter-free (fix 1
+            # preserved: no recovery attempt charged for success).
+            n = self._read_counter()
+            if n >= self.repair_attempt_cap:
+                self._write_counter(n, exhausted=True)
+                raise LedgerError(STATE_EXHAUSTED)
             try:
                 data = self._resolve_io()
             except OSError:
-                # cannot even establish the durable basis => fail closed
+                # cannot even establish the durable basis => fail
+                # closed, and the bounded episode charges this attempt
+                self._write_counter(n + 1, exhausted=False)
                 raise LedgerError(STATE_PENDING)
+            if n:
+                # a successful resolve closes the episode: clear any
+                # charged failed attempts (same discipline as the
+                # recovery round's completion-clear below)
+                self._write_counter(0, exhausted=False)
             return self.classify(data)
         # C2 fix 4: refusal BEFORE starting a round whose attempts are
         # already consumed — persist exhaustion first, then raise; the

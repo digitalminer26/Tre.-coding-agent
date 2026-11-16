@@ -2884,5 +2884,47 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(os.path.getsize(led.ledger_path), before)
 
 
+    # ------------------------------------------------- F60 (AUD45-c3-1)
+    def test_F60_no_pending_resolve_io_fault_is_bounded(self):
+        # AUD45-c3-1 (major CODE): a persistent resolve-IO fault with
+        # NO pending window must reach the specified bounded
+        # exhaustion (spec: "Resolution attempts are BOUNDED per
+        # episode ... No schedule drives an unbounded loop"). Before
+        # the fix this path returned STATE_PENDING forever: the
+        # counter was never consumed, so exhaustion never arrived.
+        led = self.mk(repair_attempt_cap=2)
+        led.faults.resolve_fsync_fault = True
+        self.assertFalse(led.durability_pending())
+        codes = []
+        for _ in range(4):
+            try:
+                led.resolve()
+                codes.append("resolved")
+            except LedgerError as e:
+                codes.append(e.code)
+        self.assertEqual(codes, [STATE_PENDING, STATE_PENDING,
+                                 STATE_EXHAUSTED, STATE_EXHAUSTED])
+        # exhaustion is visible on the informational view and the
+        # binding decision refuses with the sticky flag, not pending
+        self.assertEqual(led.status()["decision"], STATE_EXHAUSTED)
+        res = led.promote(lambda: {"allowed": True})
+        self.assertFalse(res["allowed"])
+        self.assertEqual(res["decision"], STATE_EXHAUSTED)
+        # sticky across processes (fresh Ledger on the same dir)
+        restarted = self.mk(repair_attempt_cap=2)
+        self.assertEqual(restarted.status()["decision"], STATE_EXHAUSTED)
+        # the ONLY re-arm is the explicit operator path; after it (and
+        # a healthy device) the resolve succeeds and the episode clears
+        restarted.operator_resolve_reset()
+        healthy = self.mk(repair_attempt_cap=2)
+        cls = healthy.resolve()
+        self.assertEqual(cls["state"], STATE_OK)
+        self.assertEqual(healthy._read_counter(), 0)
+        # a SUCCESSFUL ordinary resolve stays counter-free (fix 1):
+        # no recovery attempt is charged for success
+        before = healthy._read_counter()
+        healthy.resolve()
+        self.assertEqual(healthy._read_counter(), before)
+
 if __name__ == "__main__":
     unittest.main()

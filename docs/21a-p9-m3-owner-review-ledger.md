@@ -6470,3 +6470,22 @@ committed; post-fold hashes read from the tree with BOTH labels.
   1A claim enumeration and cross-document pin/count sweep open).
   Note: the cycle audited HEAD 51fce4f (post-cycle-1 fold) — kick
   HEAD drift is by design (each cycle audits the current fold).
+  1 finding, MAJOR CODE, ACCEPTED after independent verification
+  (the auditor reproduced the unbounded loop in its own copy: cap=2,
+  no pending sidecar, persistent resolve_fsync_fault — five resolves
+  all `durability-pending`, counter pinned at (0,False); binding
+  promote refused fail-closed throughout, so the defect is the
+  missing OPERATOR EXIT, not a silent pass; F20 exercises only the
+  pending-window recovery round):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c3-1 | major | CODE | no-pending resolve path returned STATE_PENDING on IO failure WITHOUT consuming the attempt counter ("not a recovery ATTEMPT" comment) — a persistent fault on a healthy-looking ledger looped forever; spec demands "BOUNDED per episode … No schedule drives an unbounded loop" (docs/21 ~2820) and exhaustion/`resolve-exhausted` never arrived | FIX in _resolve_locked: cap refusal precedes the IO (persist-first), counter charged ONLY on IO failure, successful ordinary resolve stays counter-free (v38 fix 1) and clears charged attempts, exhaustion sticky/operator-reset-only via the existing overlays; new pin test_F60_no_pending_resolve_io_fault_is_bounded (failure sequence + status + binding refusal + cross-process stickiness + operator reset + success-stays-free), mutation-verified both ways (pre-fix revert kills it; charge-only removal kills it); suite 92->93 OK; 21b EVIDENCE-TREE UPDATE 3 re-pins both files (ledger sha1 2524fb71ff17…, sha256 6e6f5277b659…; tests sha1 80eb7014ee1f…, sha256 bed061d92495…) with the cumulative +28 shift disclosure and unshifted-S1 note |
+  Cycle self-declared INCOMPLETE (resolve-bound/counter prose,
+  counter parser, resolve/settle/reset/append/status/promote paths
+  read; 78-line grep output screened, historical matches not
+  individually audited; quarantine claims + cross-doc inventory
+  open). Note: docs/21 header version bump for the AUD45 folds is
+  DEFERRED to round close (one v47 header fold covering all seven
+  cycle folds) — mid-round folds record in 21a + 21b update blocks;
+  the reference tree is the source of truth for behavior meanwhile
+  (hashes per update, pinned).

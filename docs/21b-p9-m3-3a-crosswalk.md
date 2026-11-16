@@ -62,6 +62,35 @@ here pre-empts it.
   new one — the content at each cited site is byte-identical
   (spot-verified at the S1/S2/S3 anchors).
   Suite re-run post-fold: **Ran 92 tests — OK**.
+- EVIDENCE-TREE UPDATE 3 (AUD45 cycle-3 fold, 2026-11-17): finding
+  AUD45-c3-1 (major CODE) — the NO-PENDING resolve path exempted
+  itself from the attempt bound: a persistent resolve-IO fault there
+  returned `durability-pending` forever, never consuming the counter,
+  so the spec's "Resolution attempts are BOUNDED per episode … No
+  schedule drives an unbounded loop" never arrived (docs/21 ~2820).
+  FIX: the cap refusal now PRECEDES the resolve IO on this path
+  (persist-first, same discipline as the recovery round), the
+  counter is consumed ONLY on IO failure, a successful ordinary
+  resolve stays counter-free (v38 fix 1 preserved) and clears any
+  charged attempts, exhaustion is sticky and operator-reset-only —
+  the pre-existing overlays (status/promote) needed no change.
+  New pin test_F60_no_pending_resolve_io_fault_is_bounded (repeated
+  failure → exhaustion sequence, status+binding view, cross-process
+  stickiness, operator reset + healthy resolve, success-stays-free;
+  mutation-verified BOTH ways in scratch copies — reverting the
+  branch to pre-fix behavior kills it, removing only the charge
+  kills it). Suite: **Ran 93 tests — OK** (every "92" above is
+  historical, pinned to its own tree). New tree: `ledger.py`
+  sha1-prefix `2524fb71ff178ef144f7ace38450fbe45ce1bd60`,
+  sha256-prefix `6e6f5277b6590e0fdc7c75c7…`; `test_ledger.py`
+  sha1-prefix `80eb7014ee1fcfb2396f194ebf6fd05221571cda`,
+  sha256-prefix `bed061d92495a884825c3bf0…`. Cumulative line shift
+  below ~163 is now +28 from the tree pinned at Step 2 (S2
+  1456–1459 → 1484–1487, S3 1810 → 1838; the S1 classify region is
+  ABOVE the changed resolve branch and unshifted); cited content
+  remains byte-identical (anchors re-verified). No 3A SENTENCE
+  changed behavior: S1–S6 drift stays NONE — the fix serves docs/21's
+  own resolve-bound prose.
 - Command: `cd reference && python3 -W error::ResourceWarning
   -m unittest p9m3.test_ledger`
 - Result: **Ran 92 tests — OK** (2026-11-16). The three pins added
