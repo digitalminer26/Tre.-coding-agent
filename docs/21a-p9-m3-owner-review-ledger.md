@@ -6721,3 +6721,26 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     promote-callback crash; F10/probe conformance of mid-protocol
     creation; post-IO / clear-only-on-pending writer mutants; full
     classify() paths.
+
+- CYCLE 4 (terra, 2026-11-18; transcript ~/.tre/audits/aud46-c4-out.txt):
+  - AUD46-C4-1 (MAJOR, in the C3 fix itself): `_clear_owed`'s tail
+    retry loop re-issued the FULL 12-byte buffer on a short write —
+    a permitted 4-of-12 pwrite at offset 4 retried 12 bytes at
+    offset 8, EXTENDING the fixed-width witness to 20 bytes; over-
+    long fails closed forever (healthy resolves rewrite only 16
+    bytes) — auditor's repro: `resolve ok, length 20, status
+    durability-pending, snapshot False, binding promote refused`,
+    suite 96 OK (undetected). FIXED: both clear phases slice the
+    REMAINING bytes per attempt (`buf[off:end]` — same discipline
+    as `_sidecar_write`, which was already correct); the head write
+    is now inside the checked loop too. F63 extended: one 4-byte
+    short pwrite injected at offset 4, then a full clear must land
+    at exactly 16 bytes with owed=False. Verified: real suite 96 OK;
+    auditor repro re-run -> length 16, status ok, snapshot True;
+    the un-sliced mutant turns F63 RED ("20 != 16").
+  - CYCLE INCOMPLETE remainders carried to cycle 5 (final): full
+    state-space enumeration incl. pending-intent R/'-' arms; two-
+    instance/callback-crash concurrency probes; FsFaults/errno
+    injections on the witness paths; F10/prose conformance incl.
+    _clear_owed's deliberate no-dir-fsync (never creates); the
+    remaining owed-writer/clearer/reader/overlay mutant sweep.

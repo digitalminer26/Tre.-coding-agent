@@ -3107,6 +3107,34 @@ class TestV38Cycle6Audit(Base):
         led3 = self.mk()
         self.assertTrue(led3._owed_attempt(),
                         "tail-first clear crash keeps the owed head")
+        # AUD46-C4-1 (audit cycle 3, major): a SHORT tail pwrite must
+        # retry with the REMAINING bytes only — an un-sliced retry
+        # extends the fixed-width witness past 16 bytes and wedges it
+        # owed forever (over-long = fail-closed). Patch a 4-byte
+        # short-write once and prove a full healthy clear still lands
+        # at exactly 16 bytes, owed=False.
+        with open(owed2, "wb") as f:
+            f.write(b"OWED" + b"\0" * 12)
+        os.chmod(owed2, 0o600)
+        real_pwrite = os.pwrite
+        short = {"left": 1}
+        def short_pwrite(fd, data, off, *a):
+            if short["left"] and off == 4:
+                short["left"] -= 1
+                return real_pwrite(fd, data[:4], off, *a)   # 4 of 12
+            return real_pwrite(fd, data, off, *a)
+        led4 = self.mk()
+        import sys
+        led_mod = sys.modules[type(led4).__module__]
+        orig = getattr(led_mod.os, "pwrite", None)
+        led_mod.os.pwrite = short_pwrite
+        try:
+            led4._clear_owed()
+        finally:
+            led_mod.os.pwrite = orig
+        self.assertEqual(os.path.getsize(owed2), 16,
+                         "short-write retry must not extend the witness")
+        self.assertFalse(self.mk()._owed_attempt())
 
 if __name__ == "__main__":
     unittest.main()

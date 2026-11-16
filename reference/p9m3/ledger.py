@@ -408,13 +408,21 @@ class Ledger:
         if os.path.exists(self._owed_side):
             fd = os.open(self._owed_side, os.O_RDWR | os.O_NOFOLLOW)
             try:
-                off = 4
-                while off < 16:       # tail first
-                    n = os.pwrite(fd, b"\0" * 12, off)
-                    if n <= 0:
-                        raise OSError(errno.EIO, "owed clear: zero progress")
-                    off += n
-                os.pwrite(fd, b"\0" * 4, 0)
+                # AUD46-c4 (audit cycle 3, major): retries slice the
+                # REMAINING bytes — an un-sliced retry of a short
+                # write writes past offset 16 and EXTENDS the fixed-
+                # width witness (a wedged over-long record no healthy
+                # resolve can ever clear). Same discipline as
+                # _sidecar_write's payload[off:] loop.
+                buf = b"\0" * 16
+                for start, end in ((4, 16), (0, 4)):   # tail first
+                    off = start
+                    while off < end:
+                        n = os.pwrite(fd, buf[off:end], off)
+                        if n <= 0:
+                            raise OSError(errno.EIO,
+                                          "owed clear: zero progress")
+                        off += n
                 os.fsync(fd)
             finally:
                 os.close(fd)
