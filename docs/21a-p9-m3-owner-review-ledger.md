@@ -6558,3 +6558,30 @@ committed; post-fold hashes read from the tree with BOTH labels.
   test_ledger.py sha1 2c4ccb04a014532607a8991553e19e41b3be1553
   sha256 d8a6e181b980bf0baf65917cd85df4998e8bc01a12167e1157779cee4650a1f2.
   Suite 93 OK, tsc clean.
+
+  AUD45 ROUND CLOSE (2026-11-17, at cap of 7 cycles): TOTAL 11
+  FINDINGS — 1 major CODE, 1 minor TEST, 9 minor DOC; ALL ACCEPTED,
+  NONE REJECTED (per-cycle 2+1+1+1+1+2+3=11). The one major
+  (AUD45-c3-1: no-pending resolve IO fault bypassed the attempt
+  bound — unbounded loop, missing operator exhaustion exit) is the
+  round's substance: FIXED with mutation-verified pin test_F60,
+  suite 92->93. The TEST finding (c6-1) was resolved by correcting
+  the fixture TABLE (the test was the stronger reading). Every DOC
+  finding was an over-claim/stale-description pair verified on both
+  sides before folding — three of the nine (c7-1, c7-2 partially,
+  c7-3) were BOOKKEEPING DRIFT CREATED BY THIS ROUND'S OWN MID-ROUND
+  FOLDS; round lesson for future rounds: doc-only folds touching
+  pin-mapping prose should land as one end-of-round update. All
+  seven cycles self-declared INCOMPLETE — the round is a bounded
+  adversarial sweep over Scope A, NOT a claim of zero remaining
+  findings; the unenumerated remainders are listed per cycle above.
+  FINAL GATE (round-close tree, this commit): node 2756 pass/0,
+  tsc clean, reference suite 93 OK. THE OWNER'S 3A RATIFICATION
+  READING (docs/21b Step 3) IS NOW AGAINST THE ROUND-CLOSE TREE —
+  21b UPDATE 4 carries the verified current-tree citation mapping;
+  S1–S6 drift remains NONE (c3's behavior fix serves docs/21's own
+  resolve-bound prose, changes no 3A sentence). POOLED owner
+  decisions unchanged (D4A-c4-1 rotation workstream; D9
+  confirmation). Version: docs/21 header bumped v46 -> v47 (the
+  single end-of-round header fold covering all seven cycle folds,
+  as deferred in the cycle-3 registration).

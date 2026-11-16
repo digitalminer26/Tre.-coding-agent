@@ -1,7 +1,20 @@
 # P9/M3 — Promotion/rollback & fleet budget layer (contract draft)
 
-Status: **DRAFT v46 — contract-first scoping. NOT YET APPROVED, NOT
-IMPLEMENTED; no module in `src/` is touched by this doc.** (v46 is the
+Status: **DRAFT v47 — contract-first scoping. NOT YET APPROVED, NOT
+IMPLEMENTED; no module in `src/` is touched by this doc.** (v47 is
+the AUD45 round fold (Scope A continuation, 7 cycles, 11 findings —
+1 major CODE / 1 minor TEST / 9 minor DOC, all ACCEPTED, record in
+docs/21a): the major AUD45-c3-1 fixed the no-pending resolve
+attempt-bound bypass (unbounded loop, missing exhaustion exit) with
+mutation-verified pin test_F60 (suite 92->93 OK); the TEST finding
+corrected the F3 fixture TABLE to the implemented geometry (test
+was the stronger reading); the 9 DOC folds qualified stale/over-
+claiming prose — access-control docstring vs strict 0600 policy,
+AUTH VALIDITY "unterminated NONBLANK", formerly-unqualified V37
+shorthand reference, F19 seed-geometry header, 21b pin/mapping
+currency (UPDATEs 1-4, current-tree citation mapping), F1-F60
+inventory; final gate on the round-close tree: node 2756/0, tsc
+clean, suite 93 OK). (v46 was the
 five-finding hygiene fold from the post-D4A final audit, 2026-11-17:
 (1) the V37 OWNER DECISION RECORD's 3A shorthand is now QUALIFIED at
 its source (no operator revival COMMAND vs automatic current-read
