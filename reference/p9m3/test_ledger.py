@@ -37,6 +37,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import sys
 import signal
 import tempfile
 import time
@@ -4604,6 +4605,302 @@ class TestV38Cycle6Audit(Base):
         led._write_owed()
         with self.assertRaises(TypeError):
             led._clear_owed()
+
+    def test_F87_seam_consumption_census_all_seams_asserted(self):
+        """AUD49 c5 (the round-closing census, promoted from the
+        throwaway script so it can never be 'left out of a cycle'
+        again): EVERY declared repair/clear/re-arm FsFaults seam is
+        exercised False / True / callable(defaulted-path predicate),
+        end-to-end, each cell ASSERTING an observable effect against
+        the documented contract. Re-derived from the consumption sites
+        in ledger.py (`_clear_owed` legs and `_sidecar_write`), not
+        from a prompt. This census FOUND the c5 defect: the sidecar
+        twins of the c1 clear-seam dispatch fixes (raw int() on
+        `sidecar_partial_write`, raw truthiness on the SILENT fsync/
+        dir seams) — a callable crashed or was silently ALWAYS-ON."""
+        cells = []
+
+        def cell(name, cond, why=""):
+            cells.append(name)
+            self.assertTrue(cond, "census cell %s: %s" % (name, why))
+
+        def cell_dir(tag):
+            d = os.path.join(self.dir, tag)
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            return d
+
+        def led_in(d, faults=None):
+            return Ledger(d, faults=faults or FsFaults(),
+                          repair_attempt_cap=3)
+
+        def owed_raw(d):
+            p = os.path.join(d, "resolve-owed")
+            if not os.path.exists(p):
+                return None
+            with open(p, "rb") as fh:
+                return fh.read()
+
+        OWED16 = b"OWED".ljust(16, b"\0")
+
+        # --- clear-path seams (consumed in _clear_owed) -------------
+        for seam in ("clear_write_fault", "clear_fsync_fault",
+                     "repair_seed_fault", "repair_fill_fault"):
+            for val, tag in (
+                    (False, "False"), (True, "True"),
+                    (lambda p=None: bool(p)
+                     and p.endswith("resolve-owed"), "callable")):
+                d = cell_dir("cens_%s_%s" % (seam, tag))
+                base = led_in(d)
+                base._write_owed()
+                base._write_counter(0, exhausted=False)
+                before = owed_raw(d)
+                self.assertEqual(before, OWED16)
+                kw = {seam: val}
+                if seam in ("repair_seed_fault", "repair_fill_fault"):
+                    kw["clear_fsync_fault"] = True   # storm: legs run
+                led = led_in(d, FsFaults(**kw))
+                err = None
+                try:
+                    led._clear_owed()
+                except OSError:
+                    err = sys.exc_info()[1]
+                after = owed_raw(d)
+                name = "%s/%s" % (seam, tag)
+                if seam == "clear_write_fault":
+                    if val is False:
+                        cell(name, err is None and after == b"\0" * 16,
+                             "False baseline must clear cleanly")
+                    else:
+                        cell(name, isinstance(err, OSError)
+                             and after == before,
+                             "must raise, witness untouched")
+                elif seam == "clear_fsync_fault":
+                    if val is False:
+                        cell(name, err is None and after == b"\0" * 16,
+                             "False baseline")
+                    else:
+                        cell(name, isinstance(err, OSError)
+                             and led_in(d)._owed_attempt() is True,
+                             "faulted fsync: raise AND owed via in-fd "
+                             "repair")
+                elif seam == "repair_seed_fault":
+                    if val is False:
+                        cell(name, isinstance(err, OSError)
+                             and after == OWED16,
+                             "storm baseline: repair completes, error "
+                             "propagates")
+                    else:
+                        cell(name, isinstance(err, OSError)
+                             and after == OWED16,
+                             "seed fault: FILL still lands (independent "
+                             "legs)")
+                else:  # repair_fill_fault
+                    if val is False:
+                        cell(name, isinstance(err, OSError)
+                             and after == OWED16,
+                             "storm baseline: repair completes")
+                    else:
+                        cell(name, isinstance(err, OSError)
+                             and len(after or b"") == 16
+                             and after[:1] == b"O"
+                             and after[1:] == b"\0" * 15,
+                             "fill fault: exact seed-only row")
+
+        # both-repair-legs boundary (zeros row under the storm)
+        for tag, vals in (("True-pair", dict(repair_seed_fault=True,
+                                             repair_fill_fault=True)),
+                          ("callable-pair", dict(
+                              repair_seed_fault=lambda p=None: bool(p),
+                              repair_fill_fault=(
+                                  lambda p=None: bool(p))))):
+            d = cell_dir("cens_pair_" + tag)
+            led = led_in(d)
+            led._write_owed()
+            led._write_counter(0, exhausted=False)
+            err = None
+            try:
+                led_in(d, FsFaults(clear_fsync_fault=True,
+                                   **vals))._clear_owed()
+            except OSError:
+                err = sys.exc_info()[1]
+            cell("pair/" + tag,
+                 isinstance(err, OSError) and owed_raw(d) == b"\0" * 16,
+                 "both-legs-faulted boundary: zeros + raised error")
+
+        # --- clear_partial_write ceilings (per-write oracle) --------
+        for val, tag, more in ((None, "None", False),
+                               (2, "int2", True),
+                               (lambda p=None: (3 if bool(p) else None),
+                                "callable3", True)):
+            d = cell_dir("cens_part_" + tag)
+            led = led_in(d)
+            led._write_owed()
+            n = [0]
+            real = os.pwrite
+
+            def counting(fd, buf, off, *a, _r=real, _n=n):
+                _n[0] += 1
+                return _r(fd, buf, off, *a)
+            os.pwrite = counting
+            try:
+                led_in(d, FsFaults(clear_partial_write=val))._clear_owed()
+            finally:
+                os.pwrite = real
+            cell("partial/" + tag,
+                 owed_raw(d) == b"\0" * 16
+                 and (n[0] > 2 if more else n[0] == 2),
+                 "ceiling %s: 16 zeros land; pwrites=%d (expected %s)"
+                 % (tag, n[0], ">2" if more else "==2"))
+        # 0 ceiling: zero-progress guard BEFORE any zero lands
+        d = cell_dir("cens_part_zero")
+        led = led_in(d)
+        led._write_owed()
+        err = None
+        try:
+            led_in(d, FsFaults(clear_partial_write=0))._clear_owed()
+        except OSError:
+            err = sys.exc_info()[1]
+        cell("partial/0", isinstance(err, OSError)
+             and owed_raw(d) == OWED16,
+             "0 ceiling trips the zero-progress guard, witness intact")
+
+        # --- re-arm / lifecycle seams (_sidecar_write) --------------
+        for seam in ("sidecar_open_fault", "sidecar_write_fault"):
+            for val, tag in ((False, "False"), (True, "True"),
+                             (lambda p=None: bool(p), "callable")):
+                d = cell_dir("cens_arm_%s_%s" % (seam, tag))
+                err = None
+                try:
+                    led_in(d, FsFaults(**{seam: val}))._write_owed()
+                except OSError:
+                    err = sys.exc_info()[1]
+                raw = owed_raw(d)
+                if val is False:
+                    cell("arm-%s/%s" % (seam, tag),
+                         err is None and raw == OWED16,
+                         "False baseline writes the witness")
+                else:
+                    cell("arm-%s/%s" % (seam, tag),
+                         isinstance(err, OSError),
+                         "%s=%s must raise" % (seam, tag))
+        # sidecar_partial_write: one-shot ceiling, payload completes
+        for val, tag, more in ((None, "None", False), (4, "int4", True),
+                               (lambda p=None: (4 if bool(p) else None),
+                                "callable4", True)):
+            d = cell_dir("cens_armpart_" + tag)
+            n = [0]
+            real = os.pwrite
+
+            def counting(fd, buf, off, *a, _r=real, _n=n):
+                _n[0] += 1
+                return _r(fd, buf, off, *a)
+            os.pwrite = counting
+            try:
+                led_in(d, FsFaults(sidecar_partial_write=val)
+                       )._write_owed()
+            finally:
+                os.pwrite = real
+            cell("arm-partial/" + tag,
+                 owed_raw(d) == OWED16 and (n[0] > 1 if more
+                                            else n[0] == 1),
+                 "one-shot ceiling %s: payload lands, pwrites=%d"
+                 % (tag, n[0]))
+        # silent-drop seams: contract = no error, payload lands. The
+        # DROP itself is durability-only (page-visible either way), so
+        # the discriminating observable of a CALLABLE value is that
+        # the predicate is CONSULTED (raw truthiness never calls it —
+        # that was the c5 bug: a function object is truthy).
+        for seam in ("sidecar_fsync_fault", "sidecar_dir_fsync_fault"):
+            for val, tag, consulted in (
+                    (False, "False", False),
+                    (True, "True", False),
+                    (None, "callable", True)):
+                calls = []
+
+                def pred(p=None, _c=calls):
+                    _c.append(p)
+                    return True
+                val = pred if tag == "callable" else val
+                d = cell_dir("cens_armfs_%s_%s" % (seam, tag))
+                err = None
+                try:
+                    led_in(d, FsFaults(**{seam: val}))._write_owed()
+                except OSError:
+                    err = sys.exc_info()[1]
+                ok_cell = (err is None and owed_raw(d) == OWED16)
+                if consulted:
+                    ok_cell = ok_cell and len(calls) >= 1
+                cell("arm-%s/%s" % (seam, tag), ok_cell,
+                     "silent-drop contract: no error, payload lands"
+                     + (" AND the callable predicate is CONSULTED (raw "
+                        "truthiness skips it silently — the c5 defect)"
+                        if consulted else ""))
+
+        # resolve-IO seams: callable predicate consulted, error raised.
+        # (`resolve_io_fault` is a DECLARED ctor seam; `resolve_fsync_
+        # fault` is the older attribute-style seam — set post-ctor as
+        # the pre-existing tests do.)
+        for seam in ("resolve_io_fault", "resolve_fsync_fault"):
+            for val, tag in ((False, "False"),
+                             (lambda p=None: bool(p), "callable")):
+                calls = []
+
+                def pred(p=None, _c=calls):
+                    _c.append(p)
+                    return True
+                val = pred if tag == "callable" else val
+                d = cell_dir("cens_resio_%s_%s" % (seam, tag))
+                led_in(d).resolve()
+                if seam == "resolve_io_fault":
+                    fl = FsFaults(**{seam: val})
+                else:
+                    fl = FsFaults()
+                    setattr(fl, seam, val)
+                err = None
+                try:
+                    led_in(d, fl).resolve()
+                except Exception:        # the IO fault surfaces as
+                    err = sys.exc_info()[1]   # LedgerError(pending)
+                if tag == "False":
+                    cell("resolve-io-%s/False" % seam, err is None,
+                         "False baseline resolves clean")
+                else:
+                    cell("resolve-io-%s/callable" % seam,
+                         err is not None and len(calls) >= 1,
+                         "callable resolve-IO seam must RAISE and the "
+                         "predicate must be CONSULTED")
+
+        # --- full resolve walks -------------------------------------
+        for seam, arm in (("sidecar_open_fault", "pre"),
+                          ("sidecar_write_fault", "pre"),
+                          ("clear_write_fault", "post"),
+                          ("clear_fsync_fault", "post")):
+            d = cell_dir("cens_res_" + seam)
+            led_in(d).resolve()                    # healthy warm-up
+            jp = os.path.join(d, "consumptions.jsonl")
+            before = read_or_empty(jp)
+            err = None
+            try:
+                led_in(d, FsFaults(**{seam: True})).resolve()
+            except OSError:
+                err = sys.exc_info()[1]
+            view = led_in(d)
+            if arm == "pre":
+                cell("resolve-%s" % seam,
+                     err is not None and not view._owed_attempt()
+                     and read_or_empty(jp) == before,
+                     "PRE-arm fault: raises before arming, records "
+                     "nothing")
+            else:
+                owed_now = view._owed_attempt()
+                dec = view.status().get("decision")
+                promo = view.promotion_allowed()
+                heal = led_in(d).resolve()["state"]  # clears witness
+                cell("resolve-%s" % seam,
+                     err is not None and owed_now and dec != STATE_OK
+                     and not promo and heal == STATE_OK,
+                     "POST-consumption fault: raises, owed stays, never "
+                     "ok, no promotion, heals healthy")
 
     def test_F85_true_crash_pins_seed_before_fill_repair_order(self):
         """AUD49 c1 (finding 3): the repair's SEED-BEFORE-FILL order is

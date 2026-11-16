@@ -731,14 +731,30 @@ class Ledger:
         - `sidecar_fsync_fault`: the file fsync is SILENTLY DROPPED
           (a mount that lies about durability — payload lands
           page-visible only; no error to the caller),
-        - `sidecar_dir_fsync_fault`: same for the creation dir fsync."""
+        - `sidecar_dir_fsync_fault`: same for the creation dir fsync.
+        AUD49 c5 (census finding): EVERY value above accepts True or a
+        callable path predicate consulted through `_dispatch_fault`
+        (uniform with the c1 clear seams). Before this, a callable
+        `sidecar_partial_write` crashed on raw `int()` and callables on
+        the fsync/dir seams were silently ALWAYS-ON (a function object
+        is truthy). `sidecar_partial_write` remains ONE-SHOT here (the
+        ceiling applies to the first pwrite of the operation; the
+        clear-path seam `_partial_limit` inside its loop is the
+        persistent per-write ceiling — both documented at their site."""
         faults = self.faults
         if _fault_active(getattr(faults, "sidecar_open_fault", False), path):
             raise OSError(errno.EACCES, "injected sidecar open fault")
         existed = os.path.exists(path)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            partial = getattr(faults, "sidecar_partial_write", None)
+            # AUD49 c5 (census finding): the sidecar twins of the c1
+            # clear-seam fixes were still raw-`int()`/raw-truthiness —
+            # a callable crashed here and path predicates on the
+            # fsync/dir/IO seams were silently ALWAYS-ON (a function
+            # object is truthy). Same contract as every other seam
+            # now: dispatch through _partial_limit/_fault_active.
+            partial = _partial_limit(
+                getattr(faults, "sidecar_partial_write", None), path)
             wfault = _fault_active(
                 getattr(faults, "sidecar_write_fault", False), path)
             off = 0
@@ -759,12 +775,16 @@ class Ledger:
             # fail-closed past the next healthy write (same heal as
             # the owed clear; see `_sidecar_fix_width`).
             Ledger._sidecar_fix_width(fd, len(payload))
-            if not getattr(faults, "sidecar_fsync_fault", False):
+            # AUD49 c5: uniform dispatch — a callable predicate on the
+            # SILENT-drop fsync seams was silently always-ON (a
+            # function object is truthy under raw `not getattr`).
+            if not _fault_active(getattr(faults, "sidecar_fsync_fault",
+                                         False), path):
                 os.fsync(fd)
         finally:
             os.close(fd)
-        if not existed and not getattr(faults, "sidecar_dir_fsync_fault",
-                                       False):
+        if not existed and not _fault_active(
+                getattr(faults, "sidecar_dir_fsync_fault", False), path):
             dirfd = os.open(os.path.dirname(path), os.O_RDONLY)
             try:
                 os.fsync(dirfd)
@@ -1589,8 +1609,13 @@ class Ledger:
         conservative crash marker, never proof of durability (spec
         DURABILITY: "any process making an AUTHORITY or SPEND decision
         must first perform the RESOLVE SEQUENCE")."""
-        if (getattr(self.faults, "resolve_fsync_fault", False)
-                or getattr(self.faults, "resolve_io_fault", False)):
+        # AUD49 c5: uniform callable dispatch (a callable was silently
+        # always-ON under raw truthiness); these legs act on the LEDGER
+        # file, so that is the path a predicate receives.
+        if (_fault_active(getattr(self.faults, "resolve_fsync_fault", False),
+                          self.ledger_path)
+                or _fault_active(getattr(self.faults, "resolve_io_fault",
+                                         False), self.ledger_path)):
             raise _IOError0("hostile-io:resolve-fsync")
         try:
             fd = os.open(self.ledger_path,
