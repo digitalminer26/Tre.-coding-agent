@@ -1,4 +1,4 @@
-"""Fixture suite F1-F62 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F67 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -12,7 +12,10 @@ v38 cycle-1/cycle-2 pins F28-F33, the v40-v42 audit pins F35-F57
 (F55/F56 mint freshness & ULID conformance, F57 cap-refusal preflight,
 F19 forced-order rewrite + R5-c1 contention-handshake/one-frame-fits/
 sidecar-untouched pins), and F58/F59 — the S-J3-C clamped-clock label
-and the exact-cap reserve boundary; expected results normative).
+and the exact-cap reserve boundary; F60-F64 the AUD46 cycle pins,
+F65-F67 the AUD47 cycle-1 pins (completion-failure owed re-arm, the
+decision-gate owed overlay clause, the sidecar width-heal);
+expected results normative).
 (D4A-c1 finding 2: this header formerly stopped at F57.)
 
 Run: cd reference && python3 -m unittest p9m3.test_ledger -v
@@ -325,6 +328,21 @@ class TestFixtures(Base):
         import re
         with open(os.path.join(os.path.dirname(__file__), "ledger.py")) as _f:
             src = _f.read()
+        # AUD47-c1 (audit cycle 1, major 2): ONE narrow, audited
+        # exception — `_sidecar_fix_width` re-establishes a sidecar's
+        # DECLARED fixed width (a corrupted over-long record must not
+        # wedge a field fail-closed past every healthy rewrite). The
+        # shrink is to a constant width inside that helper only; the
+        # rest of the source is scanned with the full forbidden set
+        # and the exception is pinned to its single site.
+        heal = re.search(r"    @staticmethod\n    def _sidecar_fix_width"
+                         r"\(fd, width\):.*?(?=\n    def )", src, re.S)
+        self.assertIsNotNone(heal, "_sidecar_fix_width must exist")
+        self.assertEqual(heal.group(0).count("ftruncate"), 1,
+                         "exactly one ftruncate in the width-heal helper")
+        self.assertEqual(len(re.findall(r"os\.ftruncate\s*\(", src)), 1,
+                         "the width-heal helper is the SOLE ftruncate call")
+        src = src.replace(heal.group(0), "def _sidecar_fix_width(): ...")
         for pat in (r"os\.rename\s*\(", r"os\.truncate\s*\(",
                     r"os\.ftruncate\s*\(", r"os\.replace\s*\(",
                     r"os\.remove\s*\(", r"\.unlink\s*\(",
@@ -3168,6 +3186,13 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(healed._read_counter(), 0)
         self.assertFalse(healed._owed_attempt())
         # Case B: clear succeeds, the completion counter-ZERO faults.
+        # AUD47-c1 (audit cycle 1, major 1) UPDATED this pin: a zero
+        # that faults AFTER its pwrite leaves counter=0 page-visible
+        # (F64's fault-before-write model cannot see that), so the
+        # completion now RE-ARMS the owed witness on any completion
+        # failure — the unconfirmed fact survives in the witness no
+        # matter which bytes the fault exposed. Both the counter and
+        # the witness views are now fail-closed, independently.
         led2 = self.mk(repair_attempt_cap=3)
         led2._write_pending(0, True)
         real_cw = led2._write_counter
@@ -3183,9 +3208,160 @@ class TestV38Cycle6Audit(Base):
         after2 = self.mk(repair_attempt_cap=3)
         self.assertEqual(after2._read_counter(), 1,
                          "a failed counter-zero must leave the charge")
-        self.assertFalse(after2._owed_attempt())   # witness cleared OK
+        self.assertTrue(after2._owed_attempt(),
+                        "AUD47-c1: a failed completion re-arms the "
+                        "owed witness — fail-closed even if the fault "
+                        "exposed counter=0")
         self.assertEqual(after2.status()["decision"], STATE_PENDING)
         self.assertFalse(after2.promotion_allowed())
+        # and the ledger still heals: next successful resolve clears
+        del led2._write_counter
+        self.assertEqual(led2.resolve()["state"], STATE_OK)
+        healed2 = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed2._read_counter(), 0)
+        self.assertFalse(healed2._owed_attempt())
+        self.assertEqual(healed2.status()["decision"], STATE_OK)
+
+    # ------------------------------------------- AUD47 cycle-1 pins F65/F66
+    def test_F65_counter_zero_fsync_fault_rearms_owed_witness(self):
+        """AUD47-c1 (audit cycle 1, major 1): the AUD46-c5 completion
+        order (clear witness, THEN zero counter) assumed a failed
+        counter-zero leaves the CHARGED counter visible. It does not:
+        the zero PAYLOAD lands (page-cached) before its fsync fails,
+        so a fresh instance read counter=0 with the witness already
+        cleared — `ok` for a resolve whose caller got an OSError.
+        NOW: `_complete_resolve` re-arms the owed witness on ANY
+        completion failure — the unconfirmed fact survives in a view
+        every reader honors, whatever the counter bytes show."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_pending(0, True)
+        real_sw = Ledger._sidecar_write
+
+        def flaky_zero_fsync(path, payload, real=real_sw):
+            # the zero write LANDS; only its fsync faults (the fault
+            # position the AUD46-c5 pin could not reach)
+            if path.endswith("resolve-attempts") and payload.startswith(b"0 "):
+                fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+                try:
+                    off = 0
+                    while off < len(payload):
+                        n = os.pwrite(fd, payload[off:], off)
+                        if n <= 0:
+                            raise OSError(errno.EIO, "zero progress")
+                        off += n
+                    raise OSError(errno.EIO, "injected counter-zero fsync")
+                finally:
+                    os.close(fd)
+            return real(path, payload)
+
+        led._sidecar_write = flaky_zero_fsync
+        with self.assertRaises(OSError):
+            led.resolve()
+        nxt = self.mk(repair_attempt_cap=3)
+        # the fault DID expose counter=0 (that is the finding) — the
+        # re-armed witness is what keeps the fresh view fail-closed
+        self.assertTrue(nxt._owed_attempt(),
+                        "AUD47-c1: a failed completion re-arms the owed "
+                        "witness even though the zero payload landed")
+        self.assertEqual(nxt.status()["decision"], STATE_PENDING)
+        self.assertFalse(nxt.promotion_allowed())
+        # The binding path re-resolves first: a fresh SUCCESSFUL
+        # resolve IS the resolution (designed self-heal — only real
+        # confirm IO may cure the witness), so the pin is that the
+        # STALE BYTES alone never served `ok` (status/overlay pinned
+        # above) and the healing promote leaves a fully consistent
+        # state — counter 0, witness cleared, decision ok.
+        res = nxt.promote(lambda: {"ran": True})
+        self.assertTrue(res.get("ran"))
+        healed_now = self.mk(repair_attempt_cap=3)
+        self.assertFalse(healed_now._owed_attempt())
+        self.assertEqual(healed_now.status()["decision"], STATE_OK)
+        # and the ledger still heals: a clean retry completes fully
+        del led._sidecar_write
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+        self.assertTrue(healed.promotion_allowed())
+
+    def test_F66_unreadable_owed_witness_blocks_decision_append(self):
+        """AUD47-c1 (audit cycle 1, major 2): a fail-closed owed
+        overlay (a record no reader accepts) served an APPLIED append
+        while `promote()` and `status()` refused — the decision-append
+        gate checked classification + durability only, not the same
+        binding basis `promote()` refuses on. NOW the gate adds
+        `_attempts_exhausted()`/`_owed_attempt()` — gate and binding
+        path can never disagree on the owed witness. (The width-heal,
+        test_F67, fixes the wedge itself; this pins the gate so a
+        fail-closed overlay can NEVER be gated past.)"""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_pending(0, True)
+        p = os.path.join(self.dir, "resolve-owed")
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"X" * 17)                # over-long: fail closed
+        os.close(fd)
+        # disable the width-heal so the overlay STAYS unreadable —
+        # this pins the GATE clause, not the heal (F67 pins the heal).
+        # CLASS-level patch: `_sidecar_write` calls the heal class-
+        # qualified, so an instance patch would be bypassed.
+        real_heal = Ledger.__dict__["_sidecar_fix_width"]
+        Ledger._sidecar_fix_width = staticmethod(lambda fd, width: None)
+        try:
+            r = led.resolve()                  # resolve itself is fine
+            self.assertEqual(r["state"], STATE_OK)
+            self.assertTrue(led._owed_attempt(),
+                            "the un-healed record must still read owed")
+            with self.assertRaises(LedgerError) as cm:
+                led.append_applied("F66")
+            self.assertEqual(cm.exception.code, "decision-append-refused")
+            self.assertEqual(self.raw(), b"",
+                             "a refused decision append writes ZERO bytes")
+            refused = led.promote(lambda: "MUST-NOT-RUN")
+            self.assertFalse(refused["allowed"],
+                             "the binding path refuses on the same basis")
+        finally:
+            Ledger._sidecar_fix_width = real_heal
+
+    def test_F67_overlong_sidecar_heals_on_healthy_rewrite(self):
+        """AUD47-c1 (audit cycle 1, major 2): a corrupted sidecar whose
+        bytes extend past the declared fixed width was FAIL-CLOSED
+        FOREVER — every healthy fixed-width rewrite left the past-
+        width bytes set, so the owed witness survived even a fully
+        successful resolve ("ok" served over a witness no reader
+        accepts), and an over-long counter/pending record outlived the
+        operator resets that promise to rewrite it. NOW every healthy
+        fixed-width rewrite re-establishes the declared width
+        (`_sidecar_fix_width`, F10-pinned as the sole shrink site).
+        A crash before the heal still reads over-long = fail closed."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_pending(0, True)
+        p = os.path.join(self.dir, "resolve-owed")
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"X" * 17)
+        os.close(fd)
+        self.assertTrue(led._owed_attempt())
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        raw = open(p, "rb").read()
+        self.assertEqual(len(raw), 16, "the clear heals the width")
+        self.assertEqual(raw, b"\0" * 16)
+        nxt = self.mk(repair_attempt_cap=3)
+        self.assertFalse(nxt._owed_attempt())
+        self.assertEqual(nxt.status()["decision"], STATE_OK)
+        self.assertTrue(nxt.promotion_allowed())
+        # counter record heals too: over-long corrupt = exhausted,
+        # a healthy rewrite (operator reset) re-establishes grammar
+        cp = os.path.join(self.dir, "resolve-attempts")
+        fd = os.open(cp, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"0 -" + b"\0" * 13 + b"JUNK")
+        os.close(fd)
+        led2 = self.mk(repair_attempt_cap=3)
+        self.assertTrue(led2._attempts_exhausted(),
+                        "over-long counter record fails closed")
+        led2.operator_resolve_reset()
+        led3 = self.mk(repair_attempt_cap=3)
+        self.assertEqual(led3._read_counter(), 0)
+        self.assertFalse(led3._attempts_exhausted())
 
 if __name__ == "__main__":
     unittest.main()

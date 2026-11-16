@@ -5,13 +5,20 @@ repair as an append, DURABILITY + RESOLVE-ON-USE with the resolve
 attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
-Scope: the ledger contract + fixtures F1-F62 plus the C6_* v42
+Scope: the ledger contract + fixtures F1-F67 plus the C6_* v42
 round-5 pins (F60: no-pending resolve IO fault is bounded,
 AUD45-c3-1; F61: the charge is crash-durable PRE-IO and an
 unconfirmed charged attempt renders PENDING, AUD46-a1/a2; F62: the
 OWED WITNESS survives `operator_resolve_reset()` — counter-0 owed
 evidence keeps status/promote PENDING until a resolve COMPLETES,
-AUD46-c1).
+AUD46-c1; F65: a failed completion RE-ARMS the owed witness —
+the zero payload is page-visible before its fsync faults, so the
+witness alone carries the unconfirmed fact, AUD47-c1; F66: the
+decision-append gate refuses on the owed/exhaustion overlay —
+gate and `promote()` share one binding basis, AUD47-c1; F67: every
+healthy fixed-width rewrite re-establishes the declared sidecar
+width — an over-long corrupt record no longer wedges a field
+fail-closed forever, AUD47-c1).
 COVERAGE IS BY FIXTURE FAMILY, not one test per
 label (D4A-c5-3 mapping): F14 is pinned inside test_F9_F14
 (combined), F15's behavior is pinned by test_F6 (duplicate spec
@@ -34,7 +41,12 @@ an INJECTED EXCEPTION and does not kill a process (D4A-c1 finding 1).
 
 F10 static rule honored by construction: this module performs NO
 os.rename / os.truncate / unlink / write-mode open against the ledger,
-the AUTH file, or the lock sidecar. Ledger growth is append-only
+the AUTH file, or the lock sidecar. ONE narrow audited exception
+(AUD47-c1): `_sidecar_fix_width` shrinks a sidecar to its DECLARED
+constant width only (a corrupt over-long record must not wedge a
+field fail-closed past every healthy rewrite) — the sole
+os.ftruncate site in the live protocol, pinned by F10/F67.
+Ledger growth is append-only
 (O_WRONLY|O_APPEND, one logical append per record — a checked
 short-write loop under the exclusion lock, v39 FRAMING); sidecars are
 fixed-width in-place
@@ -397,6 +409,22 @@ class Ledger:
         re-arm — the only clear is a COMPLETED resolve)."""
         self._sidecar_write(self._owed_side, b"OWED".ljust(16, b"\0"))
 
+    @staticmethod
+    def _sidecar_fix_width(fd, width):
+        """AUD47-c1 (audit cycle 1, major 2): THE only width-shrink in
+        the live protocol — re-establish a sidecar's DECLARED fixed
+        width. A healthy fixed-width writer always rewrites all
+        `width` bytes; without the heal, a corrupted/hostile record
+        whose bytes extend past the width can never be rewritten back
+        to grammar (over-long = fail closed FOREVER for every reader:
+        the owed witness wedges status at pending, a corrupt counter
+        record survives even the `operator_resolve_reset()` the
+        grammar doc promises rewrites it). The shrink is to the
+        constant width only — never a generic truncate; F10 pins
+        this helper as its sole site. A crash before the heal still
+        reads over-long = fail closed (unchanged)."""
+        os.ftruncate(fd, width)
+
     def _clear_owed(self):
         """Fixed-width zero rewrite — NEVER an unlink (F10: the
         protocol removes no names; a zeroed witness reads as none).
@@ -423,6 +451,14 @@ class Ledger:
                             raise OSError(errno.EIO,
                                           "owed clear: zero progress")
                         off += n
+                # AUD47-c1 (audit cycle 1, major 2): a clear of an
+                # OVER-LONG record must heal the width — zeroing the
+                # first 16 bytes left bytes 17+ set, so the record
+                # kept failing closed forever and a healthy resolve
+                # "succeeded" over a witness no reader accepts. The
+                # truncate joins the fsynced clear; a crash BEFORE it
+                # leaves the record over-long = fail closed (unchanged).
+                self._sidecar_fix_width(fd, 16)
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -462,6 +498,12 @@ class Ledger:
                 if n <= 0:
                     raise OSError(errno.EIO, "sidecar write: zero progress")
                 off += n
+            # AUD47-c1 (audit cycle 1, major 2): every healthy
+            # fixed-width writer RE-ESTABLISHES the declared width —
+            # an over-long corrupted record must not wedge the field
+            # fail-closed past the next healthy write (same heal as
+            # the owed clear; see `_sidecar_fix_width`).
+            Ledger._sidecar_fix_width(fd, len(payload))
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -1308,6 +1350,34 @@ class Ledger:
             os.close(dirfd)
         return self._read_bytes()
 
+    def _complete_resolve(self):
+        """AUD47-c1 (audit cycle 1, major 1): the CONFIRMED-SUCCESS
+        completion sequence, factored to one place. Fail-closed ORDER
+        preserved from AUD46-c5: clear the owed witness FIRST (a
+        failed clear leaves the attempt charged AND owed), then zero
+        the counter. But the AUD46-c5 fix assumed a failed
+        counter-zero leaves the CHARGED counter visible — the zero
+        payload is written (page-cached) BEFORE its fsync, so a
+        failing zero-fsync could expose counter=0 with the witness
+        already cleared: a fresh instance read `ok` for a resolve
+        whose caller got an error. NOW: any failure of the completion
+        RE-ARMS the owed witness (best effort) before the error
+        propagates — an unconfirmed resolve is owed in every view,
+        whatever the counter bytes show. If the re-arm itself faults
+        the original error still propagates and the attempt stays
+        charged (counter > 0 overlay)."""
+        self._clear_owed()              # AUD46-c1: witness clears
+                                        # ONLY on confirmed success
+        try:
+            self._write_counter(0, exhausted=False)
+        except OSError:
+            try:
+                self._write_owed()      # re-arm: no ok for a resolve
+                                        # that did not complete
+            except OSError:
+                pass                    # charged-counter overlay holds
+            raise
+
     def _resolve_locked(self):
         """RESOLVE SEQUENCE under the held lock (C2 cycle-2 fixes 1+4).
         v38 cycle-2 fix 1: the sequence (fsync file, fsync parent dir,
@@ -1380,17 +1450,17 @@ class Ledger:
             # charge owed — conservative, same discipline as the
             # recovery round, whose crashed rounds count)
             # AUD46-c5 (audit cycle 5, major): the CLEAR precedes the
-            # counter-zero. A failed clear (fsync EIO) then leaves
-            # the attempt CHARGED — the A2 overlay (counter > 0)
-            # keeps the next instance PENDING, fail-closed — instead
-            # of a zeroed counter whose completed-clear bytes serve
-            # `ok` to a fresh instance although the caller received
-            # an error. A failed zero AFTER a successful clear is
-            # equally fail-closed (charged counter => pending; the
-            # next resolve re-clears and re-zeros).
-            self._clear_owed()          # AUD46-c1: witness clears
-                                        # ONLY on confirmed success
-            self._write_counter(0, exhausted=False)
+            # counter-zero. A failed clear (fsync EIO) then leaves the
+            # attempt CHARGED — the A2 overlay (counter > 0) keeps the
+            # next instance PENDING, fail-closed — instead of a zeroed
+            # counter whose completed-clear bytes serve `ok` to a
+            # fresh instance although the caller received an error.
+            # AUD47-c1 (audit cycle 1, major 1): a failed zero AFTER
+            # the clear now RE-ARMS the owed witness — the bytes the
+            # page cache exposes may read counter=0, so the witness
+            # alone carries the unconfirmed fact; `_complete_resolve`
+            # guarantees the fail-closed view in every fault position.
+            self._complete_resolve()
             return self.classify(data)
         # C2 fix 4: refusal BEFORE starting a round whose attempts are
         # already consumed — persist exhaustion first, then raise; the
@@ -1407,11 +1477,10 @@ class Ledger:
         except OSError:
             raise LedgerError(STATE_PENDING)
         self._write_pending(self._pending_offset(), True)
-        # AUD46-c5 (audit cycle 5, major): clear BEFORE the counter-
-        # zero — a failed clear leaves the attempt charged (fail-
-        # closed via the A2 overlay); see the pending branch above.
-        self._clear_owed()              # AUD46-c1: confirmed success
-        self._write_counter(0, exhausted=False)
+        # AUD46-c5 (audit cycle 5, major) + AUD47-c1 (audit cycle 1,
+        # major 1): completion = clear witness, zero counter, with the
+        # owed re-arm on any failure — see `_complete_resolve`.
+        self._complete_resolve()
         return self.classify(data)
 
     def _pending_offset(self):
@@ -1924,7 +1993,13 @@ class Ledger:
                                    "instance's exclusion lock (call inside "
                                    "promote()/on_allowed)")
         cls = self._resolve_locked()      # self-enforced, never assumed
+        # AUD47-c1 (audit cycle 1, major 2): the gate basis is the
+        # BINDING path's basis — exactly what `promote()` refuses on.
+        # The classification alone let an owed-witness overlay (e.g.
+        # a record no reader accepts) serve an APPLIED append while
+        # `promote()` and `status()` refused: a gate disagreement.
         if cls["state"] != STATE_OK or self.durability_pending() \
+                or self._attempts_exhausted() or self._owed_attempt() \
                 or cls["authorization_file_malformed"]:
             raise LedgerError("decision-append-refused",
                               classification=cls["state"])
@@ -1945,7 +2020,13 @@ class Ledger:
             if gate:
                 # v38 cycle-3 fix 1: the resolve's classification IS the
                 # gate basis (in-lock read, never a stale snapshot).
+                # AUD47-c1 (audit cycle 1, major 2): same binding basis
+                # as `promote()` — exhaustion and the owed witness
+                # refuse a decision append too, never just the
+                # classification overlay.
                 if cls["state"] != STATE_OK or self.durability_pending() \
+                        or self._attempts_exhausted() \
+                        or self._owed_attempt() \
                         or cls["authorization_file_malformed"]:
                     raise LedgerError("decision-append-refused",
                                       classification=cls["state"])
