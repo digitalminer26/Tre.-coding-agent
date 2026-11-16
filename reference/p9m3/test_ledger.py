@@ -1,4 +1,4 @@
-"""Fixture suite F1-F73 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F76 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -14,10 +14,12 @@ F19 forced-order rewrite + R5-c1 contention-handshake/one-frame-fits/
 sidecar-untouched pins), and F58/F59 — the S-J3-C clamped-clock label
 and the exact-cap reserve boundary; F60-F64 the AUD46 cycle pins,
 F65-F67 the AUD47 cycle-1 pins (completion-failure owed re-arm, the
-decision-gate owed overlay clause, the sidecar width-heal); F72-F73
+decision-gate owed overlay clause, the sidecar width-heal); F72-F76
 the AUD48 cycle-1 pins (operator-reset sole-evidence refusal,
 zero-first completion surviving the combined corrupt-clear +
-zero fault);
+zero fault, the evidence-based reset guard under sticky exhaustion,
+the ambiguous unreadable-witness refusal, the in-fd owed repair on
+a faulting clear fsync);
 expected results normative).
 (D4A-c1 finding 2: this header formerly stopped at F57.)
 
@@ -3710,6 +3712,246 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(os.path.getsize(p), 16,
                          "the healed clear lands at the declared width")
         self.assertEqual(healed.status()["decision"], STATE_OK)
+
+    def test_F74_sticky_exhaustion_does_not_demote_sole_evidence(self):
+        """AUD48-c1 (audit cycle 1, major 3): the sole-evidence guard
+        skipped when the sticky `X` flag was set (`not flag and n >
+        0`) — but a cap refusal writes the flag over the SAME live
+        charge, so a second visit armed the bypass: fallback charge
+        (witness open fault), then any resolve at the cap sets `X`,
+        and the reset erased the only evidence: a fresh view served
+        `ok` for an episode nobody confirmed. The flag governs
+        AUTOMATIC rounds, not the FACT a charge exists — a parsed
+        positive count is evidence whatever the flag says. NOW the
+        guard is evidence-based (a reset under `X` over a sole
+        positive charge with a cleared/absent witness REFUSES), the
+        corrupt-record heal path (F67) stays open, and an OWED-
+        readable witness still resets freely with the witness intact
+        (F62)."""
+        led = self.mk(repair_attempt_cap=1)
+        real_open = os.open
+
+        def fail_owed_open(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-open fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()               # F68 fallback: charge n=1
+        finally:
+            os.open = real_open
+        v = self.mk(repair_attempt_cap=1)
+        self.assertEqual(v._read_counter(), 1)
+        self.assertFalse(v._owed_attempt())
+        # the SECOND visit: at the cap, persistence writes the sticky
+        # flag over the live charge (refusal, zero IO).
+        with self.assertRaises(LedgerError) as cm:
+            v.resolve()
+        self.assertEqual(cm.exception.code, STATE_EXHAUSTED)
+        sticky = self.mk(repair_attempt_cap=1)
+        n, flag, corrupt = sticky._counter_state()
+        self.assertEqual((n, flag, corrupt), (1, True, False),
+                         "precondition: sticky flag over a LIVE charge")
+        self.assertFalse(sticky._owed_attempt(),
+                         "precondition: witness absent — the charge "
+                         "is still the ONLY evidence")
+        with self.assertRaises(LedgerError) as cm:
+            sticky.operator_resolve_reset()
+        self.assertEqual(cm.exception.code, "reset-sole-evidence-refused")
+        after = self.mk(repair_attempt_cap=1)
+        self.assertEqual(after._read_counter(), 1,
+                         "a refused reset writes nothing")
+        self.assertNotEqual(after.status()["decision"], STATE_OK,
+                         "the fresh view stays fail-closed")
+        # the designed resolution under sticky `X`: restore the
+        # WITNESS (the primary evidence), the reset then lands with
+        # the witness intact (F62), and a completing resolve clears
+        # both evidences.
+        heal = self.mk(repair_attempt_cap=1)
+        heal._write_owed()
+        heal.operator_resolve_reset()
+        res = self.mk(repair_attempt_cap=1).promote(lambda: {"ran": True})
+        self.assertTrue(res.get("ran"))
+        healed = self.mk(repair_attempt_cap=1)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._attempts_exhausted())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+        # F62 untouched: sticky `X` with an OWED-READABLE witness
+        # resets (the witness — the primary evidence — survives).
+        w = self.mk(repair_attempt_cap=1)
+        w._write_owed()
+        w._write_counter(1, exhausted=True)
+        w.operator_resolve_reset()
+        post = self.mk(repair_attempt_cap=1)
+        self.assertEqual(post._read_counter(), 0)
+        self.assertTrue(post._owed_attempt(),
+                        "the reset preserves the owed witness (F62)")
+        self.assertNotEqual(post.status()["decision"], STATE_OK)
+
+    def test_F75_unreadable_witness_refuses_reset_as_ambiguous(self):
+        """AUD48-c1 (audit cycle 1, major 4): the guard caught the
+        witness-read OSError and set owed=True, TREATING AN
+        UNREADABLE WITNESS AS owed-evidence and permitting the reset
+        — but "unreadable" is neither cleared nor owed-readable:
+        ambiguous evidence over a live charge. The auditor's probe
+        showed the reset landing, then (readability restored) a fresh
+        view serving `ok` for an unconfirmed episode. NOW an OSError
+        from the witness read with a live positive charge REFUSES
+        (fail closed). Absent/cleared keeps the refusal (F72);
+        owed-readable resets with the witness preserved (F62);
+        counter n=0 resets freely with no witness rule engaged."""
+        led = self.mk(repair_attempt_cap=3)
+        real_open = os.open
+
+        def fail_owed_open(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-open fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()               # F68 fallback charge n=1
+        finally:
+            os.open = real_open
+        sole = self.mk(repair_attempt_cap=3)
+        self.assertEqual(sole._read_counter(), 1)
+        self.assertFalse(sole._owed_attempt(),
+                         "precondition: witness absent")
+
+        # make the witness UNREADABLE (any open of the owed side
+        # fails) while the charge stands: ambiguous evidence.
+        def fail_any_owed(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-read fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_any_owed
+        try:
+            amb = self.mk(repair_attempt_cap=3)
+            self.assertEqual(amb._owed_state(), "ERR",
+                             "precondition: witness read faults")
+            with self.assertRaises(LedgerError) as cm:
+                amb.operator_resolve_reset()
+            self.assertEqual(cm.exception.code,
+                             "reset-sole-evidence-refused")
+        finally:
+            os.open = real_open
+        mid = self.mk(repair_attempt_cap=3)
+        self.assertEqual(mid._read_counter(), 1,
+                         "the ambiguous refusal wrote nothing")
+        # operator recovery, pinned: restore the WITNESS (the primary
+        # evidence) — owed-readable — the reset then lands with the
+        # witness intact (F62), and the fresh view is still refused.
+        mid._write_owed()
+        self.assertTrue(mid._owed_state())
+        mid.operator_resolve_reset()
+        post = self.mk(repair_attempt_cap=3)
+        self.assertEqual(post._read_counter(), 0)
+        self.assertTrue(post._owed_attempt(),
+                        "the ambiguous-path reset still preserves the "
+                        "witness — ok is NEVER served")
+        self.assertNotEqual(post.status()["decision"], STATE_OK)
+        # a completing resolve remains THE resolution:
+        res = self.mk(repair_attempt_cap=3).promote(lambda: {"ran": True})
+        self.assertTrue(res.get("ran"))
+        self.assertEqual(self.mk(repair_attempt_cap=3).status()["decision"],
+                         STATE_OK)
+
+    def test_F76_clear_fsync_fault_repairs_owed_on_the_open_fd(self):
+        """AUD48-c1 (audit cycle 1, major 2): the completion's
+        compensation RE-ARMED the witness by OPENING the owed sidecar
+        — but a device that faults the clear's fsync can fault that
+        open too, and with the suppressed re-arm (plus the counter
+        pin at n=0 after the zero landed) the fresh view read
+        counter 0 with a readable-CLEARED witness: `ok` for a
+        resolve whose caller got an OSError. NOW `_clear_owed`
+        repairs OWED on the fd ALREADY OPEN when its fsync faults —
+        BEFORE any new open can fail — so the recharged witness does
+        not depend on a second open. Pinned with the exact combined
+        fault (the WITNESS fd's fsync EIO — inode-matched so the
+        counter/pending fsyncs stay healthy — plus every RE-ARM open
+        of the witness denied): the resolve raises, the witness
+        reads OWED, status/promote refuse, and a healthy completing
+        resolve heals."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        real_fsync, real_open, real_pwrite = os.fsync, os.open, os.pwrite
+        owed_path = os.path.join(self.dir, "resolve-owed")
+        cnt_path = os.path.join(self.dir, "resolve-attempts")
+        st_owed = os.stat(owed_path)       # witness landed
+        st_cnt = os.stat(cnt_path)
+        state = {"fsync_fired": False, "open_fired": False,
+                 "pin_fired": False, "zeroed": False}
+
+        def fail_clear_fsync(fd):
+            # ONE-SHOT: the clear's fsync — owed inode, zeros visible.
+            if not state["fsync_fired"]:
+                st = os.fstat(fd)
+                if (st.st_dev, st.st_ino) == (st_owed.st_dev,
+                                              st_owed.st_ino) \
+                        and os.pread(fd, 16, 0) == b"\0" * 16:
+                    state["fsync_fired"] = True
+                    raise OSError(errno.EIO, "injected clear-fsync fault")
+            return real_fsync(fd)
+
+        def fail_rearm_open(path, flags, *a, **k):
+            # ONE-SHOT: deny the compensation re-arm's open only —
+            # the clear's own O_RDWR open passes; every later open
+            # works so the heal can run.
+            if isinstance(path, str) and path == owed_path \
+                    and flags & (os.O_WRONLY | os.O_RDWR) \
+                    and state["fsync_fired"] and not state["open_fired"]:
+                state["open_fired"] = True
+                raise OSError(errno.EACCES,
+                              "injected owed re-arm open fault")
+            return real_open(path, flags, *a, **k)
+
+        def fail_pin_pwrite(p_, b, off, *a, **k):
+            # ONE-SHOT: the counter PIN — the first counter write
+            # AFTER the zero landed (arm + zero pass untouched).
+            st = os.fstat(p_)
+            if (st.st_dev, st.st_ino) == (st_cnt.st_dev, st_cnt.st_ino):
+                if b[:1] == b"0":
+                    state["zeroed"] = True
+                elif state["zeroed"] and not state["pin_fired"]:
+                    state["pin_fired"] = True
+                    raise OSError(errno.EIO, "injected counter-pin fault")
+            return real_pwrite(p_, b, off, *a, **k)
+
+        os.fsync = fail_clear_fsync
+        os.open = fail_rearm_open
+        os.pwrite = fail_pin_pwrite
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()               # completion clears, fsync
+                                            # faults, re-arm open AND
+                                            # counter pin both fault
+        finally:
+            os.fsync = real_fsync
+            os.open = real_open
+            os.pwrite = real_pwrite
+        self.assertTrue(state["fsync_fired"], "clear fsync never faulted")
+        self.assertTrue(state["open_fired"], "re-arm open never faulted")
+        self.assertTrue(state["zeroed"] and state["pin_fired"],
+                        "counter pin never faulted (zero must land first)")
+        survivor = self.mk(repair_attempt_cap=3)
+        self.assertTrue(survivor._owed_attempt(),
+                        "the in-fd repair must leave the witness OWED "
+                        "even when EVERY re-arm open faults")
+        self.assertNotEqual(survivor.status()["decision"], STATE_OK,
+                            "no ok for a resolve whose caller errored")
+        self.assertFalse(survivor.promotion_allowed())
+        # healthy heal: a completing resolve clears witness+counter.
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+
 
 if __name__ == "__main__":
     unittest.main()

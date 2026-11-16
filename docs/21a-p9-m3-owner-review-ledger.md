@@ -6839,3 +6839,53 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     Pin F72.
   - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
     Ran 106 tests OK.
+
+- AUD48 CYCLE 1 (auditor: terra, detached; 4 majors reported;
+  disposition 2026-11-18):
+  - C1-F1 (MAJOR, REJECTED): "a crash during the final witness clear
+    exposes an unconfirmed resolve as OK". Under the AUD48-prep ZERO-
+    FIRST order the witness clear is the LAST step AFTER the resolve
+    IO is durable and pending is updated — a process death between
+    the last visible zero byte and the return of `_complete_resolve`
+    loses nothing: the resolution itself is confirmed-durable, the
+    completion is idempotent, and the next instance re-clears the
+    same zeros. The auditor modeled process exit as a fault INSIDE
+    the protocol; the crash window it needs (resolve-IO NOT durable)
+    is covered by the pre-attempt charge (F68/AUD46-a1). Probe
+    "crash 77 counter (0,False) owed False ok" is the SUCCESS state,
+    not a leak. No code change.
+  - C1-F2 (MAJOR, ACCEPTED+FIXED): completion's compensation re-armed
+    the witness by a NEW open — a device faulting the clear's fsync
+    can fault that open; with the suppressed re-arm AND the counter
+    pin faulting, the fresh view read counter 0 + readable-CLEARED
+    witness = ok for a caller that got OSError. FIXED in
+    `_clear_owed`: on fsync fault the OWED bytes are rewritten on the
+    fd ALREADY OPEN (best-effort fsync, original error then
+    propagates) — the recharged witness no longer depends on a
+    second open succeeding. Pin F76 (inode-matched one-shot combined
+    fault: clear-fsync EIO + re-arm-open EACCES + counter-pin EIO —
+    the earlier count-based injection orderings were shown
+    non-discriminating; the one-shot sequence is precondition-
+    asserted).
+  - C1-F3 (MAJOR, ACCEPTED+FIXED): the sole-evidence guard skipped
+    when the sticky `X` flag was set — a cap refusal writes the flag
+    over the SAME live charge, arming the bypass (fallback charge,
+    second visit sets X, reset erases the sole evidence -> ok). The
+    flag governs AUTOMATIC rounds, not the FACT a charge exists.
+    FIXED: guard is evidence-based via new `_counter_state()`
+    (n, exhausted, corrupt) — a grammar-VALID positive count refuses
+    whatever the flag; corrupt bytes keep the F67 heal path open.
+    Pin F74 (sticky-X bypass repro + F62 owed-witness reset intact).
+  - C1-F4 (MAJOR, ACCEPTED+FIXED): the guard caught the witness-read
+    OSError and treated UNREADABLE as owed-evidence, permitting the
+    reset — "unreadable" is neither cleared nor owed-readable:
+    ambiguous evidence over a live charge. FIXED: `_owed_state()`
+    tri-state (True/False/'ERR'); ERR + live positive charge REFUSES
+    (fail closed). Operator recovery pinned: restore the witness
+    (owed-readable) -> reset lands, witness preserved (F62), ok
+    never served. Pin F75.
+  - Mutation check: F76's injection was verified DISCRIMINATING (the
+    in-fd repair neutered -> F76 fails; flag-bypass restored -> F74
+    fails; ERR-tolerance restored -> F75 fails; all reverted).
+  - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
+    Ran 109 tests OK.

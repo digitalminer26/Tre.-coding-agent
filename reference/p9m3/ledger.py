@@ -395,6 +395,37 @@ class Ledger:
     def _read_counter(self):
         return self._parse_counter()[0]
 
+    def _counter_state(self):
+        """(n, exhausted, CORRUPT): the strict parse PLUS the
+        corrupt/live distinction the operator guard needs (AUD48-c1).
+        corrupt=True means the bytes EXIST but sit OUTSIDE the trusted
+        grammar (torn/short/over-length/unparsable/empty): NOT
+        evidence of a live charge — the documented grammar-heal path
+        (F67) stays open. A grammar-VALID record is corrupt=False
+        even when its count is over-cap and even under the honest
+        sticky `X` flag: a parsed count is real evidence of charges
+        whatever the flag says (the flag governs automatic rounds,
+        not the fact a charge exists)."""
+        n, flag = self._parse_counter()
+        try:
+            fd = os.open(self._attempts_side, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return 0, False, False
+        try:
+            raw = os.pread(fd, 17, 0)      # 17: over-length is corrupt
+        finally:
+            os.close(fd)
+        if len(raw) != 16:
+            return n, flag, True           # torn short / over-length
+        body = raw.rstrip(b"\0")
+        if not _COUNTER_RE.fullmatch(body):
+            return n, flag, True           # unparsable / bad padding
+        count, _fl = body.decode().split(" ")
+        count = int(count)
+        if count > self.repair_attempt_cap:
+            return count, True, False      # honest over-cap charge: live
+        return n, flag, False
+
     def _attempts_exhausted(self):
         return self._parse_counter()[1]
 
@@ -461,7 +492,39 @@ class Ledger:
                 # truncate joins the fsynced clear; a crash BEFORE it
                 # leaves the record over-long = fail closed (unchanged).
                 self._sidecar_fix_width(fd, 16)
-                os.fsync(fd)
+                try:
+                    os.fsync(fd)
+                except OSError:
+                    # AUD48-c1 (audit cycle 1, major 2): the zeroed
+                    # witness is already PAGE-VISIBLE when the fsync
+                    # faults, and the caller's compensating re-arm
+                    # must re-OPEN — a device faulting the fsync can
+                    # fault that open too, and the suppressed re-arm
+                    # exposed OK. Repair on the fd ALREADY OPEN,
+                    # before any new open can fail: rewrite OWED over
+                    # the visible zeros (best-effort fsync), then
+                    # propagate — the recharged witness does not
+                    # depend on a second open succeeding.
+                    try:
+                        owed = b"OWED".ljust(16, b"\0")
+                        off = 0
+                        while off < len(owed):
+                            w = os.pwrite(fd, owed[off:], off)
+                            if w <= 0:
+                                raise OSError(errno.EIO,
+                                              "owed repair: no progress")
+                            off += w
+                        try:
+                            os.fsync(fd)
+                        except OSError:
+                            pass    # bytes are page-visible; the
+                                    # caller's pin is still attempted
+                    except OSError:
+                        pass        # repair best-effort: even a
+                                    # failed repair propagates below
+                    raise           # the clear did NOT succeed: the
+                                    # original fsync error propagates
+                                    # so the caller re-pins the charge
             finally:
                 os.close(fd)
 
@@ -484,6 +547,17 @@ class Ledger:
         if len(raw) == 16:
             return raw != b"\0" * 16
         return True                     # torn/over-long: fail closed
+
+    def _owed_state(self):
+        """True/False/'ERR': the owed witness read as OWED / cleared
+        (or absent) / UNREADABLE (AUD48-c1: the operator guard must
+        distinguish 'no evidence' from 'no readable evidence' — an
+        OSError here is ambiguity, and an ambiguous witness over a
+        live counter charge means the reset REFUSES)."""
+        try:
+            return self._owed_attempt()
+        except OSError:
+            return "ERR"
 
     def _sidecar_write(self, path, payload):
         """Fixed-width in-place sidecar rewrite with CHECKED pwrite (loop
@@ -1786,15 +1860,21 @@ class Ledger:
         A positive charge under an OWED witness needs no extra rule:
         F62 already pins that the witness survives the zero."""
         with self._lock("reconcile"):
-            n, flag = self._parse_counter()
-            if not flag and n > 0:
+            n, _flag, corrupt = self._counter_state()
+            if not corrupt and n > 0:
                 # the counter parses to a live charge — is it the
-                # only evidence left standing?
-                try:
-                    owed = self._owed_attempt()
-                except OSError:
-                    owed = True       # unreadable witness: fail closed
-                if not owed:
+                # only evidence left standing? (AUD48-c1: the sticky
+                # flag does NOT demote the evidence — an exhaustion
+                # flag over a sole positive charge is still a sole
+                # positive charge, finding c1-3.)
+                owed = self._owed_state()
+                if owed == "ERR":
+                    raise LedgerError(          # finding c1-4: an
+                        "reset-sole-evidence-refused", counter=n,
+                        detail="the owed witness is unreadable while "
+                               "a live counter charge exists: evidence "
+                               "is ambiguous — refuse (fail closed)")
+                if owed is False:
                     raise LedgerError(
                         "reset-sole-evidence-refused", counter=n,
                         detail="the counter charge is the only durable "
