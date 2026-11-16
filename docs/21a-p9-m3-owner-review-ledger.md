@@ -5845,6 +5845,14 @@ auditor coverage claim.
 
 DC-2 BLOCK (T4-gap acknowledged-gap deliverable — drafted same session
 per owner commission; self-contained text, owner review open):
+[STATUS 2026-11-16: owner review CLOSED — the block is RATIFIED AS
+WRITTEN (owner: "part 2 - ratify"; FOURTH TRANCHE record in docs/21).
+The T4-gap is a PERMANENT accepted gap in v1; whole-dir restore (R-1)
+is the answer of record; NO in-protocol completion mechanism is
+commissioned. The Q-J2-h deferral is now the owner's own recorded
+position (the block's "third affirmation" counts the
+pre-ratification deferral events; the ratification is the fourth
+affirmation and this annotation is its registration here).]
 
 ACKNOWLEDGED GAP: T4-GAP COMPLETION MECHANISM DEFERRED
 - A T4-gap entry (re-entry where the pre-rename view finds the

@@ -1,7 +1,21 @@
 # P9/M3 — Promotion/rollback & fleet budget layer (contract draft)
 
-Status: **DRAFT v43 — contract-first scoping. NOT YET APPROVED, NOT
-IMPLEMENTED; no module in `src/` is touched by this doc.** (v43 folds
+Status: **DRAFT v44 — contract-first scoping. NOT YET APPROVED, NOT
+IMPLEMENTED; no module in `src/` is touched by this doc.** (v44 folds
+the owner's FOURTH-TRANCHE replies (2026-11-16, record at foot): D1,
+D3, D7, D8 SIGNED AS DRAFTED; D2 and D4 SIGNED via option 0 of the
+depth-review tables (= as drafted); D9 replied "refuse" —
+CLOSED-PENDING-CONFIRMATION as confirming the drafted refuse
+behavior (interpretation flagged in §4 D9, correction invited);
+DC-2 acknowledged-gap block RATIFIED AS WRITTEN (status folded in
+docs/21a; Q-J2-h deferral now owner's own recorded position); 3A
+final review format ACCEPTED (evidence-first crosswalk, one owner
+reading, cycles only on drift) — 3A itself still UNCONFIRMED until
+that reading lands; Decision 4 prose round scoped to A (reference-
+impl behavior prose only) with owner-approved sequencing — round
+itself NOT YET RUN; Part-5 backlog items unchanged ("review later").
+With this tranche, §4 reads: D1–D8 CLOSED, D9 CLOSED-PENDING-
+CONFIRMATION, D5/D6 CLOSED (v43). v43 folds
 the owner's D5/D6 sign-offs (2026-11-16, THIRD TRANCHE record at
 foot): D5 = strict fail-closed DEFAULT + a scope-bound operator-
 acknowledgment waiver drafted into §2.2 (shape ratified, details NOT
@@ -870,9 +884,13 @@ the effective-read algorithm before sign-off.)
 recommended mutation-model resolution. NOT audited when written.)
 (v34 — cycle-1 terra audit of v33 (CHANGES REQUESTED): AUD33-B1 unmasked-malformed repair unreachable; AUD33-B2 unterminated tail silently dropped; AUD33-B3 (not raised) — see V34 DISPOSITIONS; AUD33-M1/M2/M3, m1, m2 folded. NOT re-audited when written.)
 (v35 — cycle-2 terra audit of v34 (CHANGES REQUESTED): AUD34-B1 durability, M1 settlement, M2 SPENT predicate, M3 precedence/staging, M4 live rewrite text superseded in place, M5 one AUTH format, m1 fixtures F5/F9, m2 ALL claim. NOT re-audited when written.)
-(v37 — owner-decision revision after the owner-approved FOCUSED audit of the v36 delta (CHANGES REQUESTED: AUD36-B1 resolve-on-use not isolated from concurrent appends; AUD36-B2 cap check races a concurrent writer; AUD36-M1 crash mid-recovery indeterminate; AUD36-m1 F13 wording vs the DEAD-REPAIR rule). Owner decisions: 0A local-only storage + startup probe is CONFIRMED; 1A exclusive flock sidecar, 2A bounded resolve rounds, 3A dead-REPAIR disposition are DRAFTED per the agent's recommendation and AWAIT the owner's explicit confirmation (v39 R2-m1: corrected from "applied" — see the V37 OWNER DECISION RECORD; until ratified treat them as proposed). Dispositions in the AUD36 footer table. NOT re-audited when written.)
+(v37 — owner-decision revision after the owner-approved FOCUSED audit of the v36 delta (CHANGES REQUESTED: AUD36-B1 resolve-on-use not isolated from concurrent appends; AUD36-B2 cap check races a concurrent writer; AUD36-M1 crash mid-recovery indeterminate; AUD36-m1 F13 wording vs the DEAD-REPAIR rule). Owner decisions: 0A local-only storage + startup probe is CONFIRMED; 1A exclusive flock sidecar, 2A bounded resolve rounds, 3A dead-REPAIR disposition are DRAFTED per the agent's recommendation and AWAIT the owner's explicit confirmation (v39 R2-m1: corrected from "applied" — see the V37 OWNER DECISION RECORD; until ratified treat them as proposed). Dispositions in the AUD36 footer table. NOT re-audited when written. [STATUS 2026-11-16: 1A/2A since CONFIRMED, 3A still UNCONFIRMED — see the V37 OWNER DECISION RECORD and the tranche records at the foot.])
 D1–D9 go to sign-off only
 after two more confirming rounds find no blocker/major
+[STATUS 2026-11-16: sign-offs have since been received — §4 and the
+OWNER DECISION RECORD tranches at the foot: D1–D8 CLOSED, D9
+CLOSED-PENDING-CONFIRMATION ("refuse" interpreted as confirming the
+drafted refuse behavior; correction invited).]
 (docs/16 precedent: contracts are attacked, not asserted). Parent
 schemas: docs/11 (§5 S5 merge-action contract, §10 Q5, §11.4 M3 row,
 §14.7 policy), docs/12 (P8 ledger/gate), docs/16 (P12 module), docs/18
@@ -5980,18 +5998,37 @@ untouched at exhaustion); purity (no fs in projection).
 - **D1 — module shape (A):** new leaf `src/integration/promote.ts`
   rather than generalizing `integrateTestedCandidate`. **Proposed:
   yes** — preserves the tested "never main" identity of P12; audit
-  history attaches per-module.
+  history attaches per-module. **SIGNED 2026-11-16 (owner) AS
+  DRAFTED** (fourth tranche; duplication of merge mechanics accepted
+  as the price of confining the main-writing capability to one
+  leaf — see the OWNER DECISION RECORD at the foot).
 - **D2 — human-gate point (A):** host-side: promotion/rollback only
   via the explicit operator CLI act with a TTY-confirmed prompt
   (§1.4); `promoteToMain:"auto"` honored by nothing in v1.
-  **Proposed: yes.**
+  **Proposed: yes.** **SIGNED 2026-11-16 (owner) — option 0 (sign as
+  drafted): a promotion gate that depends on config honesty is not
+  a gate; a future full-loop automation (e.g. an audit loop that
+  closes find→fix→test-green WITHOUT moving main) composes with
+  this decision — auto-promotion would be its own later contract
+  round (fourth tranche).**
 - **D3 — rollback default (A):** object-store `revert` construction
   (gated candidate `R`), `rewind` as the narrow escape (head ==
   promotion sha, no gate — content is by-construction pre-promotion).
-  **Proposed: yes.**
+  **Proposed: yes.** **SIGNED 2026-11-16 (owner) AS DRAFTED**
+  (fourth tranche; the rewind escape's blast radius equals a human
+  `git reset` to the pre-promotion sha, with the journal retaining
+  the erased promotion as evidence; the C5-M4 ABA remedy —
+  `--revoke-rollback-recovery` TTY marker + byte-for-byte pin —
+  travels with it).
 - **D4 — fleet cap axes (B):** USD only in v1. **Proposed: yes** —
   dollars are the machine's scarce resource; turns/wallclock are
   endpoint/attempt shapes that don't compose across a fleet.
+  **SIGNED 2026-11-16 (owner) — option 0 (sign as drafted): each
+  extra axis multiplies the indeterminate population (§2.2) and would
+  convert the only number the mechanism can
+  approximately stand behind into apparent strictness; `caps` stays
+  an extensible object so a future axis is an additive change
+  (fourth tranche).**
 - **D5 — fleet file state semantics (B, v3-revised):** ABSENT = not
   configured (no cap); BROKEN/STALE = **fail closed on new admission**
   (v1's fail-open-with-disclosure rejected by audit — it silently
@@ -6025,7 +6062,12 @@ untouched at exhaustion); purity (no fs in projection).
   pattern first), B second; each slice audits (code) to convergence
   per the m3fix/M2-acceptance precedent; host wiring a SEPARATE
   increment; docs/11 ledger flips only after the wiring round closes.
-  **Proposed: yes.**
+  **Proposed: yes.** **SIGNED 2026-11-16 (owner) AS DRAFTED**
+  (fourth tranche). Agent note recorded WITH the sign-off: D7 orders
+  the TypeScript implementation slices only; the reference
+  implementation (docs/21a "both, code first") built the
+  confirmation-log ledger core BEFORE Slice A/B exists — this is NOT
+  a D7 violation and a future reader must not read one into it.
 - **D8 — promotion source namespace (A, v3-rewritten):** v2 said
   "restricted to `refs/heads/agent/**`" — REJECTED (round-2 R2-B1:
   that is P6's TASK namespace; P12 keeps episode branches out of it,
@@ -6035,10 +6077,23 @@ untouched at exhaustion); purity (no fs in projection).
   `check-ref-format`, NOT `agent`/inside `agent/**`, does not
   case-fold to `main`. Arbitrary human branches that violate this
   grammar are not this module's business. **Proposed: yes.**
+  **SIGNED 2026-11-16 (owner) AS DRAFTED** (fourth tranche; the
+  case-fold guard is filesystem-grounded on this machine — APFS is
+  case-insensitive by default, so a branch literally named `Main`
+  collides with `main` at the file layer while being a distinct ref
+  string; the guard is the cheap correct check per P12's C2-F1
+  source-side table).
 - **D9 — unborn main (A):** `refs/heads/main` missing at promotion:
   v1 REFUSES (`refused:no-main`) — operator creates the branch first;
   a CAS-with-no-old-value on the machine's most important ref is not
   worth its own provability sub-table. **Proposed: yes.**
+  **OWNER REPLIED 2026-11-16: "refuse" — the agent's interpretation
+  (recorded as interpretation, per this doc's decision-record rule)
+  is that this CONFIRMS the drafted option-A behavior (v1 refuses;
+  first promotion requires a deliberate human `git branch main
+  <sha>`). If the owner instead meant refusal OF the sign-off, D9
+  REMAINS OPEN and this fold must be corrected — flagged to the
+  owner in the fold reply (fourth tranche).**
 
 ## 5. Delivery shape (each slice, when approved)
 
@@ -6668,7 +6723,7 @@ AUD36 DISPOSITIONS (focused audit of v36, owner-approved scope; findings against
 | AUD36-M1 | major | crash between entering durability-pending and recording resolution left an indeterminate state with no bounded re-entry path | ACCEPTED: pending is re-derived from disk (idempotent resolve), rounds bounded by `repair-attempt-cap`, exhaustion ⇒ `resolve-exhausted` fail-closed to the operator path (v37, owner decision 2A); F20 |
 | AUD36-m1 | minor | F13 said "REPAIR INVALID" while the operative v36 class for a failing REPAIR is DEAD | ACCEPTED: F13 reworded to the DEAD-REPAIR vocabulary; F21 added covering dead-REPAIR disposition end-to-end (v37, owner decision 3A: inert + reported, revived only by fresh AUTH+REPAIR) |
 
-V37 OWNER DECISION RECORD: 0A CONFIRMED by owner 2026-07-17 ("the recommendation where the deployment is local only"). 1A/2A/3A below are DRAFTED per the agent's recommendation and await the owner's explicit confirmation or correction — until then treat them as proposed, not ratified. [STATUS NOTE 2026-11-14: still unconfirmed; see the OWNER DECISION RECORD at the foot.] 0A local-only storage + 4-leg startup probe (`fs-probe-failed`, no degraded mode, lease-only remains the only cross-host mode); 1A exclusive flock sidecar `<ledger>.lock` (never renamed/deleted; LOCK_NB + bounded retry; transient `ledger-lock-held` for appenders, fail-closed `ledger-lock-timeout` for the reconciler; conformance = 0700 dir + 0600 files + same trust premise as append-only-ness); 2A bounded resolve rounds reusing `repair-attempt-cap` with `resolve-exhausted` operator exit; 3A DEAD REPAIR = inert + reported, removal is compaction debt, revival only via fresh AUTH + fresh REPAIR. Decision 4 (audit v37 prose vs build the reference implementation first vs both) REMAINED OPEN AS OF THIS V37 RECORD — owner has since answered "c"; see the OWNER DECISION RECORD at the foot.
+V37 OWNER DECISION RECORD: 0A CONFIRMED by owner 2026-07-17 ("the recommendation where the deployment is local only"). 1A/2A/3A below are DRAFTED per the agent's recommendation and await the owner's explicit confirmation or correction — until then treat them as proposed, not ratified. [STATUS NOTE 2026-11-14: still unconfirmed; see the OWNER DECISION RECORD at the foot. SUPERSEDED IN PART by the second tranche (same date): 1A/2A CONFIRMED ("confirm 1a" / "confirm 2a"); 3A explicitly DEFERRED by owner to last ("review 3a after everything") — 3A remains UNCONFIRMED; the fourth tranche (2026-11-16) accepted the evidence-first crosswalk format for that final reading.] 0A local-only storage + 4-leg startup probe (`fs-probe-failed`, no degraded mode, lease-only remains the only cross-host mode); 1A exclusive flock sidecar `<ledger>.lock` (never renamed/deleted; LOCK_NB + bounded retry; transient `ledger-lock-held` for appenders, fail-closed `ledger-lock-timeout` for the reconciler; conformance = 0700 dir + 0600 files + same trust premise as append-only-ness); 2A bounded resolve rounds reusing `repair-attempt-cap` with `resolve-exhausted` operator exit; 3A DEAD REPAIR = inert + reported, removal is compaction debt, revival only via fresh AUTH + fresh REPAIR. Decision 4 (audit v37 prose vs build the reference implementation first vs both) REMAINED OPEN AS OF THIS V37 RECORD — owner has since answered "c"; see the OWNER DECISION RECORD at the foot.
 
 V38 CYCLE-3 DRAFT AMENDMENTS (reference-implementation audit of the v37
 build; findings AUD C3-1..C3-7; drafted 2026-11-14, PENDING owner
@@ -7129,6 +7184,13 @@ Owner replies (verbatim shorthand):
   code first). The prose audit has NOT been run.
 
 Open items — NOT decided, NOT closed:
+[STATUS 2026-11-16: partially SUPERSEDED by the second/fourth
+tranches below — 1A/2A CONFIRMED (second tranche); 3A still open
+(deferred to last; crosswalk format accepted, fourth tranche);
+S-J2 rotation CLOSED (second tranche, S-J2 FINAL in docs/21a);
+S-J3 CLOSED (clamp, second tranche). Still open per this list:
+Decision 4 prose round (scoped A, fourth tranche; not yet run);
+3A final reading.]
 - 1A / 2A / 3A (drafted in the v37 record, line ~6587) still await
   explicit owner confirmation. They were drafted "per the agent's
   recommendation and await the owner's explicit confirmation".
@@ -7214,3 +7276,59 @@ interpretation):
   (authorized in the second tranche, not yet run); S-J3 clamp
   CLOSED (second tranche); §14.10 G1 draft (docs/11) — separate
   workstream, round-1 folded, NOT implemented.
+
+OWNER DECISION RECORD — FOURTH TRANCHE (replies received 2026-11-16,
+same session as the third; verbatim owner words, expansions marked
+as interpretation):
+
+- D2: "d2 - 0" → option 0 = sign AS DRAFTED (no auto-promotion path
+  in v1). [The "0" picks from the agent's depth-review option table,
+  where option 0 was "sign as drafted".]
+- D4: "d4 - 0" → option 0 = USD-only cap axes, sign AS DRAFTED.
+- D1: "d1 - as drafted" → SIGNED as drafted (leaf promote.ts).
+- D3: "d3 - as drafted" → SIGNED as drafted (inverse-merge default,
+  narrow rewind escape).
+- D7: "d7 - as drafted" → SIGNED as drafted, WITH the agent's
+  reference-impl-ordering note folded into the §4 entry (see D7).
+- D8: "d8 - as drafted" → SIGNED as drafted (integration-branch
+  grammar incl. the case-fold guard).
+- D9: "d9 - refuse" → AMBIGUOUS, interpreted (flagged, not silently
+  resolved): confirms the REFUSE behavior as drafted (refused:no-main;
+  human `git branch main <sha>` before first promotion). The
+  alternative reading (refuse the sign-off; D9 stays OPEN) is
+  recorded in the §4 entry and was surfaced to the owner for a
+  one-word correction. D1–D8 are CLOSED; D9 is CLOSED-PENDING-
+  CONFIRMATION of this interpretation.
+- Part 2 (DC-2 acknowledged-gap block): "part 2 - ratify" → the
+  DC-2 BLOCK (docs/21a, ACKNOWLEDGED GAP: T4-GAP COMPLETION
+  MECHANISM DEFERRED) is RATIFIED AS WRITTEN; Q-J2-h deferral is
+  now the OWNER'S OWN recorded position (fourth affirmation — the
+  block's "third affirmation" count described the pre-ratification
+  deferral events and is superseded by this ratification). The
+  T4-gap is a PERMANENT accepted gap in v1; the only route out is
+  whole-dir restore (R-1). STATUS FOLDED IN docs/21a.
+- Part 3 (3A final review): "part 3 - proposed format" → the agent's
+  proposed evidence-first format is ACCEPTED: (1) run the reference
+  suite and pin results; (2) disposition crosswalk — each 3A
+  sentence → code lines + test ids holding it → drift classified
+  CODE/TEST/DOC vs SPEC; (3) one owner ratification reading against
+  that artifact, cycles only if drift is found. 3A remains
+  UNCONFIRMED until that reading lands.
+- Part 4 (Decision 4 prose round): "part 4 - a" → scope A: the
+  prose audit covers ONLY prose describing reference-implementation
+  behavior (confirmation log, AUTH/REPAIR, resolve, cap/lock,
+  freshness — the F-series fixture territory); Slice A/B prose
+  (unimplemented) is OUT of this round. 5 cycles max; findings
+  CODE/TEST/DOC vs SPEC as before.
+- Part 5 (standing backlog: purge-exception draft Q-1A-b/N7,
+  Q-J2-h completion-mechanism design, provider-account hard limits,
+  D5 waiver full normative text): "review later" → NOT now; items
+  remain parked with their recorded reasons; this tranche changes
+  none of their statuses. (The DC-2 ratification above DISCHARGES
+  the documentation duty on the T4 gap; designing a completion
+  mechanism remains NOT commissioned.)
+- Sequencing: "okay with the sequencing as suggested" → (1) fold
+  this tranche [done: v44]; (2) Decision 4 prose round scope A —
+  its crosswalk artifact feeds (3); (3) 3A final review against
+  that artifact (truly last, per the second tranche); (4) provider
+  hard limits — human-side, non-blocking.
