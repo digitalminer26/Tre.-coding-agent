@@ -3546,5 +3546,43 @@ class TestV38Cycle6Audit(Base):
         self.assertFalse(healed._owed_attempt())
         self.assertEqual(healed.status()["decision"], STATE_OK)
 
+    def test_F71_sliced_clear_retry_completes_fixed_width(self):
+        """AUD47-c4 (audit cycle 4, mutant m6 disposition): the sliced
+        clear retry must COMPLETE the record after a short write at
+        exactly the declared width. This also closes m6: an UNSLICED
+        retry re-issues the full 16-byte zero buffer from `off` — it
+        zero-fills PAST `end` (the clear payload IS zeros, so no
+        segment is corrupted), the file grows over-long, and an
+        over-long witness reads FAIL-CLOSED (owed) until the width-
+        heal truncates it — every intermediate state an unsliced retry
+        can expose is strictly MORE fail-closed than the sliced one
+        and the settled state is identical (16 zero bytes): m6 is
+        behaviorally equivalent, dropped with this argument. The pin
+        here is the settled state of the sliced order: short write,
+        checked retry completes, exact width, witness cleared."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        real_pwrite = os.pwrite
+        state = {"done": False}
+
+        def short_first(p, b, off, *a, real=real_pwrite, st=state):
+            if not st["done"] and len(b) > 6:
+                st["done"] = True
+                return real(p, b[:6], off, *a)   # 6 of the segment lands
+            return real(p, b, off, *a)
+
+        os.pwrite = short_first
+        try:
+            led._complete_resolve()           # retry must finish the job
+        finally:
+            os.pwrite = real_pwrite
+        with open(os.path.join(self.dir, "resolve-owed"), "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(len(raw), 16, "width re-established at the clear")
+        self.assertEqual(raw, b"\0" * 16, "the sliced retry completed the "
+                                          "clear byte-for-byte")
+        self.assertTrue(state["done"], "the short write really was injected")
+        self.assertFalse(self.mk(repair_attempt_cap=3)._owed_attempt())
+
 if __name__ == "__main__":
     unittest.main()
