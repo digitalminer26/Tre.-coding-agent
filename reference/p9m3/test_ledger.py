@@ -1,4 +1,4 @@
-"""Fixture suite F1-F78 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F79 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -19,7 +19,11 @@ the AUD48 cycle-1/2 pins (operator-reset sole-evidence refusal,
 zero-first completion surviving the combined corrupt-clear +
 zero fault, the evidence-based reset guard under sticky exhaustion,
 the ambiguous unreadable-witness refusal, the in-fd owed repair on
-a faulting clear fsync);
+a faulting clear fsync), F78-F79 the AUD48 cycle-3/5 pins (a corrupt
+counter record whose RAW PREFIX attests a positive charge is a live
+charge — reset refuses it; a TRUE SIGKILL between the owed-clear
+segments pins the tail-first order — F70's injected fault is caught
+by the compensation and cannot pin it);
 expected results normative).
 (D4A-c1 finding 2: this header formerly stopped at F57.)
 
@@ -3513,10 +3517,13 @@ class TestV38Cycle6Audit(Base):
         first segment zeroes the only nonzero bytes and leaves an
         all-zero record that reads CLEARED; `operator_resolve_reset()`
         then removes the counter evidence and a fresh instance serves
-        `ok` although the clear never completed. TAIL-FIRST (the
-        shipped order) crashes with the OWED head intact. This test
-        interrupts the clear AFTER the first segment lands and pins
-        the fail-closed survivor: it is RED on any head-first order."""
+        `ok` although the clear never completed.
+        AUD48-c5 SCOPE CORRECTION: this test injects a Python-level
+        OSError that `_complete_resolve` CATCHES — the compensation
+        re-arms the witness regardless of segment order, so F70 pins
+        the COMPENSATION (re-arm survives, reset preserves, heal
+        completes), NOT the raw order. The ORDER pin proper is F79
+        (true SIGKILL crash mid-clear, no handler possible)."""
         led = self.mk(repair_attempt_cap=3)
         led._write_owed()
         real_pwrite = os.pwrite
@@ -3551,6 +3558,69 @@ class TestV38Cycle6Audit(Base):
         healed = self.mk(repair_attempt_cap=3)
         self.assertFalse(healed._owed_attempt())
         self.assertEqual(healed.status()["decision"], STATE_OK)
+
+    def test_F79_true_crash_mid_clear_pins_tail_first_order(self):
+        """AUD48-c5 (finding: F70 is vacuous as an ORDER pin — its
+        injected OSError is caught by `_complete_resolve`'s compensation
+        handler, which re-arms the witness under ANY segment order; the
+        head-first mutant passed all 111 tests). The ORDER itself is a
+        CRASH-consistency invariant: only a real SIGKILL between the
+        clear segments has no handler. This forks a child that SIGKILLs
+        itself after the FIRST clear segment lands (C7_3's fork recipe;
+        NEVER the multiprocessing module). TAIL-FIRST (shipped) leaves
+        the OWED head: survivor reads owed, fresh view refuses ok.
+        Head-first leaves an all-zero survivor that reads CLEARED with
+        no counter cover after a reset — RED on that mutant (verified
+        against a head-first copy: the fresh decision comes out ok).
+        Fresh-instance reads are the oracle (child may not touch self
+        after the kill; parent waits, then re-opens)."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        d = self.dir
+        real_pwrite = os.pwrite
+        pid = os.fork()
+        if pid == 0:
+            try:
+                child = Ledger(d, faults=FsFaults(), repair_attempt_cap=3)
+                calls = {"n": 0}
+
+                def die_after_first_clear_segment(p, b, off, *a, **k):
+                    # ONLY the two zero-segment pwrites of `_clear_owed`
+                    # carry an all-zero payload (the pre-clear counter
+                    # zero is `b"0 -..." + NULs` — nonzero first byte,
+                    # the c3-verified grammar), so this filter counts
+                    # EXACTLY the clear segments in order whatever
+                    # segment order the code under test uses.
+                    if b and not any(b):
+                        calls["n"] += 1
+                        if calls["n"] == 2:   # first segment landed
+                            os.kill(os.getpid(), signal.SIGKILL)
+                    return real_pwrite(p, b, off, *a, **k)
+
+                os.pwrite = die_after_first_clear_segment
+                child._complete_resolve()   # must die inside the clear
+                os._exit(3)                 # only if the kill failed
+            finally:
+                os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status)
+                        and os.WTERMSIG(status) == signal.SIGKILL,
+                        "child was not killed inside the clear")
+        rec = open(os.path.join(d, "resolve-owed"), "rb").read()
+        self.assertTrue(rec[:4] == b"OWED",
+                        "the SIGKILLed first segment must be a record "
+                        "that READS OWED — a head-first order leaves an "
+                        "all-zero (cleared-reading) survivor")
+        fresh = self.mk(repair_attempt_cap=3)
+        self.assertTrue(fresh._owed_attempt(),
+                        "crash-mid-clear witness must read owed")
+        self.assertNotEqual(fresh.status()["decision"], STATE_OK,
+                            "a fresh view must not serve ok over an "
+                            "interrupted, unconfirmed clear")
+        # the evidence still heals through a real resolve
+        self.assertEqual(fresh.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertFalse(healed._owed_attempt())
 
     def test_F71_sliced_clear_retry_completes_fixed_width(self):
         """AUD47-c4 (audit cycle 4, mutant m6 disposition): the sliced
