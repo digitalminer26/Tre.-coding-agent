@@ -6519,3 +6519,19 @@ committed; post-fold hashes read from the tree with BOTH labels.
   against the implementation; cross-doc pin inventory open).
   Post-fold tree: ledger.py sha1 cf0f6962fb87… sha256
   dadb9e043500… (test_ledger.py UNCHANGED); suite 93 OK, tsc clean.
+  2 findings, both minor, ACCEPTED after independent verification
+  (both confirmed in source: the F3 fixture's own comment says
+  "lands at 200..209" while the table said 210; the F19 test
+  computes lead_len=max(24-F+d,8) so deep-F pairs seed deeper, as
+  its comment states; auditor re-ran suite 93 OK and recounted the
+  matrix 14x2x2=56 in its copy):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c6-1 | minor | TEST | fixture table F3 setup says the confirmation "lands at offset 210" — the test lands it at 200..209 (log grows 200->210); "210" named the grown length, not a start offset | Table CORRECTED to the implemented geometry (lands at 200, grows to 210; expected asserts BOTH 200 and 210 clear — the test is the stronger of the two readings, R4-c2-2 pins the start, so no test change needed; correcting the table rather than the test, per the finding's second option) |
+  | AUD45-c6-2 | minor | DOC | F19 header claims "cap-24-seed geometry" unqualified — pairs with lead >= 8 demands seed deeper (F=32,d=0 seeds LOG_CAP-40) | Header qualified: cap-24 seeds where the frame allows, deeper for deep-F pairs (matching the test's own comment) |
+  Cycle self-declared INCOMPLETE (cap framing/reservation + REPAIR
+  preflight + exclusion-lock cap clause vs _append_bytes/settlement/
+  preflight/F3/F19/F57 bodies; exhaustive cap-path experiments,
+  mutation testing, and cross-doc pin sweep open). Docs-only fold:
+  reference tree UNCHANGED (ledger cf0f6962fb87…/dadb9e043500…;
+  tests 80eb7014ee1f…/bed061d92495…); suite 93 OK.

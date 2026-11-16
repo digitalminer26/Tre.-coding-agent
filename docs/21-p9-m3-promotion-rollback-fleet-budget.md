@@ -63,7 +63,9 @@ for one owner batch fix after the code changes land. R5-c1 then filed
 the forced-order fixture now proves CONTENTION via the new
 `_test_hook_lock_miss` seam (the rival's own "I was refused the lock"
 signal — a non-exclusive lock trips the guard instead of passing), a
-PER-FRAME-LENGTH BOUNDARY geometry (cap−24-seed geometry with 56
+PER-FRAME-LENGTH BOUNDARY geometry (cap−24-seed geometry where the
+frame allows, deeper seeds for the deep-F pairs where lead >= 8
+demands it — AUD45-c6-2; 56
 lead/trail pairs over a frame-length set CLOSED under both roles —
 for EVERY framed length F the fixture appends (as lead or trail,
 including case (a)'s 32-B and case (b)'s 12-B frames), one pair
@@ -6696,7 +6698,7 @@ V33 FIXTURE TABLE (each fixture is a byte-level test; expected results are norma
 |---|---|---|
 | F1 | AUTH set = {offset 100, hash H}; identical malformed bytes appended at offset 900 | set changed ⇒ authorization-stale; no REPAIR; offset 900 never masked |
 | F2 | landed (G1, X, L=50) at offset 100 corrupted; old confirmation (G1, X) at offset 40; REPAIR ALL{L_C=200, G1} | effective ALL makes offset 40 inert; X does not clear on it; a new confirmation at offset 260 clears |
-| F3 | operator confirmation lands at offset 210 between L_C read (200) and REPAIR append | offset 210 stays ACTIVE and clears |
+| F3 | operator confirmation (10 B) lands at offset 200 between L_C read (200) and REPAIR append — the confirmation log grows 200->210 (AUD45-c6-1: the former "lands at offset 210" phrasing named the GROWN LENGTH, not the start offset) | offsets 200 AND 210 stay ACTIVE and clear (start + last line; R4-c2-2 pins the start) |
 | F4 | REPAIR killed after 30 bytes (torn) | authority `unsettled-tail`; settlement appends \n ⇒ one malformed occurrence ⇒ NEW AUTH2 + REPAIR succeeds; AUTH1 stays unspent and stale |
 | F5 | REPAIR write returns 10 of 300 bytes then EIO; re-open + full read shows no VALID REPAIR and the file is unchanged beyond the torn tail | the tail is `unsettled-tail` (NOT FAILED); settlement, then a NEW AUTH; AUTH1 stays unspent and stale |
 | F6 | REPAIR durable; post-write full re-read fails | outcome-unknown; no second REPAIR; next successful full read shows VALID ⇒ spent |
