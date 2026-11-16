@@ -6889,3 +6889,33 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     fails; ERR-tolerance restored -> F75 fails; all reverted).
   - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
     Ran 109 tests OK.
+
+- AUD48 CYCLE 2 (auditor: terra, detached; 1 major reported;
+  disposition 2026-11-18):
+  - C2-F1 (MAJOR, ACCEPTED+FIXED): the cycle-1 in-fd repair wrote the
+    FULL 16-byte OWED payload as its first act — if the repair's
+    first pwrite faulted (EIO) no nonzero byte ever landed, and with
+    the compensating re-arm open AND the counter pin faulting too the
+    fresh view read counter 0 + readable-cleared witness: `ok` for a
+    caller that got OSError (auditor probe reproduced: faults
+    {fs, repair, open, pin, zero} all fired, decision ok). FIXED:
+    the repair SEEDS ONE BYTE at offset 0 FIRST — any non-all-zero
+    16-byte record reads owed under the fail-closed reader — then
+    fills the full payload best-effort. Exposure now requires a
+    device that rejects even a ONE-BYTE pwrite on a fd whose
+    16-byte zero write it just accepted: the documented
+    all-writes-fault boundary (`_arm_owed` precedent). A PARTIAL
+    repair (byte 1 lands, then error) was shown safe in the same
+    probe (witness reads owed). Pin F77 (five-fault one-shot
+    injection, all preconditions asserted; mutation check: seed
+    removed -> F77 fails, reverted).
+  - Cycle-2 partials (assignment 2-4 not completed by the auditor —
+    carried into cycle 3): grammar/over-cap heal analysis,
+    corrupt-witness + corrupt-counter double-corrupt reset trap
+    check, hostile unlink/exists race on the witness, FsFaults seam
+    interaction with the in-fd repair, subprocess race coverage,
+    per-mutant sweep of the cycle-1/2 code. One interleaving WAS
+    shown: the reset guard + concurrent resolve serialize on the
+    exclusion lock (resolve blocked while the guard paused).
+  - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
+    Ran 110 tests OK.

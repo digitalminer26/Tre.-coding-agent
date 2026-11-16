@@ -501,10 +501,27 @@ class Ledger:
                     # must re-OPEN — a device faulting the fsync can
                     # fault that open too, and the suppressed re-arm
                     # exposed OK. Repair on the fd ALREADY OPEN,
-                    # before any new open can fail: rewrite OWED over
-                    # the visible zeros (best-effort fsync), then
-                    # propagate — the recharged witness does not
-                    # depend on a second open succeeding.
+                    # before any new open can fail.
+                    # AUD48-c2 (audit cycle 2, major): the repair
+                    # itself can fault BEFORE writing any nonzero
+                    # byte (full-payload pwrite EIO), and with the
+                    # re-arm open AND the counter pin also faulting
+                    # the fresh view read counter 0 + zeros: ok. NOW
+                    # the repair lands MINIMUM EVIDENCE FIRST — one
+                    # byte at offset 0 (ANY non-all-zero record reads
+                    # owed, fail-closed reader) — then fills the full
+                    # 16-byte payload (best-effort). Exposure now
+                    # needs a device that rejects even a ONE-BYTE
+                    # pwrite on a fd whose 16-byte zero write it
+                    # just accepted: that is the documented
+                    # all-writes-fault boundary (`_arm_owed` — a
+                    # broader IO failure than this protocol can
+                    # record), nothing subtler.
+                    try:
+                        os.pwrite(fd, b"O", 0)
+                    except OSError:
+                        pass        # boundary: no evidence write
+                                    # possible on this fd; propagate
                     try:
                         owed = b"OWED".ljust(16, b"\0")
                         off = 0
@@ -520,8 +537,8 @@ class Ledger:
                             pass    # bytes are page-visible; the
                                     # caller's pin is still attempted
                     except OSError:
-                        pass        # repair best-effort: even a
-                                    # failed repair propagates below
+                        pass        # fill best-effort: even a
+                                    # partial fill reads owed
                     raise           # the clear did NOT succeed: the
                                     # original fsync error propagates
                                     # so the caller re-pins the charge

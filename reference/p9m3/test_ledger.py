@@ -1,4 +1,4 @@
-"""Fixture suite F1-F76 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F77 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -14,8 +14,8 @@ F19 forced-order rewrite + R5-c1 contention-handshake/one-frame-fits/
 sidecar-untouched pins), and F58/F59 — the S-J3-C clamped-clock label
 and the exact-cap reserve boundary; F60-F64 the AUD46 cycle pins,
 F65-F67 the AUD47 cycle-1 pins (completion-failure owed re-arm, the
-decision-gate owed overlay clause, the sidecar width-heal); F72-F76
-the AUD48 cycle-1 pins (operator-reset sole-evidence refusal,
+decision-gate owed overlay clause, the sidecar width-heal); F72-F77
+the AUD48 cycle-1/2 pins (operator-reset sole-evidence refusal,
 zero-first completion surviving the combined corrupt-clear +
 zero fault, the evidence-based reset guard under sticky exhaustion,
 the ambiguous unreadable-witness refusal, the in-fd owed repair on
@@ -3945,6 +3945,104 @@ class TestV38Cycle6Audit(Base):
         self.assertNotEqual(survivor.status()["decision"], STATE_OK,
                             "no ok for a resolve whose caller errored")
         self.assertFalse(survivor.promotion_allowed())
+        # healthy heal: a completing resolve clears witness+counter.
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+
+
+    def test_F77_repair_seeds_one_byte_before_the_full_fill(self):
+        """AUD48-c2 (audit cycle 2, major): the cycle-1 in-fd repair
+        rewrote the FULL 16-byte payload first — if the repair's
+        FIRST pwrite faulted, no nonzero byte ever landed, and with
+        the compensating re-arm open AND the counter pin faulting too
+        the fresh view read counter 0 + readable-CLEARED witness:
+        `ok` for a caller that got an OSError (auditor probe: faults
+        {fs, repair, open, pin, zero} all fired, decision ok). NOW
+        the repair SEEDS ONE BYTE at offset 0 FIRST (any non-all-zero
+        record reads owed, the fail-closed reader), then fills the
+        full payload best-effort — exposure needs a device rejecting
+        even a one-byte pwrite on a fd whose zero write it just
+        accepted: the documented all-writes-fault boundary."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        real_fsync, real_open, real_pwrite = os.fsync, os.open, os.pwrite
+        owed_path = os.path.join(self.dir, "resolve-owed")
+        cnt_path = os.path.join(self.dir, "resolve-attempts")
+        st_owed = os.stat(owed_path)
+        st_cnt = os.stat(cnt_path)
+        state = {"fs": False, "repair": False, "open": False,
+                 "pin": False, "zero": False}
+
+        def fail_clear_fsync(fd):
+            if not state["fs"]:
+                st = os.fstat(fd)
+                if (st.st_dev, st.st_ino) == (st_owed.st_dev,
+                                              st_owed.st_ino) \
+                        and os.pread(fd, 16, 0) == b"\0" * 16:
+                    state["fs"] = True
+                    raise OSError(errno.EIO, "injected clear-fsync fault")
+            return real_fsync(fd)
+
+        def dispatcher(p_, b, off=0, *a, **k):
+            st = os.fstat(p_)
+            if (st.st_dev, st.st_ino) == (st_owed.st_dev, st_owed.st_ino):
+                if state["fs"] and not state["repair"] \
+                        and len(b) == 16 and off == 0:
+                    state["repair"] = True
+                    raise OSError(errno.EIO, "injected repair-fill fault")
+            elif (st.st_dev, st.st_ino) == (st_cnt.st_dev, st_cnt.st_ino):
+                if b[:1] == b"0":
+                    state["zero"] = True
+                elif state["zero"] and not state["pin"]:
+                    state["pin"] = True
+                    raise OSError(errno.EIO, "injected counter-pin fault")
+            return real_pwrite(p_, b, off, *a, **k)
+
+        def fail_rearm_open(path, flags, *a, **k):
+            # the caller's compensating _write_owed open faults (the
+            # seed-only witness must survive it)
+            if isinstance(path, str) and path == owed_path \
+                    and flags & (os.O_WRONLY | os.O_RDWR) \
+                    and state["repair"] and not state["open"]:
+                state["open"] = True
+                raise OSError(errno.EACCES,
+                              "injected owed re-arm open fault")
+            return real_open(path, flags, *a, **k)
+
+        os.fsync = fail_clear_fsync
+        os.pwrite = dispatcher
+        os.open = fail_rearm_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()
+        finally:
+            os.fsync = real_fsync
+            os.open = real_open
+        self.assertTrue(state["fs"] and state["repair"]
+                        and state["open"] and state["zero"]
+                        and state["pin"],
+                        "precondition: all five combined faults fired "
+                        "(clear fsync + repair fill + re-arm open + "
+                        "counter zero + counter pin)")
+        survivor = self.mk(repair_attempt_cap=3)
+        self.assertEqual(survivor._read_counter(), 0,
+                         "the zero landed and the pin faulted (the "
+                         "auditor's state)")
+        self.assertTrue(survivor._owed_attempt(),
+                        "the one-byte seed must make the witness read "
+                        "owed with EVERY other evidence write faulted")
+        self.assertNotEqual(survivor.status()["decision"], STATE_OK,
+                            "no ok for a resolve whose caller errored")
+        self.assertFalse(survivor.promotion_allowed())
+        # the seed-only witness is still a 16-byte record (width kept)
+        with open(owed_path, "rb") as f:
+            raw = f.read()
+        self.assertEqual(len(raw), 16)
+        self.assertNotEqual(raw, b"\0" * 16)
         # healthy heal: a completing resolve clears witness+counter.
         self.assertEqual(led.resolve()["state"], STATE_OK)
         healed = self.mk(repair_attempt_cap=3)
