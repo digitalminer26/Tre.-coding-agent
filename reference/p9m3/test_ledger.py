@@ -59,6 +59,18 @@ from p9m3.ledger import (
 from p9m3.probe import FSProbeError, FsFaults, run_probe
 
 
+def read_or_empty(path):
+    """AUD49 c2 (finding F2): the suite's `open(p,'rb').read()`-inline
+    reads leak a ResourceWarning on their exists-branches — the
+    warning is UNRAISABLE at interpreter gc time, so
+    `-W error::ResourceWarning` does NOT fail the run (proven). All
+    four sites now read through a managed handle."""
+    if not os.path.exists(path):
+        return b""
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -2208,7 +2220,7 @@ class TestV38CyclePins(Base):
             with self.assertRaises(LedgerError) as cm:
                 led.repair(auth)
             self.assertEqual(cm.exception.code, "log-cap-exceeded")
-        jdata = open(jp, "rb").read() if os.path.exists(jp) else b""
+        jdata = read_or_empty(jp)
         self.assertNotIn(b"A57", jdata,
                          "cap refusal journaled an intent (R4-c2-1)")
         size0 = os.path.getsize(os.path.join(self.dir, "consumptions.jsonl"))
@@ -2474,8 +2486,7 @@ class TestV38Cycle6Audit(Base):
         # audit C1-1: EVERY decision/append entry point refuses on a
         # damaged journal and writes ZERO decision bytes.
         led = self._journal(b"bad\n")
-        ledger_before = os.path.exists(led.ledger_path) and \
-            open(led.ledger_path, "rb").read() or b""
+        ledger_before = read_or_empty(led.ledger_path)
         for name, call in (
             ("resolve", lambda: led.resolve()),
             ("settle", lambda: led.settle()),
@@ -2495,8 +2506,7 @@ class TestV38Cycle6Audit(Base):
                     # promote returns a refusal dict instead of raising
                     self.assertEqual(out.get("decision"),
                                      "journal-unreadable", name)
-        ledger_after = os.path.exists(led.ledger_path) and \
-            open(led.ledger_path, "rb").read() or b""
+        ledger_after = read_or_empty(led.ledger_path)
         self.assertEqual(ledger_before, ledger_after,
                          "a damaged-journal entry point wrote ledger bytes")
 
