@@ -22,8 +22,9 @@ here pre-empts it.
   as `sha256-prefix` at da7f7f0 but were transcribed from `shasum`
   (SHA-1) output — the true SHA-256 prefixes are the ones added here
   (read from the tree, per the D4A pin rule; verified identical at
-  8721f5b and HEAD — the reference tree has not drifted since the
-  suite run this step pins).]
+  8721f5b and HEAD **for ledger.py only** — the tree at HEAD carries
+  a STRENGTHENED test_ledger.py, see the update immediately below;
+  finding AUD45-c1-1).]
 - EVIDENCE-TREE UPDATE (AUD45-pre fold, 2026-11-17): the five-finding
   hygiene fold STRENGTHENED `test_ledger.py` (test_F25v33_* gained
   write-side arms: `partial_write` {0,1,4} produce the crash prefixes

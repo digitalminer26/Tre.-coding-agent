@@ -2661,9 +2661,10 @@ ALGORITHM over a FULL read (log > 64 MiB ⇒ `unknown`):
     reclassifies VALID automatically when its missing precondition
     arrives later as a genuine authorization (AUTH appears / log
     grows past its watermark within its own `all.confirmGen`) —
-    pinned by test_F24gen + fixture F24. The unqualified
+    pinned by test_F24gen + fixture F24. The formerly unqualified
     "revival only via fresh AUTH + fresh REPAIR" shorthand in the
-    V37 OWNER DECISION RECORD carries the same qualification; the
+    V37 OWNER DECISION RECORD carries the same qualification (in
+    place since the v46 fold, 2026-11-17); the
     owner's still-pending 3A reading is the ratification point for
     this whole disposition INCLUDING the qualification.]
     LATE VALIDATION IS EXPLICIT MEANING (v39, AUDV1-M1): validity is a

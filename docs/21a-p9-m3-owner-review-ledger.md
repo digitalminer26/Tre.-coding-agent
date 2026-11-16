@@ -6444,3 +6444,17 @@ committed; post-fold hashes read from the tree with BOTH labels.
 
 - CYCLE 1 (kick 2026-11-17; mission: cross-verify the v46 five-
   finding hygiene fold): report ~/.tre/audits/aud45-c1-out.txt.
+  2 findings, both minor DOC, both ACCEPTED after independent
+  verification (the auditor ran the suite 92 OK in its own copy,
+  re-killed both F25 mutation arms, and recounted the D4A totals
+  2+1+1+2+3=9 — the v46 fold verified):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c1-1 | minor | DOC | the 21b hash-correction note said the pinned files were "verified identical at 8721f5b and HEAD — the reference tree has not drifted", true of ledger.py only: HEAD carries the v46-strengthened test_ledger.py (656e77d3599f -> 7780857914ad sha1) | Note qualified to ledger.py with an explicit pointer to the update block below (cites the finding) |
+  | AUD45-c1-2 | minor | DOC | the ~2647 qualification still called the V37 shorthand "The unqualified … shorthand" after v46 qualified that record IN PLACE — stale self-description | Rewritten "The formerly unqualified … shorthand … (in place since the v46 fold, 2026-11-17)" |
+  Cycle self-declared INCOMPLETE (v46 diff + five edit groups
+  inspected; full Step-2 sweep, hash-history search, and cycles
+  2-7 regions open per assignments). Post-fold hashes (from the
+  tree, both labels): ledger.py sha1 3a9307a7b1fc… / sha256
+  4e997d59ed99… (UNCHANGED); test_ledger.py sha1 7780857914ad… /
+  sha256 7a2159df7f46… (UNCHANGED — docs-only fold). Suite: 92 OK.
