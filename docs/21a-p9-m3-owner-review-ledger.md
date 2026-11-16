@@ -6960,3 +6960,36 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     FsFaults seam interaction with the AUD48 code paths).
   - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
     Ran 111 tests OK.
+
+## AUDIT ROUND AUD48 — CYCLE 4 disposition (auditor: fresh-context adversarial; tree 2be3c25, suite 111 OK)
+
+RESULT: **CYCLE INCOMPLETE — zero findings; the auditor died at the turn budget
+with four remainders unexecuted.** Everything it DID execute held: the
+raw-charge/prefix agreement probes (multi-digit, over-cap, leading-zero,
+NUL-junk, empty — all three views agree), the c3 mutants (`live = n` always,
+`live >= 0`, seed b"\\0" — ALL KILLED; `split(" ")` -> `rsplit(" ")` survived
+and the auditor verified it is behaviorally equivalent on every reachable
+input: 16-byte single-space grammar admits no second space, so split ==
+rsplit — mutation-equivalent, not a coverage hole), the guard + sticky
+interaction pass, and the full-suite re-run.
+
+CARRIED REMAINERS (become the cycle-5 target list):
+1. subprocess-level resolve-vs-reset serialization probe (two PIDs, lock
+   must serialize the guard read against the reset's counter write).
+2. exhaustive per-input disagreement matrix across _parse_counter /
+   _counter_state / _counter_raw_charge / _read_counter / status.
+3. FsFaults seam matrix driven through the AUD48 repair paths
+   (sidecar_write_fault / partial_write / fsync_fault / open_fault x
+   _write_owed / _clear_owed / repair seed+fill — does a seam consume the
+   seed or spin the fill loop without progress?).
+4. combined unlink + five-fault + PIN-failure ordering (what survives when
+   the repair lands on a deleted inode AND the charge pin faults).
+
+RESIDUAL RE-PROBED (owner side, closes the c3 disposition residual):
+unlink-after-clear-open under `sidecar_open_fault` — resolve raises, fresh
+view = counter 0, owed False, decision `repairing` (the counter cover holds;
+the caller got an error, not `ok`). No exposure at reference level.
+
+DISPOSITION: no code change (nothing found). Remainders 1-4 are cycle 5's
+assignment; the F59/F74 reconcile-lock serialization is the invariant under
+test in remainder 1.
