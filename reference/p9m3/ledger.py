@@ -426,6 +426,31 @@ class Ledger:
             return count, True, False      # honest over-cap charge: live
         return n, flag, False
 
+    def _counter_raw_charge(self):
+        """AUD48-c3 (audit cycle 3, finding 1): the RAW-GRAMMAR charge
+        of the counter record — parse the FIRST 16 bytes against the
+        fixed grammar (what the record looked like BEFORE any trailing
+        damage) and return its count, or 0 when no positive charge is
+        attestable (missing / garbage / empty / zero count). The
+        operator reset's corrupt-record heal uses this so appending
+        ONE byte to a live `1 -...` record cannot launder the sole
+        evidence of an unconfirmed attempt through the F67 heal path
+        (the auditor's attack: append -> corrupt -> free heal ->
+        fresh view served `ok`)."""
+        try:
+            fd = os.open(self._attempts_side, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return 0
+        try:
+            raw = os.pread(fd, 17, 0)
+        finally:
+            os.close(fd)
+        body = raw[:16].rstrip(b"\0")
+        if _COUNTER_RE.fullmatch(body):
+            count, _fl = body.decode().split(" ")
+            return int(count)
+        return 0
+
     def _attempts_exhausted(self):
         return self._parse_counter()[1]
 
@@ -1878,22 +1903,27 @@ class Ledger:
         F62 already pins that the witness survives the zero."""
         with self._lock("reconcile"):
             n, _flag, corrupt = self._counter_state()
-            if not corrupt and n > 0:
-                # the counter parses to a live charge — is it the
-                # only evidence left standing? (AUD48-c1: the sticky
-                # flag does NOT demote the evidence — an exhaustion
-                # flag over a sole positive charge is still a sole
-                # positive charge, finding c1-3.)
+            # AUD48-c3 (audit cycle 3, finding 1): the guard runs on
+            # the RAW-GRAMMAR charge, not the classified one —
+            # appending ONE byte to a live `1 -...` record made the
+            # record 'corrupt' and the F67 heal path zeroed the SOLE
+            # evidence (the auditor's free-ok launder). A corrupt
+            # record whose first 16 bytes still parse to a positive
+            # count is evidence of a live charge until something
+            # readable outranks it (an owed witness): heal only free
+            # (zero-count) damage, else the SAME refusal.
+            live = n if not corrupt else self._counter_raw_charge()
+            if live > 0:
                 owed = self._owed_state()
                 if owed == "ERR":
                     raise LedgerError(          # finding c1-4: an
-                        "reset-sole-evidence-refused", counter=n,
+                        "reset-sole-evidence-refused", counter=live,
                         detail="the owed witness is unreadable while "
                                "a live counter charge exists: evidence "
                                "is ambiguous — refuse (fail closed)")
                 if owed is False:
                     raise LedgerError(
-                        "reset-sole-evidence-refused", counter=n,
+                        "reset-sole-evidence-refused", counter=live,
                         detail="the counter charge is the only durable "
                                "evidence of an unconfirmed resolve "
                                "attempt; zeroing it erases the proof — "

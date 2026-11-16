@@ -6919,3 +6919,44 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     exclusion lock (resolve blocked while the guard paused).
   - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
     Ran 110 tests OK.
+
+- AUD48 CYCLE 3 (auditor: terra, detached; 1 high + 2 test-survivors;
+  disposition 2026-11-18):
+  - C3-F1 (HIGH, ACCEPTED+FIXED): the reset guard skipped the witness
+    check when the counter record classified CORRUPT (F67 heal path)
+    — appending ONE byte to a live `1 -...` record makes it
+    over-length = corrupt, LAUNDERING the sole evidence: free heal
+    zeroes the counter, fresh view counter-0 + no witness => `ok`
+    (auditor probe reproduced end-to-end). FIXED: the guard now runs
+    on the RAW-GRAMMAR charge (`_counter_raw_charge`: first 16 bytes
+    parsed against the fixed grammar — what the record was BEFORE
+    trailing damage). Corrupt damage whose prefix parses POSITIVE is
+    a live charge: same refusal; damage over a ZERO count (no
+    attestable charge) keeps the F67 free heal. F72's escape-hatch
+    fixture narrowed to the zero-count case accordingly. Pin F78
+    (launder + both escape paths + e-length classification pin;
+    mutation check: guard reverted -> F78 fails).
+  - C3-F2 (test survivor, ACCEPTED): the suite never enforced the
+    seed OFFSET (a-offset mutant survived; auditor confirmed the
+    mutant itself stays safe — the reader fails closed on any
+    nonzero record). F77 now asserts byte 0 == b"O". Mutation: seed
+    moved to offset 1 -> F77 fails.
+  - C3-F3 (test survivor, ACCEPTED): `len(raw) != 16` -> `len(raw) <
+    16` survived (17-byte zero-record + NUL treated live: reset
+    wedges refusing). Not a defect in the current check; F78 pins
+    the 17-byte corrupt-and-healable classification directly.
+  - Auditor probes ACCEPTED as coverage (no finding): seeded-repair
+    hostile states (seed-only / 2-byte partial fill + re-arm fault)
+    all read owed, durability-pending, healthy resolve heals;
+    double-corrupt witness+counter: reset preserves witness ->
+    pending, completing resolve heals (the c2-assignment-2 recovery
+    path PROVEN); unlink race: in-fd repair hits the deleted inode
+    but the counter pin carries the evidence (residual: pin ALSO
+    failing is the documented all-writes-fault boundary).
+  - Cycle-3 remainders (auditor: CYCLE INCOMPLETE): exhaustive
+    seed-ordering mutant variants; combined unlink+pin-failure
+    probe. Carried into cycle 4 (with new hunt: the RAW-CHARGE
+    guard itself — c3-F1's fix is the prime suspect; and the
+    FsFaults seam interaction with the AUD48 code paths).
+  - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
+    Ran 111 tests OK.

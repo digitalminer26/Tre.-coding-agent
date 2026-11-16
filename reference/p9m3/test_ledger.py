@@ -3349,7 +3349,8 @@ class TestV38Cycle6Audit(Base):
         os.close(fd)
         self.assertTrue(led._owed_attempt())
         self.assertEqual(led.resolve()["state"], STATE_OK)
-        raw = open(p, "rb").read()
+        with open(p, "rb") as f:
+            raw = f.read()
         self.assertEqual(len(raw), 16, "the clear heals the width")
         self.assertEqual(raw, b"\0" * 16)
         nxt = self.mk(repair_attempt_cap=3)
@@ -3644,9 +3645,13 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(healed.status()["decision"], STATE_OK)
         # escape hatch, pinned open: a CORRUPT counter is not a live
         # charge — the operator rewrite (F67 grammar heal) still works.
+        # AUD48-c3 (finding 1) NARROWS this: corrupt damage that still
+        # parses POSITIVE in its first 16 bytes IS a live charge and
+        # the guard refuses (pin F78) — so the free-heal fixture is a
+        # corrupt record over a ZERO count.
         cp = os.path.join(self.dir, "resolve-attempts")
         fd = os.open(cp, os.O_WRONLY | os.O_CREAT, 0o600)
-        os.write(fd, b"1 -" + b"\0" * 13 + b"JUNK")   # over-long, n=1
+        os.write(fd, b"0 -" + b"\0" * 13 + b"JUNK")   # over-long, n=0
         os.close(fd)
         corrupt = self.mk(repair_attempt_cap=3)
         self.assertTrue(corrupt._attempts_exhausted(),
@@ -4043,12 +4048,111 @@ class TestV38Cycle6Audit(Base):
             raw = f.read()
         self.assertEqual(len(raw), 16)
         self.assertNotEqual(raw, b"\0" * 16)
+        self.assertEqual(raw[0:1], b"O",
+                         "the seed lands at offset 0 (auditor survivor "
+                         "a-offset: the suite must enforce WHERE the "
+                         "minimum evidence sits, not just that one byte "
+                         "somewhere reads owed)")
         # healthy heal: a completing resolve clears witness+counter.
         self.assertEqual(led.resolve()["state"], STATE_OK)
         healed = self.mk(repair_attempt_cap=3)
         self.assertEqual(healed._read_counter(), 0)
         self.assertFalse(healed._owed_attempt())
         self.assertEqual(healed.status()["decision"], STATE_OK)
+
+
+    def test_F78_append_damage_cannot_launder_a_live_charge_past_reset(self):
+        """AUD48-c3 (audit cycle 3, finding 1, high): the reset guard
+        skipped the witness check when the counter record was
+        'corrupt' (the F67 heal path) — but appending ONE byte to a
+        live `1 -...` record makes it over-length = corrupt, so a
+        hostile append LAUNDERED the sole evidence of an unconfirmed
+        attempt: free heal zeroes the counter, fresh view reads
+        counter 0 + no witness = `ok` (auditor probe: fallback
+        charge n=1, append -> (4,True,True) corrupt -> reset ->
+        (0,False,False) ok). NOW the guard runs on the RAW-GRAMMAR
+        charge: the first 16 bytes parsed against the fixed grammar.
+        A corrupt record whose prefix still parses POSITIVE is a live
+        charge — same refusal — while damage over a ZERO count (no
+        attestable charge) keeps the F67 free heal. The suite also
+        pins the over-length CLASSIFICATION itself (auditor survivor
+        e-length): a valid-zero record + one trailing NUL must be
+        treated corrupt-and-healable, not live."""
+        led = self.mk(repair_attempt_cap=3)
+        real_open = os.open
+
+        def fail_owed_open(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-open fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()               # F68 fallback: charge n=1
+        finally:
+            os.open = real_open
+        sole = self.mk(repair_attempt_cap=3)
+        self.assertEqual(sole._read_counter(), 1)
+        self.assertFalse(sole._owed_attempt(),
+                         "precondition: witness absent — the charge "
+                         "is the ONLY evidence")
+        # the auditor's launder: append one byte to the counter.
+        cp = os.path.join(self.dir, "resolve-attempts")
+        with open(cp, "ab") as f:
+            f.write(b"\xff")
+        damaged = self.mk(repair_attempt_cap=3)
+        n, flag, corrupt = damaged._counter_state()
+        self.assertTrue(corrupt,
+                        "precondition: the append makes the record "
+                        "over-length = corrupt (the old heal bypass)")
+        self.assertEqual(damaged._counter_raw_charge(), 1,
+                         "the raw 16-byte prefix still attests a live "
+                         "charge of 1")
+        with self.assertRaises(LedgerError) as cm:
+            damaged.operator_resolve_reset()
+        self.assertEqual(cm.exception.code, "reset-sole-evidence-refused")
+        kept = self.mk(repair_attempt_cap=3)
+        self.assertEqual(kept._counter_raw_charge(), 1,
+                         "a refused reset writes nothing")
+        self.assertNotEqual(kept.status()["decision"], STATE_OK)
+        # escape hatch intact: the PRIMARY evidence restored (owed
+        # witness) — the reset heals the damaged record (F62/F75).
+        kept._write_owed()
+        kept.operator_resolve_reset()
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertTrue(healed._owed_attempt(),
+                        "the witness survives the reset (F62)")
+        self.assertNotEqual(healed.status()["decision"], STATE_OK)
+        self.assertEqual(self.mk(repair_attempt_cap=3).resolve()["state"],
+                         STATE_OK)
+        fin = self.mk(repair_attempt_cap=3)
+        self.assertEqual(fin._read_counter(), 0)
+        self.assertFalse(fin._owed_attempt())
+        self.assertEqual(fin.status()["decision"], STATE_OK)
+        # damage over a ZERO count is no charge: the F67 free heal
+        # stays open (n=1 damage above refuses; n=0 damage heals).
+        cp2 = os.path.join(self.dir, "resolve-attempts")
+        fd = os.open(cp2, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"0 -" + b"\0" * 13 + b"\xff\xff\xff")
+        os.close(fd)
+        z = self.mk(repair_attempt_cap=3)
+        self.assertTrue(z._attempts_exhausted())
+        z.operator_resolve_reset()          # must NOT refuse
+        self.assertEqual(self.mk(repair_attempt_cap=3)._read_counter(), 0)
+        # survivor e-length pin: a valid-zero record + ONE trailing
+        # NUL (17 bytes) is corrupt-and-healable — never treated as
+        # live evidence that wedges the reset.
+        fd = os.open(cp2, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"0 -" + b"\0" * 14)   # 3 + 14 = 17 bytes
+        os.close(fd)
+        e = self.mk(repair_attempt_cap=3)
+        _n, _f, corr = e._counter_state()
+        self.assertTrue(corr, "17 bytes is outside the fixed-width "
+                              "grammar: corrupt, not live")
+        e.operator_resolve_reset()          # must NOT refuse
+        self.assertEqual(self.mk(repair_attempt_cap=3)._read_counter(), 0)
 
 
 if __name__ == "__main__":
