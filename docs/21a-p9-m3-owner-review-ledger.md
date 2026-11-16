@@ -6585,3 +6585,51 @@ committed; post-fold hashes read from the tree with BOTH labels.
   confirmation). Version: docs/21 header bumped v46 -> v47 (the
   single end-of-round header fold covering all seven cycle folds,
   as deferred in the cycle-3 registration).
+
+## AUDIT ROUND AUD46 (independent-session kickoff, 2026-11-17) — cycles 1-5, terra
+
+**PROVENANCE NOTE (the round's first lesson, recorded as finding
+AUD46-a3's context):** the three kickoff findings did NOT come from
+a scheduled cycle — they came from an independent session the owner
+ran directly on the workstream ("audit the changes"), and that
+session found MORE than the seven scheduled AUD45 cycles did
+(including the major A1: bounded retry defeatable by fault timing).
+Round-design consequence for future audits: interleave at least one
+fresh-context full-diff audit alongside scheduled cycles — scheduled
+cycles over-shifted to doc hygiene and missed a live-code property.
+
+- SCOPE: the resolve-bound code paths introduced by AUD45-c3-1
+  (`_resolve_locked` no-pending branch, status overlay) + the
+  crosswalk evidence blocks, diff 97214d8..HEAD and fold commits.
+- PREAMBLE (independent session, findings A1/A2/A3 — folded as the
+  cycle-0 pre-fold BEFORE this round's cycles began):
+  - AUD46-A1 (major CODE): the AUD45-c3-1 charge POSTED the IO
+    (consumed only on caught OSError) — an interruption/crash DURING
+    the resolve IO left the counter untouched, so the bound was
+    defeatable by fault timing. FIXED: the charge is now
+    crash-durable PRE-IO (write n+1 before `_resolve_io()`, same
+    discipline as the recovery round — success clears on completion;
+    a crash between IO and the clear leaves the charge owed).
+  - AUD46-A2 (major CODE): a charged attempt with no pending window
+    (failed resolve, or crash after IO before the clear) is an
+    UNCONFIRMED outcome, but status()/promotion_allowed() rendered
+    `ok` until the exhaustion flag persisted — contradicting the
+    binding path and the default-deny premise. FIXED: status()
+    overlays `durability-pending` when counter>0 with no pending
+    window (cleared by the next successful resolve).
+  - AUD46-A3 (minor DOC): 21b UPDATE 4 said "CURRENT-TREE MAPPING"
+    but pinned the pre-cycle-7 tree and was already stale at the
+    round-close tree. FIXED: Update 4 marked HISTORICAL (commit-
+    317ca83-pinned); the AUD46 round-close Update 5 carries the
+    current mapping.
+  - PINS: test_F61 (mutation-verified, see cycle entries): charge
+    survives interruption across restarts; charged-no-window renders
+    PENDING + snapshot refuses; cap refused BEFORE IO after cap
+    interruptions; sticky across processes; operator reset re-arms;
+    healthy success clears. Suite 93 -> 94.
+  - VERIFIED (kickoff probe, post-fold): interruption charges
+    (1,False)->(2,False)->refused exhausted before IO on the 3rd
+    (cap 2); caught-failure sequence renders PENDING from attempt 1
+    (was ok/snapshot-True); binding promote refuses
+    resolve-exhausted; plain appends unaffected by exhaustion;
+    decision appends refuse on their own gate re-check.

@@ -1,4 +1,4 @@
-"""Fixture suite F1-F60 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F61 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -2920,11 +2920,66 @@ class TestV38Cycle6Audit(Base):
         cls = healthy.resolve()
         self.assertEqual(cls["state"], STATE_OK)
         self.assertEqual(healthy._read_counter(), 0)
-        # a SUCCESSFUL ordinary resolve stays counter-free (fix 1):
-        # no recovery attempt is charged for success
-        before = healthy._read_counter()
+        # a SUCCESSFUL ordinary resolve ends counter-free (fix 1 is
+        # counter-free ON COMPLETION — AUD46-a1: the pre-charged
+        # attempt is cleared when the resolve completes; F61 pins
+        # that a CRASHED attempt stays charged)
         healthy.resolve()
-        self.assertEqual(healthy._read_counter(), before)
+        self.assertEqual(healthy._read_counter(), 0)
+
+    # ------------------------------------------------- F61 (AUD46-a1/a2)
+    def test_F61_ordinary_resolve_charge_is_pre_io_and_unconfirmed_pending(self):
+        # AUD46-a1 (independent-session audit, major): the AUD45-c3-1
+        # charge POSTED the IO — an interruption/crash DURING the IO
+        # left the counter untouched, so bounded retry was defeatable
+        # by fault timing. The charge is now crash-durable PRE-IO:
+        # an interrupted attempt must stay charged across a restart.
+        class Boom(OSError):
+            pass
+        led = self.mk(repair_attempt_cap=3)
+        original = led._resolve_io
+        def interrupted():
+            raise KeyboardInterrupt()          # models a crash mid-IO
+        led._resolve_io = interrupted
+        self.assertFalse(led.durability_pending())
+        with self.assertRaises(KeyboardInterrupt):
+            led.resolve()
+        self.assertEqual(led._read_counter(), 1)   # charge survived
+        # AUD46-a2 (same audit, major): the charged attempt is an
+        # UNCONFIRMED outcome — the informational view must not
+        # report `ok` off bytes no completed resolve confirmed.
+        self.assertEqual(led.status()["decision"], STATE_PENDING)
+        self.assertFalse(led.promotion_allowed())
+        # the charge is crash-durable: a fresh process sees it
+        restarted = self.mk(repair_attempt_cap=3)
+        self.assertEqual(restarted._read_counter(), 1)
+        self.assertEqual(restarted.status()["decision"], STATE_PENDING)
+        # second interrupted attempt charges again...
+        restarted._resolve_io = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            restarted.resolve()
+        self.assertEqual(self.mk()._read_counter(), 2)
+        # ...a third interruption is the LAST permitted attempt (cap
+        # 3): the 4th call refuses BEFORE any IO (cap refusal
+        # precedes IO) and persistence shows the sticky flag.
+        again = self.mk(repair_attempt_cap=3)
+        again._resolve_io = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            again.resolve()
+        fourth = self.mk(repair_attempt_cap=3)
+        with self.assertRaises(LedgerError) as cm:
+            fourth.resolve()
+        self.assertEqual(cm.exception.code, STATE_EXHAUSTED)
+        fresh = self.mk()
+        self.assertTrue(fresh._attempts_exhausted())
+        self.assertEqual(fresh.status()["decision"], STATE_EXHAUSTED)
+        # the operator reset re-arms; a HEALTHY resolve then serves
+        # and clears (a non-zero counter is never latched by success)
+        fresh.operator_resolve_reset()
+        served = self.mk()
+        self.assertEqual(served.resolve()["state"], STATE_OK)
+        self.assertEqual(self.mk()._read_counter(), 0)
+        self.assertEqual(self.mk().status()["decision"], STATE_OK)
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,7 +94,11 @@ here pre-empts it.
   changed behavior: S1–S6 drift stays NONE — the fix serves docs/21's
   own resolve-bound prose.
 - EVIDENCE-TREE UPDATE 4 (AUD45 round close, 2026-11-17; finding
-  AUD45-c7-1): the update-3 "+28 cumulative" mapping went stale the
+  AUD45-c7-1; **NOW HISTORICAL per AUD46-a3 — this block pins the
+  tree at commit 317ca83 (the AUD45 round-close commit); the AUD46
+  fold (A1/A2 pre-IO charge + status overlay) and later cycles
+  re-shift the anchors — see the AUD46 round-close Update 5**):
+  the update-3 "+28 cumulative" mapping went stale the
   moment cycles 4-5 edited ledger.py docstrings again. CURRENT-TREE
   MAPPING (measured, both algorithms pinned below): S1 classify
   DEAD/valid route — pinned 866–899 (8721f5b) -> now 875–908

@@ -5,9 +5,11 @@ repair as an append, DURABILITY + RESOLVE-ON-USE with the resolve
 attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
-Scope: the ledger contract + fixtures F1-F60 plus the C6_* v42
+Scope: the ledger contract + fixtures F1-F61 plus the C6_* v42
 round-5 pins (F60: no-pending resolve IO fault is bounded,
-AUD45-c3-1). COVERAGE IS BY FIXTURE FAMILY, not one test per
+AUD45-c3-1; F61: the charge is crash-durable PRE-IO and an
+unconfirmed charged attempt renders PENDING, AUD46-a1/a2).
+COVERAGE IS BY FIXTURE FAMILY, not one test per
 label (D4A-c5-3 mapping): F14 is pinned inside test_F9_F14
 (combined), F15's behavior is pinned by test_F6 (duplicate spec
 row), and V33 rows F23/F25 share numbers with DIFFERENT v38
@@ -46,14 +48,22 @@ Modeling notes (reference-level choices where the spec is prose):
   (never before durability), so the window where bytes exist with no
   marker is eliminated (audit finding 1).
 - The resolve attempt bound writes a crash-durable attempt counter
-  BEFORE each RECOVERY round (pending window: a crashed round counts);
-  a NO-PENDING resolve (AUD45-c3-1) is charged only when its IO
-  failure is CAUGHT (a crash mid-IO there leaves no window and the
-  same bytes, so nothing is owed), and success resets it. Exhaustion
-  is STICKY (counter + flag in one sidecar
+  BEFORE each attempt — recovery rounds (pending window) AND
+  no-pending resolves alike (AUD45-c3-1 charged the failed IO;
+  AUD46-a1 made the charge pre-IO: an interruption or crash DURING
+  the IO leaves the attempt owed, so bounded retry cannot be
+  defeated by fault timing). Success resets the counter ON
+  COMPLETION; a crash between a successful IO and the completion-
+  clear leaves the charge (conservative). Exhaustion is STICKY
+  (counter + flag in one sidecar
   rewrite): once `resolve-exhausted`, no further automatic attempt is
   made — only the explicit operator path `operator_resolve_reset()`
   re-arms resolution (owner: exhaustion exits service, no silent pass).
+- A CHARGED attempt with no pending window is an UNCONFIRMED
+  resolve outcome, and `status()`/`promotion_allowed()` render it
+  `durability-pending`, never `ok` (AUD46-a2): the default-deny
+  premise holds the informational view until a resolve sequence
+  SUCCEEDS and clears the counter.
 - BINDING promotion decisions run through `promote(callback)` which
   holds ONE exclusion-lock acquisition across resolve + classification
   + decision + any in-lock appends (EXCLUSION LOCK (ii)). The
@@ -1231,9 +1241,10 @@ class Ledger:
         NEVER a substitute for the durable resolution; its absence does
         not prove visible bytes are durable. Bounded by
         repair_attempt_cap per PENDING episode (v37 AUD36-M1): the
-        crash-durable counter is bumped BEFORE each recovery round (a
-        crashed round counts); a no-pending resolve is charged ONLY on
-        a caught IO failure (AUD45-c3-1 — see the branch comment).
+        crash-durable counter is bumped BEFORE EVERY attempt — each
+        recovery round AND each no-pending resolve (AUD45-c3-1 +
+        AUD46-a1: a crashed/interrupted attempt counts; success
+        clears on completion).
         v38 cycle-2 fix 4: once the cap attempts are
         consumed the NEXT round REFUSES BEFORE ANY RESOLVE IO — a cap of
         N never permits an (N+1)-st automatic round, and exhaustion is
@@ -1259,26 +1270,34 @@ class Ledger:
             # requires ("Resolution attempts are BOUNDED per episode
             # ... No schedule drives an unbounded loop") never
             # arrived. NOW: the cap refusal precedes the IO (persist-
-            # first, same discipline as the recovery round below);
-            # the counter is consumed ONLY on IO failure — a
-            # successful ordinary resolve stays counter-free (fix 1
-            # preserved: no recovery attempt charged for success).
+            # first, same discipline as the recovery round below).
             n = self._read_counter()
             if n >= self.repair_attempt_cap:
                 self._write_counter(n, exhausted=True)
                 raise LedgerError(STATE_EXHAUSTED)
+            # AUD46-a1 (independent-session audit, major): the
+            # AUD45-c3-1 charge POSTED THE IO ("consumed ONLY on IO
+            # failure") — an interruption or crash DURING the IO
+            # left the counter untouched, so bounded retry was
+            # defeatable by fault timing. NOW the charge is
+            # CRASH-DURABLE PRE-IO (same discipline as the recovery
+            # round): the attempt is owed the moment the service
+            # starts it; a successful resolve clears it (success is
+            # counter-free on completion — fix 1 — but a CRASHED
+            # attempt is charged; AUD46-a1 verdict).
+            self._write_counter(n + 1, exhausted=False)
             try:
                 data = self._resolve_io()
             except OSError:
                 # cannot even establish the durable basis => fail
-                # closed, and the bounded episode charges this attempt
-                self._write_counter(n + 1, exhausted=False)
+                # closed; the pre-charged attempt is already durable
                 raise LedgerError(STATE_PENDING)
-            if n:
-                # a successful resolve closes the episode: clear any
-                # charged failed attempts (same discipline as the
-                # recovery round's completion-clear below)
-                self._write_counter(0, exhausted=False)
+            # success closes the episode: clear the pre-charged
+            # attempt (fix 1: success is counter-free ON COMPLETION;
+            # a crash between the IO and this clear leaves the
+            # charge owed — conservative, same discipline as the
+            # recovery round, whose crashed rounds count)
+            self._write_counter(0, exhausted=False)
             return self.classify(data)
         # C2 fix 4: refusal BEFORE starting a round whose attempts are
         # already consumed — persist exhaustion first, then raise; the
@@ -1856,6 +1875,18 @@ class Ledger:
         if self._attempts_exhausted():
             out["decision"] = STATE_EXHAUSTED
         elif pending:
+            out["decision"] = STATE_PENDING
+        elif self._read_counter() > 0:
+            # AUD46-a2 (independent-session audit, major): a charged
+            # attempt with NO pending window is an UNCONFIRMED
+            # resolve outcome — a failed no-pending resolve, or a
+            # crash between the resolve IO and its completion-clear.
+            # The default-deny premise (docs/21, RESOLVE BOUND): the
+            # log stays `durability-pending` until a resolve
+            # sequence SUCCEEDS; reporting `ok` off bytes that no
+            # completed resolve ever confirmed contradicted the
+            # binding path's discipline. Cleared by the next
+            # successful resolve (which clears the counter).
             out["decision"] = STATE_PENDING
         if cls["state"] == STATE_OK and cls["masked"] > 0:
             auth = cls["valid_repairs"][0]["authId"] if cls["valid_repairs"] else "?"
