@@ -116,6 +116,27 @@ here pre-empts it.
   CITATIONS ARE HISTORICAL (pinned to 8721f5b per the D4A pin rule);
   this block is the verified mapping to the current tree. Suite at
   this tree: **Ran 93 tests — OK**.
+- EVIDENCE-TREE UPDATE 5 (AUD46 round close, 2026-11-18; re-anchors
+  the tree at the AUD46 round-close commit — superseding Update 4's
+  317ca83 pin, which stays HISTORICAL): the AUD46 round changed
+  resolve/status/clear code (7 code majors folded, F61–F64).
+  CURRENT-TREE MAPPING (measured at the round-close commit, content
+  byte-compared against the Update-4 (317ca83) anchors): S1 classify
+  DEAD/valid route — Update-4 875–908 -> now 961–994 (+85;
+  dead.append anchor 904 -> 989); S2 revive_dead_repair — 1492–1495
+  -> 1609–1612 (+117); S3 status dead_repairs line — 1846 -> 1968
+  (+122). All three cited contents verified byte-identical at the
+  new anchors (window diff against 317ca83). Current tree:
+  `ledger.py` sha1 `9d01df40fd0f312b489542b8c866f463b2532fb9`
+  sha256 `c39ff9c0c76d683abfb3a9f756808eed491b541adef6d29d8fec8714e83ca83d`;
+  `test_ledger.py` sha1 `3b792afc7e141f421ebfb611e6c07c7df1d6ac1f`
+  sha256 `982cb842aa34bd4dd9b307d455815390abb132af63054cb61e849410a72e8b4f`.
+  Behavior changed since Update 4 (all AUD46, none touching a 3A
+  sentence): pre-IO owed witness + charge, closed witness content
+  space, sliced tail-first clear, fail-closed completion order
+  (clear-before-zero), status overlays. No 3A SENTENCE changed
+  behavior: S1–S6 drift stays NONE. Suite at this tree:
+  **Ran 97 tests — OK** (2026-11-18).
 - Command: `cd reference && python3 -W error::ResourceWarning
   -m unittest p9m3.test_ledger`
 - Result: **Ran 92 tests — OK** (2026-11-16). The three pins added

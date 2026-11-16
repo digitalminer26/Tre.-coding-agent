@@ -6744,3 +6744,59 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     injections on the witness paths; F10/prose conformance incl.
     _clear_owed's deliberate no-dir-fsync (never creates); the
     remaining owed-writer/clearer/reader/overlay mutant sweep.
+
+- CYCLE 5 (terra, 2026-11-18; transcript ~/.tre/audits/aud46-c5-out.txt;
+  NOTE: the auditor process deadlocked ~52 min in a multiprocessing
+  fork during its own concurrency probe — owner killed the child PIDs
+  and the main process completed 1 min later; lesson: schedule no
+  threaded/forking probes from a read+bash auditor on this codebase):
+  - AUD46-C5-1 (MAJOR): failed witness-clear fsync served `ok`.
+    Resolve completion wrote `_write_counter(0)` BEFORE
+    `_clear_owed()`; an EIO on the clear's second fsync left the
+    caller with an error while the visible state was ZERO witness +
+    ZERO counter — a fresh instance read counter==0, owed==False and
+    served `ok`/allowed=True although no completed resolve had
+    confirmed the outcome (contradicting the A2 default-deny premise
+    on the completion path itself). Reproduced by the auditor
+    (fsync-EIO injection on the witness fd). FIXED: completion order
+    swapped in BOTH success branches (pending branch + recovery-
+    round branch): `_clear_owed()` FIRST, then `_write_counter(0)`.
+    A failed clear leaves the attempt CHARGED (A2 overlay => PENDING)
+    with the witness still owed (double evidence); the symmetric
+    fault (clear lands, the zero faults) is equally fail-closed —
+    charged counter, cleared witness, PENDING until the next
+    successful resolve. Verified: both fault modes -> counter 1,
+    status durability-pending, promotion_allowed False; next healthy
+    resolve recovers (counter 0, owed False, ok).
+  - PINS: test_F64_clear_fsync_fault_stays_fail_closed — case A
+    (clear raises) asserts charged + owed + PENDING + refuse, then
+    bounded recovery; case B (counter-zero raises after a successful
+    clear) asserts charged + witness cleared + PENDING + refuse.
+    Mutation-verified: reverting the swap in both branches turns F64
+    RED ("a failed clear must leave the attempt charged") and
+    nothing else. Suite 96 -> 97.
+  - Minor (no finding action): a concurrent resolve interleaving was
+    OBSERVED by the auditor (not exhaustively proven — the scheduled
+    threaded-race proof was not completed, see remainders); a
+    promote-callback crash after an allowed resolve is spec-
+    conformant (the decision already landed; the callback is the
+    caller's own effect).
+  - CYCLE INCOMPLETE remainders (accepted as carried-forward, see
+    round close): full state-space enumeration incl. pending-intent
+    R/'-' arms; exhaustive threaded-race proof; the remaining
+    fault-injection matrix (dir-fsync/exists-race on the witness;
+    F10/prose conformance of _clear_owed's deliberate no-dir-fsync);
+    the exhaustive per-mutant sweep of the owed writer/clearer/
+    reader/overlay.
+
+- ROUND CLOSE (AUD46, 2026-11-18): 5 cycles + kickoff pre-fold, 10
+  findings — 7 major CODE (A1, A2, C1-1, C3-1, C3-2, C4-1, C5-1), 1
+  minor DOC (A3), 2 minor TEST-strength (C2-1, C3-3) — all ACCEPTED
+  and FIXED with mutation-pinned tests (F61-F64). Cumulative
+  majors found IN A FIX: 2 (C4-1 in the C3 fix; C5-1 sits in the
+  AUD45-c3-1/A2 completion path — cycles caught what prior rounds'
+  fixes introduced). The CYCLE INCOMPLETE remainders above are
+  carried to the next round as scope, not closed by assertion.
+  Final gate: `cd reference && python3 -W error::ResourceWarning -m
+  unittest p9m3.test_ledger` -> **Ran 97 tests — OK**; tsc clean;
+  evidence tree re-anchored at this commit in 21b UPDATE 5.
