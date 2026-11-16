@@ -6,7 +6,13 @@ attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
 Scope: the ledger contract + fixtures F1-F59 plus the C6_* v42
-round-5 pins (F23-F27 pin the v38 audit fixes; F28-F33 the v38
+round-5 pins. COVERAGE IS BY FIXTURE FAMILY, not one test per
+label (D4A-c5-3 mapping): F14 is pinned inside test_F9_F14
+(combined), F15's behavior is pinned by test_F6 (duplicate spec
+row), and V33 rows F23/F25 share numbers with DIFFERENT v38
+fixtures — the V33 late-AUTH-activation and crash-prefix semantics
+are pinned by test_F23v33_* / test_F25v33_* (added by the
+D4-scopeA cycle-5 fold, mutation-checked). (F23-F27 pin the v38 audit fixes; F28-F33 the v38
 cycle-1/2 pins; F35-F57 the v40-v42 audit pins — mint
 freshness/ULID conformance, cap-refusal preflight, F19 forced-order
 serialization; F58-F59 pin the clamped diagnostic clock label and

@@ -6382,3 +6382,22 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   against the tree: ledger dee009cbcbda / test_ledger b23bfa6feeae
   pre-fold (match cycles 2-3); post-fold values recorded at the
   commit below. Read hashes from the tree, never from a report.
+- CYCLE 5 (FINAL; mission: residual scope — V33 fixture-row coverage
+  completeness: every normative sentence of the rows in scope must be
+  pinned by a test that REVERTS-TO-RED on its rule): 2 findings, both
+  ACCEPTED after independent verification —
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | D4A-c5-1 | MAJOR | TEST | V33 row F23's late-AUTH arms (DEAD unknown-authId REPAIR reclassified VALID by a genuine later AUTH with occurrences=M, second REPAIR refused SPENT; occurrences≠M stays DEAD forever) were NOT pinned anywhere: the v38 test_F23 pins a DIFFERENT fixture reusing the number (intent-journal) and only the F24gen growth arm touched late validation. The row's behavior was verified empirically correct (A1-A4 arms: dead→valid activation, spent-refusal, mask-mismatch stays dead) but unpinned = unprotected | Two NEW tests added: test_F23v33_late_genuine_AUTH_activates_dead_repair + test_F23v33_late_AUTH_occurrence_mismatch_stays_dead (AUTH seeded RAW with the strict schema {t,authId,occurrences,createdAt} — the live authorize() would refuse the authId as already-used, so the injection-only setup matches the row's own v39 R2-M1 note). Mutation-checked: removing late validation ⇒ both new pins red; removing the mask-equality check ⇒ ONLY the mismatch pin red. Docs row annotated with the pin lineage. |
+  | D4A-c5-2 | MAJOR | TEST | V33 row F25's CRASH-PREFIX ENUMERATION sentence ("fixtures drive (a), (b), (c) separately", v39 R2-M4) was unpinned: the v38 test_F25 pins post-write verify staleness (different fixture, reused number) | New test test_F25v33_crash_prefix_enumeration_three_arms drives all four prefixes — zero / "\n" / " \n " whitespace-only ⇒ decision OK (whitespace ignored, NOT unsettled) — and nonblank "\n{X" ⇒ unsettled-tail. Mutation-checked: treating ANY tail as unsettled ⇒ exactly this pin red. Docs row annotated with lineage. |
+  | D4A-c5-3 | minor | DOC | both module headers claimed per-label fixture coverage (F1-F59 "pins") while F14 is pinned inside test_F9_F14, F15's row is a duplicate pinned by test_F6, and V33 F23/F25 share numbers with different v38 fixtures — the mapping claim was misleading | Both headers now state coverage is BY FIXTURE FAMILY with the explicit exceptions and the test_F23v33_*/test_F25v33_* lineage (the c5-1/c5-2 fold) |
+  Round totals: 5 cycles, 8 findings filed (1 SPEC pooled:
+  D4A-c4-1; 4 TEST major incl. c5-1/c5-2; 3 DOC), 0 CODE. Every TEST
+  finding here carried mutation-verified pins. Suite post-fold:
+  92 OK (python3 -W error::ResourceWarning -m unittest
+  p9m3.test_ledger, reference/). Post-fold hashes (read from the
+  tree, per the cycle-4 note): ledger.py 3a9307a7b1fc…,
+  test_ledger.py 656e77d3599f…, docs/21 4847b3205b63… (pre-commit;
+  the commit id supersedes). The D4A-c4-1 SPEC owner batch decision
+  (rotation workstream?) remains POOLED and OPEN; the round is CLOSED
+  at its 5-cycle cap.

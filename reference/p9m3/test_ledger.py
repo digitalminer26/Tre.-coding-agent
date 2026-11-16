@@ -1,5 +1,11 @@
 """Fixture suite F1-F59 (+ the C6_* v38-cycle-6 audit pins) for the
-P9/M3 reference implementation
+P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
+test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
+by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
+different v38 fixtures; the V33 activation/prefix semantics are
+pinned by test_F23v33_*/test_F25v33_* (D4-scopeA cycle-5 fold,
+mutation-checked) (mapping detail in the ledger module header,
+D4A-c5-3)
 (spec docs/21-p9-m3-promotion-rollback-fleet-budget.md DRAFT v42,
 V33 FIXTURE TABLE with v36/v37 additions + v38 audit fixtures F23-F27,
 v38 cycle-1/cycle-2 pins F28-F33, the v40-v42 audit pins F35-F57
@@ -923,6 +929,91 @@ class TestFixtures(Base):
         self.assertEqual(cls["state"], STATE_UNMASKED)
         self.assertFalse(successor.durability_pending())
 
+
+    # ---------------------- F23/V33 (D4A-c5-1): late-AUTH activation --
+    def test_F23v33_late_genuine_AUTH_activates_dead_repair(self):
+        """V33 fixture row F23 (docs/21): a DEAD REPAIR (unknown-authId)
+        classifies VALID on the re-read once a GENUINE AUTH with the
+        exact mask list appears; a second REPAIR under that AUTH is
+        refused SPENT. SETUP IS INJECTED/CORRUPTION-ONLY per the row
+        (a conforming producer refuses a REPAIR with no matching AUTH;
+        the AUTH line is seeded raw — the live authorize() would refuse
+        the authId as already-used by the injected REPAIR). Added by
+        the D4-scopeA cycle-5 fold: the v38 test_F23 pins a different
+        (intent-journal) fixture; the V33 row's activation arm was
+        otherwise pinned only by the F24gen growth arm."""
+        bad = CORRUPT + b"-f23late"
+        self.seed(bad + b"\n")
+        led = self.mk()
+        gen = led.confirmation_gen()
+        o = self.occ(0, bad)
+        self.seed(self.Led_frame(json.dumps(
+            {"t": "REPAIR", "authId": "A9", "masks": [o],
+             "all": {"hostToken": "ALL", "watermark": 0,
+                     "confirmGen": gen}})))
+        c = led.classify()
+        self.assertEqual([x["reason"] for x in c["dead_repairs"]],
+                         ["unknown-authId"])          # DEAD pre-AUTH
+        self.assertEqual(c["state"], STATE_UNMASKED)
+        # the genuine AUTH arrives LATER (raw seed: injection-only row)
+        self.seed(b'{"t":"AUTH","authId":"A9","occurrences":'
+                  + json.dumps([o]).encode()
+                  + b',"createdAt":1.0}\n', path="authorizations.jsonl")
+        c = led.classify()
+        self.assertEqual(c["dead_repairs"], [])        # VALID on re-read
+        self.assertEqual(c["state"], STATE_OK)
+        self.assertIn("A9", c["spent"])
+        with self.assertRaises(LedgerError) as cm:
+            self.mk().repair("A9")                     # second REPAIR
+        self.assertEqual(cm.exception.code, "authorization-spent")
+
+    def test_F23v33_late_AUTH_occurrence_mismatch_stays_dead(self):
+        """V33 F23's second arm: if the later AUTH carries
+        occurrences != M, the REPAIR stays DEAD forever (F21 rule)."""
+        b1, b2 = CORRUPT + b"-f23m1", CORRUPT + b"-f23m2"
+        self.seed(b1 + b"\n" + b2 + b"\n")
+        led = self.mk()
+        gen = led.confirmation_gen()
+        self.seed(self.Led_frame(json.dumps(
+            {"t": "REPAIR", "authId": "A8", "masks": [self.occ(0, b1)],
+             "all": {"hostToken": "ALL", "watermark": 0,
+                     "confirmGen": gen}})))
+        # AUTH over BOTH occurrences while the REPAIR masks only the first
+        self.seed(b'{"t":"AUTH","authId":"A8","occurrences":'
+                  + json.dumps([self.occ(0, b1),
+                                self.occ(len(b1) + 1, b2)]).encode()
+                  + b',"createdAt":1.0}\n', path="authorizations.jsonl")
+        c = led.classify()
+        self.assertEqual([x["reason"] for x in c["dead_repairs"]],
+                         ["mask-mismatch"])            # stays DEAD
+        self.assertEqual(c["state"], STATE_UNMASKED)
+        self.assertNotIn("A8", c["spent"])
+
+    # ------------------ F25/V33 (D4A-c5-2): crash-prefix arms --------
+    def test_F25v33_crash_prefix_enumeration_three_arms(self):
+        """V33 fixture row F25 CRASH-PREFIX ENUMERATION (v39 R2-M4):
+        a crash between loop syscalls leaves three disk prefixes with
+        THREE distinct read outcomes, driven SEPARATELY here:
+        (a) ZERO bytes => no trace at all (read == no append);
+        (b) whitespace-only prefix (bare \n and ' \n ') => trailing
+            whitespace is ignored => indistinguishable from (a), NOT
+            unsettled-tail;
+        (c) a NONBLANK unterminated prefix => unsettled-tail + the
+            settlement route.
+        The v38 test_F25 pins post-write verify staleness (a different
+        fixture reusing the number); this row's arms were not driven."""
+        frame_ok = b"\n" + json.dumps(
+            {"t": "WATERMARK", "hostToken": "H0", "watermark": 1,
+             "confirmGen": "G0"}).encode() + b"\n"
+        for label, tail in [("(a)", b""), ("(b1)", b"\n"),
+                            ("(b2)", b"\n  \n "), ("(c)", b"\n{X")]:
+            with self.subTest(label):
+                self.seed(frame_ok + tail)
+                st = self.mk().status()
+                if tail == b"\n{X":
+                    self.assertEqual(st["decision"], STATE_UNSETTLED)
+                else:
+                    self.assertEqual(st["decision"], STATE_OK)
     # ---------------------------------------------------------------- F21
     def test_F21_dead_repair_inert_promotion_refused_fresh_pair(self):
         bad = CORRUPT + b"-f21"
