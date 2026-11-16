@@ -1378,6 +1378,28 @@ class Ledger:
                 pass                    # charged-counter overlay holds
             raise
 
+    def _arm_owed(self, n):
+        """AUD47-c3 (audit cycle 3, major): the owed witness is the
+        FIRST evidence an attempt exists — but if its OPEN faults the
+        attempt would start with NO durable evidence at all: a fresh
+        instance (counter 0, no witness) reads `ok` for a resolve the
+        caller saw fail. NOW the counter charge is the FALLBACK
+        evidence: witness first (AUD46-c1), and on witness-open fault
+        a best-effort charge (n+1) lands before the error propagates —
+        counter > 0 renders the fresh view PENDING. If even the
+        fallback faults the original error still propagates: an
+        attempt that starts on a device rejecting EVERY evidence
+        write is a broader IO failure than this protocol can record,
+        and the caller receives the error either way."""
+        try:
+            self._write_owed()
+        except OSError:
+            try:
+                self._write_counter(n, exhausted=False)
+            except OSError:
+                pass                    # no evidence write possible
+            raise
+
     def _resolve_locked(self):
         """RESOLVE SEQUENCE under the held lock (C2 cycle-2 fixes 1+4).
         v38 cycle-2 fix 1: the sequence (fsync file, fsync parent dir,
@@ -1436,7 +1458,10 @@ class Ledger:
             # completion-clear leaves the evidence, and
             # `operator_resolve_reset()` cannot erase it (only a
             # successful resolve clears it).
-            self._write_owed()
+            # AUD47-c3 (audit cycle 3, major): a witness-OPEN fault
+            # must not start the attempt evidence-free — `_arm_owed`
+            # falls back to the counter charge before re-raising.
+            self._arm_owed(n + 1)
             self._write_counter(n + 1, exhausted=False)
             try:
                 data = self._resolve_io()
@@ -1470,7 +1495,11 @@ class Ledger:
             self._write_counter(n, exhausted=True)
             raise LedgerError(STATE_EXHAUSTED)
         n += 1
-        self._write_owed()              # AUD46-c1: witness before charge+IO
+        # AUD46-c1: witness before charge+IO; AUD47-c3 (cycle 3,
+        # major): the charge is the evidence-fallback if the witness
+        # open faults (the pending branch keeps its pending marker
+        # regardless, but the counter must not stay at 0 either).
+        self._arm_owed(n)
         self._write_counter(n, exhausted=False)
         try:
             data = self._resolve_io()

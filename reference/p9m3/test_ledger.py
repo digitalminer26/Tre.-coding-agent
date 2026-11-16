@@ -3363,5 +3363,62 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(led3._read_counter(), 0)
         self.assertFalse(led3._attempts_exhausted())
 
+    def test_F68_owed_open_fault_charges_before_attempt(self):
+        """AUD47-c3 (audit cycle 3, major): the owed witness is the
+        first evidence an attempt exists — if its OPEN faults, the
+        attempt began with NO evidence at all (counter 0, no
+        witness), so a fresh instance served `ok` for a resolve whose
+        caller got the error. NOW `_arm_owed` falls back to the
+        counter charge before re-raising: the fresh view is fail-
+        closed whatever the witness file shows."""
+        led = self.mk(repair_attempt_cap=3)
+        real_open = os.open
+
+        def fail_owed_open(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-open fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()           # no-pending branch
+        finally:
+            os.open = real_open
+        fresh = self.mk(repair_attempt_cap=3)
+        self.assertEqual(fresh._read_counter(), 1,
+                         "the fallback charge landed: the attempt is "
+                         "evidenced even though the witness never opened")
+        self.assertNotEqual(fresh.status()["decision"], STATE_OK)
+        self.assertFalse(fresh.promotion_allowed())
+        # the STALE bytes never serve ok; a fresh SUCCESSFUL resolve
+        # is the resolution (designed self-heal — only real confirm
+        # IO may cure the evidence)
+        res = fresh.promote(lambda: {"ran": True})
+        self.assertTrue(res.get("ran"))
+        healed_now = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed_now._read_counter(), 0)
+        self.assertEqual(healed_now.status()["decision"], STATE_OK)
+
+        # pending branch: same fault, fresh view still fail-closed
+        led2 = self.mk(repair_attempt_cap=3)
+        led2._write_pending(0, True)
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led2.resolve()
+        finally:
+            os.open = real_open
+        fresh2 = self.mk(repair_attempt_cap=3)
+        self.assertEqual(fresh2._read_counter(), 1)
+        self.assertEqual(fresh2.status()["decision"], STATE_PENDING)
+        self.assertFalse(fresh2.promotion_allowed())
+        # healthy re-arm: a clean resolve heals both evidences
+        self.assertEqual(led2.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+
 if __name__ == "__main__":
     unittest.main()
