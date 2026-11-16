@@ -6800,3 +6800,42 @@ cycles over-shifted to doc hygiene and missed a live-code property.
   Final gate: `cd reference && python3 -W error::ResourceWarning -m
   unittest p9m3.test_ledger` -> **Ran 97 tests — OK**; tsc clean;
   evidence tree re-anchored at this commit in 21b UPDATE 5.
+
+## AUDIT ROUND AUD48 (2026-11-18, terra, 5 cycles — OPEN)
+
+- SCOPE: the P9-M3 reference as it stands at 11c8176 — the resolve/
+  completion/evidence machinery incl. the two AUD48-prep fixes
+  (below). Carried-forward AUD46 remainders stay in scope: full
+  state-space enumeration (pending-intent R/'-' arms), exhaustive
+  threaded-race proof, the remaining fault-injection matrix
+  (dir-fsync/exists-race on the witness), per-mutant sweep of the
+  owed writer/clearer/reader/overlay. AUD47 cycle entries live in
+  git (f3fb983..a69c6cb); the two open findings are folded here.
+
+- AUD48 PREP (owner, 2026-11-18; the two AUD47-c5 open findings,
+  commit 11c8176):
+  - PREP-1 (MAJOR, inherited): the AUD47-c1 completion (clear-first,
+    re-arm-on-failure) exposed `ok` under a COMBINED fault — a
+    corrupt-witness clear failure re-armed by rewriting OWED ERASED
+    the failed-clear evidence, and the following counter-zero fault
+    left counter=0 + readable-cleared witness: fresh instance served
+    ok for a resolve whose caller got OSError. FIXED: completion is
+    ZERO-FIRST (pre-attempt charge is the durable cover), witness
+    clears LAST, every compensation pins the honest charge n (the
+    pre-attempt write already counted this attempt — the first fix
+    draft pinned n+1 and the F64-A pin caught the double-charge;
+    lesson: compensation writes must respect the charge ALREADY
+    made). Pins F73 (combined corrupt-clear + zero-fault survivor +
+    heal).
+  - PREP-2 (MAJOR, inherited): operator_resolve_reset zeroed the
+    counter unconditionally. When the counter charge is the SOLE
+    durable evidence (F68 fallback: witness-open fault left
+    counter=1, no witness), the reset erased the only proof of an
+    unconfirmed attempt — fresh instance read (0, no witness) = ok.
+    FIXED: reset REFUSES (`reset-sole-evidence-refused`) when the
+    counter PARSES positive and the witness reads cleared — corrupt/
+    unparseable counter records still reset (grammar-heal path,
+    F67), sticky-exhaustion and witness-present resets untouched.
+    Pin F72.
+  - Gate: `cd reference && python3 -m unittest p9m3.test_ledger` ->
+    Ran 106 tests OK.
