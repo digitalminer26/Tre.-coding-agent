@@ -4225,5 +4225,234 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(self.mk(repair_attempt_cap=3)._read_counter(), 0)
 
 
+    # ---- AUD49 implement0: declared repair-path seams (F80+) ----
+
+    def test_F80_repair_path_seams_are_declared(self):
+        """AUD49 implement0 (residual unification): the clear path
+        (`_clear_owed`: both segments, the raising fsync, the repair
+        seed, the repair fill) consumed no declared FsFaults seams —
+        the fault matrix reached those legs only by monkeypatching
+        os.pwrite/os.fsync with inode discrimination. NOW every leg
+        is a DECLARED constructor seam (bool OR callable predicate —
+        the `size_override` precedent) and constructor-pinned here:
+        an un-declared seam is not a seam (F69 discipline)."""
+        import inspect
+        sig = inspect.signature(FsFaults.__init__)
+        for name in ("clear_write_fault", "clear_partial_write",
+                     "clear_fsync_fault", "repair_seed_fault",
+                     "repair_fill_fault"):
+            self.assertIn(name, sig.parameters,
+                          "declared repair-path seam missing: %s" % name)
+        f = FsFaults(clear_write_fault=True)
+        for name in ("clear_write_fault", "clear_partial_write",
+                     "clear_fsync_fault", "repair_seed_fault",
+                     "repair_fill_fault"):
+            self.assertTrue(hasattr(f, name),
+                            "seam attribute missing: %s" % name)
+        # callable predicates share the one consumption contract
+        from p9m3.ledger import _fault_active
+        self.assertTrue(_fault_active(True))
+        self.assertFalse(_fault_active(False))
+        self.assertTrue(_fault_active(lambda: True))
+        self.assertTrue(_fault_active(lambda p: p.endswith("resolve-owed"),
+                                      "/some/dir/resolve-owed"))
+        self.assertFalse(_fault_active(lambda p: p.endswith("nope"),
+                                       "/some/dir/resolve-owed"))
+
+    def test_F81_clear_seam_faults_leave_owed_and_heal(self):
+        """AUD49 implement0: the clear SEGMENT seams with ZERO OS
+        patching. (a) `clear_write_fault` raises mid-clear — the
+        survivor still reads OWED, and an un-faulted clear heals.
+        (b) `clear_partial_write=3` — the checked continuation loop
+        must still land all 16 zeros: the record clears COMPLETELY,
+        never a torn/extended width (AUD46-c4 sliced-retry)."""
+        # (a) raising first segment: clear fails, owed survives
+        f = FsFaults(clear_write_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        self.assertTrue(led._owed_attempt())
+        with self.assertRaises(OSError):
+            led._clear_owed()
+        self.assertTrue(led._owed_attempt(),
+                        "a faulted clear segment leaves the witness "
+                        "reading OWED (fail closed)")
+        # heal: fresh instance (no faults), the real clear works
+        led2 = self.mk(repair_attempt_cap=3)
+        led2._write_owed()
+        self.assertTrue(led2._owed_attempt())
+        led2._clear_owed()
+        self.assertFalse(led2._owed_attempt())
+
+        # (b) partial first segment: continuation completes the clear
+        f = FsFaults(clear_partial_write=3)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        led._clear_owed()
+        with open(os.path.join(self.dir, "resolve-owed"), "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(raw, b"\0" * 16,
+                         "a 3-byte short first segment must be carried "
+                         "by the continuation loop to a full 16-zero "
+                         "clear")
+        self.assertFalse(led._owed_attempt())
+
+        # (c) DISCRIMINATOR for the seam being ALIVE: partial=0
+        # truncates the segment to an EMPTY pwrite — only a seam that
+        # really fired hits the zero-progress guard. A dead seam
+        # would clear normally and this raise fails: the (b) final
+        # state alone cannot tell "short write + continuation" from
+        # "seam never consumed" (mutation discipline).
+        f = FsFaults(clear_partial_write=0)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        with self.assertRaises(OSError):
+            led._clear_owed()
+        self.assertTrue(led._owed_attempt(),
+                        "the empty-segment guard fired BEFORE any real "
+                        "zero landed: the witness still reads OWED")
+
+    def test_F82_seam_driven_clear_fsync_storm_no_ok(self):
+        """AUD49 implement0 (F76's scenario, ZERO OS patching): the
+        combined storm — the clear's fsync RAISES (in-fd repair runs),
+        every re-arm OPEN of the witness is DENIED via the declared
+        `sidecar_open_fault` predicate (counted: the arm-write and
+        the clear's own head-check pass, the compensation re-arm
+        after is denied), the counter PIN faults via the
+        `sidecar_write_fault` predicate armed only AFTER the zero
+        landed — resolve raises; the survivor reads counter 0 + an
+        OWED witness (the seed repaired it on the already-open fd);
+        no ok, no promotion; a healthy resolve heals. The SAME
+        verdict F76 pins by monkeypatching os.fsync/os.open/os.pwrite
+        — production seams must reach it constructor-only."""
+        owed_path = os.path.join(self.dir, "resolve-owed")
+        opens = {"owed": 0}
+        state = {"zeroed": False, "pin_fired": False}
+
+        def deny_rearm_open(p):
+            # counted predicate: open #1 = the arm-write's witness
+            # create, #2 = the clear's own head; EVERY later open of
+            # the witness (the compensation re-arm) is denied.
+            # Disarms once the pin faulted — i.e. after the storm —
+            # so the heal phase below runs clean.
+            if state["pin_fired"]:
+                return False
+            if isinstance(p, str) and p == owed_path:
+                opens["owed"] += 1
+                return opens["owed"] > 2
+            return False
+
+        def pin_fault_once(p):
+            if (isinstance(p, str) and p.endswith("resolve-attempts")
+                    and state["zeroed"] and not state["pin_fired"]):
+                state["pin_fired"] = True
+                return True
+            return False
+
+        f = FsFaults(clear_fsync_fault=lambda: not state["pin_fired"],
+                     sidecar_open_fault=deny_rearm_open,
+                     sidecar_write_fault=pin_fault_once)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        # arm the pin the moment the completion's counter ZERO lands
+        # (the first "0 -" sidecar write, before the clear starts).
+        real_sidecar = led._sidecar_write
+
+        def arming_sidecar(path, payload):
+            result = real_sidecar(path, payload)
+            if path.endswith("resolve-attempts") \
+                    and payload.startswith(b"0 "):
+                state["zeroed"] = True
+            return result
+
+        led._sidecar_write = arming_sidecar
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()
+        finally:
+            del led._sidecar_write
+        self.assertTrue(state["zeroed"] and state["pin_fired"],
+                        "precondition: the zero landed and the counter "
+                        "pin faulted (F76's combined state, seams only)")
+        self.assertGreater(opens["owed"], 2,
+                           "precondition: a re-arm open WAS attempted "
+                           "and denied (the predicate really fired)")
+        survivor = self.mk(repair_attempt_cap=3)
+        self.assertEqual(survivor._read_counter(), 0,
+                         "the zero landed and the pin faulted")
+        self.assertTrue(survivor._owed_attempt(),
+                        "the in-fd repair (seed on the already-open fd) "
+                        "keeps the witness owed with every re-arm open "
+                        "denied — via DECLARED seams only")
+        self.assertNotEqual(survivor.status()["decision"], STATE_OK,
+                            "no ok for a resolve whose caller errored")
+        self.assertFalse(survivor.promotion_allowed())
+        # healthy heal
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+
+    def test_F83_repair_seed_and_fill_seams_exact_states(self):
+        """AUD49 implement0 (F77's evidence-placement discipline, ZERO
+        OS patching): the repair legs addressed separately.
+        (a) `repair_fill_fault` only — the seed lands, the fill
+        raises: the survivor is a 16-byte record reading owed with
+        offset 0 == b'O' and bytes 1..15 == 0 (the exact seed-only
+        row).
+        (b) BOTH repair legs faulted (`repair_seed_fault` AND
+        `repair_fill_fault`) — the documented all-in-fd-writes-fault
+        boundary: the row is left zeros and the CALLER's
+        compensating re-arm (a normal `_sidecar_write`) is the
+        protocol's remaining cover; with it, the fresh view is owed,
+        no ok, no promotion."""
+        owed_path = os.path.join(self.dir, "resolve-owed")
+
+        # (a) seed lands, fill faults: exact seed-only state
+        f = FsFaults(clear_fsync_fault=True, repair_fill_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        with self.assertRaises(OSError):
+            led._clear_owed()          # the raising variant
+        with open(owed_path, "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(len(raw), 16, "fixed width kept")
+        self.assertEqual(raw[0:1], b"O",
+                         "the seed landed at offset 0 despite the "
+                         "declared fill fault")
+        self.assertEqual(raw[1:16], b"\0" * 15,
+                         "the fill never ran (exact seed-only row)")
+        self.assertTrue(led._owed_attempt())
+        # best-effort means a later fault-free clear still works
+        led2 = self.mk(repair_attempt_cap=3)
+        led2._write_owed()
+        led2._clear_owed()
+        self.assertFalse(led2._owed_attempt())
+
+        # (b) both repair legs faulted: boundary row = zeros; the
+        # caller's re-arm is the remaining cover and restores owed.
+        f = FsFaults(clear_fsync_fault=True, repair_seed_fault=True,
+                     repair_fill_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        with self.assertRaises(OSError):
+            led._clear_owed()
+        with open(owed_path, "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(raw, b"\0" * 16,
+                         "boundary state: with BOTH repair legs faulted "
+                         "no in-fd evidence can land — the row is zeros "
+                         "and the caller's compensating re-arm is the "
+                         "protocol's remaining cover")
+        led._write_owed()              # the caller's cover fires
+        self.assertTrue(led._owed_attempt())
+        survivor = self.mk(repair_attempt_cap=3)
+        self.assertTrue(survivor._owed_attempt())
+        self.assertNotEqual(survivor.status()["decision"], STATE_OK)
+
+
 if __name__ == "__main__":
     unittest.main()

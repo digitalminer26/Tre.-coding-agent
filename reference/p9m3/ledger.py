@@ -115,6 +115,7 @@ AUTH_FILE_MALFORMED = "authorization-file-malformed"
 # (digits, single space, flag -|X); everything else on an EXISTING file
 # is corrupt => exhausted. Compiled once at module level.
 import re as _re
+import inspect as _inspect
 _COUNTER_RE = _re.compile(rb"(?:\d{1,10}) ([-X])")
 # v38 cycle-3 fix 4 (AUD C3-4, spec draft AUTH READER BOUNDS): total
 # valid-AUTH inventory bound — the 1025th valid line fails the file
@@ -143,6 +144,37 @@ class LedgerError(Exception):
 class _IOError0(OSError):
     def __init__(self, msg):
         super().__init__(errno.EIO, msg)
+
+
+def _fault_active(value, path=None):
+    """AUD49 implement0: a fault-seam value is ACTIVE when it is
+    truthy, or — when callable (precedent: the callable
+    `size_override` seam on the append path) — when it returns True.
+    A callable is tried one-arg (the affected path) first, falling
+    back to no-arg; the CALL itself is never fault-swallowed — a
+    predicate that raises is the fixture's own bug and must surface.
+    Every clear/repair seam consumption goes through here so bool and
+    predicate fixtures share ONE consumption contract."""
+    if not value:
+        return False
+    if callable(value):
+        # arity by signature (NOT try/except TypeError: a TypeError
+        # raised INSIDE a 1-arg predicate is that fixture's bug and
+        # must surface, not be retried zero-arg)
+        try:
+            params = _inspect.signature(value).parameters
+        except (TypeError, ValueError):   # builtins etc.: 1-arg default
+            return bool(value(path))
+        required = [p for p in params.values()
+                    if p.default is p.empty
+                    and p.kind in (p.POSITIONAL_ONLY,
+                                   p.POSITIONAL_OR_KEYWORD)]
+        if len(required) >= 1:
+            return bool(value(path))
+        if any(p.kind is p.VAR_POSITIONAL for p in params.values()):
+            return bool(value(path))
+        return bool(value())
+    return True
 
 
 class Ledger:
@@ -488,9 +520,26 @@ class Ledger:
         FIRST — a crash mid-clear leaves the nonzero OWED head, which
         reads owed, instead of a zeroed head whose surviving tail
         bytes a head-first writer can no longer distinguish from a
-        completed clear."""
+        completed clear.
+        AUD49 implement0 (residual unification): the clear path
+        consumed NO declared FsFaults seams — the fault matrix
+        reached these legs only by monkeypatching os.pwrite/os.fsync
+        with inode discrimination. NOW each leg is a DECLARED seam:
+        `clear_write_fault` (segment pwrite raises EIO),
+        `clear_partial_write=N` (first segment short — the checked
+        continuation must still land all 16 zeros),
+        `clear_fsync_fault` (the completion fsync RAISES — the
+        in-fd repair below), `repair_seed_fault` / `repair_fill_fault`
+        (the two repair legs). Each accepts True or a callable
+        predicate on the sidecar path. The ordering semantics are
+        untouched: tail-first, seed-before-fill, and a faulting seed
+        is followed by the fill attempt exactly as a real seed EIO
+        is (independent legs — the boundary needs BOTH repair legs
+        faulted)."""
         if os.path.exists(self._owed_side):
-            if getattr(self.faults, "sidecar_open_fault", False):
+            faults = self.faults
+            if _fault_active(getattr(faults, "sidecar_open_fault", False),
+                             self._owed_side):
                 raise OSError(errno.EACCES, "injected sidecar open fault")
             fd = os.open(self._owed_side, os.O_RDWR | os.O_NOFOLLOW)
             try:
@@ -504,7 +553,18 @@ class Ledger:
                 for start, end in ((4, 16), (0, 4)):   # tail first
                     off = start
                     while off < end:
-                        n = os.pwrite(fd, buf[off:end], off)
+                        if _fault_active(
+                                getattr(faults, "clear_write_fault", False),
+                                self._owed_side):
+                            raise OSError(errno.EIO,
+                                          "injected clear write fault")
+                        partial = getattr(faults, "clear_partial_write",
+                                          None)
+                        if partial is not None:
+                            n = os.pwrite(fd,
+                                          buf[off:end][:int(partial)], off)
+                        else:
+                            n = os.pwrite(fd, buf[off:end], off)
                         if n <= 0:
                             raise OSError(errno.EIO,
                                           "owed clear: zero progress")
@@ -518,6 +578,11 @@ class Ledger:
                 # leaves the record over-long = fail closed (unchanged).
                 self._sidecar_fix_width(fd, 16)
                 try:
+                    if _fault_active(
+                            getattr(faults, "clear_fsync_fault", False),
+                            self._owed_side):
+                        raise OSError(errno.EIO,
+                                      "injected clear fsync fault")
                     os.fsync(fd)
                 except OSError:
                     # AUD48-c1 (audit cycle 1, major 2): the zeroed
@@ -543,11 +608,21 @@ class Ledger:
                     # broader IO failure than this protocol can
                     # record), nothing subtler.
                     try:
+                        if _fault_active(
+                                getattr(faults, "repair_seed_fault", False),
+                                self._owed_side):
+                            raise OSError(errno.EIO,
+                                          "injected repair seed fault")
                         os.pwrite(fd, b"O", 0)
                     except OSError:
                         pass        # boundary: no evidence write
                                     # possible on this fd; propagate
                     try:
+                        if _fault_active(
+                                getattr(faults, "repair_fill_fault", False),
+                                self._owed_side):
+                            raise OSError(errno.EIO,
+                                          "injected repair fill fault")
                         owed = b"OWED".ljust(16, b"\0")
                         off = 0
                         while off < len(owed):
@@ -621,13 +696,14 @@ class Ledger:
           page-visible only; no error to the caller),
         - `sidecar_dir_fsync_fault`: same for the creation dir fsync."""
         faults = self.faults
-        if getattr(faults, "sidecar_open_fault", False):
+        if _fault_active(getattr(faults, "sidecar_open_fault", False), path):
             raise OSError(errno.EACCES, "injected sidecar open fault")
         existed = os.path.exists(path)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             partial = getattr(faults, "sidecar_partial_write", None)
-            wfault = bool(getattr(faults, "sidecar_write_fault", False))
+            wfault = _fault_active(
+                getattr(faults, "sidecar_write_fault", False), path)
             off = 0
             while off < len(payload):
                 if wfault:

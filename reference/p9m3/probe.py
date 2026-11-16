@@ -52,7 +52,10 @@ class FsFaults:
                  dir_preplaced_unsafe=False,
                  resolve_io_fault=False, sidecar_open_fault=False,
                  sidecar_write_fault=False, sidecar_partial_write=None,
-                 sidecar_fsync_fault=False, sidecar_dir_fsync_fault=False):
+                 sidecar_fsync_fault=False, sidecar_dir_fsync_fault=False,
+                 clear_write_fault=False, clear_partial_write=None,
+                 clear_fsync_fault=False, repair_seed_fault=False,
+                 repair_fill_fault=False):
         self.flock_fails = flock_fails
         self.fsync_visibility_fails = fsync_visibility_fails
         self.silly_rename_leaves_second_name = silly_rename_leaves_second_name
@@ -74,6 +77,36 @@ class FsFaults:
         self.sidecar_partial_write = sidecar_partial_write
         self.sidecar_fsync_fault = sidecar_fsync_fault
         self.sidecar_dir_fsync_fault = sidecar_dir_fsync_fault
+        # AUD49 implement0: DECLARED seams for the owed CLEAR path
+        # (`_clear_owed`) and its in-fd repair legs — until now these
+        # were the only production writes with NO seam (the fault
+        # matrix reached them solely through test-side os.pwrite/
+        # os.fsync monkeypatching; an un-seamed path is not addressed
+        # by the matrix). Every value may be True (unconditional) or
+        # a CALLABLE predicate (no-arg or single-arg path) so a
+        # fixture targets one leg without patching any OS call —
+        # same shape as the existing callable `size_override` seam.
+        # - `clear_write_fault`: the clear's first segment pwrite raises
+        #   (the compensation re-arm then re-arms a surviving owed
+        #   witness).
+        # - `clear_partial_write=N`: the clear's first segment writes
+        #   only N bytes (the checked loop must continue at the right
+        #   offset; mid-crash reads still read owed).
+        # - `clear_fsync_fault`: the clear's fsync RAISES — the RAISING
+        #   variant that triggers the in-fd repair leg. Distinct from
+        #   `sidecar_fsync_fault`, which is SILENTLY DROPPED in
+        #   `_sidecar_write` (a lying mount): here the error is real
+        #   and the repair path runs.
+        # - `repair_seed_fault`: the repair's minimum-evidence seed
+        #   (1 byte at offset 0) raises — the documented
+        #   all-writes-fault boundary.
+        # - `repair_fill_fault`: the seed landed, the full-payload
+        #   fill raises (best-effort leg; evidence still owed).
+        self.clear_write_fault = clear_write_fault
+        self.clear_partial_write = clear_partial_write
+        self.clear_fsync_fault = clear_fsync_fault
+        self.repair_seed_fault = repair_seed_fault
+        self.repair_fill_fault = repair_fill_fault
 
 
 # statfs f_type magics (Linux); f_fstypename is used where the platform
