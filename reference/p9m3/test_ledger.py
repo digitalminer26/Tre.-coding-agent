@@ -2995,6 +2995,24 @@ class TestV38Cycle6Audit(Base):
             raise KeyboardInterrupt()          # models a crash mid-IO
         led = self.mk(repair_attempt_cap=3)
         led._resolve_io = interrupted
+        # AUD46-C2-1 (audit cycle 1 fold, test-strength): the ORDER
+        # witness-before-charge is pinned directly — on the real code
+        # the witness is already OWED when the charge write executes
+        # (both branches). A mutant that swaps the two observes
+        # owed=False at charge time AND re-creates the C1-1 loss when
+        # crashed between the charge and a late witness write + reset.
+        seen = []
+        real_counter = led._write_counter
+        def spy_counter(n, exhausted=None):
+            seen.append((n, led._owed_attempt()))
+            return real_counter(n, exhausted)
+        led._write_counter = spy_counter
+        with self.assertRaises(KeyboardInterrupt):
+            led.resolve()
+        self.assertTrue(seen and all(owed for _n, owed in seen),
+                        "every charge must land with the witness set: %r"
+                        % (seen,))
+        led._write_counter = real_counter
         with self.assertRaises(KeyboardInterrupt):
             led.resolve()
         self.assertTrue(led._owed_attempt())   # witness landed pre-IO

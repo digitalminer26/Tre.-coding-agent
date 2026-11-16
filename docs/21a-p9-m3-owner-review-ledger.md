@@ -6660,3 +6660,26 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     self-heals (returns payload, clears witness and counter, status
     ok); cleared witness file reads as never-created. Suite 94 -> 95,
     all OK.
+
+- CYCLE 2 (terra, 2026-11-18; transcript ~/.tre/audits/aud46-c2-out.txt):
+  - AUD46-C2-1 (minor TEST, strength): F62 did not pin the OWED-
+    BEFORE-CHARGE ORDERING — the auditor's mutant moved
+    `_write_owed()` after `_write_counter()` in both branches and the
+    full suite still passed; crashing at the (now-late) witness write
+    then operator-resetting re-creates the exact C1-1 loss
+    (owner re-ran the reproduction on the mutant: counter=1 owed=False
+    -> reset -> counter=0 owed=False -> status ok, allowed True).
+    FIXED IN TESTS: F62 now spies `_write_counter` and asserts the
+    witness is ALREADY OWED at every charge write (both branches;
+    `seen=[(n, owed)]` all-owed), then proceeds with the original
+    C1-1 scenario. Verified: real suite 95 OK; the swapped-order
+    mutant turns F62 RED ("every charge must land with the witness
+    set: [(1, False)]"). No CODE change required (current code has
+    the ordering right — the finding is pin strength).
+  - CYCLE INCOMPLETE remainders (auditor's own list, carried forward
+    to cycles 3+): full (pending,counter,owed,exhausted) state-space
+    enumeration; torn/empty/hostile-0-byte witness fault injection;
+    directory-fsync & exists-race probes; cleared-then-recrashed
+    interleavings; two-instance concurrency; F10/probe conformance of
+    the mid-protocol witness creation; per-mutant sweep of every owed
+    writer/clearer/reader/status-check; full classify() paths.
