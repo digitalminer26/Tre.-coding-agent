@@ -461,7 +461,12 @@ class Ledger:
         would take the journal past JOURNAL_CAP — otherwise a valid
         append could itself make the journal globally unreadable and
         stop every decision. Refusal is `journal-full` with ZERO bytes
-        written (operator recovery is OPEN spec question S-J2)."""
+        written. Operator recovery: S-J2 was RATIFIED (rotation via
+        ROTATE-SNAPSHOT journal records + in-flight marker — see the
+        S-J2 FINAL entry in docs/21a) but rotation is OUT OF SCOPE
+        for this reference implementation (D4A-c4-1 SPEC note: the
+        implementation-workstream decision is the owner's; here the
+        refusal stands as the only behavior)."""
         p = os.path.join(self.dir, "repair_intent.jsonl")
         # `at` normalization (S-J3, FINAL — owner ratified the clamp
         # 2026-11-14: "ok. clamp for s-j3"). A non-int or bool `at` is
@@ -1460,8 +1465,10 @@ class Ledger:
 
     def repair(self, auth_id):
         """(c-O): the forced repair IS AN APPEND. One lock acquisition
-        spans resolve + occurrence-list check + reserve + the single
-        write (v37 1A closes AUD36-B1/B2)."""
+        spans resolve + occurrence-list check + reserve + one logical
+        write executed by the checked short-write loop (v39 R2-M3:
+        "single write" REVOKED as a description — D4A-c4-2; the
+        one-lock guarantee is unchanged) (v37 1A closes AUD36-B1/B2)."""
         with self._lock("append"):
             cls = self._resolve_locked()
 
@@ -1530,8 +1537,10 @@ class Ledger:
             size = os.path.getsize(self.ledger_path) if os.path.exists(
                 self.ledger_path) else 0
 
-            # (v) the single reserved write (reserve check inside) with
-            # the 'R' INTENT landed before the first ledger byte, plus
+            # (v) the reserved logical write (reserve check inside),
+            # executed by the checked short-write loop (v39 R2-M3;
+            # D4A-c4-2), with the 'R' INTENT landed before the first
+            # ledger byte, plus
             # the append-only repair-intent journal entry (operator
             # evidence for a window closed by crash — v38 audit fix 5).
             # R4-c2-1 (v41): the CAPACITY reservation is checked BEFORE

@@ -6365,3 +6365,20 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   carry it. Cycle 3 also re-verified the round pins by its own
   shasums (dee009cbcbda / b23bfa6feeae — match the cycle-2
   registration) and re-ran the suite in its own copy: 89 OK.
+- CYCLE 4 (report: d4-scopeA-c4-out.txt; mission: regions (2)
+  rotation + (3) cap reserve/commit): SELF-DECLARED INCOMPLETE
+  (numbered claim inventory 1-13 in the report precedes the
+  findings; the full S-J2-R crash matrix and F19 internals not
+  independently audited; suite re-run in own copy: 89 OK).
+  2 findings, both ACCEPTED after independent verification:
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | D4A-c4-1 | MAJOR | **SPEC** (POOLED — owner batch) | S-J2-R rotation (ROTATE-SNAPSHOT carry-over, in-flight marker grammar, 0400 archive, crash matrix) is RATIFIED prose with ZERO implementation in the reference module (grep rotate/ROTATE/rotation: no matches; journal-full refusal stands as the only behavior) — the ratified sub-spec cannot be behavior-verified against the reference impl at all | boundary RECORDED here (registration below); the ledger's stale "OPEN spec question S-J2" docstring corrected to "ratified, OUT OF SCOPE for the reference impl — implementation-workstream decision belongs to the owner"; NO work commissioned; **OWNER DECISION POOLED: does rotation get its own implementation workstream, and is the reference impl's journal-full refusal the ratified interim behavior?** |
+  | D4A-c4-2 | minor | DOC | repair() docstring + the step-(v) comment still said "the single write" / "the single reserved write" — v39 R2-M3 explicitly REVOKED that description (checked short-write loop under one lock acquisition; the one-lock guarantee stands) | both descriptions corrected in place (docstring/comment only, zero behavior change; loop at _append_bytes 1150-1156 verified as the operative behavior); suite re-run green after the edits |
+  SPEC POOL STATUS (round rule: pooled SPEC findings get ONE owner
+  batch fix): { D4A-c4-1 }. No other SPEC findings from cycles 1-4.
+  Pin note: the cycle-4 report's hash transcription was garbled
+  ("dee009cbc bda", "b23bfa6feed2") — the orchestrator re-verified
+  against the tree: ledger dee009cbcbda / test_ledger b23bfa6feeae
+  pre-fold (match cycles 2-3); post-fold values recorded at the
+  commit below. Read hashes from the tree, never from a report.
