@@ -6458,3 +6458,15 @@ committed; post-fold hashes read from the tree with BOTH labels.
   tree, both labels): ledger.py sha1 3a9307a7b1fc… / sha256
   4e997d59ed99… (UNCHANGED); test_ledger.py sha1 7780857914ad… /
   sha256 7a2159df7f46… (UNCHANGED — docs-only fold). Suite: 92 OK.
+  1 finding, minor DOC, ACCEPTED after independent verification
+  (auditor re-confirmed the enforcement refusal experimentally in
+  its own copy; suite 92 OK there; post-v46 hashes independently
+  recomputed and matched):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c2-1 | minor | DOC | `_check_access_controls` docstring still stated the superseded v38-cycle-1 permissive policy ("pre-existing read-only group bits … operator policy") while the code immediately below (added by v38 cycle-3 fix 5, AUD C3-5) refuses ANY bit outside 0600 — an externally created 0644 protocol file returns `unsafe-path-permissions` | Docstring restated to the enforced STRICT policy (zero behavior change, code untouched); 21b EVIDENCE-TREE UPDATE 2 records the new ledger.py pins (sha1 86d9ddc5d059…, sha256 26e44e0414ca…), the +6 line shift below ~163, and that Step-2 line citations resolve against the superseded pin with byte-identical content at each anchor (spot-verified) |
+  Cycle self-declared INCOMPLETE (1A principal texts, C4-F1/F7,
+  D4-B, acquisition/identity code, F24/F40/F42 bodies read; full
+  1A claim enumeration and cross-document pin/count sweep open).
+  Note: the cycle audited HEAD 51fce4f (post-cycle-1 fold) — kick
+  HEAD drift is by design (each cycle audits the current fold).

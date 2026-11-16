@@ -40,6 +40,28 @@ here pre-empts it.
   suite re-run post-fold: **Ran 92 tests — OK** (2026-11-17). The
   owner's ratification reading may be taken against EITHER tree;
   they differ in test rigor only.
+- EVIDENCE-TREE UPDATE 2 (AUD45 cycle-2 fold, 2026-11-17): finding
+  AUD45-c2-1 (minor DOC) — the `_check_access_controls` docstring in
+  `ledger.py` still described the SUPERSEDED v38 cycle-1 permissive
+  policy ("pre-existing read-only group bits … operator policy");
+  the code below it (and the 1A premise at docs/21 ~2548) enforce
+  STRICT 0600-owner-only (an externally created 0644 protocol file
+  REFUSES — experimentally confirmed in an audit copy). The
+  docstring was restated to match the enforced policy; **ZERO
+  behavior change, tests untouched** — `ledger.py` sha1-prefix
+  `86d9ddc5d059e9d28ffc621b32465f0fe671fcb0`, sha256-prefix
+  `26e44e0414cae8ed059d4f202bf135079a2c4911f4b5c594921157e2bf89d954`
+  (supercedes the `3a9307a7b1fc…`/`4e997d59ed99…` pin above — that
+  pin remains true of the pre-fold tree, per the hash-history rule);
+  `test_ledger.py` UNCHANGED (`7780857914ad…`/`7a2159df7f46…`).
+  The Step-2 table's LINE citations are pinned to the tree pinned
+  above them at writing (per the D4A pin rule); the docstring-only
+  edit shifts `ledger.py` lines below ~163 by +6 (e.g. the S1
+  866–899 route → 872–905; S2 1456–1459 → 1462–1465; S3 1810 →
+  1816), so citations resolve against the SUPERSEDED pin, not the
+  new one — the content at each cited site is byte-identical
+  (spot-verified at the S1/S2/S3 anchors).
+  Suite re-run post-fold: **Ran 92 tests — OK**.
 - Command: `cd reference && python3 -W error::ResourceWarning
   -m unittest p9m3.test_ledger`
 - Result: **Ran 92 tests — OK** (2026-11-16). The three pins added

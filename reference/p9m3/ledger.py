@@ -160,14 +160,20 @@ class Ledger:
         self._check_access_controls()
 
     def _check_access_controls(self):
-        """v38 cycle-1 fix 11: the live protocol creates EVERY file 0600
-        and the ledger directory 0700. At startup we refuse paths whose
-        mode lets group/other WRITE or EXECUTE (tamper with the
-        consumption evidence / sidecars, `unsafe-path-permissions`,
-        fail closed). Pre-existing read-only group bits (test seeding,
-        externally created 0644 fixtures) are operator policy, not a
-        service write hazard — the protocol itself never creates them.
-        We never silently chmod a policy we do not own."""
+        """STRICT owner-only access controls (v38 cycle-3 fix 5,
+        AUD C3-5; this docstring restated by AUD45-c2-1 after the
+        v38 cycle-1 wording described the SUPERSEDED permissive
+        policy): the protocol creates EVERY file 0600 and the ledger
+        directory 0700, and at startup EVERY protocol path is checked
+        against that premise — the protocol user must OWN every path,
+        the directory must be exactly 0700, and EVERY protocol file
+        must be exactly 0600: ANY bit outside 0600 (group READ
+        included) is refused with `unsafe-path-permissions`, fail
+        closed. There is NO "operator read-bit policy" exemption for
+        the consumption evidence — an externally created 0644 fixture
+        REFUSES, it is not tolerated. Symlinked protocol paths
+        REFUSE (never followed). We never silently chmod a policy we
+        do not own."""
         # v38 cycle-3 fix 5 (AUD C3-5): STRICT rules — the protocol
         # user must OWN every path, the directory is 0700 (owner-only),
         # and every protocol file is 0600: ANY bit outside 0600 (group
