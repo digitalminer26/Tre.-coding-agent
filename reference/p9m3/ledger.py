@@ -1379,9 +1379,18 @@ class Ledger:
             # a crash between the IO and this clear leaves the
             # charge owed — conservative, same discipline as the
             # recovery round, whose crashed rounds count)
-            self._write_counter(0, exhausted=False)
+            # AUD46-c5 (audit cycle 5, major): the CLEAR precedes the
+            # counter-zero. A failed clear (fsync EIO) then leaves
+            # the attempt CHARGED — the A2 overlay (counter > 0)
+            # keeps the next instance PENDING, fail-closed — instead
+            # of a zeroed counter whose completed-clear bytes serve
+            # `ok` to a fresh instance although the caller received
+            # an error. A failed zero AFTER a successful clear is
+            # equally fail-closed (charged counter => pending; the
+            # next resolve re-clears and re-zeros).
             self._clear_owed()          # AUD46-c1: witness clears
                                         # ONLY on confirmed success
+            self._write_counter(0, exhausted=False)
             return self.classify(data)
         # C2 fix 4: refusal BEFORE starting a round whose attempts are
         # already consumed — persist exhaustion first, then raise; the
@@ -1398,8 +1407,11 @@ class Ledger:
         except OSError:
             raise LedgerError(STATE_PENDING)
         self._write_pending(self._pending_offset(), True)
-        self._write_counter(0, exhausted=False)
+        # AUD46-c5 (audit cycle 5, major): clear BEFORE the counter-
+        # zero — a failed clear leaves the attempt charged (fail-
+        # closed via the A2 overlay); see the pending branch above.
         self._clear_owed()              # AUD46-c1: confirmed success
+        self._write_counter(0, exhausted=False)
         return self.classify(data)
 
     def _pending_offset(self):

@@ -3136,5 +3136,56 @@ class TestV38Cycle6Audit(Base):
                          "short-write retry must not extend the witness")
         self.assertFalse(self.mk()._owed_attempt())
 
+    def test_F64_clear_fsync_fault_stays_fail_closed(self):
+        # AUD46-c5 (audit cycle 5, major): a FAILED witness-clear
+        # (fsync EIO during the completion of a successful resolve)
+        # must NOT hand the next instance an `ok`. The completion now
+        # writes in fail-closed ORDER: clear the owed witness FIRST,
+        # then zero the counter. A clear that raises leaves the
+        # attempt CHARGED (A2 overlay: counter > 0 => PENDING) and
+        # the witness still owed — double evidence, no ok. The
+        # symmetric fault (clear lands, the counter-zero then faults)
+        # is equally fail-closed: charged counter, cleared witness,
+        # still PENDING until the NEXT successful resolve.
+        # Case A: the clear itself raises (models fsync failure).
+        led = self.mk(repair_attempt_cap=3)
+        led._write_pending(0, True)
+        led._clear_owed = lambda: (_ for _ in ()).throw(OSError(5, "clear fsync"))
+        with self.assertRaises(OSError):
+            led.resolve()
+        after = self.mk(repair_attempt_cap=3)
+        self.assertEqual(after._read_counter(), 1,
+                         "a failed clear must leave the attempt charged")
+        self.assertTrue(after._owed_attempt(),
+                        "a failed clear leaves the witness owed")
+        self.assertEqual(after.status()["decision"], STATE_PENDING)
+        self.assertFalse(after.promotion_allowed())
+        # the next successful resolve still recovers (bounded):
+        del led._clear_owed              # un-patch: clear works again
+        res = led.resolve()
+        self.assertEqual(res["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        # Case B: clear succeeds, the completion counter-ZERO faults.
+        led2 = self.mk(repair_attempt_cap=3)
+        led2._write_pending(0, True)
+        real_cw = led2._write_counter
+        calls = {"n": 0}
+        def flaky_zero(n, exhausted=None):
+            calls["n"] += 1
+            if calls["n"] == 2:      # charge lands, zero faults
+                raise OSError(5, "zero fsync")
+            return real_cw(n, exhausted)
+        led2._write_counter = flaky_zero
+        with self.assertRaises(OSError):
+            led2.resolve()
+        after2 = self.mk(repair_attempt_cap=3)
+        self.assertEqual(after2._read_counter(), 1,
+                         "a failed counter-zero must leave the charge")
+        self.assertFalse(after2._owed_attempt())   # witness cleared OK
+        self.assertEqual(after2.status()["decision"], STATE_PENDING)
+        self.assertFalse(after2.promotion_allowed())
+
 if __name__ == "__main__":
     unittest.main()
