@@ -7135,3 +7135,32 @@ seam mutation-killed individually before handoff.
   - Gate: `cd reference && python3 -W error::ResourceWarning -m
     unittest p9m3.test_ledger` -> Ran 118 tests OK, zero warnings.
     Fix commit: 7d9ac0c.
+
+AUD49 CYCLE 2 disposition (2026-11-16, auditor: fresh
+context gpt-6.1-sol, full assignment: diff audit of
+7d9ac0c, 5 specified mutants + 2 assertion-strength
+mutants, callable census, 80-case seam census on the
+FIXED dispatch (violations []), F85 kill-boundary
+verified (the full repair fill is the only b"OWED"-
+payload pwrite in the child's sequence; seed lands
+before the kill), healthy-path syscall trace vs bdc6fe0
+IDENTICAL (no added real syscalls), two zero-warning
+gates): verdict CYCLE CLEAN with 2 minor findings, both
+ACCEPTED:
+- C2-F2 (minor, ACCEPTED+FIXED in 0d49e00): four latent
+  inline `open(p,'rb').read()` leak sites (F57's
+  exists-branch + 3 grep-named); a gc-time ResourceWarning
+  is UNRAISABLE so -W does not fail the run (proven). All
+  four now read via a managed read_or_empty helper; 118 OK
+  zero-warning re-run.
+- C2-F1 (minor, ACCEPTED as a test gap): the
+  double-bind-failure fallback mutant (return False
+  instead of surfacing TypeError) passes all 118 — the
+  wiring-TypeError contract is unproven by any pin; the
+  pin ships with the round-close increment.
+Carry-forward disposition from the c2 report: F82 is NOT
+an independent clear_fsync-seam liveness pin (killing
+that consumption fails F83/F85 instead) — accepted, no
+redundant pin shipped.
+Cycle 3 (fresh auditor, gpt-6.1-terra per owner request)
+is the round-closing cycle per the 3-clean gate.
