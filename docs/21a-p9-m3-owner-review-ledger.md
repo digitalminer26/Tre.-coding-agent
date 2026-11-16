@@ -6419,3 +6419,28 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   the earlier totals prose without changing any finding, disposition,
   or closure state. The 3A artifact (docs/21b) and docs/21 header
   carry the corrected count.
+
+---
+
+AUD45 ROUND — SCOPE A CONTINUATION (kicked 2026-11-17, owner-
+authorized 7 cycles immediately after the v46 hygiene fold 37070e1;
+terra = gpt-6.1-terra, read,bash, read-only repo, experiments in
+per-cycle copies under ~/.tre/audits/aud45-x<n>/; prompt
+~/.tre/audits/aud45-prompt.txt, kick aud45-kick.sh <cycle>).
+
+AUTHORITY: unchanged (reference RUNNING behavior = behavior
+authority; docs/21 prose = intent authority; CODE/TEST/DOC/SPEC
+classification; SPEC pooled for one owner batch fix). SCOPE: same
+Scope A as D4A, PLUS: cross-verification of the v46 fold itself
+(cycle 1) and docs/21b Step-1 pin lines + Step-2 citation
+resolution (cycle 7) — the artifact's DISPOSITIONS are not
+re-adjudicated (owner's 3A reading owns that). Cycle assignments
+1-7 per the prompt (v46 fold; 1A lock prose; 2A resolve prose;
+settlement prose; AUTH lifecycle + S-A1-R; cap reserve/commit +
+F19/F3 counts; sweep incl. 21b citations). Findings AUD45-c<k>-<n>.
+Fold discipline per round: each cycle's findings verified against
+source BEFORE acceptance, folded, gated (node + tsc + ref suite),
+committed; post-fold hashes read from the tree with BOTH labels.
+
+- CYCLE 1 (kick 2026-11-17; mission: cross-verify the v46 five-
+  finding hygiene fold): report ~/.tre/audits/aud45-c1-out.txt.
