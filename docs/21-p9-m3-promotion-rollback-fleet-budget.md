@@ -1,7 +1,13 @@
 # P9/M3 — Promotion/rollback & fleet budget layer (contract draft)
 
-Status: **DRAFT v42 — contract-first scoping. NOT YET APPROVED, NOT
-IMPLEMENTED; no module in `src/` is touched by this doc.** (v42 folds
+Status: **DRAFT v43 — contract-first scoping. NOT YET APPROVED, NOT
+IMPLEMENTED; no module in `src/` is touched by this doc.** (v43 folds
+the owner's D5/D6 sign-offs (2026-11-16, THIRD TRANCHE record at
+foot): D5 = strict fail-closed DEFAULT + a scope-bound operator-
+acknowledgment waiver drafted into §2.2 (shape ratified, details NOT
+yet audited); D6 = SOFT cap SIGNED AS DRAFTED (§2.4) with a human-side
+provider-account hard-limit ACTION ITEM outside this repo; §4 entries
+and two §5.2 rows updated. v42 folds
 the INLINE-AUDIT of the R4 changes themselves (targeted pass, 3
 findings): F19's pistol race proved nothing about serialization and
 used the wrong geometry — REWRITTEN around a new under-lock
@@ -4565,6 +4571,53 @@ framing is withdrawn: a fleet that keeps admitting spend it cannot see
 is the failure the cap exists to prevent, and the BROKEN-FILE state
 already fails closed for a weaker cause.
 
+**Operator-acknowledgment waiver (v43 — owner sign-off 2026-11-16, D5
+answered "option 3 for robustness"):** the v3 fleet-wide denial remains
+the DEFAULT and the only automatic behavior; a narrow, non-automatic
+exception is added: the operator may acknowledge a SPECIFIC
+indeterminate source so the fleet is not held hostage to one episode's
+broken ledger. Binding rules (skeleton — full normative text is
+post-approval drafting; NOTHING here is implemented in `src/`):
+- **Scope-bound:** one ack names exactly one `(root, episodeId)` AND
+  the named indeterminate state (`unreadable(...)` / unknown-priced
+  spend) AND the fleet-policy generation it was made under; a policy
+  regeneration ORROWS the ack (Σ-computability is re-established
+  without it or a fresh ack is required). An ack NEVER covers the
+  policy file itself — T1 (broken/stale policy) remains unconditional
+  fleet denial; an ack NEVER covers root-enumeration failure (you
+  cannot ack what you cannot name).
+- **Effect:** the acknowledged episode is REMOVED from the §2.3
+  accounting population (it is NOT substituted with any number — no
+  0, no lower bound, no estimate; the R2-M1 rejection stands: the ack
+  excludes, it does not value). Σ becomes computable over the rest,
+  and admission resumes under the §2.3 inequality.
+- **Disclosure is mandatory and loud:** every fleet summary and every
+  admission verdict computed under any ack carries the ack list
+  (episode, state, ackedAt label, acking operator) on its disclosure
+  line; a verdict under ack is distinguishable from a clean verdict
+  by construction, and its `Σ` is explicitly "Σ excluding N
+  acknowledged episodes".
+- **Durable state (honesty):** the ack store IS new durable
+  fleet-level state; v3's "no new durable state" (§2.2) applied to
+  PER-EPISODE state. Owner waiver 2026-11-16 SUPERSEDES that
+  sentence's scope; the supersession is noted here so no reader
+  takes §2.2's sentence as currently true of the slice as extended.
+- **Trust domain:** the ack store is an operator-owned file beside
+  the policy (same trust domain as `tre-fleet-budget/1` itself —
+  file-permission-gated like `--repair-quiescence-ledger`, NOT
+  signature-gated; the "operator-signed" phrasing is avoided per the
+  C14-m2 correction). It is durable fleet-level operator config —
+  v3's "no new durable state" promise concerned per-EPISODE state.
+- **What the waiver buys and pays:** liveness (fleet keeps admitting
+  against a computable Σ) at the price of knowingly UNDERCOUNTING
+  reality — the acknowledged episode's actual spend is and remains
+  invisible to the cap. That trade is the owner's explicit choice
+  ("for robustness"); it is recorded as a §5.2 residual, not a
+  closed hole. Tests (post-wiring round, contract-first): ack named
+  wrongly ⇒ no effect; ack orphaned by regeneration ⇒ denial
+  resumes; verdicts under ack disclose; policy-broken + valid ack ⇒
+  STILL fleet-denied.
+
 ### 2.3 Admission rule (v4 — the formula, stated as an inequality; discovery fixed)
 
 The fleet gate is a SECOND check consulted by the host at admission
@@ -5091,6 +5144,25 @@ episodes that HAVE caps and live in the declared roots. It narrows
 drift; it does not bound the total. A provably hard machine-wide limit
 would need provider-side (API-account) budget controls — outside this
 repo's surface; if Hong needs that, it is its own contract round.
+
+**Owner sign-off (v43, 2026-11-16 — D6 answered as drafted):** the
+SOFT, admission-only, best-effort cap is SIGNED as written. The
+contract's position — physics, not timidity: a numerical overshoot
+bound is NOT DERIVABLE across independent processes without a
+cross-episode reservation transaction (rejected for v1), so every
+alternative that promised a number was rejected on the merits, twice —
+signing "soft" is the only honest option, and demanding a hard cap of
+THIS layer buys nothing an estimate cannot fake. Two recorded
+consequences of the sign-off, both owner-directed (not new spec
+mechanisms): **(1) provider-account hard limits are the real hard
+stop and are a SEPARATE ACTION ITEM (owner/human action, OUTSIDE the
+repo — set account-level budget caps at each provider; this contract
+round neither implements nor can implement them, and the sign-off
+explicitly leans on them).** **(2) If a HARD in-repo cap is ever
+required, the owner RE-OPENS the reservation-transaction question
+with full knowledge of what it costs (shared-write machinery this
+compartment has avoided since P4) — signing soft today is not a
+precedent that the transaction was never considered.**
 
 ### 2.5 Fleet read surface
 
@@ -5928,7 +6000,14 @@ untouched at exhaustion); purity (no fs in projection).
   ⇒ **fleet-wide USD denial** (`fleet-indeterminate`, v3 — v2's
   per-episode refuse + "lower-bound Σ" admitted other episodes against
   spend nobody could see, and no such bound is derivable from an
-  unreadable ledger). **Proposed: yes.**
+  unreadable ledger). **Proposed: yes.** **SIGNED 2026-11-16 (owner)
+  WITH ONE AMENDMENT — "option 3 for robustness": a scope-bound,
+  non-automatic operator-acknowledgment waiver over per-episode
+  indeterminacy (T2/T3 only; policy-broken T1 stays unconditional;
+  acks exclude-not-value; mandatory loud disclosure; regeneration
+  orphans them; new operator-owned ack store) — full binding rules
+  in §2.2 (v43). The strict v3 denial remains the default behavior
+  absent a valid ack.**
 - **D6 — cap hardness (B, v3-revised):** accept a SOFT, admission-only,
   best-effort cap (§2.4) — **no numerical overshoot bound is claimed**
   (v2's overshoot formula withdrawn as unsupportable); reject the
@@ -5936,7 +6015,11 @@ untouched at exhaustion); purity (no fs in projection).
   if Hong needs a HARD machine-wide cap, per-episode sums do NOT
   provide one (v3 correction, §2.4); the honest mechanism is
   provider-side account budget — a separate contract round, not this
-  slice's claim.
+  slice's claim. **SIGNED 2026-11-16 (owner) AS DRAFTED — soft
+  accepted; provider-account hard limits recorded as a separate
+  human-side ACTION ITEM (owner to set them at each provider
+  account); hard-cap demand would re-open the reservation-transaction
+  question (see §2.4 sign-off note).**
 - **D7 — build order:** Slice A first (Q5 pinned; doctrine ports per
   §1.5; the highest-blast-radius act gets the battle-tested leaf
   pattern first), B second; each slice audits (code) to convergence
@@ -5982,8 +6065,9 @@ names its section):
 | Host-lease exclusion is a TIME BOUND, not a proof | §1.1 exclusivity posture | The shipped takeover lock carries a documented check→act TOCTOU and `leaseSwapHoldMs` is "NOT a scheduler-independent bound" (`supervise.ts:2338-2346`, `:2259-2272`); a delayed double-reclaim can put two hosts in writer-lease-replace races — the derivative writer fence degrades to EXACTLY this disclosed bound (adds no new failure mode; per-append validation still admits only the current lease-file token); THE FULL OUTCOME LATTICE UNDER THE RESIDUAL (v16, cycle-11 major 1 — v15's "worst case is the torn-tail class" understated it and is corrected here and in §1.1): spurious `fence-lost` (mild) → torn-EOF tail (repaired at open) → MID-FILE INTERLEAVED CORRUPTION when the displaced holder was mid-append (RESTORE-CLASS: `journal-corrupted`, manual repair/restore with the journal as evidence — same class as the forced-steal row); NO-RESTORE-CLASS safety requires the stronger fencing protocol (O_EXCL-chained compare-and-write) scoped as M3-ADJACENT hardening work, not assumed here (v15, cycle-10 blocker 2; v16 lattice restatement) |
 | Quiescence ledger is takeover-local | §1.1 quarantine | `events/quarantine.json` proves predecessors dead across takeover chains ONLY on this host family's episode dir; an operator who deletes the file severs the chain (manual act, restore-evidence remedy; NEVER automatic — ABSENCE IS THE EMPTY SET by the v17 single posture: a fresh episode never created the file and is not refused, and a deleted ledger is OBSERVATIONALLY IDENTICAL to fresh absence — that is exactly what makes severance undetectable and therefore a residual, v17 cycle-12 major 4; a MALFORMED file is the fail-closed `journal-quiescing` case remedied by the OPERATOR SURFACE's `--repair-quiescence-ledger` (the phrase "operator-signed minimal-ledger procedure" is WITHDRAWN — the procedure is file-permission-gated, not signature-gated, C14-m2); ESRCH on a recorded pid clears it (dead-is-dead); unknown predecessors are entries `{pid: 0, hostToken: "unknown-<ulid>", seenAt}` cleared only by confirmation naming that token (v17 cycle-12 major 6); operator clearing of a pid-reuse entry designates the entry by its recorded `hostToken`, never by pid (v16, cycle-11 major 4); MERGE-LOSS RESIDUAL (v16; restated v17, cycle-12 majors 2+3): under the double-reclaim race two reclaimers last-rename-win with read-merge-publish — the guarantee is the SNAPSHOT BOUND (every entry in a publisher's own read survives; the survivor ⊇ entries both snapshots observed), and an addition a publisher never observed CAN be LOST, including a just-confirmed-away entry resurrected by a stale clearing rename; loss/reurrection is bounded, DETECTABLE at the next clearing pass; re-capture by the next takeover's union rule holds ONLY WHILE the predecessor's writer body survives on disk — under the residual's check→rename windows a racing takeover CAN erase the identity from ledger AND writer body jointly while its process is live, and NO QUIESCENCE-BOOKKEEPING invariant survives that triple erasure — the journal-side epoch-validation lattice (fence-lost/torn/restore-class) is INDEPENDENT of the ledger and STILL BOUNDS B's late-append damage (v19, cycle-14 major 6 reconciliation: identity-proof failure vs journal damage are separate; the lattice is the damage bound) (v18, cycle-13 major 1 — the FULL class is stated; a real exclusion protocol, M3-ADJACENT, is the only closure) — disclosed, not closed |
 | Torn-fragment `r` reuse | §1.1 B4 reconciliation | `open()` repair truncates an ambiguous claim line; re-allocating the same `n` is proven-safe recovery, not reuse — the non-reuse promise covers SURVIVING records only |
-| Cap is soft, no numerical bound | §2.4 | The cap is SOFT and §2.4 claims NO numerical overshoot bound (v13 cycle-8 minor 3 corrects v12's §5.2 wording "by one candidate estimate" — an unsupportable numeric); concurrent admissions may overshoot by an unquantified margin; determinacy of the NEXT consult is what is claimed |
+| Cap is soft, no numerical bound | §2.4 | The cap is SOFT and §2.4 claims NO numerical overshoot bound (v13 cycle-8 minor 3 corrects v12's §5.2 wording "by one candidate estimate" — an unsupportable numeric); concurrent admissions may overshoot by an unquantified margin; determinacy of the NEXT consult is what is claimed. **SIGNED SOFT by owner 2026-11-16 (D6): the real hard stop is provider-account budget limits — a human-side action OUTSIDE this repo (action item open until Hong sets them); this contract never promises more than a governor** |
 | `fleet-indeterminate` fail-closed | §2.2 | An unreadable ledger denies ALL new USD admissions fleet-wide until repaired (ledger-scope only; a journal defect — duplicate ids, mid-file corruption — is per-ACT refusal, never fleet denial: ledger ≠ journal, v13 cycle-8 minor 2) |
+| Operator-ack waiver UNDERCOUNTS by design | §2.2 (v43, owner D5 option 3, 2026-11-16) | An acknowledged indeterminate episode is REMOVED from the accounting population, so Σ admits against a KNOWN-INCOMPLETE total: acknowledged spend is invisible to the cap, permanently and by construction. Bounded not by math but by procedure: one-episode-one-ack scope, policy-generation expiry, mandatory disclosure on every affected verdict, T1 (policy broken) and root-enumeration failure NEVER waivable. The waiver trades cap completeness for fleet liveness — the owner's explicit robustness choice; the fleet-indeterminate row above remains the default posture for unacknowledged indeterminacy |
 | Forward reader compat | §1.1 schema block | A pre-extension reader meeting a new record kind fails closed at open; only M3-aware stacks may host M3 journals |
 | `grantedBy` is not authorization | §1.0 | The field is recorded evidence, never trusted; the human gate is structural (TTY-confirm), not an authentication mechanism |
 | `revoke-<ulid>` needs no clock trust | §1.1 id scheme | ULIDs are sortable labels, not timestamps of truth; journal ORDER is file order, not claimed wall-clock |
@@ -7095,3 +7179,38 @@ same session; verbatim owner words, expansions marked as interpretation):
 - 3A: "review 3a after everything" → EXPLICITLY DEFERRED by the
   owner to last, after all of the above lands. NOT confirmed, not
   corrected — a final owner review item with a fresh brief.
+
+OWNER DECISION RECORD — THIRD TRANCHE (replies received 2026-11-16,
+same session; verbatim owner words, expansions marked as
+interpretation):
+
+- D5 (fleet file-state semantics): "option 3 for robustness"
+  → interpreted: sign the v3 strict fail-closed posture AS THE
+    DEFAULT, amended by drafted Option 3 — a scope-bound,
+    non-automatic operator-acknowledgment waiver over PER-EPISODE
+    indeterminacy only. Binding skeleton folded to §2.2 (v43);
+    T1 (policy broken/stale) and root-enumeration failure stay
+    unconditional; acks exclude-not-value; regeneration orphans
+    them; mandatory disclosure on affected verdicts; new
+    operator-owned ack store (scope note added against §2.2's
+    "no new durable state"). FULL normative text (file schema,
+    ack grammar, expiry semantics) is post-approval drafting —
+    the shape is ratified, the details are NOT yet audited.
+    Recorded as a §5.2 residual (waiver undercounts by design).
+- D6 (cap hardness): "option 0"
+  → interpreted: SIGN THE SOFT CAP AS DRAFTED (§2.4, no numerical
+    overshoot bound; reservation transaction stays rejected).
+    Folded to §2.4 sign-off note + §4 D6 + §5.2 row. ACTION ITEM
+    (human-side, outside this repo, OPEN): set provider-account
+    budget hard limits at each provider — the sign-off leans on
+    them as the real hard stop. Hard-cap demand would re-open the
+    reservation-transaction question.
+- D1–D4, D7–D9: NOT YET ANSWERED (D2 no-auto-gate and D4
+  USD-only flagged by the agent as the two most contract-
+  shaping of the remainder; low-regret shape/ordering items
+  otherwise).
+- Remaining open owner items after this tranche: 3A final review
+  (deferred to last, by owner); Decision 4 prose audit round
+  (authorized in the second tranche, not yet run); S-J3 clamp
+  CLOSED (second tranche); §14.10 G1 draft (docs/11) — separate
+  workstream, round-1 folded, NOT implemented.
