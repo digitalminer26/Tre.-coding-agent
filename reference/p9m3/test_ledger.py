@@ -3235,7 +3235,9 @@ class TestV38Cycle6Audit(Base):
         every reader honors, whatever the counter bytes show."""
         led = self.mk(repair_attempt_cap=3)
         led._write_pending(0, True)
-        real_sw = Ledger._sidecar_write
+        real_sw = led._sidecar_write    # AUD47-c3: bound method (now
+                                        # an instance method carrying
+                                        # the FsFaults lifecycle seams)
 
         def flaky_zero_fsync(path, payload, real=real_sw):
             # the zero write LANDS; only its fsync faults (the fault
@@ -3419,6 +3421,83 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(healed._read_counter(), 0)
         self.assertFalse(healed._owed_attempt())
         self.assertEqual(healed.status()["decision"], STATE_OK)
+
+    def test_F69_declared_sidecar_lifecycle_seams(self):
+        """AUD47-c3 (audit cycle 3, minor): the lifecycle writes (owed
+        witness create/clear, counter, pending window) were only
+        reachable by monkeypatching OS calls, and `resolve_fsync_fault`
+        was consumed via getattr without ever being DECLARED. NOW the
+        seams are declared `FsFaults` constructor options and
+        constructor-pinned here: an un-declared seam is not a seam."""
+        import inspect
+        sig = inspect.signature(FsFaults.__init__)
+        for name in ("resolve_io_fault", "sidecar_open_fault",
+                     "sidecar_write_fault", "sidecar_partial_write",
+                     "sidecar_fsync_fault", "sidecar_dir_fsync_fault"):
+            self.assertIn(name, sig.parameters,
+                          "declared lifecycle seam missing: %s" % name)
+
+        # open fault: every sidecar write refuses BEFORE any name is
+        # created; the attempt never starts (raise precedes IO), so a
+        # fresh `ok` is HONEST — pin that zero sidecars landed.
+        f = FsFaults(sidecar_open_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        with self.assertRaises(OSError):
+            led.resolve()
+        for side in ("resolve-owed", "resolve-attempts", "last-append"):
+            self.assertFalse(os.path.exists(os.path.join(self.dir, side)),
+                             "an open fault creates no name: %s" % side)
+
+        # write fault: name visible, payload absent (torn creation).
+        # The witness reads OWED (zero-length = torn) and the fallback
+        # charge faults too, so the pre-IO raise stands — but the
+        # evidence that DID land (the torn witness) keeps the fresh
+        # view fail-closed.
+        f = FsFaults(sidecar_write_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        with self.assertRaises(OSError):
+            led.resolve()
+        fresh = self.mk(repair_attempt_cap=3)
+        self.assertTrue(fresh._owed_attempt(),
+                        "a torn-creation witness reads OWED (fail closed)")
+        self.assertNotEqual(fresh.status()["decision"], STATE_OK,
+                            "torn evidence never serves ok (the torn "
+                            "counter reads exhausted, the torn witness "
+                            "reads owed — both fail closed)")
+        self.assertFalse(fresh.promotion_allowed())
+
+        # partial write: the checked loop must complete the record.
+        f = FsFaults(sidecar_partial_write=5)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_counter(3, exhausted=False)
+        with open(os.path.join(self.dir, "resolve-attempts"), "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(len(raw), 16, "fixed width re-established")
+        self.assertEqual(raw.rstrip(b"\0").decode(), "3 -")
+        self.assertEqual(led._read_counter(), 3)
+
+        # fsync fault: the DURABILITY LIE is silent (payload lands,
+        # fsync dropped, no error) — the written view must still be
+        # consistent, exactly as `_sidecar_write` documents.
+        f = FsFaults(sidecar_fsync_fault=True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_pending(7, True)
+        self.assertEqual(led._read_pending(), (7, True))
+
+        # declared resolve-IO fault: consumed at the `_resolve_io`
+        # head — the round fails closed as pending, evidence intact.
+        # (fresh sub-dir: the parts above left sidecar evidence)
+        d2 = os.path.join(self.dir, "f69-resolve")
+        os.mkdir(d2, 0o700)   # the probe demands 0700 (dir-mode leg)
+        led = Ledger(d2, faults=FsFaults(resolve_io_fault=True),
+                     repair_attempt_cap=3)
+        with self.assertRaises(LedgerError) as cm:
+            led.resolve()
+        self.assertEqual(cm.exception.code, STATE_PENDING)
+        fresh = Ledger(d2, repair_attempt_cap=3)
+        self.assertEqual(fresh._read_counter(), 1,
+                         "the attempted round stays charged")
+        self.assertFalse(fresh.promotion_allowed())
 
 if __name__ == "__main__":
     unittest.main()

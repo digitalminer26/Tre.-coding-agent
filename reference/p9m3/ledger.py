@@ -434,6 +434,8 @@ class Ledger:
         bytes a head-first writer can no longer distinguish from a
         completed clear."""
         if os.path.exists(self._owed_side):
+            if getattr(self.faults, "sidecar_open_fault", False):
+                raise OSError(errno.EACCES, "injected sidecar open fault")
             fd = os.open(self._owed_side, os.O_RDWR | os.O_NOFOLLOW)
             try:
                 # AUD46-c4 (audit cycle 3, major): retries slice the
@@ -483,18 +485,42 @@ class Ledger:
             return raw != b"\0" * 16
         return True                     # torn/over-long: fail closed
 
-    @staticmethod
-    def _sidecar_write(path, payload):
+    def _sidecar_write(self, path, payload):
         """Fixed-width in-place sidecar rewrite with CHECKED pwrite (loop
         on short writes) and, when the sidecar is CREATED by this call,
         a parent-directory fsync — the same durability contract (C22-F4)
-        every other byte gets (v38 cycle-1 fix 5)."""
+        every other byte gets (v38 cycle-1 fix 5).
+
+        AUD47-c3 (audit cycle 3, minor): the FsFaults lifecycle seams are
+        consumed HERE so the fault matrix addresses every sidecar write
+        (owed create, counter, pending) through DECLARED seams:
+        - `sidecar_open_fault`: open raises (attempt/evidence never
+          begins on disk — the F68 evidence-fallback path),
+        - `sidecar_write_fault`: open succeeded, the FIRST pwrite raises
+          EIO (torn creation: name visible, payload absent),
+        - `sidecar_partial_write=N`: the first pwrite writes only N
+          bytes (the checked loop must retry at the right offset),
+        - `sidecar_fsync_fault`: the file fsync is SILENTLY DROPPED
+          (a mount that lies about durability — payload lands
+          page-visible only; no error to the caller),
+        - `sidecar_dir_fsync_fault`: same for the creation dir fsync."""
+        faults = self.faults
+        if getattr(faults, "sidecar_open_fault", False):
+            raise OSError(errno.EACCES, "injected sidecar open fault")
         existed = os.path.exists(path)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
+            partial = getattr(faults, "sidecar_partial_write", None)
+            wfault = bool(getattr(faults, "sidecar_write_fault", False))
             off = 0
             while off < len(payload):
-                n = os.pwrite(fd, payload[off:], off)
+                if wfault:
+                    raise OSError(errno.EIO, "injected sidecar write fault")
+                if partial is not None:
+                    n = os.pwrite(fd, payload[off:off + int(partial)], off)
+                    partial = None
+                else:
+                    n = os.pwrite(fd, payload[off:], off)
                 if n <= 0:
                     raise OSError(errno.EIO, "sidecar write: zero progress")
                 off += n
@@ -504,10 +530,12 @@ class Ledger:
             # fail-closed past the next healthy write (same heal as
             # the owed clear; see `_sidecar_fix_width`).
             Ledger._sidecar_fix_width(fd, len(payload))
-            os.fsync(fd)
+            if not getattr(faults, "sidecar_fsync_fault", False):
+                os.fsync(fd)
         finally:
             os.close(fd)
-        if not existed:
+        if not existed and not getattr(faults, "sidecar_dir_fsync_fault",
+                                       False):
             dirfd = os.open(os.path.dirname(path), os.O_RDONLY)
             try:
                 os.fsync(dirfd)
@@ -1332,7 +1360,8 @@ class Ledger:
         conservative crash marker, never proof of durability (spec
         DURABILITY: "any process making an AUTHORITY or SPEND decision
         must first perform the RESOLVE SEQUENCE")."""
-        if getattr(self.faults, "resolve_fsync_fault", False):
+        if (getattr(self.faults, "resolve_fsync_fault", False)
+                or getattr(self.faults, "resolve_io_fault", False)):
             raise _IOError0("hostile-io:resolve-fsync")
         try:
             fd = os.open(self.ledger_path,

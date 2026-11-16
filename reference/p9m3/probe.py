@@ -49,7 +49,10 @@ class FsFaults:
                  simulated_fstype=None, fstype_unresolvable=False,
                  append_leaves_extra_bytes=False,
                  rename_keeps_old_content=False,
-                 dir_preplaced_unsafe=False):
+                 dir_preplaced_unsafe=False,
+                 resolve_io_fault=False, sidecar_open_fault=False,
+                 sidecar_write_fault=False, sidecar_partial_write=None,
+                 sidecar_fsync_fault=False, sidecar_dir_fsync_fault=False):
         self.flock_fails = flock_fails
         self.fsync_visibility_fails = fsync_visibility_fails
         self.silly_rename_leaves_second_name = silly_rename_leaves_second_name
@@ -58,6 +61,19 @@ class FsFaults:
         self.append_leaves_extra_bytes = append_leaves_extra_bytes
         self.rename_keeps_old_content = rename_keeps_old_content
         self.dir_preplaced_unsafe = dir_preplaced_unsafe
+        # AUD47-c3 (audit cycle 3, minor): declared constructor seams
+        # for the SAFETY-RELEVANT lifecycle writes (owed witness
+        # create/clear, counter, pending window). The resolve-IO fault
+        # was consumed via getattr at the `_resolve_io` head but was
+        # never DECLARED; the sidecar seams let the fault-injection
+        # matrix address lifecycle writes without monkeypatching OS
+        # calls (an un-declared seam is not a seam — nothing pins it).
+        self.resolve_io_fault = resolve_io_fault
+        self.sidecar_open_fault = sidecar_open_fault
+        self.sidecar_write_fault = sidecar_write_fault
+        self.sidecar_partial_write = sidecar_partial_write
+        self.sidecar_fsync_fault = sidecar_fsync_fault
+        self.sidecar_dir_fsync_fault = sidecar_dir_fsync_fault
 
 
 # statfs f_type magics (Linux); f_fstypename is used where the platform
