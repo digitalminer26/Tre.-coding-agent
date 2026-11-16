@@ -1,4 +1,4 @@
-"""Fixture suite F1-F79 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F85 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -3606,7 +3606,8 @@ class TestV38Cycle6Audit(Base):
         self.assertTrue(os.WIFSIGNALED(status)
                         and os.WTERMSIG(status) == signal.SIGKILL,
                         "child was not killed inside the clear")
-        rec = open(os.path.join(d, "resolve-owed"), "rb").read()
+        with open(os.path.join(d, "resolve-owed"), "rb") as _fh:
+            rec = _fh.read()
         self.assertTrue(rec[:4] == b"OWED",
                         "the SIGKILLed first segment must be a record "
                         "that READS OWED — a head-first order leaves an "
@@ -4452,6 +4453,165 @@ class TestV38Cycle6Audit(Base):
         survivor = self.mk(repair_attempt_cap=3)
         self.assertTrue(survivor._owed_attempt())
         self.assertNotEqual(survivor.status()["decision"], STATE_OK)
+
+    def test_F84_seam_dispatch_contract(self):
+        """AUD49 c1 (findings 1+2). (a) ARITY: a callable seam with an
+        OPTIONAL parameter (defaulted lambda / functools.partial /
+        bound method) must RECEIVE the path — counting required params
+        silently dropped it and the fixture ran the healthy operation
+        (the cycle-1 repro: `lambda p=None: p.endswith(..)` was dead
+        on arrival end-to-end). (b) `clear_partial_write` accepts a
+        CALLABLE like every other seam and is consumed ONCE PER WRITE
+        of the checked loop (a persistent throttle, not one-shot): the
+        predicate is consulted exactly once per real segment pwrite and
+        the clear still completes."""
+        import functools
+        from p9m3.ledger import _fault_active, _partial_limit
+
+        # (a) optional-arg predicates receive the path (unit level)
+        self.assertTrue(_fault_active(
+            lambda p=None: p is not None and p.endswith("resolve-owed"),
+            "/d/resolve-owed"))
+        self.assertFalse(_fault_active(
+            lambda p=None: p is not None and p.endswith("nope"),
+            "/d/resolve-owed"))
+        self.assertTrue(_fault_active(
+            functools.partial(
+                lambda p=None, note=None: (
+                    p is not None and p.endswith("resolve-owed"))),
+            "/d/resolve-owed"))
+
+        class _Holder:
+            def pred(self, p=None):
+                return p is not None and p.endswith("resolve-owed")
+        self.assertTrue(_fault_active(_Holder().pred, "/d/resolve-owed"))
+        # required-arg and *args predicates keep getting the path
+        self.assertTrue(_fault_active(lambda p: p.endswith("resolve-owed"),
+                                      "/d/resolve-owed"))
+        self.assertTrue(_fault_active(lambda *a: bool(a), "/d/resolve-owed"))
+        # no-arg predicates still work (bind(path) fails, bind() fits)
+        self.assertTrue(_fault_active(lambda: True))
+
+        # (a) END-TO-END (the cycle-1 repro, seams only): a defaulted
+        # predicate on the clear-write seam must really fault the clear.
+        owed_path = os.path.join(self.dir, "resolve-owed")
+        f = FsFaults(clear_write_fault=lambda p=None: (
+            isinstance(p, str) and p.endswith("resolve-owed")))
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        with self.assertRaises(OSError):
+            led._clear_owed()
+        self.assertTrue(led._owed_attempt(),
+                        "the defaulted predicate REALLY faulted the "
+                        "clear (the finding-1 mutant completed the "
+                        "clear silently instead)")
+
+        # (b) callable partial seam: consulted per write with the path,
+        # the throttle is 2 bytes, the continuation still lands 16 zeros.
+        consulted = []
+
+        def limit_two(p=None):
+            consulted.append(p)
+            return 2
+
+        writes = {"n": 0}
+        real_pwrite = os.pwrite
+
+        def counting(p, b, off, *a, real=real_pwrite, w=writes):
+            if b and not any(b):        # only clear segments carry zeros
+                w["n"] += 1
+            return real(p, b, off, *a)
+
+        f = FsFaults(clear_partial_write=limit_two)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        os.pwrite = counting
+        try:
+            led._clear_owed()
+        finally:
+            os.pwrite = real_pwrite
+        with open(owed_path, "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(raw, b"\0" * 16,
+                         "a callable 2-byte throttle still completes "
+                         "the clear via the checked continuation")
+        self.assertGreaterEqual(writes["n"], 8,
+                                "precondition: the throttle really "
+                                "shortened the segment writes")
+        self.assertEqual(len(consulted), writes["n"],
+                         "the partial seam is consumed EXACTLY once per "
+                         "write of the loop — not one-shot (finding 2: "
+                         "the suite passed a first-write-only variant)")
+        self.assertTrue(all(isinstance(p, str) and p == owed_path
+                            for p in consulted),
+                        "the predicate receives the owed-sidecar path")
+        # direct contract: int passthrough, None unthrottled,
+        # callable returns are interpreted recursively
+        self.assertEqual(_partial_limit(3), 3)
+        self.assertIsNone(_partial_limit(None))
+        self.assertEqual(_partial_limit(lambda: 4), 4)
+        self.assertIsNone(_partial_limit(lambda p: None))
+
+    def test_F85_true_crash_pins_seed_before_fill_repair_order(self):
+        """AUD49 c1 (finding 3): the repair's SEED-BEFORE-FILL order is
+        a CRASH-consistency invariant the endpoint assertions cannot
+        see — after BOTH independent legs finish the row is identical,
+        so the fill-before-seed mutant passed all 116 tests. Only a
+        real SIGKILL at the FILL boundary distinguishes the orders
+        (F79's recipe, NEVER the multiprocessing module): the child
+        clears with the fsync seam raising (in-fd repair runs) and
+        SIGKILLs itself at ENTRY to the fill pwrite (payload starts
+        with b"OWED" — the seed is the single byte b"O", the clear
+        segments are all-zero). SHIPPED: the seed already landed, the
+        survivor reads owed. FILL-FIRST: nothing has landed, the row
+        is zeros — a CLEARED-reading witness with no counter cover
+        after the reset — RED on that mutant (verified against a
+        fill-first copy)."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        d = self.dir
+        real_pwrite = os.pwrite
+        pid = os.fork()
+        if pid == 0:
+            try:
+                child = Ledger(d, faults=FsFaults(clear_fsync_fault=True),
+                               repair_attempt_cap=3)
+
+                def die_at_fill(p, b, off, *a, **k):
+                    # the fill is the ONLY pwrite whose payload starts
+                    # with the OWED tag (the seed is one byte b"O"; the
+                    # clear segments are all-zero) — order-independent
+                    # filter on the code under test.
+                    if b[:4] == b"OWED":
+                        os.kill(os.getpid(), signal.SIGKILL)
+                    return real_pwrite(p, b, off, *a, **k)
+
+                os.pwrite = die_at_fill
+                child._clear_owed()     # must die inside the repair fill
+                os._exit(3)             # only if the kill failed
+            finally:
+                os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status)
+                        and os.WTERMSIG(status) == signal.SIGKILL,
+                        "child was not killed entering the fill leg")
+        with open(os.path.join(d, "resolve-owed"), "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(raw[0:1], b"O",
+                         "the shipped order put the minimum-evidence "
+                         "seed down BEFORE the fill began — a "
+                         "fill-first order dies with nothing landed")
+        self.assertEqual(raw[1:16], b"\0" * 15, "seed-only survivor")
+        fresh = self.mk(repair_attempt_cap=3)
+        self.assertTrue(fresh._owed_attempt(),
+                        "crash-mid-repair witness must read owed")
+        self.assertNotEqual(fresh.status()["decision"], STATE_OK,
+                            "a fresh view must not serve ok over an "
+                            "interrupted repair")
+        self.assertEqual(fresh.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertFalse(healed._owed_attempt())
 
 
 if __name__ == "__main__":

@@ -89,9 +89,16 @@ class FsFaults:
         # - `clear_write_fault`: the clear's first segment pwrite raises
         #   (the compensation re-arm then re-arms a surviving owed
         #   witness).
-        # - `clear_partial_write=N`: the clear's first segment writes
-        #   only N bytes (the checked loop must continue at the right
-        #   offset; mid-crash reads still read owed).
+        # - `clear_partial_write=N`: EVERY clear-segment pwrite in the
+        #   checked loop is throttled to at most N bytes (a persistent
+        #   per-write ceiling, consumed once per write — the checked
+        #   continuation must still land all 16 zeros; N=0 is an empty
+        #   pwrite that trips the zero-progress guard before any zero
+        #   lands). A CALLABLE is consulted through `_dispatch_fault`
+        #   like every other seam; its return value (int or None) is
+        #   the limit. AUD49 c1 (finding 2): until now this value went
+        #   straight through `int()` with no dispatch — a callable
+        #   raised TypeError before any syscall.
         # - `clear_fsync_fault`: the clear's fsync RAISES — the RAISING
         #   variant that triggers the in-fd repair leg. Distinct from
         #   `sidecar_fsync_fault`, which is SILENTLY DROPPED in

@@ -146,35 +146,71 @@ class _IOError0(OSError):
         super().__init__(errno.EIO, msg)
 
 
+def _dispatch_fault(value, path):
+    """AUD49 c1 (finding 1): the CALL contract for a callable fault
+    seam. The one-argument form (the affected path) is used whenever
+    the signature ACCEPTS it — required, optional, or *args — decided
+    by SIGNATURE BINDING, not by counting REQUIRED parameters: an
+    optional-parameter counter silently DROPPED the path for
+    defaulted lambdas / functools.partial / bound methods, so a
+    path-selective fixture executed the healthy operation instead of
+    injecting the fault (repro: `lambda p=None: p.endswith(..)` was
+    dead on arrival). Bind attempts raise TypeError ONLY for the CALL
+    signature — never from the predicate body — so a TypeError raised
+    INSIDE a predicate still surfaces unretried. Bindable-to-path ->
+    value(path); else bindable no-arg -> value(); neither ->
+    value(path) and the wiring TypeError surfaces (fixture bug)."""
+    try:
+        sig = _inspect.signature(value)
+    except (TypeError, ValueError):       # builtins etc.: 1-arg default
+        return value(path)
+    try:
+        sig.bind(path)
+    except TypeError:
+        try:
+            sig.bind()
+        except TypeError:
+            return value(path)            # surface the wiring TypeError
+        return value()
+    return value(path)
+
+
 def _fault_active(value, path=None):
     """AUD49 implement0: a fault-seam value is ACTIVE when it is
     truthy, or — when callable (precedent: the callable
     `size_override` seam on the append path) — when it returns True.
-    A callable is tried one-arg (the affected path) first, falling
-    back to no-arg; the CALL itself is never fault-swallowed — a
+    A callable is consulted through `_dispatch_fault` (one-arg path
+    preferred whenever the signature accepts it, no-arg only when the
+    path cannot bind); the CALL itself is never fault-swallowed — a
     predicate that raises is the fixture's own bug and must surface.
-    Every clear/repair seam consumption goes through here so bool and
-    predicate fixtures share ONE consumption contract."""
+    Every bool-valued clear/repair seam consumption goes through here
+    so bool and predicate fixtures share ONE consumption contract."""
     if not value:
         return False
     if callable(value):
-        # arity by signature (NOT try/except TypeError: a TypeError
-        # raised INSIDE a 1-arg predicate is that fixture's bug and
-        # must surface, not be retried zero-arg)
-        try:
-            params = _inspect.signature(value).parameters
-        except (TypeError, ValueError):   # builtins etc.: 1-arg default
-            return bool(value(path))
-        required = [p for p in params.values()
-                    if p.default is p.empty
-                    and p.kind in (p.POSITIONAL_ONLY,
-                                   p.POSITIONAL_OR_KEYWORD)]
-        if len(required) >= 1:
-            return bool(value(path))
-        if any(p.kind is p.VAR_POSITIONAL for p in params.values()):
-            return bool(value(path))
-        return bool(value())
+        return bool(_dispatch_fault(value, path))
     return True
+
+
+def _partial_limit(value, path=None):
+    """AUD49 c1 (finding 2): the resolved value of the
+    `clear_partial_write` seam — until now the ONE seam whose value
+    went straight through `int()` with no dispatch, so a callable
+    raised TypeError before any syscall and the constructor's
+    "True-or-callable" contract was a lie for it. Contract NOW:
+    None = unthrottled writes; an int = the byte CEILING of EVERY
+    clear-segment pwrite in the checked loop (a persistent per-write
+    THROTTLE, consumed once per write — not a one-shot injection;
+    the continuation still completes the clear, F81(b); 0 = an empty
+    pwrite tripping the zero-progress guard BEFORE any zero lands,
+    F81(c)); a callable is consulted through `_dispatch_fault` like
+    every other seam and its return value interpreted recursively
+    (int or None)."""
+    if callable(value):
+        value = _dispatch_fault(value, path)
+    if value is None:
+        return None
+    return int(value)
 
 
 class Ledger:
@@ -526,7 +562,8 @@ class Ledger:
         reached these legs only by monkeypatching os.pwrite/os.fsync
         with inode discrimination. NOW each leg is a DECLARED seam:
         `clear_write_fault` (segment pwrite raises EIO),
-        `clear_partial_write=N` (first segment short — the checked
+        `clear_partial_write=N` (EVERY segment pwrite throttled to N
+        bytes — the checked
         continuation must still land all 16 zeros),
         `clear_fsync_fault` (the completion fsync RAISES — the
         in-fd repair below), `repair_seed_fault` / `repair_fill_fault`
@@ -558,13 +595,13 @@ class Ledger:
                                 self._owed_side):
                             raise OSError(errno.EIO,
                                           "injected clear write fault")
-                        partial = getattr(faults, "clear_partial_write",
-                                          None)
-                        if partial is not None:
-                            n = os.pwrite(fd,
-                                          buf[off:end][:int(partial)], off)
-                        else:
+                        limit = _partial_limit(
+                            getattr(faults, "clear_partial_write", None),
+                            self._owed_side)
+                        if limit is None:
                             n = os.pwrite(fd, buf[off:end], off)
+                        else:
+                            n = os.pwrite(fd, buf[off:end][:limit], off)
                         if n <= 0:
                             raise OSError(errno.EIO,
                                           "owed clear: zero progress")
