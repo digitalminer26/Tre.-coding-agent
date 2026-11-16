@@ -3499,5 +3499,52 @@ class TestV38Cycle6Audit(Base):
                          "the attempted round stays charged")
         self.assertFalse(fresh.promotion_allowed())
 
+    def test_F70_tail_first_clear_order_pinned(self):
+        """AUD47-c4 (audit cycle 4, mutant m5): reversing the clear
+        order in `_clear_owed` (head-first) kept the suite GREEN while
+        being REACHABLY different — the witness payload is
+        b"OWED"+NULs, so a head-first clear interrupted after its
+        first segment zeroes the only nonzero bytes and leaves an
+        all-zero record that reads CLEARED; `operator_resolve_reset()`
+        then removes the counter evidence and a fresh instance serves
+        `ok` although the clear never completed. TAIL-FIRST (the
+        shipped order) crashes with the OWED head intact. This test
+        interrupts the clear AFTER the first segment lands and pins
+        the fail-closed survivor: it is RED on any head-first order."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        real_pwrite = os.pwrite
+        calls = {"n": 0}
+
+        def flaky(p, b, off, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:     # die AFTER the first clear segment
+                raise OSError(errno.EIO, "injected clear-segment fault")
+            return real_pwrite(p, b, off, *a, **k)
+
+        os.pwrite = flaky
+        try:
+            with self.assertRaises(OSError):
+                led._complete_resolve()
+        finally:
+            os.pwrite = real_pwrite
+        self.assertTrue(led._owed_attempt(),
+                        "the interrupted clear must leave a record that "
+                        "READS OWED — head-first orders leave an all-zero "
+                        "(cleared-reading) record: tail-first is pinned")
+        # operator re-arm cannot erase the survivor (F62 discipline)
+        led.operator_resolve_reset()
+        fresh = self.mk(repair_attempt_cap=3)
+        self.assertTrue(fresh._owed_attempt())
+        self.assertNotEqual(fresh.status()["decision"], STATE_OK,
+                            "counter 0 after reset must NOT serve ok over "
+                            "the interrupted-clear witness")
+        self.assertFalse(fresh.promotion_allowed())
+        # and the ledger still heals through a real resolve
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+
 if __name__ == "__main__":
     unittest.main()
