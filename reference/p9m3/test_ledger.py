@@ -4562,6 +4562,49 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(_partial_limit(lambda: 4), 4)
         self.assertIsNone(_partial_limit(lambda p: None))
 
+    def test_F86_dispatch_wiring_typeerror_contract(self):
+        """AUD49 c2 (finding C2-F1): the double-bind-failure contract
+        is PINNED. A seam value whose signature binds NEITHER `bind(path)`
+        nor `bind()` is a fixture wiring bug and MUST surface the call
+        TypeError (the c2 mutant returning silent-False passed all the
+        other tests: a miswired fixture would read as a dead seam — the
+        exact silent-inactivation class this round was chartered to
+        close). Also pinned: a TypeError raised in the predicate BODY
+        surfaces unretried (bind attempts fail BEFORE the body runs)."""
+        from p9m3.ledger import _dispatch_fault, _fault_active
+
+        # neither bindable: two required positional args
+        with self.assertRaises(TypeError):
+            _dispatch_fault(lambda a, b: True, "/d/p")
+        with self.assertRaises(TypeError):
+            _fault_active(lambda a, b: True, "/d/p")
+        # neither bindable: keyword-only required param (bind(path)
+        # and bind() both raise for `lambda *, p: True`)
+        with self.assertRaises(TypeError):
+            _dispatch_fault(lambda *, p: True, "/d/p")
+
+        # body-raised TypeError surfaces UNRETRIED (not a bind failure):
+        # the predicate is invoked EXACTLY once before it raises.
+        calls = []
+
+        def body_raises(p):
+            calls.append(p)
+            raise TypeError("body")
+        with self.assertRaises(TypeError) as cm:
+            _dispatch_fault(body_raises, "/d/p")
+        self.assertEqual(str(cm.exception), "body")
+        self.assertEqual(calls, ["/d/p"],
+                         "exactly one invocation — the dispatcher must "
+                         "not retry (or bind-swallow) a body TypeError")
+
+        # end-to-end: a miswired seam value surfaces at construction-
+        # time use rather than silently disabling the fixture.
+        f = FsFaults(clear_write_fault=lambda a, b: True)
+        led = self.mk(faults=f, repair_attempt_cap=3)
+        led._write_owed()
+        with self.assertRaises(TypeError):
+            led._clear_owed()
+
     def test_F85_true_crash_pins_seed_before_fill_repair_order(self):
         """AUD49 c1 (finding 3): the repair's SEED-BEFORE-FILL order is
         a CRASH-consistency invariant the endpoint assertions cannot
