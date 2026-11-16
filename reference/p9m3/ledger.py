@@ -1000,9 +1000,11 @@ class Ledger:
     # ---------------- AUTH file ----------------
 
     def _read_auths(self):
-        """Returns (valid_auths, malformed_flag). Any unterminated tail or
-        terminated nonblank-malformed line fails CLOSED for every
-        authorization (v34 AUTH rule, F9/F14).
+        """Returns (valid_auths, malformed_flag). Any unterminated
+        NONBLANK tail or terminated nonblank-malformed line fails
+        CLOSED for every authorization (v34 AUTH rule, F9/F14); a
+        whitespace-only unterminated tail is stripped, consistent
+        with the (b-O) blank-tail rule (AUD45-c5-1).
         v38 cycle-3 fix 4 (AUD C3-4): the read STREAMS in bounded chunks
         and counts the CURRENT physical line incrementally — the 64 KiB
         per-line cap is enforced the moment it is crossed, BEFORE the

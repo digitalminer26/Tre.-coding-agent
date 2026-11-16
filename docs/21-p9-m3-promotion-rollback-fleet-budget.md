@@ -2873,8 +2873,10 @@ stage-2 SYNTACTIC occurrences (terminated lines failing the schema);
 `--authorize-consumption-repair` REFUSES (`auth-entry-not-malformed`) any
 entry whose bytes are a schema-valid terminated line, including a DEAD
 REPAIR's bytes (v36, AUD35-B1).
-VALIDITY: a valid AUTH is a terminated schema-valid line; an unterminated
-or nonblank-malformed authorization line FAILS CLOSED
+VALIDITY: a valid AUTH is a terminated schema-valid line; an
+unterminated NONBLANK or nonblank-malformed authorization line FAILS
+CLOSED (a whitespace-only unterminated tail is stripped, consistent
+with the (b-O) blank-tail rule; AUD45-c5-1)
 (`authorization-file-malformed` for every authorization) until an
 operator repair procedure, which is out of scope and named as open debt.
 `--authorize-consumption-repair` REFUSES when a valid unspent AUTH with

@@ -6504,3 +6504,18 @@ committed; post-fold hashes read from the tree with BOTH labels.
   Post-fold tree: ledger.py sha1 92a3b45004b5… sha256
   1a01e7d89abd… (test_ledger.py UNCHANGED 80eb7014ee1f…/
   bed061d92495…); suite 93 OK, tsc clean.
+  1 finding, minor DOC, ACCEPTED after independent verification
+  (both prose sites confirmed overclaiming in source; the code's
+  whitespace-tail strip is DELIBERATE and consistent with the (b-O)
+  blank-tail rule; auditor's experiment: b' '/b'\t\r' -> ([],False),
+  b'{' -> ([],True); the other torn-tail shorthand sites (5846,
+  AUD33-B2 row, AUD29/30 rows) already say "nonblank" — none left
+  unqualified; suite 93 OK in its copy):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c5-1 | minor | DOC | AUTH VALIDITY paragraph (docs/21 ~2876) and _read_auths docstring said "ANY unterminated tail … FAILS CLOSED" while the reader ignores a WHITESPACE-ONLY unterminated tail (strip check; consistent with (b-O) blank-tail framing) | Both sites qualified to "unterminated NONBLANK" with the blank-tail consistency noted; behavior UNCHANGED |
+  Cycle self-declared INCOMPLETE (lifecycle regions + generation
+  binding read; S-A1-R three-state protocol NOT fully audited
+  against the implementation; cross-doc pin inventory open).
+  Post-fold tree: ledger.py sha1 cf0f6962fb87… sha256
+  dadb9e043500… (test_ledger.py UNCHANGED); suite 93 OK, tsc clean.
