@@ -6291,3 +6291,43 @@ own"):
   only against this ledger; pre-1425a69 artifact bytes not
   externally establishable; D2-D5 session-log scans bounded to the
   pre-forensics region as instructed.
+
+---
+
+DECISION-4 PROSE ROUND — SCOPE A (kicked 2026-11-16, owner-authorized
+fourth tranche "part 4 - a" + approved sequencing; 5 cycles max;
+terra = gpt-6.1-terra, read,bash, read-only repo, experiments in
+per-cycle copies under ~/.tre/audits/d4a-x<n>/).
+
+AUTHORITY: reference implementation RUNNING BEHAVIOR = behavior
+authority; docs/21 prose = intent authority. Findings classify
+CODE/TEST (impl drifted from ratified intent) / DOC (prose
+misdescribes code) / SPEC (pooled, owner batch fix only). SCOPE A
+STRICTLY: prose describing reference-impl behavior (probe/0A, flock
+1A, resolve 2A, DEAD REPAIR 3A disposition, AUTH/REPAIR lifecycle,
+rotation S-J2-R, torn-AUTH S-A1-R, cap reserve/commit, F-series
+fixture claims). Slice A/B prose (no implementing code) is OUT.
+
+- PIN AT KICK (cycle 1): HEAD 6625d6f (the fourth-tranche fold;
+  reference/ UNTOUCHED by it — verified via git show --stat);
+  ledger.py db3c289f916b, test_ledger.py 3b238a6536e1; suite 89 OK
+  under -W error::ResourceWarning (auditor's own copy d4a-x1).
+  Auditor prompt: ~/.tre/audits/d4-scopeA-prompt.txt; outputs
+  ~/.tre/audits/d4-scopeA-c<n>-out.txt.
+- CYCLE 1 (report: d4-scopeA-c1-out.txt): SELF-DECLARED INCOMPLETE —
+  targeted reads only, no exhaustive sweep; findings stand, absence
+  of further findings NOT established (per the round's own rule this
+  is disclosed, not laundered). 2 findings, both minor DOC, both
+  ACCEPTED after source verification:
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | D4A-c1-1 | minor | DOC | ledger.py header claimed "F20/F27 use a real SIGKILL" — F20 injects an exception (test's own comment says so); only F27 + the TestV38CyclePins fork+kill -9 case are real kills | header REWRITTEN: real-kill cases named; F20 explicit as simulated; test comment at F20 already correct (verified 882-888) |
+  | D4A-c1-2 | minor | DOC | both module headers' fixture inventories stopped at F57 while F58/F59 (S-J3-C clock-clamp + exact-cap reserve) exist and run | both headers UPDATED to F1-F59 (+C6_* noted); verified F58@2065/F59@2096 present in suite |
+  Post-fix pins: ledger dee009cbcbda, test_ledger b23bfa6feeae,
+  suite 89/89 OK (re-run after the header edits — headers are
+  docstrings, zero behavior change intended or claimed).
+- CLASSIFICATION NOTE (agent fold): both findings are DOC-class
+  INSIDE the reference tree (implementation self-description), not
+  docs/21 prose — in-scope per the prompt's "claims in the
+  implementation that belong to docs" clause. Neither is SPEC: no
+  owner ruling needed; folded directly.

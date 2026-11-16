@@ -1,10 +1,13 @@
-"""Fixture suite F1-F57 for the P9/M3 reference implementation
+"""Fixture suite F1-F59 (+ the C6_* v38-cycle-6 audit pins) for the
+P9/M3 reference implementation
 (spec docs/21-p9-m3-promotion-rollback-fleet-budget.md DRAFT v42,
 V33 FIXTURE TABLE with v36/v37 additions + v38 audit fixtures F23-F27,
-v38 cycle-1/cycle-2 pins F28-F33, and the v40-v42 audit pins F35-F57
+v38 cycle-1/cycle-2 pins F28-F33, the v40-v42 audit pins F35-F57
 (F55/F56 mint freshness & ULID conformance, F57 cap-refusal preflight,
 F19 forced-order rewrite + R5-c1 contention-handshake/one-frame-fits/
-sidecar-untouched pins); expected results normative).
+sidecar-untouched pins), and F58/F59 — the S-J3-C clamped-clock label
+and the exact-cap reserve boundary; expected results normative).
+(D4A-c1 finding 2: this header formerly stopped at F57.)
 
 Run: cd reference && python3 -m unittest p9m3.test_ledger -v
 """

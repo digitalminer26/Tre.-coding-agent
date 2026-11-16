@@ -5,16 +5,20 @@ repair as an append, DURABILITY + RESOLVE-ON-USE with the resolve
 attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
-Scope: the ledger contract + fixtures F1-F57 (F23-F27 pin the v38
-audit fixes; F28-F33 the v38 cycle-1/2 pins; F35-F57 the v40-v42
-audit pins — mint freshness/ULID conformance, cap-refusal preflight,
-F19 forced-order serialization; F1-F22 are re-verified against the
+Scope: the ledger contract + fixtures F1-F59 plus the C6_* v42
+round-5 pins (F23-F27 pin the v38 audit fixes; F28-F33 the v38
+cycle-1/2 pins; F35-F57 the v40-v42 audit pins — mint
+freshness/ULID conformance, cap-refusal preflight, F19 forced-order
+serialization; F58-F59 pin the clamped diagnostic clock label and
+the exact-cap reserve boundary; F1-F22 are re-verified against the
 cycle-1 corrections: per-generation authority, resolve-before-act,
 intent-before-byte settlement, fail-closed sidecars, strict schema
 shape, outcome-unknown plumbing, owner-only paths). Pure stdlib.
 Fault injection through FsFaults models hostile IO (EIO, partial
 writes, lock contention, visibility failures) without real crashes;
-F20/F27 use a real SIGKILL.
+F27 (and the fork + kill -9 partial-bytes case in
+TestV38CyclePins) use a REAL SIGKILL — F20 simulates its crash with
+an INJECTED EXCEPTION and does not kill a process (D4A-c1 finding 1).
 
 F10 static rule honored by construction: this module performs NO
 os.rename / os.truncate / unlink / write-mode open against the ledger,
