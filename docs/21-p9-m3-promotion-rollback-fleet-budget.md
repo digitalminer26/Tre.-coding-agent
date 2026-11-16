@@ -17,7 +17,9 @@ DC-2 acknowledged-gap block RATIFIED AS WRITTEN (status folded in
 docs/21a; Q-J2-h deferral now owner's own recorded position); 3A
 final review format ACCEPTED (evidence-first crosswalk, one owner
 reading, cycles only on drift) — 3A itself still UNCONFIRMED until
-that reading lands; Decision 4 prose round scoped to A (reference-
+that reading lands — ARTIFACT BUILT 2026-11-16 as docs/21b (suite
+pinned 92 OK + 6-sentence crosswalk, 0 CODE drift; the owner's
+ratification reading is the only step left); Decision 4 prose round scoped to A (reference-
 impl behavior prose only) with owner-approved sequencing — round
 itself RUN AND CLOSED 2026-11-16 at its 5-cycle cap — 8 findings, record in docs/21a (D4A-c1-1 … D4A-c5-3); its cycle-5 fold added 3 mutation-checked pins (test_F23v33_* / test_F25v33_*, suite now 92 OK) and corrected the fixture-coverage mapping in both module headers; ONE owner decision remains POOLED from the round (D4A-c4-1: does S-J2-R rotation get its own implementation workstream; is the reference impl's journal-full refusal the ratified interim behavior?) — flagged, non-blocking; Part-5 backlog items unchanged ("review later").
 With this tranche, §4 reads: D1–D8 CLOSED, D9 CLOSED-PENDING-
