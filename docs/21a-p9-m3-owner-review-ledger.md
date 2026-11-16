@@ -6331,3 +6331,20 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   docs/21 prose — in-scope per the prompt's "claims in the
   implementation that belong to docs" clause. Neither is SPEC: no
   owner ruling needed; folded directly.
+- CYCLE 2 (report: d4-scopeA-c2-out.txt; mission: the four regions
+  cycle 1 declared uncovered; auditor ENUMERATED a claim inventory
+  first per instruction, then verified): again SELF-DECLARED
+  INCOMPLETE — completed the torn-AUTH region only; AUTH/REPAIR
+  lifecycle, S-J2-R rotation, and cap reserve/commit remain
+  unenumerated after two cycles (disclosed, not laundered).
+  1 finding, MAJOR DOC, ACCEPTED after independent verification:
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | D4A-c2-1 | MAJOR | DOC | fixture row (e-7) (docs/21 ~5803) still said a torn AUTH tail is IGNORED and the prior complete AUTH remains valid — the operative VALIDITY rule (~2837, v34), rows F9/F14, ledger.py _read_auths (unterminated nonblank carry ⇒ malformed) and test_F9_F14 all say FAIL CLOSED for every authorization; the auditor also empirically confirmed the suite pins refusal of repair AND of fresh authorize | (e-7) REWRITTEN as V34 SUPERSESSION (v30 text revoked in place, revocation lineage kept visible); no code/test change — the code and F9/F14 were always right, the fixture row was the sole stale carrier; zero behavior change |
+  Post-fold pins: ledger dee009cbcbda, test_ledger b23bfa6feeae
+  (UNCHANGED — docs-only fold), suite unchanged at 89 OK.
+  AGENT NOTE: cycle 2's report also corrected the round's own kick
+  premise — HEAD 4f5c32c DID touch both reference files (the cycle-1
+  header fold), so "reference tree untouched" holds only for the
+  v44 docs fold 6625d6f, not for 4f5c32c. Read the pin line as the
+  cycle's own re-verified values, never as inherited.

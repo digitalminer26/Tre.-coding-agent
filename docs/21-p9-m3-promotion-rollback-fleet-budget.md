@@ -5801,8 +5801,15 @@ that every confirmation at offset < L_C stays inert. (e-6) REPLAY:
 a second repair attempt with the SAME authId ⇒ refused (APPLIED
 present); a fresh authorization over the already-repaired file ⇒
 malformed set empty ⇒ refused `no-malformed-lines`. (e-7) TORN AUTH
-TAIL: an unterminated authorization tail is ignored and the prior
-complete AUTH remains valid; a terminated malformed authorization
+TAIL (V34 SUPERSESSION — v30 text REVOKED by D4A-c2-1 fold): an
+unterminated authorization tail is NOT ignored — a nonblank
+unterminated tail fails CLOSED exactly like a terminated
+nonblank-malformed line (`authorization-file-malformed` for EVERY
+authorization, including one backed by a prior complete AUTH), until
+the operator repair procedure (operative VALIDITY rule above; rows
+F9/F14, which already carried the corrected expectation — this
+fixture row had simply never been updated; pinned by
+test_F9_F14_torn_auth_tail_fails_closed). A terminated malformed authorization
 line refuses every authorization. (e-8) PARTIAL TAIL (δ): a torn
 unterminated append ⇒ `unsettled-tail`; recovery is SETTLEMENT then
 operator AUTH+REPAIR over the resulting malformed occurrence (v38,
