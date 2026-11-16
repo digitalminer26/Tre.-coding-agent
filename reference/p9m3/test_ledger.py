@@ -1,4 +1,4 @@
-"""Fixture suite F1-F59 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F60 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with

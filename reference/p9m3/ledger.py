@@ -5,8 +5,9 @@ repair as an append, DURABILITY + RESOLVE-ON-USE with the resolve
 attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
-Scope: the ledger contract + fixtures F1-F59 plus the C6_* v42
-round-5 pins. COVERAGE IS BY FIXTURE FAMILY, not one test per
+Scope: the ledger contract + fixtures F1-F60 plus the C6_* v42
+round-5 pins (F60: no-pending resolve IO fault is bounded,
+AUD45-c3-1). COVERAGE IS BY FIXTURE FAMILY, not one test per
 label (D4A-c5-3 mapping): F14 is pinned inside test_F9_F14
 (combined), F15's behavior is pinned by test_F6 (duplicate spec
 row), and V33 rows F23/F25 share numbers with DIFFERENT v38

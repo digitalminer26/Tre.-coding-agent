@@ -22,8 +22,10 @@ here pre-empts it.
   as `sha256-prefix` at da7f7f0 but were transcribed from `shasum`
   (SHA-1) output — the true SHA-256 prefixes are the ones added here
   (read from the tree, per the D4A pin rule; verified identical at
-  8721f5b and HEAD **for ledger.py only** — the tree at HEAD carries
-  a STRENGTHENED test_ledger.py, see the update immediately below;
+  8721f5b and the HEAD **of that time** (commit 37070e1, the v46
+  fold) **for ledger.py only** — later AUD45 folds have changed
+  ledger.py again; see the updates below and the current-tree
+  mapping (AUD45-c7-2);
   finding AUD45-c1-1).]
 - EVIDENCE-TREE UPDATE (AUD45-pre fold, 2026-11-17): the five-finding
   hygiene fold STRENGTHENED `test_ledger.py` (test_F25v33_* gained
@@ -91,6 +93,25 @@ here pre-empts it.
   remains byte-identical (anchors re-verified). No 3A SENTENCE
   changed behavior: S1–S6 drift stays NONE — the fix serves docs/21's
   own resolve-bound prose.
+- EVIDENCE-TREE UPDATE 4 (AUD45 round close, 2026-11-17; finding
+  AUD45-c7-1): the update-3 "+28 cumulative" mapping went stale the
+  moment cycles 4-5 edited ledger.py docstrings again. CURRENT-TREE
+  MAPPING (measured, both algorithms pinned below): S1 classify
+  DEAD/valid route — pinned 866–899 (8721f5b) -> now 875–908
+  (dead.append anchor 894 -> 903, +9); S2 revive_dead_repair —
+  1456–1459 -> 1491–1494 (+35); S3 status dead_repairs line — 1810
+  -> 1845 (+35). Cited content byte-identical at all three anchors
+  (re-verified). Current tree: `ledger.py` sha1
+  `cf0f6962fb87c7cd196e73697420d6136c76baba` sha256
+  `dadb9e043500a1413cf4adea394260107b87bba388898c5961a1d493ae539088`
+  (cycles 4-5 docstring folds after update 3; behavior of cycles
+  4-5/6 folds: docstrings/prose only); `test_ledger.py` sha1
+  `80eb7014ee1fcfb2396f194ebf6fd05221571cda` sha256
+  `bed061d92495a884825c3bf0095156c2823cc15a52f4dbea9a2c7886e6a0ef6d`
+  (unchanged since the cycle-3 pin — F60). THE Step-2 TABLE'S LINE
+  CITATIONS ARE HISTORICAL (pinned to 8721f5b per the D4A pin rule);
+  this block is the verified mapping to the current tree. Suite at
+  this tree: **Ran 93 tests — OK**.
 - Command: `cd reference && python3 -W error::ResourceWarning
   -m unittest p9m3.test_ledger`
 - Result: **Ran 92 tests — OK** (2026-11-16). The three pins added

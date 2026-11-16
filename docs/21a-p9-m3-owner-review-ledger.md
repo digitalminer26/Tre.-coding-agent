@@ -6535,3 +6535,26 @@ committed; post-fold hashes read from the tree with BOTH labels.
   mutation testing, and cross-doc pin sweep open). Docs-only fold:
   reference tree UNCHANGED (ledger cf0f6962fb87…/dadb9e043500…;
   tests 80eb7014ee1f…/bed061d92495…); suite 93 OK.
+  3 findings, all minor DOC, all ACCEPTED after independent
+  verification (all three confirmed in source — two are bookkeeping
+  drift created by this round's own mid-round folds; suite 93 OK in
+  the auditor's copy; hashes re-derived per revision for 8721f5b /
+  37070e1 / df0b88b / 3902362 / current):
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | AUD45-c7-1 | minor | DOC | 21b update-3's "+28 cumulative" mapping went stale after cycles 4-5 edited ledger.py again (revive now 1491-1494, status line 1845 — update-3 offsets miss by 7) | 21b EVIDENCE-TREE UPDATE 4 added: explicit current-tree mapping measured at the round-close kickoff tree a6d54d5 (S1 anchor 894->903 (+9); S2 1456-1459->1491-1494 (+35); S3 1810->1845 (+35); content byte-identical, re-verified) + "Step-2 citations are HISTORICAL (8721f5b), this block is the verified current mapping" |
+  | AUD45-c7-2 | minor | DOC | the hash-correction note said the old ledger hash was "verified identical at 8721f5b and HEAD" — true only at the v46 HEAD; current HEAD differs | Qualified "the HEAD **of that time** (commit 37070e1, the v46 fold)" with pointers to the updates + mapping |
+  | AUD45-c7-3 | minor | DOC | both module headers' fixture inventories still say F1-F59 after F60 was added (cycle-3 fold) | Both inventories extended to F1-F60 with the AUD45-c3-1 purpose named (family-coverage qualification preserved) |
+  Cycle self-declared INCOMPLETE (21b read fully + representative
+  anchors + per-revision hashes; every individual Step-2 citation,
+  the full docs/21+21a pin/count sweep, and full Scope-A prose not
+  enumerated; no new mutation experiments; cumulative diff review
+  was head-truncated).
+  POST-FOLD TREE (the fold adds header-inventory lines only —
+  ledger.py's +2 header lines shift all anchors +2 from the
+  update-4 mapping, content identical): ledger.py sha1
+  6902c5e4f77e68928f4427673944c709d9624d4f sha256
+  ddaba333fb3d5d1c216d3f54e159b366d5bde40b570cef4766fad07c4fa686ff;
+  test_ledger.py sha1 2c4ccb04a014532607a8991553e19e41b3be1553
+  sha256 d8a6e181b980bf0baf65917cd85df4998e8bc01a12167e1157779cee4650a1f2.
+  Suite 93 OK, tsc clean.
