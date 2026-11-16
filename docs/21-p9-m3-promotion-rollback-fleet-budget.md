@@ -2628,6 +2628,18 @@ ALGORITHM over a FULL read (log > 64 MiB ⇒ `unknown`):
     DEAD REPAIR (offset, hash, reason: unknown-authId / mask-mismatch);
     an operator who believes one should be live must go through a NEW
     AUTH + fresh REPAIR against the CURRENT occurrence list.
+    [QUALIFIED by the LATE-VALIDATION rule immediately below (v39
+    AUDV1-M1; surfaced by D4A-c3-1): "no revival" means NO OPERATOR
+    REVIVAL COMMAND exists — it does NOT mean a DEAD classification
+    persists: validity is current-read, and the same stored record
+    reclassifies VALID automatically when its missing precondition
+    arrives later as a genuine authorization (AUTH appears / log
+    grows past its watermark within its own `all.confirmGen`) —
+    pinned by test_F24gen + fixture F24. The unqualified
+    "revival only via fresh AUTH + fresh REPAIR" shorthand in the
+    V37 OWNER DECISION RECORD carries the same qualification; the
+    owner's still-pending 3A reading is the ratification point for
+    this whole disposition INCLUDING the qualification.]
     LATE VALIDATION IS EXPLICIT MEANING (v39, AUDV1-M1): validity is a
     CURRENT-READ classification — no "was DEAD" fact persists (none can:
     the log is append-only and nothing tombstones a record). A REPAIR

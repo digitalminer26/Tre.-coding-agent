@@ -6348,3 +6348,20 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   header fold), so "reference tree untouched" holds only for the
   v44 docs fold 6625d6f, not for 4f5c32c. Read the pin line as the
   cycle's own re-verified values, never as inherited.
+- CYCLE 3 (report: d4-scopeA-c3-out.txt; mission: region (1)
+  AUTH/REPAIR lifecycle incl. the 3A sentences — feeds the owner's
+  deferred 3A reading): SELF-DECLARED INCOMPLETE (portion examined
+  inventoried first — claims 1-5 in the report; full-region
+  enumeration, quarantine/resolve-before-act rows and mutation
+  experiments NOT done). 1 finding, MAJOR DOC, ACCEPTED after
+  independent verification:
+  | ID | Sev | Class | Finding | Disposition |
+  |---|---|---|---|---|
+  | D4A-c3-1 | MAJOR | DOC | the 3A disposition (~2623) and the V37 OWNER DECISION RECORD line (~6733, "revival only via fresh AUTH + fresh REPAIR") state an UNQUALIFIED no-revival rule, while the operative LATE-VALIDATION rule (v39 AUDV1-M1, ~2631+, ratified content) and test_F24gen (grew the confirmation log within the REPAIR's own confirmGen ⇒ same record reclassified VALID, same AUTH spent, no fresh pair) make validity current-read: no OPERATOR REVIVAL COMMAND exists, but automatic reclassification on precondition arrival is the ratified design | disposition + V37 record QUALIFIED IN PLACE (bracketed; shorthand's meaning pinned to "no operator command", cross-refs F24/test_F24gen and the late-validation rule; explicitly flagged that the owner's pending 3A reading ratifies the disposition INCLUDING the qualification). NO code/test change — code is the ratified behavior |
+  NOTE: this is the FIRST finding that touches the owner's still-
+  unconfirmed 3A verdict itself — it is deliberately folded as a
+  QUALIFICATION of existing ratified prose (v39 AUDV1-M1 was owner-
+  approved at v39), NOT as a new claim; the 3A reading artifact will
+  carry it. Cycle 3 also re-verified the round pins by its own
+  shasums (dee009cbcbda / b23bfa6feeae — match the cycle-2
+  registration) and re-ran the suite in its own copy: 89 OK.
