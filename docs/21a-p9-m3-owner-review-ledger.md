@@ -6384,20 +6384,38 @@ fixture claims). Slice A/B prose (no implementing code) is OUT.
   commit below. Read hashes from the tree, never from a report.
 - CYCLE 5 (FINAL; mission: residual scope — V33 fixture-row coverage
   completeness: every normative sentence of the rows in scope must be
-  pinned by a test that REVERTS-TO-RED on its rule): 2 findings, both
-  ACCEPTED after independent verification —
+  pinned by a test that REVERTS-TO-RED on its rule): 3 findings
+  (intro first said "2 findings" — the fold table immediately below
+  lists three; corrected per the count-correction note at the round
+  totals), all ACCEPTED after independent verification —
   | ID | Sev | Class | Finding | Disposition |
   |---|---|---|---|---|
   | D4A-c5-1 | MAJOR | TEST | V33 row F23's late-AUTH arms (DEAD unknown-authId REPAIR reclassified VALID by a genuine later AUTH with occurrences=M, second REPAIR refused SPENT; occurrences≠M stays DEAD forever) were NOT pinned anywhere: the v38 test_F23 pins a DIFFERENT fixture reusing the number (intent-journal) and only the F24gen growth arm touched late validation. The row's behavior was verified empirically correct (A1-A4 arms: dead→valid activation, spent-refusal, mask-mismatch stays dead) but unpinned = unprotected | Two NEW tests added: test_F23v33_late_genuine_AUTH_activates_dead_repair + test_F23v33_late_AUTH_occurrence_mismatch_stays_dead (AUTH seeded RAW with the strict schema {t,authId,occurrences,createdAt} — the live authorize() would refuse the authId as already-used, so the injection-only setup matches the row's own v39 R2-M1 note). Mutation-checked: removing late validation ⇒ both new pins red; removing the mask-equality check ⇒ ONLY the mismatch pin red. Docs row annotated with the pin lineage. |
   | D4A-c5-2 | MAJOR | TEST | V33 row F25's CRASH-PREFIX ENUMERATION sentence ("fixtures drive (a), (b), (c) separately", v39 R2-M4) was unpinned: the v38 test_F25 pins post-write verify staleness (different fixture, reused number) | New test test_F25v33_crash_prefix_enumeration_three_arms drives all four prefixes — zero / "\n" / " \n " whitespace-only ⇒ decision OK (whitespace ignored, NOT unsettled) — and nonblank "\n{X" ⇒ unsettled-tail. Mutation-checked: treating ANY tail as unsettled ⇒ exactly this pin red. Docs row annotated with lineage. |
   | D4A-c5-3 | minor | DOC | both module headers claimed per-label fixture coverage (F1-F59 "pins") while F14 is pinned inside test_F9_F14, F15's row is a duplicate pinned by test_F6, and V33 F23/F25 share numbers with different v38 fixtures — the mapping claim was misleading | Both headers now state coverage is BY FIXTURE FAMILY with the explicit exceptions and the test_F23v33_*/test_F25v33_* lineage (the c5-1/c5-2 fold) |
-  Round totals: 5 cycles, 8 findings filed (1 SPEC pooled:
-  D4A-c4-1; 4 TEST major incl. c5-1/c5-2; 3 DOC), 0 CODE. Every TEST
+  Round totals: 5 cycles, 9 findings filed (corrected 2026-11-17 —
+  the totals line first said "8 findings … 4 TEST major"; the fold
+  tables carry 2+1+1+2+3 = 9 and cycle 5's own table lists THREE
+  rows (D4A-c5-1/2/3) under an intro line saying "2 findings": the
+  miscount was in the totals, not the tables. Correct classification:
+  2 TEST major (c5-1/c5-2, both mutation-verified), 6 DOC (2 MAJOR:
+  c2-1, c3-1; 4 minor: c1-1, c1-2, c4-2, c5-3), 1 SPEC pooled
+  (D4A-c4-1), 0 CODE). Every TEST
   finding here carried mutation-verified pins. Suite post-fold:
   92 OK (python3 -W error::ResourceWarning -m unittest
   p9m3.test_ledger, reference/). Post-fold hashes (read from the
-  tree, per the cycle-4 note): ledger.py 3a9307a7b1fc…,
-  test_ledger.py 656e77d3599f…, docs/21 4847b3205b63… (pre-commit;
-  the commit id supersedes). The D4A-c4-1 SPEC owner batch decision
+  tree, per the cycle-4 note; HASH-LABEL CORRECTION 2026-11-17:
+  these were written unlabeled and are SHA-1 (`shasum`) values —
+  the SHA-256 prefixes are ledger.py 4e997d59ed99…,
+  test_ledger.py ca66c1a47209…; the "docs/21 4847b3205b63…" pin
+  matches NO committed state of docs/21 under either algorithm —
+  treat as a transcription failure; the superseding values are the
+  commit ids themselves): ledger.py 3a9307a7b1fc… sha1,
+  test_ledger.py 656e77d3599f… sha1. The D4A-c4-1 SPEC owner batch decision
   (rotation workstream?) remains POOLED and OPEN; the round is CLOSED
   at its 5-cycle cap.
+  COUNT CORRECTION NOTE (2026-11-17, post-round): per the round's own
+  rule findings are counted from the fold tables; this note supersedes
+  the earlier totals prose without changing any finding, disposition,
+  or closure state. The 3A artifact (docs/21b) and docs/21 header
+  carry the corrected count.

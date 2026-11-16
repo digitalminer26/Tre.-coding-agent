@@ -1001,7 +1001,13 @@ class TestFixtures(Base):
         (c) a NONBLANK unterminated prefix => unsettled-tail + the
             settlement route.
         The v38 test_F25 pins post-write verify staleness (a different
-        fixture reusing the number); this row's arms were not driven."""
+        fixture reusing the number); this row's arms were not driven.
+        AUD45-pre fold strengthens this beyond the read side: the write
+        side is DRIVEN — append_watermark under partial_write {0, 1, 4}
+        must PRODUCE exactly the prefixes (a)/(b1)/(c) on disk, resolve
+        them per their arms, and arm (c) walks the full settlement
+        route (torn tail -> newline -> one malformed occurrence ->
+        unmasked-malformed, per the AUD34-M1 settlement rule)."""
         frame_ok = b"\n" + json.dumps(
             {"t": "WATERMARK", "hostToken": "H0", "watermark": 1,
              "confirmGen": "G0"}).encode() + b"\n"
@@ -1014,6 +1020,35 @@ class TestFixtures(Base):
                     self.assertEqual(st["decision"], STATE_UNSETTLED)
                 else:
                     self.assertEqual(st["decision"], STATE_OK)
+        # write side (AUD45-pre): the injected short write produces
+        # exactly these prefixes; each resolves per its arm. Fresh
+        # dirs: the read-side loop above already wrote to self.dir,
+        # and each write arm needs a pristine journal.
+        for label, partial, prefix in [("a-zero", 0, b""),
+                                       ("b1-ws", 1, b"\n"),
+                                       ("c-nonblank", 4, b'\n{"t')]:
+            with self.subTest(label):
+                wdir = tempfile.mkdtemp(prefix="p9m3-w", dir=self.dir)
+                self.addCleanup(shutil.rmtree, wdir, ignore_errors=True)
+                led = Ledger(wdir, faults=FsFaults())
+                led.faults.partial_write = partial
+                with self.assertRaises(OSError):
+                    led.append_watermark("H0", 1, "G0")
+                led.faults.partial_write = None
+                self.assertEqual(self.raw(led), prefix)
+                res = led.resolve()
+                if label == "c-nonblank":
+                    self.assertEqual(res["state"], STATE_UNSETTLED)
+                    led.settle()
+                    raw = self.raw(led)
+                    self.assertTrue(raw.endswith(b"\n"))
+                    self.assertEqual(raw.count(b"\n"), 2)   # torn + settle
+                    self.assertEqual(len(led.classify()["occurrences"]), 1)
+                    self.assertEqual(led.status()["decision"],
+                                     STATE_UNMASKED)
+                else:
+                    self.assertEqual(res["state"], STATE_OK)
+                    self.assertEqual(led.status()["decision"], STATE_OK)
     # ---------------------------------------------------------------- F21
     def test_F21_dead_repair_inert_promotion_refused_fresh_pair(self):
         bad = CORRUPT + b"-f21"

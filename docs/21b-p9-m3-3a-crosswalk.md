@@ -12,10 +12,33 @@ here pre-empts it.
 ## Step 1 — suite run, pinned
 
 - Evidence tree (post D4A round close, commit 8721f5b):
-  `reference/p9m3/ledger.py` sha256-prefix
-  `3a9307a7b1fc6fea628c03c19c855c9facc655ab`;
-  `reference/p9m3/test_ledger.py` sha256-prefix
-  `656e77d3599f31a9be2f97f800ee32be6faac395`.
+  `reference/p9m3/ledger.py` sha1-prefix
+  `3a9307a7b1fc6fea628c03c19c855c9facc655ab`, sha256-prefix
+  `4e997d59ed99433e25141177145f99eb512b239d38661d893a7b2664819d47fb`;
+  `reference/p9m3/test_ledger.py` sha1-prefix
+  `656e77d3599f31a9be2f97f800ee32be6faac395`, sha256-prefix
+  `ca66c1a47209a763040c25f908097b49a8b9f600096149a90130a99559694772`.
+  [HASH-LABEL CORRECTION 2026-11-17: these values were first recorded
+  as `sha256-prefix` at da7f7f0 but were transcribed from `shasum`
+  (SHA-1) output — the true SHA-256 prefixes are the ones added here
+  (read from the tree, per the D4A pin rule; verified identical at
+  8721f5b and HEAD — the reference tree has not drifted since the
+  suite run this step pins).]
+- EVIDENCE-TREE UPDATE (AUD45-pre fold, 2026-11-17): the five-finding
+  hygiene fold STRENGTHENED `test_ledger.py` (test_F25v33_* gained
+  write-side arms: `partial_write` {0,1,4} produce the crash prefixes
+  and arm (c) drives the settlement route; mutation-verified in a
+  scratch copy — any-tail-unsettled kills the (b2) arm,
+  no-settlement-byte kills the (c) arm). TESTS ONLY — `ledger.py`
+  UNCHANGED (sha1 `3a9307a7b1fc…`, sha256 `4e997d59ed99…` — the
+  behavior this crosswalk reads is untouched; every Step-2 line
+  citation and test-id still resolves). New tree: `test_ledger.py`
+  sha1-prefix `7780857914ad4147e51d9732ca668fd99ff5359b`,
+  sha256-prefix
+  `7a2159df7f46b6d1393e1894981bd9b2057db76c2d5d13f1ed1d3cbdd079ec51`;
+  suite re-run post-fold: **Ran 92 tests — OK** (2026-11-17). The
+  owner's ratification reading may be taken against EITHER tree;
+  they differ in test rigor only.
 - Command: `cd reference && python3 -W error::ResourceWarning
   -m unittest p9m3.test_ledger`
 - Result: **Ran 92 tests — OK** (2026-11-16). The three pins added
