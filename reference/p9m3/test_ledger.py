@@ -1,4 +1,4 @@
-"""Fixture suite F1-F61 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F62 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -2980,6 +2980,57 @@ class TestV38Cycle6Audit(Base):
         self.assertEqual(served.resolve()["state"], STATE_OK)
         self.assertEqual(self.mk()._read_counter(), 0)
         self.assertEqual(self.mk().status()["decision"], STATE_OK)
+
+    # ------------------------------------------------- F62 (AUD46-c1)
+    def test_F62_owed_witness_survives_operator_reset(self):
+        # AUD46-c1 (audit cycle 1, blocker): the counter is NOT the
+        # only owed evidence. A resolve attempt lands the OWED WITNESS
+        # before its charge+IO; if the attempt is interrupted the
+        # witness survives as crash-durable evidence on disk.
+        # `operator_resolve_reset()` zeroes the counter but MUST NOT
+        # erase the evidence — until a resolve COMPLETES, the ledger
+        # stays PENDING even at counter 0, on the informational view
+        # AND on the binding promote path.
+        def interrupted():
+            raise KeyboardInterrupt()          # models a crash mid-IO
+        led = self.mk(repair_attempt_cap=3)
+        led._resolve_io = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            led.resolve()
+        self.assertTrue(led._owed_attempt())   # witness landed pre-IO
+        led.operator_resolve_reset()            # operator re-arms
+        self.assertEqual(led._read_counter(), 0)
+        # the evidence survived the reset (crash-durable, own file)
+        after = self.mk()
+        self.assertEqual(after._read_counter(), 0)
+        self.assertTrue(after._owed_attempt())
+        st = after.status()
+        self.assertEqual(st["decision"], STATE_PENDING)
+        self.assertTrue(st.get("owed_attempt"))
+        self.assertFalse(after.promotion_allowed())
+        # WITH THE FAULT STILL ACTIVE the binding promote refuses: its
+        # in-lock resolve fails (OSError => fail-closed STATE_PENDING)
+        # and the owed check refuses even a counter-0 window.
+        after._resolve_io = lambda: (_ for _ in ()).throw(OSError("io down"))
+        with self.assertRaises(LedgerError) as cm:
+            after.resolve()
+        self.assertEqual(cm.exception.code, STATE_PENDING)
+        self.assertTrue(self.mk()._owed_attempt())   # evidence persists
+        # a healthy instance's promote SELF-HEALS: its in-lock
+        # resolve completes and clears every owed trace.
+        res = self.mk().promote(lambda: "promoted")
+        self.assertEqual(res, "promoted")
+        self.assertFalse(self.mk()._owed_attempt())
+        # ONLY a completed resolve clears the witness: the healthy
+        # re-arm path serves once and every owed trace is gone.
+        self.assertEqual(self.mk().status()["decision"], STATE_OK)
+        cleared = self.mk()
+        self.assertFalse(cleared._owed_attempt())
+        self.assertEqual(cleared._read_counter(), 0)
+        self.assertEqual(cleared.status()["decision"], STATE_OK)
+        # the cleared witness reads identically to a never-created
+        # one (zero-padded; F10: the protocol removes no names)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "resolve-owed")))
 
 if __name__ == "__main__":
     unittest.main()

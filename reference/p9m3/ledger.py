@@ -5,10 +5,13 @@ repair as an append, DURABILITY + RESOLVE-ON-USE with the resolve
 attempt bound + sticky exhaustion, EXCLUSION LOCK, RESERVE-ON-APPEND,
 staged classification with DEAD REPAIRs, AUTH files).
 
-Scope: the ledger contract + fixtures F1-F61 plus the C6_* v42
+Scope: the ledger contract + fixtures F1-F62 plus the C6_* v42
 round-5 pins (F60: no-pending resolve IO fault is bounded,
 AUD45-c3-1; F61: the charge is crash-durable PRE-IO and an
-unconfirmed charged attempt renders PENDING, AUD46-a1/a2).
+unconfirmed charged attempt renders PENDING, AUD46-a1/a2; F62: the
+OWED WITNESS survives `operator_resolve_reset()` — counter-0 owed
+evidence keeps status/promote PENDING until a resolve COMPLETES,
+AUD46-c1).
 COVERAGE IS BY FIXTURE FAMILY, not one test per
 label (D4A-c5-3 mapping): F14 is pinned inside test_F9_F14
 (combined), F15's behavior is pinned by test_F6 (duplicate spec
@@ -152,6 +155,17 @@ class Ledger:
         self.lock_path = self.ledger_path + ".lock"
         self._pending_side = os.path.join(directory, "last-append")
         self._attempts_side = os.path.join(directory, "resolve-attempts")
+        # AUD46-c1-1: the owed evidence must survive operator_reset —
+        # the counter alone cannot carry it (reset zeroes it), so a
+        # one-byte owed marker rides its own sidecar.
+        # AUD46-c1 (audit cycle 1): OWED-ATTEMPT WITNESS. A resolve
+        # attempt writes this marker BEFORE its charge+IO; a resolve
+        # that completes fully clears it. `operator_resolve_reset()`
+        # deliberately does NOT clear it: zeroing the counter must not
+        # silently discard the evidence that an attempt was started and
+        # never confirmed — until a resolve SUCCEEDS, the ledger stays
+        # PENDING even at counter 0 (witness-overlay, status/promote).
+        self._owed_side = os.path.join(directory, "resolve-owed")
         # v38 cycle-3 fix 6: the exclusion lock is tracked per instance —
         # `_append_bytes` REFUSES a write whose acquisition the caller
         # never performed (an unenforced caller contract is no contract).
@@ -206,7 +220,7 @@ class Ledger:
                 raise LedgerError("unsafe-path-permissions", path=path,
                                   hint="ledger dir must be 0700 (owner-only)")
         for p in (self.ledger_path, self.auth_path, self.lock_path,
-                  self._pending_side, self._attempts_side,
+                  self._pending_side, self._attempts_side, self._owed_side,
                   os.path.join(self.dir, "repair_intent.jsonl")):
             try:
                 st = os.lstat(p)          # never follow (v38 cycle-4 F4)
@@ -371,6 +385,38 @@ class Ledger:
 
     def _attempts_exhausted(self):
         return self._parse_counter()[1]
+
+    # ---- AUD46-c1: owed-attempt witness (counter-0 survivor) ----
+
+    def _write_owed(self):
+        """Mark an attempt OWED — written BEFORE the charge+IO of every
+        resolve attempt, fixed-width, same durability contract as the
+        counter. A crash after this byte leaves the witness even if the
+        charge itself was lost; `operator_resolve_reset()` preserves it
+        (evidence of an unconfirmed attempt survives an operator
+        re-arm — the only clear is a COMPLETED resolve)."""
+        self._sidecar_write(self._owed_side, b"OWED".ljust(16, b"\0"))
+
+    def _clear_owed(self):
+        """Fixed-width zero rewrite — NEVER an unlink (F10: the
+        protocol removes no names; a zeroed witness reads as none)."""
+        if os.path.exists(self._owed_side):
+            self._sidecar_write(self._owed_side, b"\0" * 16)
+
+    def _owed_attempt(self):
+        """True when a resolve attempt was started and never confirmed.
+        MISSING = none; zero-padded/legacy content = none (a never-
+        created witness and a cleared one read identically); a torn
+        creation ("OW" only) FAILS CLOSED as owed."""
+        try:
+            fd = os.open(self._owed_side, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return False
+        try:
+            raw = os.pread(fd, 16, 0)
+        finally:
+            os.close(fd)
+        return bool(raw.strip(b"\0"))
 
     @staticmethod
     def _sidecar_write(path, payload):
@@ -1285,6 +1331,13 @@ class Ledger:
             # starts it; a successful resolve clears it (success is
             # counter-free on completion — fix 1 — but a CRASHED
             # attempt is charged; AUD46-a1 verdict).
+            # AUD46-c1 (audit cycle 1): the OWED WITNESS lands BEFORE
+            # the charge — an attempt is owed the moment the service
+            # commits to starting it; a crash anywhere before the
+            # completion-clear leaves the evidence, and
+            # `operator_resolve_reset()` cannot erase it (only a
+            # successful resolve clears it).
+            self._write_owed()
             self._write_counter(n + 1, exhausted=False)
             try:
                 data = self._resolve_io()
@@ -1298,6 +1351,8 @@ class Ledger:
             # charge owed — conservative, same discipline as the
             # recovery round, whose crashed rounds count)
             self._write_counter(0, exhausted=False)
+            self._clear_owed()          # AUD46-c1: witness clears
+                                        # ONLY on confirmed success
             return self.classify(data)
         # C2 fix 4: refusal BEFORE starting a round whose attempts are
         # already consumed — persist exhaustion first, then raise; the
@@ -1307,6 +1362,7 @@ class Ledger:
             self._write_counter(n, exhausted=True)
             raise LedgerError(STATE_EXHAUSTED)
         n += 1
+        self._write_owed()              # AUD46-c1: witness before charge+IO
         self._write_counter(n, exhausted=False)
         try:
             data = self._resolve_io()
@@ -1314,6 +1370,7 @@ class Ledger:
             raise LedgerError(STATE_PENDING)
         self._write_pending(self._pending_offset(), True)
         self._write_counter(0, exhausted=False)
+        self._clear_owed()              # AUD46-c1: confirmed success
         return self.classify(data)
 
     def _pending_offset(self):
@@ -1518,7 +1575,12 @@ class Ledger:
         `resolve-exhausted` (v38 audit fix 4). Resets ONLY the sticky
         counter/flag — it does NOT clear the pending mark (the bytes are
         still unresolved) and performs no ledger write; the next
-        resolve-on-use gets a fresh attempt bound."""
+        resolve-on-use gets a fresh attempt bound.
+        AUD46-c1: it does NOT clear the OWED WITNESS either — zeroing
+        the counter must not silently discard the evidence that an
+        attempt was started and never confirmed. Until a resolve
+        COMPLETES (the only clearer), status/promote keep refusing at
+        counter 0 (`owed_attempt` overlay)."""
         with self._lock("reconcile"):
             self._write_counter(0, exhausted=False)
 
@@ -1888,6 +1950,17 @@ class Ledger:
             # binding path's discipline. Cleared by the next
             # successful resolve (which clears the counter).
             out["decision"] = STATE_PENDING
+        elif self._owed_attempt():
+            # AUD46-c1 (audit cycle 1, blocker): the OWED WITNESS at
+            # counter 0 — an attempt was STARTED (witness written
+            # before charge+IO) but never confirmed, and
+            # `operator_resolve_reset()` zeroed the counter WITHOUT
+            # erasing the evidence. Counter alone could not carry the
+            # owed fact across a reset; the witness does. Same
+            # default-deny as the charged case: PENDING until a
+            # resolve COMPLETES (the only thing that clears it).
+            out["decision"] = STATE_PENDING
+            out["owed_attempt"] = True
         if cls["state"] == STATE_OK and cls["masked"] > 0:
             auth = cls["valid_repairs"][0]["authId"] if cls["valid_repairs"] else "?"
             out["renders"] = ("repaired (overlay active: %d lines masked by "
@@ -1921,10 +1994,15 @@ class Ledger:
             except LedgerError as e:
                 return {"allowed": False, "decision": e.code}
             if cls["state"] != STATE_OK or self.durability_pending() \
-                    or self._attempts_exhausted():
+                    or self._attempts_exhausted() or self._owed_attempt():
+                # AUD46-c1: the OWED WITNESS is a BINDING refusal too
+                # — the informational overlay above is not enough; the
+                # lock-held decision refuses exactly like exhaustion
+                # until a resolve completes in THIS or a later call.
                 return {"allowed": False, "decision": (
                     STATE_EXHAUSTED if self._attempts_exhausted()
                     else (STATE_PENDING if self.durability_pending()
+                          or self._owed_attempt()
                           else cls["state"]))}
             if cls["authorization_file_malformed"]:
                 return {"allowed": False, "decision": AUTH_FILE_MALFORMED}

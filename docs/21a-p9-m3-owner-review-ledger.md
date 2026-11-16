@@ -6633,3 +6633,30 @@ cycles over-shifted to doc hygiene and missed a live-code property.
     (was ok/snapshot-True); binding promote refuses
     resolve-exhausted; plain appends unaffected by exhaustion;
     decision appends refuse on their own gate re-check.
+
+- CYCLE 1 (terra, 2026-11-18; full transcript ~/.tre/audits/aud46-c1-out.txt):
+  - AUD46-C1-1 (major CODE): `operator_resolve_reset()` zeroed the
+    counter WITHOUT recording the still-unconfirmed outcome elsewhere.
+    With no pending-window marker, status() then reported `ok` and
+    promotion_allowed() returned True, although no resolve had ever
+    succeeded — defeating the AUD46-A2 overlay's default-deny purpose
+    on the explicit operator re-arm path (owner probe confirmed:
+    after reset (0, False) -> status ok, snapshot allowed True while
+    the binding promote() still refused durability-pending).
+    FIXED: OWED WITNESS sidecar `resolve-owed` (fixed-width 16,
+    0600, in the strict permission census): `_resolve_locked` writes
+    it BEFORE the charge+IO of EVERY attempt (both branches) and
+    `_clear_owed()` (fixed-width zero rewrite — F10: no unlink) runs
+    ONLY on a fully completed resolve. `operator_resolve_reset()`
+    preserves it: counter-0 owed evidence keeps status() at
+    `durability-pending` (new `owed_attempt` diagnostic) and the
+    binding promote() refuses until a resolve COMPLETES — the sole
+    clearer, so healthy self-heal is unchanged (promote resolves
+    in-lock and clears the witness).
+  - PINS: test_F62_owed_witness_survives_operator_reset — witness
+    lands pre-IO; survives reset + restart; status PENDING with
+    owed_attempt; snapshot refuses; fault-still-active resolve fails
+    closed STATE_PENDING with evidence persisting; healthy promote
+    self-heals (returns payload, clears witness and counter, status
+    ok); cleared witness file reads as never-created. Suite 94 -> 95,
+    all OK.
