@@ -6993,3 +6993,64 @@ the caller got an error, not `ok`). No exposure at reference level.
 DISPOSITION: no code change (nothing found). Remainders 1-4 are cycle 5's
 assignment; the F59/F74 reconcile-lock serialization is the invariant under
 test in remainder 1.
+
+## AUDIT ROUND AUD48 — CYCLE 5 disposition (auditor: fresh-context adversarial; tree 161a06e, suite 111 OK)
+
+RESULT: **CYCLE CLEAN** — all five assignments executed: (1) FsFaults seam
+matrix through every repair leg: all fail-closed, no serving decision over
+unconfirmed evidence; (2) unlink x seam-fault storm, 224 interleavings: 0
+violations; (3) subprocess resolve-vs-reset race: the reconcile lock held,
+the owed witness survived every observed interleaving; (4) 24-record
+disagreement matrix across all observer passes: mutually consistent (the
+mode-000 `OSErr:13` rows verified as the designed ambiguous-witness
+handling, not a divergence); (5) full suite clean under
+`-W error::ResourceWarning` AND `-X dev`, 4 design mutants: M1/M2/M3
+(the c3 guard reverts) KILLED; **M4 (clear order -> head-first) SURVIVED**
+-> the cycle's finding.
+
+### C5-F1 (minor, ACCEPTED+FIXED): F70 is vacuous as the tail-first ORDER pin
+`test_F70_tail_first_clear_order_pinned` injects a Python-level OSError
+*inside* the clear — `_complete_resolve`'s compensation handler catches it
+and re-arms the witness under ANY segment order, so every F70 assertion
+passes identically on a head-first mutant (owner re-verified: a head-first
+copy of ledger.py passed all 111 tests). The order invariant is a
+CRASH-consistency property: only a real SIGKILL between the segments has
+no handler. The auditor's true-crash probe showed the reachable hazard is
+real: shipped tail-first survivor reads `OWED` -> fresh view pending;
+head-first survivor is all-zero -> `owed=False decision=ok`.
+FIX (commit 8626746): F79 — fork a child, SIGKILL it after the FIRST
+clear segment (the all-zero-payload filter counts exactly the clear
+segments in order under any segment order; C7_3's fork recipe, never the
+multiprocessing module); the survivor must read OWED, the fresh view must
+refuse ok, and a real resolve must heal it. Mutation-verified: F79 is RED
+on the head-first mutant (`rec[:4] != b"OWED"`), green on shipped code.
+F70 kept (it genuinely pins the COMPENSATION path: re-arm survives, reset
+preserves, heal completes) with its docstring claim corrected to that
+scope — an overclaiming pin is how a vacuous pin survives two rounds.
+Suite: **112 OK** under `-W error::ResourceWarning`.
+
+## AUDIT ROUND AUD48 — ROUND CLOSE
+
+Cycles: c1 (1 major fixed — zero-first completion, F72/F73), c2 (1 major
+fixed — in-fd repair seeds minimum evidence at offset 0 first, F74-F77),
+c3 (1 high fixed — the reset guard judges CORRUPT records by their RAW
+charge prefix, F78), c4 (incomplete, zero findings — remainders carried),
+c5 (CLEAN — remainders all executed and passed; 1 minor test-quality
+finding fixed with a true-crash order pin, F79).
+
+Production-code changes this round (3): `_complete_resolve` zero-first
+with pin-at-n compensation; `_clear_owed` repair minimum-evidence-first
+seed; `operator_resolve_reset` raw-charge guard (`_counter_raw_charge`).
+Spec changes: none needed — every defect was reference-side; docs/21
+already mandates crash-consistent evidence ordering and never-ok-over-
+error (each fix restores conformance, the round found no spec gap).
+
+ROUND RESIDUALS (accepted at reference level, carried to AUD49 candidates):
+- `_sidecar_write` has declared fault seams but the AUD48 repair paths
+  (`_clear_owed`'s repair, the owed re-arm) bypass it (own open/pwrite
+  loop); the repair-path fault matrix ran through a test-side injector
+  instead. A production seam unification is a cleanup, not a defect.
+- Sticky-overlay tradeoffs remain F55/F62 closed positions (documented).
+- The five-fault combined storm remains unexposed after the c1-c3 fixes
+  (c5 assignment 2, 224 interleavings, 0 violations).
+HEAD at close: 8626746, suite 112 OK. Round AUD48 CLOSED.
