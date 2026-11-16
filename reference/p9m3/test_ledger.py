@@ -1,4 +1,4 @@
-"""Fixture suite F1-F67 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F73 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -14,7 +14,10 @@ F19 forced-order rewrite + R5-c1 contention-handshake/one-frame-fits/
 sidecar-untouched pins), and F58/F59 — the S-J3-C clamped-clock label
 and the exact-cap reserve boundary; F60-F64 the AUD46 cycle pins,
 F65-F67 the AUD47 cycle-1 pins (completion-failure owed re-arm, the
-decision-gate owed overlay clause, the sidecar width-heal);
+decision-gate owed overlay clause, the sidecar width-heal); F72-F73
+the AUD48 cycle-1 pins (operator-reset sole-evidence refusal,
+zero-first completion surviving the combined corrupt-clear +
+zero fault);
 expected results normative).
 (D4A-c1 finding 2: this header formerly stopped at F57.)
 
@@ -3583,6 +3586,130 @@ class TestV38Cycle6Audit(Base):
                                           "clear byte-for-byte")
         self.assertTrue(state["done"], "the short write really was injected")
         self.assertFalse(self.mk(repair_attempt_cap=3)._owed_attempt())
+
+    # ------------------------------------------- AUD48 cycle-1 pins F72/F73
+    def test_F72_operator_reset_refused_when_charge_is_sole_evidence(self):
+        """AUD48-c1 (audit cycle 1, major 2): the owed-witness overlay
+        only honors records it can READ. When the counter charge is the
+        SOLE durable evidence of an unconfirmed attempt (witness absent
+        or cleared, counter parses to a positive charge), the old
+        unconditional `operator_resolve_reset()` zeroed the counter and
+        erased the only proof an attempt had started: a fresh instance
+        (counter 0, no witness) served `ok` for an episode nobody
+        confirmed. The F68 evidence-fallback charge is exactly that
+        sole evidence. NOW the reset REFUSES
+        (`reset-sole-evidence-refused`) unless the counter record is
+        corrupt (untrusted bytes, not a live charge — the F67 heal
+        path stays open). Sticky-exhaustion resets (flag X) and
+        witness-present resets (F62) are untouched."""
+        led = self.mk(repair_attempt_cap=3)
+        real_open = os.open
+
+        def fail_owed_open(path, *a, **k):
+            if isinstance(path, str) and path.endswith("resolve-owed"):
+                raise OSError(errno.EACCES, "injected owed-open fault")
+            return real_open(path, *a, **k)
+
+        os.open = fail_owed_open
+        try:
+            with self.assertRaises(OSError):
+                led.resolve()               # F68 fallback: charge lands
+        finally:
+            os.open = real_open
+        sole = self.mk(repair_attempt_cap=3)
+        self.assertEqual(sole._read_counter(), 1)
+        self.assertFalse(sole._owed_attempt(),
+                         "precondition: the witness never landed — the "
+                         "charge is the ONLY evidence")
+        self.assertNotEqual(sole.status()["decision"], STATE_OK)
+        # the reset that would erase it REFUSES, and writes nothing:
+        with self.assertRaises(LedgerError) as cm:
+            sole.operator_resolve_reset()
+        self.assertEqual(cm.exception.code, "reset-sole-evidence-refused")
+        self.assertEqual(self.mk(repair_attempt_cap=3)._read_counter(), 1,
+                         "a refused reset must leave the evidence intact")
+        self.assertNotEqual(self.mk(repair_attempt_cap=3).status()["decision"],
+                            STATE_OK,
+                         "after the refusal the fresh view is still "
+                         "fail-closed — no ok was ever served")
+        # the designed self-heal still works: a completing resolve IS
+        # the resolution and clears both evidences.
+        res = self.mk(repair_attempt_cap=3).promote(lambda: {"ran": True})
+        self.assertTrue(res.get("ran"))
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
+        # escape hatch, pinned open: a CORRUPT counter is not a live
+        # charge — the operator rewrite (F67 grammar heal) still works.
+        cp = os.path.join(self.dir, "resolve-attempts")
+        fd = os.open(cp, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.write(fd, b"1 -" + b"\0" * 13 + b"JUNK")   # over-long, n=1
+        os.close(fd)
+        corrupt = self.mk(repair_attempt_cap=3)
+        self.assertTrue(corrupt._attempts_exhausted(),
+                        "over-long counter fails closed as exhausted")
+        corrupt.operator_resolve_reset()    # flag=True -> refuse-guard off
+        fixed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(fixed._read_counter(), 0)
+        self.assertFalse(fixed._attempts_exhausted())
+        # an EMPTY (never-written) ledger resets freely: n=0 is no
+        # evidence of an attempt.
+        fresh = self.mk(repair_attempt_cap=3)
+        fresh.operator_resolve_reset()
+        self.assertEqual(self.mk()._read_counter(), 0)
+
+    def test_F73_completion_survives_corrupt_clear_plus_zero_fault(self):
+        """AUD48-c1 (audit cycle 1, major 1): the AUD47-c1 completion
+        (clear witness FIRST, then zero the counter) exposed `ok` under
+        a COMBINED fault: when the clear failed over a CORRUPT witness
+        the re-arm rewrote OWED over the corruption — erasing the
+        evidence that the CLEAR had failed — and the following
+        counter-zero then faulted: a fresh instance read counter=0
+        with a readable-cleared witness for a resolve whose caller got
+        an OSError. NOW the completion is ZERO-FIRST (the pre-attempt
+        charge covers the window) and every compensation pin writes
+        the honest charge n (the pre-attempt write already counted
+        THIS attempt — pinning n+1 would double-charge, F64-A pin).
+        This test reproduces the combined fault and pins the
+        fail-closed survivor and the heal."""
+        led = self.mk(repair_attempt_cap=3)
+        led._write_owed()
+        # corrupt the witness past the grammar (over-long hostile):
+        p = os.path.join(self.dir, "resolve-owed")
+        with open(p, "r+b") as f:
+            f.write(b"OWED" + b"\0" * 12 + b"JUNK")
+        real_pwrite = os.pwrite
+
+        def fail_tail(p_, b, off, *a, **k):
+            if off == 4:            # the clear's FIRST segment (tail)
+                raise OSError(errno.EIO, "injected clear-tail fault")
+            return real_pwrite(p_, b, off, *a, **k)
+
+        os.pwrite = fail_tail
+        try:
+            with self.assertRaises(OSError):
+                led._complete_resolve()
+        finally:
+            os.pwrite = real_pwrite
+        # the corruption SURVIVED (the compensation never overwrote
+        # the failed-clear evidence): the witness still fails closed.
+        survivor = self.mk(repair_attempt_cap=3)
+        self.assertTrue(survivor._owed_attempt(),
+                        "a corrupt witness must survive the failed clear")
+        self.assertNotEqual(survivor.status()["decision"], STATE_OK,
+                            "counter 0 over a fail-closed witness must "
+                            "NEVER serve ok")
+        self.assertFalse(survivor.promotion_allowed())
+        # and the ledger still heals: a real completing resolve
+        # re-arms, clears the width-healed witness, zeroes the charge.
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(os.path.getsize(p), 16,
+                         "the healed clear lands at the declared width")
+        self.assertEqual(healed.status()["decision"], STATE_OK)
 
 if __name__ == "__main__":
     unittest.main()

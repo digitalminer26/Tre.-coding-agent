@@ -1380,31 +1380,50 @@ class Ledger:
         return self._read_bytes()
 
     def _complete_resolve(self):
-        """AUD47-c1 (audit cycle 1, major 1): the CONFIRMED-SUCCESS
-        completion sequence, factored to one place. Fail-closed ORDER
-        preserved from AUD46-c5: clear the owed witness FIRST (a
-        failed clear leaves the attempt charged AND owed), then zero
-        the counter. But the AUD46-c5 fix assumed a failed
-        counter-zero leaves the CHARGED counter visible — the zero
-        payload is written (page-cached) BEFORE its fsync, so a
-        failing zero-fsync could expose counter=0 with the witness
-        already cleared: a fresh instance read `ok` for a resolve
-        whose caller got an error. NOW: any failure of the completion
-        RE-ARMS the owed witness (best effort) before the error
-        propagates — an unconfirmed resolve is owed in every view,
-        whatever the counter bytes show. If the re-arm itself faults
-        the original error still propagates and the attempt stays
-        charged (counter > 0 overlay)."""
-        self._clear_owed()              # AUD46-c1: witness clears
-                                        # ONLY on confirmed success
+        """AUD48-c1 (audit cycle 1, major 1): the CONFIRMED-SUCCESS
+        completion sequence, ZERO-FIRST. The AUD46-c5/AUD47-c1 order
+        (clear witness, then zero the counter, re-arm on any failure)
+        was fail-closed per SINGLE fault, but its compensation path
+        charged the PREVIOUS counter value — on a faulted re-arm after
+        a combined failure (a corrupted-clear survivor erased by the
+        zero pass, then the zero fsync faulting) the fresh view read
+        counter=0 with no witness: `ok` for a resolve whose caller
+        got an error. NOW the counter zero runs FIRST (the pre-
+        completion charge is the durable cover), the witness clears
+        LAST, and each step's compensation is pinned at `n` — the
+        pre-attempt write ALREADY charged this attempt, so `n` is the
+        honest charge and `n+1` would double-charge (F64-A pin) — so
+        NO fault position, single OR combined, exposes `ok`."""
+        n = self._read_counter()        # pre-clear charge = the cover
+                                        # (already includes this
+                                        #  attempt — do NOT add 1)
         try:
             self._write_counter(0, exhausted=False)
         except OSError:
             try:
-                self._write_owed()      # re-arm: no ok for a resolve
-                                        # that did not complete
+                self._write_owed()      # belt: an owed fact is owed
             except OSError:
-                pass                    # charged-counter overlay holds
+                pass
+            try:                        # pin the charge: a torn zero
+                                        # must never read under n
+                self._write_counter(n, exhausted=False)
+            except OSError:
+                pass                    # original error propagates;
+                                        # witness/charge cover holds
+            raise
+        try:
+            self._clear_owed()          # AUD46-c1: witness clears
+                                        # ONLY on confirmed success
+        except OSError:
+            try:
+                self._write_owed()      # re-arm the unconfirmed fact
+            except OSError:
+                pass
+            try:                        # pin the charge (counter=0
+                                        # alone would serve ok)
+                self._write_counter(n, exhausted=False)
+            except OSError:
+                pass
             raise
 
     def _arm_owed(self, n):
@@ -1748,8 +1767,41 @@ class Ledger:
         the counter must not silently discard the evidence that an
         attempt was started and never confirmed. Until a resolve
         COMPLETES (the only clearer), status/promote keep refusing at
-        counter 0 (`owed_attempt` overlay)."""
+        counter 0 (`owed_attempt` overlay).
+        AUD48-c1 (audit cycle 1, major 2): the witness overlay only
+        honors records it can READ. When the counter charge is the
+        SOLE durable evidence of an attempt — witness absent/cleared
+        (or unreadable: the witness's own fail-closed reading keeps
+        the refusal honest) while the counter parses to a POSITIVE
+        charge — zeroing it erases the only proof an attempt was ever
+        started, and a fresh instance serves `ok` for an unconfirmed
+        episode. NOW the reset REFUSES (`reset-sole-evidence-refused`)
+        unless the counter record is corrupt/unparseable: a corrupt
+        counter is untrusted bytes, not evidence of a live charge
+        (F67's heal path stays open), and a positive charge under a
+        clear witness is a fact the operator must resolve through a
+        completing resolve — never by deleting the record. An
+        unreadable witness (neither clear NOR owed-readable) with a
+        positive charge is ambiguous evidence: refusal (fail-closed).
+        A positive charge under an OWED witness needs no extra rule:
+        F62 already pins that the witness survives the zero."""
         with self._lock("reconcile"):
+            n, flag = self._parse_counter()
+            if not flag and n > 0:
+                # the counter parses to a live charge — is it the
+                # only evidence left standing?
+                try:
+                    owed = self._owed_attempt()
+                except OSError:
+                    owed = True       # unreadable witness: fail closed
+                if not owed:
+                    raise LedgerError(
+                        "reset-sole-evidence-refused", counter=n,
+                        detail="the counter charge is the only durable "
+                               "evidence of an unconfirmed resolve "
+                               "attempt; zeroing it erases the proof — "
+                               "complete a resolve (or restore the "
+                               "witness) instead of resetting")
             self._write_counter(0, exhausted=False)
 
     # ---------------- (c-O) forced repair ----------------
