@@ -7164,3 +7164,49 @@ that consumption fails F83/F85 instead) — accepted, no
 redundant pin shipped.
 Cycle 3 (fresh auditor, gpt-6.1-terra per owner request)
 is the round-closing cycle per the 3-clean gate.
+
+AUD49 ROUND CLOSED (2026-11-17, verdict by fresh-context
+gpt-6.1-terra, cycle 5: "ROUND AUD49 CLOSED — 3 effective
+clean passes"). Cycle ledger:
+- c0 87c290f: repair-path seam unification (the round's
+  charter from the owner: in-fd owed repair + compensating
+  re-arms through DECLARED FsFaults seams).
+- c1 (sol): 3 findings, all ACCEPTED+fixed 7d9ac0c
+  (signature-bind dispatch; partial-seam callable
+  contract + F84; true-crash repair-order pin F85; F79
+  warning leak closed).
+- c2 (sol): CYCLE CLEAN + 2 minors, both ACCEPTED —
+  leak sites fixed 0d49e00; F86 dispatch-contract pin
+  bcd855a (F82 non-liveness dispositioned).
+- c3+c4 (terra): ZERO findings both passes; both ended
+  INCOMPLETE on the asserted seam census — the fixer
+  built it instead (tmp census script, 44 asserted
+  cells) and IT FOUND FOUR PRODUCTION DEFECTS the
+  118-test suite plus two auditor passes had missed:
+  sidecar_partial_write raw int() (callable TypeError)
+  and raw truthiness on sidecar_fsync_fault /
+  sidecar_dir_fsync_fault / the resolve fsync-io pair
+  (a callable there is SILENTLY ALWAYS-ON). All four
+  sites dispatched through _partial_limit/_fault_active
+  (uniform contract, documented); the census promoted
+  to permanent suite test F87 so it can never be left
+  out of a cycle again (three pre-c5 reverts each
+  KILLED by F87 alone).
+- c5 (terra): full-hunk audit of the c5 increment —
+  one-shot sidecar ceiling preserved (predicate
+  consulted ONCE, pinned empirically), no attribute-
+  style fixture regressed by the resolve-io dispatch,
+  docstring-vs-consumption-site census clean, four
+  fresh mutants all killed (POST-walk swallow, IO
+  dispatch revert, clear-ceiling ignore) — FINDINGS
+  NONE; gates x2 zero-warning, 120 OK.
+FINAL STATE: 120 tests OK F61-F87, zero-warning gate;
+production defects fixed this round: 5 (dispatch arity,
+partial-seam int(), repair-order exposure PROVEN safe,
+4 silent-always-on sidecar/IO wirings — one commit);
+mutation-verified pins added: F84, F85, F86, F87.
+LESSON (folded for future rounds): an ASSERTED
+exhaustive-value census over declared seams found in
+one pass what two zero-finding auditor passes could
+not — the census is now a permanent test (F87), not a
+cycle activity.
