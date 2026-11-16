@@ -7054,3 +7054,84 @@ ROUND RESIDUALS (accepted at reference level, carried to AUD49 candidates):
 - The five-fault combined storm remains unexposed after the c1-c3 fixes
   (c5 assignment 2, 224 interleavings, 0 violations).
 HEAD at close: 8626746, suite 112 OK. Round AUD48 CLOSED.
+
+## AUDIT ROUND AUD49 — ROUND OPEN
+
+SCOPE (2026-11-17, Hong: "just run the audit cycle on yourself, run 3
+cycles, address the findings as they come up"): the AUD48 residual #1 —
+repair-path SEAM UNIFICATION. The clear path and its in-fd repair legs
+were the only production writes with NO declared FsFaults seam (the
+fault matrix reached them via test-side os.pwrite/os.fsync
+monkeypatching); an un-seamed path is not addressed by the matrix.
+Hong ratified unification as a production-side cleanup (the test-side
+injector is only allowed while no seam exists), pinned the scope to the
+fault matrix (the `_sidecar_write` dedup stays a test-observability
+cleanup), and set the release gate at three CLEAN cycles — no shipping
+on a clean cycle 1 or 2. Kickoff (AUD49-c0, commit 87c290f, 116 OK):
+five declared constructor seams (`clear_write_fault`,
+`clear_partial_write`, `clear_fsync_fault` — the RAISING variant,
+distinct from the silently-dropped `sidecar_fsync_fault` —
+`repair_seed_fault`, `repair_fill_fault`), each True-or-callable;
+`sidecar_open_fault`/`sidecar_write_fault` path-predicated; consumption
+through one contract (`_fault_active`); new pins F80 (seams declared),
+F81 (clear segment seams incl. the partial=0 zero-progress
+discriminator), F82 (F76's storm constructor-only), F83 (exact
+seed-only row; the all-in-fd-writes boundary). Pre-flight: every new
+seam mutation-killed individually before handoff.
+
+- AUD49 CYCLE 1 (auditor: gpt-6.1-sol, detached; 3 findings reported;
+  disposition 2026-11-17):
+  - C1-F1 (MEDIUM, ACCEPTED+FIXED): `_fault_active` chose the 1-arg
+    call by counting REQUIRED parameters, so a predicate with an
+    OPTIONAL path parameter (defaulted lambda / functools.partial /
+    bound method) was invoked ZERO-arg and silently returned its
+    default — a path-selective fixture ran the HEALTHY operation
+    instead of injecting the fault (repro: a defaulted clear-write
+    predicate completed the clear silently). FIXED: new
+    `_dispatch_fault` decides by SIGNATURE BINDING — the path is
+    passed whenever the signature accepts it (required, optional, or
+    *args); no-arg only when the path cannot bind. Bind attempts
+    raise TypeError only for the call signature, so a predicate-body
+    TypeError still surfaces unretried (the c0 discipline kept).
+  - C1-F2 (MINOR, ACCEPTED+FIXED): `clear_partial_write` was the one
+    seam whose value skipped dispatch (`int()` directly): a callable
+    raised TypeError before any syscall although the constructor
+    advertised True-or-callable for every seam. Its consumption
+    semantics were also undocumented in two directions: it applies to
+    EVERY loop write (not "the first segment" as documented) and the
+    suite passed a first-write-only mutant. FIXED: consumed through
+    `_partial_limit` (callable -> `_dispatch_fault`, return value
+    interpreted recursively: int ceiling or None); the contract is
+    now DOCUMENTED as a persistent per-write byte ceiling (throttle),
+    and pin F84(b) discriminates consumption-LEVEL: the predicate is
+    asserted consulted EXACTLY once per real segment pwrite (counts a
+    zero-payload-write oracle), closing the once-only mutant.
+  - C1-F3 (MINOR, ACCEPTED+FIXED): the suite admitted a
+    FILL-BEFORE-SEED repair-order mutant (116 OK) — after both
+    independent legs finish the row is identical, so endpoint
+    assertions cannot see the order; this is the AUD48-c5 F70 lesson
+    recurring on the repair path. The shipped order is PROVEN correct
+    by a fresh true-crash probe (SIGKILL at the fill-pwrite boundary:
+    shipped leaves the seed-only owed row; fill-first leaves zeros =
+    a cleared-reading witness with no counter cover). FIXED as a
+    permanent pin: F85 (F79's recipe; kills at ENTRY to the only
+    pwrite whose payload starts b"OWED" — order-independent filter;
+    survivor must read owed, fresh view must not serve ok).
+    Mutation check: fill-before-seed swap -> F85 FAILS, reverted.
+  - Test-hygiene fix carried with the cycle (the auditor's gate
+    qualification): F79 read the survivor with `open(...).read()` —
+    an unraisable ResourceWarning leaked despite
+    `-W error::ResourceWarning` (the run exits 0; warnings are not
+    gate-enforced on unraisable). Now a `with`-block; both gate runs
+    this cycle emitted ZERO warnings (grep-verified on the merged
+    output).
+  - Mutation check (fresh copies, PYTHONDONTWRITEBYTECODE=1, -B):
+    dispatch reverted to required-count -> KILLED (F84); partial
+    dispatch removed -> KILLED (F84); fill-before-seed -> KILLED
+    (F85); partial consumed once-only -> KILLED (F84). The auditor's
+    own 15-mutant table: all five new-seam dead/unconditional
+    mutants killed; its two survivors ARE the F3 gap and the F2
+    consumption ambiguity (both closed).
+  - Gate: `cd reference && python3 -W error::ResourceWarning -m
+    unittest p9m3.test_ledger` -> Ran 118 tests OK, zero warnings.
+    Fix commit: 7d9ac0c.
