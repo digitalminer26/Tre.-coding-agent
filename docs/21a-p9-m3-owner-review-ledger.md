@@ -7277,9 +7277,13 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   passed 121) -> F89 pins predicate-consult-count==1 + the 4+12
   write shape; owner re-ran the auditor recipe: F89 kills it
   (failures=1). c1-F2 minor/RECORD ACCEPTED+FIXED 058c8e5: the
-  corrected tally had counted test-only leak commits (7d9ac0c
-  F79-closure, 0d49e00 batch) as production fixes — git show
-  confirms test-file-only; re-counted. Gates 122 OK zero-warning.
+  corrected tally had counted test-only leak closures (the F79
+  fix hunk in 7d9ac0c; the whole 0d49e00 batch) as production
+  fixes; re-counted. (c3-F1 precision: the COMMIT 7d9ac0c is
+  NOT test-file-only — it also carries the production dispatch-
+  arity + partial-contract fixes in ledger.py/probe.py; only
+  its F79 leak-closure hunk is test-only.) Gates 122 OK
+  zero-warning.
   Not clean (2 accepted findings).
 - AUD50-c2 (terra, HEAD 058c8e5): CYCLE FINDINGS — 2.
   c2-F1 minor/PROD-DOC+TEST ACCEPTED+FIXED (this commit):
@@ -7293,3 +7297,21 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   failures=1). c2-F2 minor/RECORD ACCEPTED+FIXED: cycle results
   lived only in commit messages; 21a now carries the per-cycle
   entries (this list). Not clean (2 accepted findings).
+
+- AUD50-c3 (terra, HEAD c3c78c4): CYCLE INCOMPLETE (3 attempts,
+  none clean, none counted): attempt 1 executed none of the
+  matrix (carried); attempt 2 was INVALID — not fresh context
+  (the kick script reused the c3 session file and the model
+  resumed; harness-side process defect, guarded: the kick now
+  REFUSES an existing session file); attempt 3 fresh: ran the
+  consuming-pair matrix incl. the read-failure contract
+  (resolve_io_fault -> round fails, no cleared marker over an
+  unread basis, charge+ witness retained: PASS) and the c2
+  abs-mutant re-run (F90 RED), found c3-F1 (minor/RECORD,
+  FIXED in the c1 entry wording above: "test-file-only" was
+  false of commit 7d9ac0c), then declared ITSELF incomplete on
+  the unbounded "systematic sweep / verify ALL historical
+  claims" assignments — my prompt's fault (unbounded done-
+  criteria), not the auditor's; c4+ prompts carry explicit
+  per-assignment DONE-criteria and a no-scope-extension rule.
+  Clean tally after c3: 0/3.
