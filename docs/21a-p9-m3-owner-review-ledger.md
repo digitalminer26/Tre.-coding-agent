@@ -7655,6 +7655,37 @@ findings, terra is the auditor, run 5 cycles until clear"):
   mutation-verified against its c7 variant: all five RED naming
   F99, unique killers). 142 OK zero-warning x2. Commit 8bae545.
 
+- AUD51-c8 (terra, HEAD 7cd321e; FINAL cycle of the 3-cycle user
+  extension): CYCLE INCOMPLETE — 0 findings established, but the
+  auditor executed only 1 of the 25 assignment-1 rows before its
+  turn budget ended (execution defect, not a code verdict; early
+  tool friction included a blocked setup call and one skipped
+  duplicate call). What DID complete: K1 re-verified KILLED by
+  F99's cell as unique killer (142, exactly one failure — the c7
+  fix confirmed on fixed code); novel abort (in promote(), after
+  the in-lock decision, before on_allowed()): survivor PASS (no
+  decision append; kernel released the lock at abort; fresh reader
+  ok — correct, the promotion never executed); spot-checks 3/3
+  (137-OK historical count confirmed; F99-K1 unique killer; P1
+  EQUIVALENT line-verified: _resolve_locked's first statement is
+  _journal_records under promote's same lock). Gate 142 OK x2
+  zero-warning. The remaining 24 re-verification rows are NOT
+  auditor-confirmed; per the c3 lesson do not re-kick this prompt
+  unchanged — enumerate only the missing rows (all but K1) into a
+  c9 prompt IF the user extends the budget again.
+
+- AUD51 EXTENSION CLOSED (2026-11-17, user budget 3 confirming
+  cycles c6-c8): UNCONFIRMED — no CYCLE CLEAN (c6: 1 finding ->
+  F98; c7: 5 findings -> F99; c8: INCOMPLETE 0f). Cumulative round
+  truth: production ledger.py defect-free since the c0 fix — every
+  c1-c7 finding was test strength, all pinned (F93/F95/F96/F97/
+  F98/F99); suite grew 128 -> 142, zero-warning throughout; 7
+  novel abort boundaries, all survivors PASS documented contracts.
+  The c7 decision-layer gaps were owner-mutation-verified at pin
+  time (F99 unique killers); the auditor-side re-run closed only
+  the K1 row before budget end — confirmation stays honestly
+  UNCONFIRMED rather than back-filled from owner self-checks.
+
 - AUD51 ROUND CLOSED (2026-11-17, pre-extension): UNCONFIRMED — no cycle reached
   the CYCLE CLEAN verdict within max 5 (c1/c2: 0 findings but self-
   assessed INCOMPLETE on execution; c3/c4/c5: findings 2/5/4 — all
