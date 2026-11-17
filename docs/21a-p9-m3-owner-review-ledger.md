@@ -7550,3 +7550,29 @@ findings, terra is the auditor, run 5 cycles until clear"):
     enum; decision-site validation skip; F94 vanished-sidecar
     race). Commit f134600. Clean tally: 0/1 (round clears on the
     FIRST clean cycle).
+
+- AUD51-c4 (terra, HEAD 0997afc — docs-only successor of f134600,
+  audited code identical; owner-enumerated 24-branch sweep of the
+  counter/owed/sidecar core, ALL rows reported): CYCLE FINDINGS 5,
+  all minor/TEST, all owner-reproduced surviving 128 (documented
+  behavior correct, unpinned):
+  - K6 `_counter_state` regex-fail corrupt distinction;
+  - K13 owed-clear over-long width heal;
+  - K15 repair-fill checked loop vs single pwrite;
+  - K18 `_sidecar_write` zero-progress EIO (create-path twin of the
+    clear-loop pin);
+  - K24 `_write_counter` exhausted=None sticky-flag derivation
+    (auditor's anchor correction accepted: the default derives via
+    `_attempts_exhausted()`, and the force-'-' variant was already
+    killed by F20/F60/F61/F74 — only the default-branch mutant
+    survived).
+  FIXED by NEW PIN CLASS TestV38Cycle7Audit F96 (five cells, each
+  mutation-verified against the c4 variant: all five RED naming
+  F96; K15 pinned BOTH ways — no-loop AND short-first-write shim).
+  19/24 killed by the existing suite (named killers per row); novel
+  abort (sidecar payload fsync -> creation dir fsync, c4-new):
+  survivor PASSes (owed witness page-visible, status pending, no
+  OK served). Spot-check 3/3 VERBATIM (both F95 pins + F93
+  Arabic-Indic arm). 133 OK zero-warning x2. Commit f6e4d1c.
+  Clean tally: 0/1 — c5 is the round's LAST cycle (max 5): clean
+  clears the round; findings close it UNCONFIRMED with residuals.
