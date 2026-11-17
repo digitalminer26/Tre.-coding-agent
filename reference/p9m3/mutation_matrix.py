@@ -507,6 +507,12 @@ def selftest_classifier():
     for k in REASONS:
         if k not in names:
             bad.append("selftest REASONS key %r matches no case" % k)
+    # An empty reason is "" in every detail string: it would silently
+    # restore the verdict-only check. Reject blank values outright.
+    for k, v in REASONS.items():
+        if not isinstance(v, str) or not v.strip():
+            bad.append("selftest %s: REASON is empty — the reason check "
+                       "would be a no-op" % k)
     import builtins
     has_group = hasattr(builtins, "BaseExceptionGroup")
     work = tempfile.mkdtemp(prefix="mutmatrix-selftest-")
