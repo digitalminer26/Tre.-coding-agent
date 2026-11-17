@@ -5619,8 +5619,9 @@ if __name__ == "__main__":
 class TestV38Cycle8Audit(Base):
     """AUD51 cycle 5 (findings A11/A14/R3, minor test gaps, all
     reproduced surviving 133 at f6e4d1c; the cycle's fourth finding
-    M2 was REFUTED owner-side — both mutant shapes of the suppressed
-    propagation are killed by F68/F72/F74/F75/F78). Append/resolve-
+    M2 was REFUTED owner-side — SUPERSEDED by c6: only the
+    suppress-ALWAYS shape dies to F68/F72/F74/F75/F78; the double-
+    failure shape survives and is pinned by F98 below). Append/resolve-
     core contract cells: intent preservation across the post-write
     pending update, the D marker strictly after BOTH fsyncs, and the
     resolve sequence's parent-directory fsync effect (F88/F95-
@@ -5719,3 +5720,73 @@ class TestV38Cycle8Audit(Base):
         self.assertIn(led2.dir, synced,
                       "resolve sequence must fsync the parent dir "
                       "(drop-dir leg survived the suite): %r" % (synced,))
+
+
+class TestV38Cycle9Audit(Base):
+    """AUD51 cycle 6 (finding 1, minor test gap; SUPERSEDES the c5
+    REFUTED note): _arm_owed documents that when the owed-witness
+    OPEN faults AND the fallback counter write faults, the ORIGINAL
+    error still propagates ("the caller receives the error either
+    way"). c5 killed only the suppress-ALWAYS shape; the suppress-
+    ONLY-ON-DOUBLE-FAILURE shape (fallback except: return) survived
+    the full suite (owner-reproduced: 136 OK at 6d63ae6). Production
+    behavior was and is correct — the pin is the evidence."""
+
+    def test_F98_fallback_leg_failure_keeps_the_original_error(self):
+        """Witness-open fault + fallback counter-write fault: the
+        caller gets the ORIGINAL witness EACCES (not a laundered
+        success) and the failed fallback writes NOTHING — the
+        attempt stays uncharged. The suppress-only-on-double-failure
+        mutant returns silently and then executes the caller's own
+        counter write, leaving a phantom charge; a correct build
+        never reaches it."""
+        led = self.mk(repair_attempt_cap=3)
+        state = {"fired": False}
+
+        def fallback_fault_once(path):
+            # the seam is consulted per sidecar write; fire exactly
+            # once, on the fallback's FIRST pwrite of the counter.
+            if (isinstance(path, str) and path.endswith("resolve-attempts")
+                    and not state["fired"]):
+                state["fired"] = True
+                return True
+            return False
+
+        f = FsFaults(sidecar_open_fault=lambda x: x.endswith("resolve-owed"),
+                     sidecar_write_fault=fallback_fault_once)
+        led2 = self.mk(faults=f, repair_attempt_cap=3)
+        with self.assertRaises(OSError) as ctx:
+            led2.resolve()              # no-pending branch arms owed
+        self.assertEqual(getattr(ctx.exception, "errno", None),
+                         errno.EACCES,
+                         "the ORIGINAL witness-open error must "
+                         "propagate past the double failure (a "
+                         "suppressed fallback turns this into a "
+                         "phantom-charged silent success)")
+        self.assertTrue(state["fired"], "the fallback leg was exercised")
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "resolve-owed")),
+                         "the witness never opened (torn-creation "
+                         "boundary: no OWED record exists)")
+        # The failed fallback leaves a ZERO-BYTE attempts file (the
+        # documented all-writes-fault boundary): the empty record is
+        # NOT a durable zero - reads treat it as no live charge and
+        # the fresh view must stay fail-closed. Crucially the failed
+        # write lands NO charge: the suppress-mutant returns silently
+        # here, the caller's own counter write then lands n=1, and a
+        # fresh read serves OK for the attempt whose caller got an
+        # error instead.
+        with open(os.path.join(self.dir, "resolve-attempts"), "rb") as fh:
+            self.assertEqual(fh.read(), b"",
+                             "the failed fallback write lands nothing")
+        # the boundary is NOT a permanent wedge: the corrupt record
+        # fails closed (no OK — asserted above), and the documented
+        # heal path (operator reset rewrites the corrupt counter,
+        # F67) re-arms a clean resolve.
+        self.assertTrue(led._attempts_exhausted(),
+                        "the zero-byte boundary record fails closed")
+        led.operator_resolve_reset()
+        self.assertEqual(led.resolve()["state"], STATE_OK)
+        healed = self.mk(repair_attempt_cap=3)
+        self.assertEqual(healed._read_counter(), 0)
+        self.assertFalse(healed._owed_attempt())
+        self.assertEqual(healed.status()["decision"], STATE_OK)
