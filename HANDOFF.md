@@ -16,9 +16,12 @@ abort (decision computed -> on_allowed in promote) PASSes; spot-
 checks 3/3. Extension closed UNCONFIRMED in 21a (entries c6/c7/c8).
 
 **Final state:** HEAD 2774254; production `reference/p9m3/ledger.py`
-UNCHANGED since the c0 fix (defect-free across the whole AUD50+51
-audit arc); suite **142 tests F61-F99, gate green zero-warning x2**;
-pin classes F98/F99 added. All artifacts: `~/.tre/audits/aud51-c{6,7,8}-*`.
+UNCHANGED since the last production defect fix (da8bd7e, AUD51-c1
+folded fix; corrected per AUD52-c1 spot-check — the earlier "since
+the c0 fix" wording was imprecise; no production change in AUD51
+c2-c8 and none since da8bd7e); suite **142 tests F61-F99, gate green
+zero-warning x2**; pin classes F98/F99 added. All artifacts:
+`~/.tre/audits/aud51-c{6,7,8}-*`.
 
 **TO GET A CLEAN VERDICT (only if the user extends budget again):**
 c8's failure was EXECUTION (turn budget), not the code. Do NOT

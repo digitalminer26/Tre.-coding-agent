@@ -7674,13 +7674,45 @@ findings, terra is the auditor, run 5 cycles until clear"):
   unchanged — enumerate only the missing rows (all but K1) into a
   c9 prompt IF the user extends the budget again.
 
+- AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
+  Implement findings. Run 5 cycles"). Same contract/rules as AUD51
+  (owner-enumerated bounded rows, fresh context per cycle, tmp-copy
+  mutation harness, five-field abort tables, gate 142 zero-warning x2);
+  findings are IMPLEMENTED (owner-fixed + pinned) in the same round.
+
+- AUD52-c1 (terra, HEAD d50ccfb): CYCLE INCOMPLETE per its own
+  criterion (assignment-3 partial), 0 code findings — effectively a
+  PASS on substance. Assignment 1: ALL 24 decision-layer confirm-rows
+  executed independently (AUD51-c8's un-run rows): 23 KILLED (S1-S7,
+  P2-P9, C1-C6, K2-K3 — killer names recorded, incl. all five F99
+  cells) + P1 SURVIVED re-judged EQUIVALENT by the fresh auditor
+  (second independent concurrence). Assignment 2: novel abort
+  boundary #14 (caller window: promotion_allowed() True return ->
+  caller action) survivor PASS — informational snapshot contract
+  held. Assignment 3: P7-F99 unique killer verified; TWO GENUINE
+  DOCUMENTATION-ACCURACY FINDINGS against my own AUD51 closure text:
+  (a) "unchanged since the c0 fix" imprecise — ledger.py's last
+  production change is da8bd7e (the AUD51-c1 folded fix itself);
+  c2-c7 had no production change; (b) "suite grew 128 -> 142" wrong
+  baseline — measured 136 at the pre-extension close (6d63ae6), 126
+  at AUD51 first fix commit; 128 was a mid-round count. Both FIXED
+  in the closure text (owner-measured this cycle). Auditor pacing
+  rule WORKED (sweep-first): all 24 rows ran in ~160s.
+
 - AUD51 EXTENSION CLOSED (2026-11-17, user budget 3 confirming
   cycles c6-c8): UNCONFIRMED — no CYCLE CLEAN (c6: 1 finding ->
   F98; c7: 5 findings -> F99; c8: INCOMPLETE 0f). Cumulative round
-  truth: production ledger.py defect-free since the c0 fix — every
-  c1-c7 finding was test strength, all pinned (F93/F95/F96/F97/
-  F98/F99); suite grew 128 -> 142, zero-warning throughout; 7
-  novel abort boundaries, all survivors PASS documented contracts.
+  truth (wording CORRECTED per AUD52-c1 spot-check finding — the
+  original "unchanged since the c0 fix" was imprecise): production
+  ledger.py has been UNCHANGED since the last production defect fix
+  (da8bd7e, the AUD51-c1 folded fix _pending_intent whole-grammar —
+  itself the fix OF a c1 finding); no production change occurred in
+  c2-c7. The defect-FREE claim is about behavior under findings:
+  every c1-c7 finding was test strength (all pinned
+  F93/F95/F96/F97/F98/F99), no post-c1 production defect was found.
+  Suite grew 136 -> 142 across the extension (126 -> 136 in the
+  pre-extension round; zero-warning throughout); 7 novel abort
+  boundaries, all survivors PASS documented contracts.
   The c7 decision-layer gaps were owner-mutation-verified at pin
   time (F99 unique killers); the auditor-side re-run closed only
   the K1 row before budget end — confirmation stays honestly
