@@ -6126,37 +6126,60 @@ class TestV38Cycle11Audit(Base):
         are byte-for-byte snapshots, not length-only (AUD53-c1
         findings 2).
         Mutation-verified: RED naming F108 under the A15 mutant (it
-        refuses the fitting payload)."""
+        refuses the fitting payload).
+        AUD54-c1 finding 1: the equal-length premise is CLOCK-DERIVED
+        (`createdAt` is the only clock field), so the ledger clock is
+        FROZEN for the whole fixture — the payload length is constant
+        by construction, never by the epoch's current digit count."""
         import unittest.mock as mock
         import p9m3.ledger as lmod
         a, b, c = CORRUPT + b"-a15x", CORRUPT + b"-a15y", CORRUPT + b"-a15z"
         # two-digit offsets + same-length payloads + same-length auth ids
-        # => every AUTH payload is byte-for-byte the same length.
+        # + a frozen ledger clock => every AUTH payload is byte-for-byte
+        # the same length.
         self.seed_at([(10, a), (40, b), (70, c)])
         self.led = self.mk()
-        self.led.authorize([self.occ(10, a)], auth_id="A15idA",
-                           test_only=True)
-        after1 = len(read_or_empty(self.led.auth_path))
-        payload_len = after1 - 1
-        self.led.authorize([self.occ(40, b)], auth_id="A15idB",
-                           test_only=True)   # distinct occurrence, same length
-        after2 = len(read_or_empty(self.led.auth_path))
-        new_len = after2 - after1 - 1
-        self.assertEqual(new_len, payload_len,
-                         "F108: fixture must mint an equal-length payload")
-        occ3 = self.occ(70, c)
-        before = read_or_empty(self.led.auth_path)
-        with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 1}):
-            with self.assertRaises(LedgerError) as cm:
-                self.led.authorize([occ3], auth_id="A15idC",
-                                   test_only=True)   # same length: +1 over
-            self.assertEqual(cm.exception.code, "auth-too-large")
-        self.assertEqual(read_or_empty(self.led.auth_path), before,
-                         "F108: the refused authorize wrote zero bytes "
-                         "(byte-for-byte)")
-        with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 2}):
-            aid = self.led.authorize([occ3], auth_id="A15idD",
-                                     test_only=True)
+        # Freeze the ONLY clock field in the AUTH record (`createdAt`):
+        # `int(time.time())` is constant-length only while the epoch
+        # keeps its digit count — pin it so the length premise is true
+        # by construction (AUD54-c1 finding 1). The shim replaces the
+        # ledger module's `time` NAME only (not the stdlib module):
+        # every other time consumer (lock-backoff sleep, the test
+        # framework) keeps the real clock.
+        class _FrozenClock:
+            def __init__(self, real):
+                self._real = real
+
+            def time(self):
+                return 1000.0
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+        with mock.patch.object(lmod, "time", _FrozenClock(lmod.time)):
+            self.led.authorize([self.occ(10, a)], auth_id="A15idA",
+                               test_only=True)
+            after1 = len(read_or_empty(self.led.auth_path))
+            payload_len = after1 - 1
+            self.led.authorize([self.occ(40, b)], auth_id="A15idB",
+                               test_only=True)  # distinct occ, same length
+            after2 = len(read_or_empty(self.led.auth_path))
+            new_len = after2 - after1 - 1
+            self.assertEqual(new_len, payload_len,
+                             "F108: fixture must mint an equal-length "
+                             "payload")
+            occ3 = self.occ(70, c)
+            before = read_or_empty(self.led.auth_path)
+            with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 1}):
+                with self.assertRaises(LedgerError) as cm:
+                    self.led.authorize([occ3], auth_id="A15idC",
+                                       test_only=True)  # same length: +1 over
+                self.assertEqual(cm.exception.code, "auth-too-large")
+            self.assertEqual(read_or_empty(self.led.auth_path), before,
+                             "F108: the refused authorize wrote zero bytes "
+                             "(byte-for-byte)")
+            with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 2}):
+                aid = self.led.authorize([occ3], auth_id="A15idD",
+                                         test_only=True)
         self.assertEqual(aid, "A15idD")
         data = read_or_empty(self.led.auth_path)
         self.assertEqual(data[:len(before)], before,
