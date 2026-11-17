@@ -54,6 +54,25 @@ PKG = os.path.dirname(HERE)          # the `reference/` dir (import root)
 # so that is out of scope.)
 DRIVER = (
     "import json, os, sys, unittest, traceback\n"
+    "# AUD54-post-audit-2: infrastructure membership is decided HERE with\n"
+    "# the real built-in classes (isinstance), over the whole exception\n"
+    "# chain (__cause__/__context__, cycle-safe). Names are never compared,\n"
+    "# so a user class called ImportError is not infrastructure, and a\n"
+    "# wrapper raised `from` an ImportError IS.\n"
+    "INFRA = (SyntaxError, ImportError, FileNotFoundError, PermissionError,\n"
+    "         MemoryError, SystemExit, KeyboardInterrupt)\n"
+    "def _infra(exc):\n"
+    "    seen, stack = set(), [exc]\n"
+    "    while stack:\n"
+    "        e = stack.pop()\n"
+    "        if e is None or id(e) in seen:\n"
+    "            continue\n"
+    "        seen.add(id(e))\n"
+    "        if isinstance(e, INFRA):\n"
+    "            return True\n"
+    "        stack.append(e.__cause__)\n"
+    "        stack.append(e.__context__)\n"
+    "    return False\n"
     "class Rec(unittest.TestResult):\n"
     "    def __init__(self):\n"
     "        unittest.TestResult.__init__(self)\n"
@@ -65,8 +84,7 @@ DRIVER = (
     "        tmod = sys.modules[type(test).__module__]\n"
     "        self.deaths.append([test.id(), kind, frames,\n"
     "                            getattr(tmod, '__file__', ''),\n"
-    "                            [c.__name__ for c in\n"
-    "                             type(err[1]).__mro__]])\n"
+    "                            _infra(err[1])])\n"
     "    def addError(self, test, err):\n"
     "        unittest.TestResult.addError(self, test, err)\n"
     "        self._die(test, 'error', err)\n"
@@ -88,8 +106,7 @@ DRIVER = (
     "                err[0], AssertionError) else 'error'\n"
     "            self.deaths.append([test.id(), kind, frames,\n"
     "                                getattr(tmod, '__file__', ''),\n"
-    "                                [c.__name__ for c in\n"
-    "                                 err[0].__mro__]])\n"
+    "                                _infra(err[1])])\n"
     "res = Rec()\n"
     "suite = unittest.TestLoader().loadTestsFromName(sys.argv[1])\n"
     "suite.run(res)\n"
@@ -251,24 +268,18 @@ def run_test(root, target, timeout, expect_ran=None):
     if len(deaths) != 1:
         return "ERROR", "not exactly one clean death: %d deaths (ran %d)" \
             % (len(deaths), ran)
-    tid, kind, frames, modfile = deaths[0][:4]
-    mro = deaths[0][4] if len(deaths[0]) > 4 else []
+    tid, kind, frames, modfile, infra_hit = deaths[0]
     if tid != target:
         return "ERROR", "the death is %r, not the named pin" % tid
-    # AUD54-post-audit finding: an error whose traceback passes through
-    # the pin is NOT a kill when the exception is an infrastructure
-    # failure — SyntaxError/ImportError (broken dependency, bad
-    # mutant copy, environment drift) proves nothing about the pin's
-    # assertion. The driver records the exception's MRO so this check
-    # cannot be fooled by message text or a re-raised wrapper.
-    infra = {"SyntaxError", "ImportError", "ModuleNotFoundError",
-             "FileNotFoundError", "PermissionError", "MemoryError",
-             "SystemExit", "KeyboardInterrupt"}
-    hit = infra.intersection(mro)
-    if kind == "error" and hit:
-        return "ERROR", ("error death is an infrastructure failure (%s) "
-                         "through the pin — not evidence of a kill"
-                         % ", ".join(sorted(hit)))
+    # AUD54-post-audit: an infrastructure failure anywhere in the
+    # exception chain (SyntaxError/ImportError/FileNotFoundError/...,
+    # real built-in classes, decided in the driver) is NOT a kill,
+    # whatever unittest labelled it (failureException can be remapped
+    # to an infra type, so `kind` is not trusted for this check).
+    if infra_hit:
+        return "ERROR", ("death is an infrastructure failure in the "
+                         "exception chain (%s kind) — not evidence "
+                         "of a kill" % kind)
     method = target.rsplit(".", 1)[-1]
     # structured frame identity (c2 f1+f2): the death must pass
     # THROUGH the pin's own method in the test module — works for
@@ -354,6 +365,47 @@ def selftest_classifier():
          "    def test_pin(self):\n"
          "        pass\n",
          "m_gate_count.T.test_pin", "ERROR", 2),
+        ("wrapped-importerror-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        try:\n"
+         "            import definitely_missing_module_xyz\n"
+         "        except ImportError as e:\n"
+         "            raise RuntimeError('dependency failed') from e\n",
+         "m_infr_wrap.T.test_pin", "ERROR", None),
+        ("context-chained-infra-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        try:\n"
+         "            open('/definitely/not/here/xyz')\n"
+         "        except OSError:\n"
+         "            raise ValueError('wrapped without from')\n",
+         "m_infr_ctx.T.test_pin", "ERROR", None),
+        ("failureexception-remapped-infra-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    failureException = ImportError\n"
+         "    def test_pin(self):\n"
+         "        raise ImportError('dependency failed')\n",
+         "m_infr_fe.T.test_pin", "ERROR", None),
+        ("subtest-remapped-infra-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    failureException = ImportError\n"
+         "    def test_pin(self):\n"
+         "        with self.subTest('b'):\n"
+         "            raise ImportError('dependency failed')\n",
+         "m_infr_sub.T.test_pin", "ERROR", None),
+        ("user-class-named-ImportError-stays-RED",
+         "import unittest\n"
+         "class ImportError(Exception):\n"
+         "    pass\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise ImportError('domain exception, not infra')\n",
+         "m_kill_name.T.test_pin", "RED", None),
         ("two-deaths-is-ERROR",
          "import unittest\n"
          "class T(unittest.TestCase):\n"
