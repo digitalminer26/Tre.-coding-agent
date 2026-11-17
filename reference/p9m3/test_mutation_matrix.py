@@ -69,5 +69,29 @@ class BatteryGateTests(unittest.TestCase):
         self.assertEqual(coverage, [], coverage)
 
 
+class BatteryNonStringReasonTests(unittest.TestCase):
+    """Battery-level pin (post-audit): a non-string reason must come back
+    as a coverage FAILURE from selftest_classifier(), never a TypeError
+    raised from `reason in detail`. Exercises the real battery, not only
+    the helper, so removing the valid_reason skip is caught here."""
+
+    def test_non_string_reason_is_reported_not_raised(self):
+        import io
+        import contextlib
+        from unittest import mock
+        for bad in (None, 0, ["x"]):
+            with self.subTest(reason=repr(bad)):
+                with mock.patch.dict(mm.REASONS,
+                                     {"count-mismatch-is-ERROR": bad}):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        errors = mm.selftest_classifier()  # must not raise
+                hits = [e for e in errors
+                        if "count-mismatch-is-ERROR" in e
+                        and "not a string" in e]
+                self.assertTrue(hits, errors)
+        # table restored by mock.patch.dict
+        self.assertIsInstance(mm.REASONS["count-mismatch-is-ERROR"], str)
+
+
 if __name__ == "__main__":
     unittest.main()
