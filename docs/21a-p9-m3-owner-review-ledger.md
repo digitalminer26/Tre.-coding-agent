@@ -7461,3 +7461,44 @@ findings, terra is the auditor, run 5 cycles until clear"):
     (isdigit without isascii), intent_echo, sidecar reconsult,
     abs_partial — all 5 RED naming their pins; 126 OK
     zero-warning x2.
+
+- AUD51-c1 (terra, HEAD 48fb0ae): CYCLE INCOMPLETE (assignment 1's
+  exhaustive branch table not completed; report otherwise complete:
+  assignments 2-4 DONE, gate 126 OK zero-warning x2 pasted, tmp
+  cleaned, tracked files untouched). ATTEMPT HISTORY: attempts 1+2
+  aborted on provider response-filter trips (invalid, not counted;
+  archived aud51-c1-attempt{1,2}; prompt reworded per AUD50 lesson
+  4 — output validated before counting). FINDINGS 4 (3 accepted
+  test-gap minors + 1 accepted production minor; all REPRODUCED by
+  owner before accepting):
+  - c1-F1 minor/PRODUCTION `_pending_intent` (ledger.py:868):
+    checked the intent token in ISOLATION — out-of-grammar records
+    (`-1 D R`, `1 Q R`, `1 D R extra`, unicode-digit `R` records)
+    fail-close the offset via _read_pending yet still echoed "R",
+    contradicting the site comment. Reproduced (5 payloads echoed
+    R pre-fix). Fixed: whole-grammar check, then contract-token
+    echo. Pinned by 4 new F93 arms; whole-grammar-revert variant
+    RED naming F93 (failures=4).
+  - c1-F2 minor/TEST: both `_pending_intent` default-return
+    branches (record-None; vanished-between-opens ENOENT race)
+    survived '-'->'R' variants across 126. Pinned by F94(a)
+    (missing sidecar; injected vanish on the 2nd open) — both
+    variants RED naming F94.
+  - c1-F3 minor/TEST: journal read cap is strict `total > CAP`;
+    a `>=` variant rejected the exactly-cap LIVE journal and
+    survived 126. Pinned by F94(b) both sides of the boundary
+    (exactly-cap reads, CAP+1 LedgerError) — variant RED.
+  - c1-F4 minor/TEST: `ljust(23)` writer-width off-by-one
+    survived 126. Pinned by F94(c) healthy-writer on-disk size
+    == 24 — variant RED.
+  Cycle-verified work standing: variant batch D journal-intent-drop
+  + AT_MAX-raise killed (F23/F48, C6_19/C6_21/F58); novel abort
+  point (os.abort between durable P marker and first ledger byte)
+  PASS against intent-before-byte contract (novelty checked vs
+  F27/C7_3/F61/F62/F79/F85); 3/3 record spot-checks confirmed
+  (Arabic-digit int() acceptance, F89 flip, F90 hostile arm).
+  c1 sweep notes: truncation-only fix_width survivor accepted as
+  EQUIVALENT (healthy writer writes full payload before heal).
+  127 OK zero-warning x2. Clean tally: 0/1 (attempt-3 report is
+  INCOMPLETE per its own verdict — not a clean cycle; findings
+  also bar clean).

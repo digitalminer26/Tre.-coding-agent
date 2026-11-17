@@ -4923,7 +4923,15 @@ class TestV38Cycle6Audit(Base):
                              (b"0 D garbage", "bogus intent token"),
                              (b"\xd9\xd9 D", "non-UTF8 offset"),
                              ("١٢ D".encode("utf-8"),
-                              "non-ASCII decimal digits (int() accepts)")):
+                              "non-ASCII decimal digits (int() accepts)"),
+                             # AUD51 c1-F1: grammar must be checked as
+                             # a WHOLE — a valid intent token on an
+                             # out-of-grammar record reads the default.
+                             (b"-1 D R", "negative offset + R token"),
+                             (b"1 Q R", "bad flag + R token"),
+                             (b"1 D R extra", "4-token + R"),
+                             ("١٢ D R".encode("utf-8"),
+                              "unicode digits + R token")):
             with self.subTest(tag):
                 self.led = self.mk()
                 self.led.append_watermark("H0", 1, "G0")
@@ -4962,6 +4970,90 @@ class TestV38Cycle6Audit(Base):
                 self.assertEqual(
                     self.led._pending_intent(),
                     "R" if tag.endswith("repair") else "-", tag)
+
+    def test_F94_pending_default_intent_branches_and_journal_cap_edges(self):
+        """AUD51 cycle 1 (findings 2-4, minor test gaps, all
+        reproduced surviving 126): (a) `_pending_intent`'s two
+        default-return branches (record-None; sidecar vanishes
+        between the two opens — the race only the second open sees)
+        returned "-" with no pin: a '-'->'R' variant on either
+        survived the suite; (b) the journal read-cap comparison is
+        strict `total > CAP` (ledger.py ~1031) — a '>=' mutant
+        rejects an EXACTLY-cap journal and survived: this pins both
+        sides of the LIVE boundary (exactly CAP reads clean,
+        CAP+1 fails closed); (c) `_write_pending` emits the declared
+        FIXED 24-byte record — an ljust(23) off-by-one mutant
+        survived: the healthy writer's on-disk width is pinned."""
+        # (a1) missing sidecar: no window, default intent
+        self.led = self.mk()
+        side = os.path.join(self.dir, "last-append")
+        self.assertIsNone(self.led._read_pending())
+        self.assertEqual(self.led._pending_intent(), "-",
+                         "missing sidecar must read the default intent")
+        # (a2) sidecar vanishes between _read_pending's open and
+        # _pending_intent's own re-open (the FileNotFoundError race)
+        self.led.append_watermark("H0", 1, "G0")
+        self.assertIsNotNone(self.led._read_pending())
+        import p9m3.ledger as _L
+        real_open, n = _L.os.open, [0]
+
+        def _vanish_after_first(path, *a, **kw):
+            if path == side:
+                n[0] += 1
+                if n[0] == 2:
+                    raise FileNotFoundError(2, "injected vanished sidecar")
+            return real_open(path, *a, **kw)
+
+        orig = _L.os.open
+        _L.os.open = _vanish_after_first
+        try:
+            self.assertEqual(
+                self.led._pending_intent(), "-",
+                "vanished-sidecar branch must read the default intent")
+        finally:
+            _L.os.open = orig
+        # (b) journal cap: exactly-CAP journal reads clean, CAP+1
+        # fails closed (the '>=' mutant rejects LIVE data)
+        cap = type(self.led).JOURNAL_CAP
+        import json as _json
+
+        def _line(width):
+            base = len(_json.dumps({"t": "REPAIR-INTENT", "authId": "",
+                                    "at": 1}).encode())
+            pad = width - 1 - base          # -1 for the newline
+            self.assertGreaterEqual(pad, 1)
+            rec = _json.dumps({"t": "REPAIR-INTENT",
+                               "authId": "a" * pad, "at": 1}).encode()
+            self.assertEqual(len(rec) + 1, width)
+            return rec + b"\n"
+        w = 64
+        line = _line(w)
+        self.assertEqual(cap % w, 0)
+        fd = os.open(os.path.join(self.dir, "repair_intent.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, line * (cap // w))
+        finally:
+            os.close(fd)
+        recs = self.led._journal_records()   # exactly CAP: LIVE
+        self.assertEqual(len(recs), cap // w,
+                         "exactly-cap journal must read, not refuse")
+        fd = os.open(os.path.join(self.dir, "repair_intent.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, line * (cap // w) + b"\n")
+        finally:
+            os.close(fd)
+        with self.assertRaises(_L.LedgerError):
+            self.led._journal_records()   # CAP+1: fail closed
+        os.unlink(os.path.join(self.dir, "repair_intent.jsonl"))
+        # (c) healthy writer emits the declared 24-byte record
+        self.led = self.mk()
+        self.led.append_watermark("H1", 2, "G1")
+        size = os.path.getsize(os.path.join(self.dir, "last-append"))
+        self.assertEqual(size, 24,
+                         "_write_pending record must be 24 bytes "
+                         "(ljust(23) mutant): %d" % size)
 
     def test_F92_pending_int_offset_and_counter_grammar_edges(self):
         """AUD50 cycle 6 (findings 1-3, minor test gaps in the F91

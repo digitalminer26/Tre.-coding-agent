@@ -879,11 +879,21 @@ class Ledger:
         finally:
             os.close(fd)
         parts = raw.decode("utf-8", "replace").strip().split()
+        # AUD51 cycle 1 (finding 1, minor/PRODUCTION): the intent is a
+        # CONTRACT token of a record whose WHOLE grammar must hold —
+        # checking it in isolation let `-1 D R` (fail-closed offset)
+        # still echo "R", contradicting the comment below and the
+        # _read_pending contract. An out-of-grammar record reads the
+        # default intent, full stop.
+        if (len(parts) not in (2, 3) or parts[1] not in ("D", "P")
+                or not parts[0].isascii() or not parts[0].isdigit()
+                or (len(parts) == 3 and parts[2] not in ("-", "R"))):
+            return "-"
         # AUD51 pre-fold (close-audit finding 1): intent is a CONTRACT
         # token — only what the writer can emit is echoed ("-" default,
         # "R" repair); anything else (out-of-grammar, non-UTF8 bytes)
         # reads as the default, never as garbage.
-        return parts[2] if len(parts) >= 3 and parts[2] in ("-", "R") else "-"
+        return parts[2] if len(parts) == 3 else "-"
 
     def _log_repair_intent(self, auth_id):
         """Append-only journal of repair attempts: one intent line before
