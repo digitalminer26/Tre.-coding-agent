@@ -148,6 +148,8 @@ cite the row):
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
 | 2026-11-15 | §14.10 (rewritten v2) | **G1 OWNER REVIEW ROUND 1 FOLDED — §14.10 draft v2 (owner decisions R1–R8, recorded verbatim in new §14.10.4).** R1-B: class SPLIT into routed `route:code-fix|human-review` x domain `surface:code|test|doc|spec` (the vocabulary the live R5 round actually classified in); `surface:spec`+`route:code-fix` invalid at intake. R2-A: new second kind `audit-finding-update` fully specified (findingId, to, dispositionBy, authority, supersedes; no `from` — derivable under S5 single-writer; update-on-closed refused; one supersede encoding replaces the old companion-record half-mechanism). R3: emission authority — auditors append findings only via supervisor intake (id minted there, R7: fresh conforming ULID, collision-refused, caller ids test-only per F55/F56); supervisor is sole appender of updates; `dispositionBy:owner` requires a TTY-confirmed-channel reference (D2 precedent) in `authority` — closes implementer-downgrades-own-blocker. R4: minors never auto-hold sign-off, owner decides escalations; `accepted-fix` binds to repro re-run green (semantics pinned here; consumer enforces). R5-A: bounded `claim` + REQUIRED `findingRef` -> episode `findings/` (S4 layout amendment in-place). R6: `affectedNorm` now object `{doc,anchor,sha256|null}`, digest mandated-or-not deferred to G2, at-most-one-norm-per-finding. R8: opinion-holds-sign-off rule MOVED to G3 (enforcement) — §14.10 supplies `verdictBasis` only. `residual-risk-accepted` demoted from finding class to `closed-residual` DISPOSITION (authority REQUIRED). Still DRAFT, NOT implemented, no module touched. | G1 finding-record schema (draft v2, owner round-1 folded) |
+| 2026-11-17 | §14.11–§14.15 (v1) | **Round-0 adversarial audit of the G2–G5 draft (same-session, read-only): 6 BLOCKER + 4 MAJOR, all fixed into v2 the same day.** B1 a crashed/zero-report auditor could count clean → durable per-auditor `auditor-round` records, incomplete/missing/stale-target = unclean (14.12.2 rule 1). B2 later dispositions could retro-clean a round → cleanliness frozen at the boundary into `convergence-verdict` (rule 3). B3 unknown implementer family "computed without exclusion" could false-pass diversity → disqualifying + `needs-owner` (rule 2). B4 ratify commit point not reconstructible → `norm-created` identity record + immutable anchor-text snapshot named by the transition; `norms.json` demoted to rebuildable projection (14.11.2–3). B5 null-digest findings dodged the stale check → supervisor stamps normId+digest from the dispatch pin, no pin ⇒ `stale-norm` (14.11.4, O-G2-5). B6 "S3 mechanically enforces disjointness" was false (S3 says advisory) → disjointness by construction (one group per path), P6 worktree + P12 conflict refusal as backstop, anchor-parallelism on one file removed (14.14.2/4). M7 unknown spend counted at estimate contradicted count-at-cap → single fail-closed rule: unknown consumes ALL headroom until reconciliation/owner act (14.13.2/4a, O-G4-4). M8 recovery spend escaped the cycle cap → cycle projection counts all spend the cycle dispatched (14.13.3, O-G4-3). M9 G2 stale reroute violated G1 route-immutability → G2 is an intake gate; refusals are S5 decision records, owner matters are supervisor-filed records (14.10.1 note, 14.11.4). M10 `needs-owner` masking terminal `budget-exhausted` → precedence fixed: exhausted > needs-owner > converged (14.12.3). Plus: §14.15's strict section-separability qualified for shared-interface dependency review. §14.10 → v4 | G2–G5 contract (draft v2) |
+| 2026-11-17 | §14.10.1, §14.11–§14.15 | **G2–G5 drafted in one pass (DRAFT v1, batched, separable sections).** §14.11 G2 norm state (`norms.json` states drafted/ratified/rejected/superseded; sha256 mandatory at ratified — closes the R6 deferral; `norm-transition` CAS records with TTY-owner authority; atomic ratify→regenerate with the ratify record as commit point). §14.12 G3 convergence as a pure verdict over §14.10 records (declared family table, k consecutive clean rounds, `needs-owner` outranks `converged`; owns R8 opinion enforcement). §14.13 G4 design-cycle budget (cycle-boundary admission, separate from §14.7 recovery counters, owner-only extension). §14.14 G5 partitioning (connected components over path-overlap/shared-norm; unscoped collapses to serial; amends §14.10.1 with `scopeRefs`). §14.15 audit order and ratification order. Open decisions O-G2-1..3, O-G3-1..2, O-G4-1..2, O-G5-1..2, each drafted with a default; none ratified; NOT implemented | G2–G5 contract (draft v1) |
 
 ## 2. S1 — Worker session entries (the bus)
 
@@ -1240,8 +1242,10 @@ Wire-shape changes after closure require a Change Ledger row before code.
 
 ### 14.10 Audit-finding records (G1 — the loop's classification hinge)
 
-**Status: DRAFT v2 (2026-11-15) — owner review round 1 folded (decisions
-R1–R8 recorded at §14.10.4). NOT IMPLEMENTED; post-P0 additive wire
+**Status: DRAFT v4 (2026-11-17) — v2 + G5 `scopeRefs` amendment (§14.14.1)
++ v4: route×surface note extended for the G2 intake gate (§14.11.4 seam
+fix, round-0 audit finding M9).
+Owner review round 1 folded (decisions R1–R8 recorded at §14.10.4). NOT IMPLEMENTED; post-P0 additive wire
 shape per the §14.9 closure rule. No module is touched by this section.**
 
 **Purpose.** The autonomous audit-fix loop (HANDOFF 2026-11-15, owner
@@ -1278,6 +1282,7 @@ state changes flow through `audit-finding-update` (§14.10.2).
   "verdictBasis":"repro | evidence-only | opinion",
   "claim":"…",                        // bounded summary, ≤2000 chars, single line
   "findingRef":"findings/f-0061.md",  // REQUIRED: full-prose artifact in the episode dir (R5-A)
+  "scopeRefs":["src/runner/attempt.ts"],  // G5 (§14.14.1): repo-relative paths/#anchors; [] = unscoped, serial
   "repro":{ "kind":"probe|fixture|session-log|none", "command":"…",
             "preFixObserved":"…", "postFixExpected":"…" },
   "evidenceRefs":["sessions/t2.jsonl#<entryId>"],  // ≥1 required
@@ -1293,7 +1298,16 @@ drops it):
 - **`route` × `surface` (R1-B).** `route` is the ONLY field the
   orchestrator routes on: `code-fix` re-enters the implementation loop;
   `human-review` goes to the owner ledger (G2's norm state — out of
-  scope here). `surface` (the R5 round's proven vocabulary) records
+  scope here). G2 (v2) does NOT re-route records — it gates intake: a
+  `code-fix` record failing a G2 norm check is **refused at intake**
+  (`refusal-code` journaled as an S5 decision-log record naming the
+  refused line's content hash — the line never becomes an
+  `audit-finding`, so the auditor's immutability rule is untouched;
+  a corrected resubmission is a NEW record in the next cycle), and any
+  G2 blocker or
+  stale-norm situation is filed by the SUPERVISOR as its own
+  `human-review` record. One mutable record never overrides another's
+  route. `surface` (the R5 round's proven vocabulary) records
   where the defect lives: `code | test | doc | spec`. Intake rule:
   `surface:"spec"` with `route:"code-fix"` is **invalid** — a fix whose
   substance is changing ratified norm text cannot self-route into a
@@ -1407,6 +1421,587 @@ Verbatim owner replies on the eight review points; folded as this v2:
   enforcement; this record only supplies its inputs (`auditor.model`,
   `severity`, `verdictBasis`, close transitions).
 - No autonomy claim: kickoff, design-cycle budget (G4), and finding
-  partitioning (G5) are separate open compartments.
+  partitioning (G5) are separate open compartments. G2–G5 are drafted
+  in §14.11–§14.15 (DRAFT v2 after the round-0 audit, not ratified).
 - No transport: records land in the local episode log; cross-host
   collection stays Q4 (file-only until transport decides).
+
+### 14.11 Spec norm state (G2 — ratification as parseable state)
+
+**Status: DRAFT v2 (2026-11-17), batched draft of G2–G5 (§14.11–§14.14).
+v2 fixes the v1 audit: norm state is now fully reconstructible from the
+log alone (creation record + content-addressed ratify snapshot), the
+stale-norm check can no longer be dodged with a null digest, and consumer
+rules are intake-gates, not route rewrites (G1 seam). Separable: each
+section ratifies, and is attacked, independently, EXCEPT edits to the
+shared interfaces (`scopeRefs`, norm identity, verdict table) reopen
+consumers for dependency-impact review. NOT IMPLEMENTED; post-P0
+additive per §14.9. No module is touched.**
+
+**Purpose.** §14.10's `affectedNorm` POINTS at normative text; nothing
+yet says whether that text is settled. Today "PENDING owner ratification"
+is prose in docs/21 and a finding against a draft norm can be routed as
+if the norm were binding. G2 makes norm state a closed, machine-checked
+value, and makes ratification an atomic act whose downstream effects
+(worker prompts) are derived from it, so workers never fix against stale
+text.
+
+#### 14.11.1 Norm state file (derived projection, supervisor-written; v2)
+
+`<episodesRoot>/<episodeId>/norms.json` — atomic tmp+fsync+rename,
+supervisor sole writer (S6 discipline). Keys are supervisor-minted ids.
+**v2: this file is a projection of the §14.11.2 records, not an
+authority — rebuild-on-restart, repair drift by rewriting it, never the
+reverse.**
+
+```jsonc
+{ "schema":"tre-norms/1", "episodeId":"…",
+  "norms": {
+    "N-0007": { "doc":"docs/21-p9-m3-…", "anchor":"§1.1 (c) step (2)",
+                "sha256":"ab12…", "state":"ratified",
+                "revision":3, "ratifiedAt":1730231400000,
+                "authority":"tty:2026-11-16T…/owner-cli-session-ref" } } }
+```
+
+- **States (closed):** `drafted | ratified | rejected | superseded`.
+  Initial state is `drafted`. There is no `ratified → drafted` edge; a
+  changed norm is a NEW norm id with `supersedes` pointing at the old one,
+  so history is never rewritten.
+- **Digest ruling (closes the G1/R6 deferral):** `sha256` is **mandatory
+  for `ratified`** (a ratified norm without a digest is refused — "which
+  text was ratified" must be checkable) and optional for `drafted`. The
+  digest is computed by the supervisor from the anchored text at the
+  ratify transition, never supplied by a worker.
+- `revision` is a positive integer, incremented on every transition.
+
+#### 14.11.2 Records: creation, snapshot, transition (S5 kinds `norm-created`, `norm-transition`)
+
+A norm enters the log with a **creation record** — the only place
+`doc`/`anchor` live, so `{doc, anchor}` resolution and full replay never
+depend on `norms.json` (v2, blocker fix):
+
+```jsonc
+{ "kind":"norm-created", "id":"01J…ULID", "ts":…, "schema":"tre-supervisor/1",
+  "episodeId":"…", "normId":"N-0007",
+  "doc":"docs/21-p9-m3-…", "anchor":"§1.1 (c) step (2)",  // the identity G1 findings resolve by
+  "supersedes":null }                  // REQUIRED non-null for a successor norm
+```
+
+Transitions carry a **content-addressed snapshot** at the transition, so
+the ratified text's provenance lives IN the log, not only in the mutable
+doc (v2, blocker fix — replay can reconstruct `norms.json` from
+`norm-created` + `norm-transition` alone):
+
+```jsonc
+{ "kind":"norm-transition", "id":"01J…ULID", "ts":…, "schema":"tre-supervisor/1",
+  "episodeId":"…", "normId":"N-0007",
+  "from":"drafted", "to":"ratified",
+  "expectedRevision":2,                // CAS: refused unless current revision == this
+  "dispositionBy":"owner",             // or "orchestrator" for drafted/superseded only
+  "authority":"tty:…",                 // REQUIRED for ratified/rejected; TTY-confirmed owner channel (§14.10.3, D2)
+  "sha256":"ab12…",                    // REQUIRED for ratified; supervisor-computed over the anchored text it read
+  "anchorTextRef":"norms/N-0007.rev3.txt", // REQUIRED for ratified: supervisor-written immutable snapshot in the episode dir
+  "supersedes":null }                  // REQUIRED non-null for superseded
+```
+
+- **Resolution rule (v2, closes the M9 seam):** a finding's
+  `affectedNorm` `{doc, anchor}` resolves to a `normId` by matching a
+  `norm-created` record's `doc`+`anchor`. Zero matches ⇒ the finding is
+  refused at intake (`norm-unknown`); more than one match among
+  non-superseded norms ⇒ intake refusal (`norm-ambiguous`) — identity is
+  never guessed. Superseded norms resolve explicitly (a finding citing a
+  superseded norm is `stale-norm`, below).
+- **Authority is structural, same as §14.10.3:** only an owner act over the
+  TTY-confirmed channel may move a norm to `ratified` or `rejected`. The
+  orchestrator may propose (`norm-created`, `drafted`) and mark
+  `superseded` only.
+- **`from` is recorded here** (unlike `audit-finding-update`) because
+  norm transitions are rare and an explicit `from` lets the CAS check be
+  replayed; a mismatch with the derived state is refused.
+- Transition applied to a `rejected` or `superseded` norm is refused.
+- `norms.json` is a **derived projection** of these two kinds (the S3
+  rule): on restart the supervisor rebuilds it from the log and repairs
+  drift by rewriting the file — never the other way around.
+
+#### 14.11.3 Atomic ratify → regenerate
+
+The **ratify transition record is the single commit point.** Everything
+downstream is derived from the log and is idempotent:
+
+1. Supervisor writes the immutable anchor-text snapshot file
+   (`norms/N-0007.rev3.txt`, tmp+fsync+rename).
+2. Supervisor appends `norm-transition` (ratified) — commit point.
+3. Supervisor updates `norms.json` (atomic rename; a derived projection,
+   rebuildable from the log).
+4. Worker prompt headers are regenerated for every queued/ready task whose
+   `promptRef` cites the norm, carrying `normRevisions: {N-0007: 3}` and
+   the digest.
+
+A crash between 2 and 4 is repaired on restart by re-deriving (3) and (4)
+from the log; re-deriving is a pure function, so no duplicate effect
+exists. A crash between 1 and 2 leaves an orphan snapshot — harmless,
+never referenced, overwritten or swept. A task already `running` under
+revision 2 is NOT interrupted; its dispatch record pinned
+`normRevisions` at spawn (§14.11.4), and its findings are checked against
+that pinned digest.
+
+#### 14.11.4 Consumer rules (what G1 intake and G3 read; v2)
+
+Norm state is an **intake gate, never a route rewrite** (G1 seam, v2):
+the immutable `audit-finding` record's `route` is final; G2 refuses or
+admits it at intake, and any situation needing the owner is filed by the
+SUPERVISOR as its own record (§14.10.1 route×surface note).
+
+- **Digest binding (v2, blocker fix):** a `code-fix` finding with
+  non-null `affectedNorm` MUST carry the digest of the norm text it was
+  prompted with. Mechanism: the S3 dispatch record gains an additive
+  desired field `normRevisions: {normId: revision, sha256}` (frozen at
+  spawn — a third §14.14.1-style amendment, recorded in the Change
+  Ledger), and the supervisor fills `affectedNorm.normId` and stamps
+  `affectedNorm.sha256` from that pin at intake; a worker-supplied
+  digest is overwritten by the pinned value (workers
+  cannot forge freshness, and a null is not an escape hatch — the
+  supervisor supplies the truth from the dispatch pin). A task dispatched
+  BEFORE G2 exists has no pin: its findings against a norm resolve to
+  `stale-norm`. No path lets a finding whose prompt predates the current
+  ratification reach the fix loop.
+- `code-fix` whose `affectedNorm` resolves to a norm NOT in `ratified` ⇒
+  **refused at intake** (`norm-not-ratified`); the supervisor files its
+  own `human-review` record carrying the original `findingRef`.
+- Stamped digest ≠ current ratified digest ⇒ **refused at intake**
+  (`stale-norm`); supervisor files the `human-review` record. Findings
+  are never auto-fixed against text nobody ratified.
+- A `human-review` finding whose norm is `drafted` is queued as a
+  **blocker of kind `norm-ratification`** (additive kind on the P13
+  channel), answer options `A: ratify <rev>` / `B: reject` / `C: revise`
+  (structured; parsed only from the TTY-confirmed channel — §0.7, no prose
+  parsing).
+
+#### 14.11.5 Owner decisions for ratification
+
+- **O-G2-1** Digest mandatory at `ratified` only (drafted optional) — as
+  drafted above.
+- **O-G2-2** `from` field recorded on norm transitions (differs from
+  audit-finding-update by design; rationale in §14.11.2).
+- **O-G2-3** A changed norm supersedes by new id, never by in-place edit.
+- **O-G2-4 (v2)** Norm identity lives in `norm-created`; the ratified
+  text's provenance lives in the immutable snapshot named by the
+  transition. `norms.json` is a rebuildable projection.
+- **O-G2-5 (v2)** Supervisor (not the worker) stamps `normId`+digest on
+  findings from the dispatch pin; a missing pin ⇒ `stale-norm`.
+
+#### 14.11.6 What this section does NOT do
+
+No norm text editing, no doc generation, no ratification UI (the P13
+channel is the only human surface). Does not decide what a finding's
+`route` should be (G1). Cross-episode norm sharing is out of scope: norms
+are episode-scoped, so a norm ratified in one episode is not implicitly
+ratified in another.
+
+### 14.12 Convergence stop rule as data (G3 — the verdict, not "auditor says clean")
+
+**Status: DRAFT v2 (2026-11-17), batched with §14.11/§14.13/§14.14. v2:
+round-completeness records, frozen-at-boundary cleanliness, unknown
+implementer family is disqualifying, budget/owner precedence fixed.**
+
+**Purpose.** HANDOFF G3: "auditor says clean" is disproven as a stop
+condition by this repo's own history (P6 cycle-4 ACCEPT overturned by an
+independent cycle-5; p9m3 produced fresh findings through cycle 4; AUD51
+closed UNCONFIRMED after five cycles with no CYCLE CLEAN). G3 makes the
+stop condition a pure function over the §14.10 records, recorded at each
+cycle boundary. It also owns the enforcement half of R8 (opinion-basis
+sign-off), which §14.10 deferred here.
+
+#### 14.12.1 Policy inputs (desired authority, graph.json `policy.convergence`)
+
+```jsonc
+{ "cleanRoundsRequired": 2,            // k consecutive clean rounds [2]
+  "minDistinctAuditorFamilies": 2,     // among the round's auditors, excluding implementer family [2]
+  "families": { "gpt-6.1-terra": "openai-gpt", "gpt-6.1-sol": "openai-gpt",
+                "claude-haiku-5.5": "anthropic", "qwen3-…": "local-qwen" },
+  "opinionBlockers": "owner-only"      // see below; [owner-only]
+}
+```
+
+- **Family is a policy table, never inferred from a model string.** A model
+  absent from `families` has family `unknown`, which never counts toward
+  diversity. This is the G3 answer to "family diversity is manual": it is
+  now declared, checkable data.
+- The implementer's family is derived from the task's `model` (S3) through
+  the same table. An implementer family of `unknown` makes the exclusion
+  undecidable and therefore **disqualifies the round** (14.12.2 rule 2,
+  v2) — it is never silently treated as "excluded nothing". A policy
+  waiver must name the model and its resolution on the record; a waiver
+  for one task does not generalize.
+
+#### 14.12.2 Round cleanliness (pure function, cycle `n`)
+
+A **round** is the set of `audit-finding` records with `cycle == n`, plus
+the auditor set assigned at intake for cycle `n`. Round `n` is **clean**
+iff all:
+
+1. **Completeness (v2, blocker fix):** every assigned auditor for cycle `n`
+   has a durable `auditor-round` completion record (§14.12.4) with
+   `result: "completed" | "incomplete"` and `targetDigest` (the digest of
+   the artifact it audited). A round is unclean unless ALL assigned
+   auditors completed against the expected target digest. An auditor that
+   crashed, timed out, never reported, or audited a stale target is
+   `incomplete` and holds the round unclean — **absence of findings is
+   not evidence of cleanliness**: only a completed round with no open
+   findings can be clean.** An incomplete auditor requires its own retry
+   record before it can
+   re-count (one retry per cycle, then `needs-owner`).
+2. **Diversity:** distinct families among *completed* round auditors,
+   excluding the implementer family, ≥ `minDistinctAuditorFamilies`.
+   **Unknown implementer family is disqualifying (v2):** if the task's
+   `model` maps to family `unknown` (or ambiguously), the exclusion cannot
+   be computed, so diversity is *undecidable*, not "computed without
+   exclusion". An undecidable diversity makes the round unclean and yields
+   `needs-owner` — the owner must map the model or waive the requirement
+   in policy, on the record.
+3. **Frozen-at-boundary (v2, blocker fix):** round cleanliness is
+   evaluated ONCE, at the cycle boundary, over the dispositions of that
+   moment, and written to the `convergence-verdict` record (14.12.4). A
+   finding is open at the boundary unless its §14.10.2 disposition closed
+   it (`accepted-fix` closes only on a green repro re-run per the §14.10.1
+   R4 acceptance contract). A
+   later disposition (e.g. a fix landing in cycle `n+1` that closes cycle
+   `n`'s blocker) NEVER re-cleans round `n`. Consecutive clean rounds are
+   consecutive *audits*, not consecutive *after-the-fact-clean states*: a
+   round that was unclean when it closed stays unclean forever.
+4. **Opinion rule (R8 enforcement):** an open blocker/major with
+   `verdictBasis:"opinion"` holds the round unclean unless it has been
+   dispositioned by the owner (`closed-residual` with authority) BEFORE
+   the boundary evaluation. An opinion finding cannot be silently closed
+   by the orchestrator.
+5. **Minors** never make a round unclean (§14.10.1 R4).
+
+#### 14.12.3 Verdict (recorded each cycle boundary)
+
+The **streak** is the count of consecutive clean rounds ending at the
+latest round. Verdict, in precedence order:
+
+| verdict | condition |
+|---|---|
+| `budget-exhausted` | G4 refuses admission of the next cycle (§14.13) — terminal |
+| `needs-owner` | any open `norm-ratification` blocker (G2), any `route:human-review` finding awaiting disposition, any opinion-basis blocker awaiting owner decision, or undecidable diversity (14.12.2 rule 2) |
+| `converged` | streak ≥ `cleanRoundsRequired` |
+| `continue` | otherwise |
+
+Precedence (v2): `budget-exhausted` outranks `needs-owner` — exhaustion
+is a fact about the loop's authority to continue, and must not be masked
+by an outstanding owner question (the owner sees it anyway: exhaustion
+is surfaced on the P13 channel together with any pending owner question,
+merging the asks into one). `needs-owner` outranks `converged` — a clean
+streak with an outstanding owner decision is NOT converged (the same
+"presence of a finding outranks absence of evidence" principle as P14
+C3-F2). A budget extension (14.13.5) lifts the terminal state and
+re-evaluation resumes from the recorded streak.
+
+A **`converged` verdict is the only path to a CONFIRMED-CLEAN round
+closure.** `budget-exhausted` closes the round UNCONFIRMED, exactly as
+AUD51 did, and that status is recorded, never upgraded.
+
+#### 14.12.4 Records (S5, kinds `auditor-round` and `convergence-verdict`)
+
+Every assigned auditor gets a durable round record — written at
+assignment and updated at completion (the S3 `running`-reconcile rule
+applies: an `auditor-round` still `assigned` at restart is reconciled to
+`incomplete`, never silently re-counted):
+
+```jsonc
+{ "kind":"auditor-round", "id":"…", "ts":…, "schema":"tre-supervisor/1",
+  "episodeId":"…", "cycle":4, "auditor":"gpt-6.1-terra",
+  "targetDigest":"sha256:…",           // artifact digest the auditor was given
+  "state":"assigned | completed | incomplete",
+  "result":null,                        // on completion: "clean" | "findings"
+  "findingsRecordIds":[ … ] }           // ids of the audit-finding records it filed
+```
+
+Derived verdicts are recorded for audit as `kind:"convergence-verdict"`:
+`{cycle, streak, verdict, implementerFamily, roundFamilies:[…],
+auditorRoundIds:[…], openBlockers:[ids], inputsDigest}`. `inputsDigest`
+hashes the input record ids and their dispositions **as of the boundary
+evaluation** (14.12.2 rule 3), so the verdict is reproducible and any
+drift is detectable. **Verdict and round records are derived
+projections, never inputs to recovery decisions** (the S3 derived-vs-
+desired rule); the `convergence-verdict` IS the freeze of that boundary's
+cleanliness.
+
+#### 14.12.5 Owner decisions for convergence
+
+- **O-G3-1** Opinion-basis blockers/majors: `owner-only` (drafted above) vs
+  `hold-until-repro` (the orchestrator may hold, but only the owner may
+  close). The drafted default is `owner-only` because an unfalsifiable
+  blocker is the case the convergence rule exists to surface.
+- **O-G3-2** `cleanRoundsRequired` default 2 (matches the k=2 consecutive
+  rule implied by HANDOFF G3). Lower values are not permitted without an
+  owner-recorded policy change.
+
+#### 14.12.6 What this section does NOT do
+
+No budget (G4). No partitioning (G5). No auditor invocation or model
+selection. It consumes `auditor.model` and the §14.10 dispositions; it
+does not create them.
+
+### 14.13 Design-cycle budget (G4 — the rounds/time/spend cap)
+
+**Status: DRAFT v2 (2026-11-17), batched with §14.11/§14.12/§14.14. v2:
+one fail-closed rule for unknown spend (no estimate-as-truth), usage
+counts toward BOTH the per-task and the cycle projection, and the
+terminal-vs-owner precedence is fixed in §14.12.3.**
+
+**Purpose.** §14.7 budgets are per-*recovery* (per task, per attempt).
+The audit-fix loop needs a separate budget per *design cycle* (one
+audit→fix round), because its spend is not recovery spend. Without it,
+AUD51-style "max 5 cycles, closed UNCONFIRMED" is an operator habit, not
+a limit the machine enforces. The G4 cap also gives the owner a bounded,
+recorded place to extend a loop.
+
+#### 14.13.1 Policy (desired authority, `graph.json policy.cycleBudget`)
+
+```jsonc
+{ "maxCycles": 5,                 // design cycles incl. confirming cycles [5]
+  "maxConfirmingCycles": 3,       // confirming cycles after the first clean-candidate [3]
+  "maxWallclockS": 14400,         // [14400] over all cycles
+  "maxUsd": 20.0                  // cycle spend cap — ALL spend the cycle dispatched: auditors + implementers + their recoveries (v2) [required in managed episodes]
+}
+```
+
+Defaults are bracketed; `maxUsd` is required, matching the §14.7
+`maxEpisodeRecoveryUsd` discipline (no unbounded managed loop).
+
+#### 14.13.2 Enforcement point: cycle boundaries only
+
+- Budget is checked **only when admitting cycle `n+1`** (the cycle
+  boundary), never mid-cycle. In-flight workers finish under their own
+  §14.7 per-task budgets; the design-cycle budget decides whether another
+  cycle may START.
+- **Admission is a pre-check with an estimate:** admit cycle `n+1` only if
+  `spent + estimate(n+1) ≤ cap`, where `estimate` is the mean observed cost
+  of prior cycles (or `maxUsd / maxCycles` before any observation).
+  **One fail-closed rule for unknown spend (v2, blocker fix):** ANY
+  unresolved unknown spend — a worker with missing usage, or an `admit`
+  with no matching `close` (§14.13.4) — consumes **all remaining headroom
+  for admission** (equivalently: unknown ⇒ no next cycle), never an
+  estimate. An estimate is a prediction, not evidence of what a crashed
+  cycle actually spent; counting crashed work at its estimate could grant
+  headroom a $10 crash had already burned. The same A6 posture as P8:
+  unknown is counted, not forgiven. The only unlock is **reconciliation**
+  (§14.13.4a): the supervisor resolves the unknown against provider
+  usage; if usage is unrecoverable, only an owner act (§14.13.5 shape)
+  records the accepted value. Estimate error on KNOWN costs can still
+  overshoot the next cycle; the record states this rather than claiming a
+  hard bound (same honesty as docs/21 D5 revised).
+- Wallclock is checked the same way against elapsed time; an unresolved
+  open interval (admit without close) counts as consuming the remaining
+  wallclock budget, same fail-closed posture.
+
+#### 14.13.3 Two projections, one ledger (v2 fix)
+
+Design-cycle spend and time are a **separate projection over the same
+usage records**: a cycle's projection sums ALL spend attributable to
+work the cycle dispatched — auditors, implementers, AND recoveries of
+those tasks. A dollar may appear in both the §14.7 recovery projection
+and the cycle projection (they are views over the ledger, not accounts;
+"double-counting" would mean counting it twice in ONE projection, which
+never happens). v2 closes the v1 escape hatch: v1 said "recovery spend
+never draws down the cycle budget", so a $1 audit task whose recovery
+burned $9 counted only its $1 against a $2 cycle cap. The projections
+still govern DIFFERENT decisions and never mutate each other's counters
+— a recovery budget stops the next *attempt* (§14.7 unchanged), the
+cycle budget stops the next *cycle* — but both read the true spend of
+the same records, under P8's discipline (append-only, stable ids,
+reconcile on restart).
+
+#### 14.13.4 Records (S5 kind `cycle`)
+
+```jsonc
+{ "kind":"cycle", "id":"…", "ts":…, "schema":"tre-supervisor/1", "episodeId":"…",
+  "cycle":4, "phase":"admit | closed",
+  "admitted":true, "reason":"within-budget | budget-exhausted | wallclock-exhausted | spend-unknown",
+  "estimateUsd":1.8, "spentUsd":12.4, "unknownSpendUsd":0,
+  "elapsedS":7200, "confirming":false }
+```
+
+Admission is appended BEFORE the cycle starts (log-then-act, §14.3); the
+close record carries observed spend. A `phase:"admit"` with no matching
+`closed` on restart is reconciled as **spend-unknown**: it blocks
+admission (14.13.2) until §14.13.4a resolves it.
+
+#### 14.13.4a Reconciliation
+
+On restart the supervisor re-reads P8 usage for every open cycle
+interval and every worker whose usage was missing. Resolved ⇒ a new
+`closed` record with observed `spentUsd` and `unknownSpendUsd:0`.
+Unresolvable ⇒ the unknown stands; only an owner act of the
+`budget-extension` shape (§14.13.5) may record an accepted value, and
+that value is what the projection uses thereafter.
+
+#### 14.13.5 Extension
+
+Extending a loop is an **owner act**: `kind:"budget-extension"` with
+`authority` (TTY-confirmed channel reference, §14.10.3) and an explicit
+new `maxCycles`/`maxUsd`. The orchestrator may never extend its own
+budget. This is the formal version of the AUD51 "user budget extension".
+
+#### 14.13.6 Interaction with the verdict
+
+`budget-exhausted` (§14.12.3) is terminal for the round and closes it
+UNCONFIRMED. A round ended by budget is never recorded as converged.
+
+#### 14.13.7 Owner decisions for the cycle budget
+
+- **O-G4-1** Enforcement at cycle boundary only (drafted above). The
+  alternative — kill in-flight work at the cap — was rejected: it converts
+  a clean boundary into partially-applied fixes.
+- **O-G4-2** Estimate-overshoot is disclosed, not bounded. A hard bound
+  would require holding spend in reserve across concurrent cycles, which
+  the single-episode loop does not need yet.
+- **O-G4-3 (v2)** Recovery spend of cycle-dispatched tasks counts toward
+  the cycle cap (drafted; closes the v1 escape in 14.13.3). The owner may
+  instead ring-fence recovery dollars under §14.7 only — but then the
+  cycle cap must be understood as covering audit+implement spend alone,
+  and that scope must be stated in `maxUsd`'s policy line, not left
+  ambiguous as v1 did.
+- **O-G4-4 (v2)** Unknown spend consumes ALL remaining headroom
+  (14.13.2), unlocked only by reconciliation or an owner-recorded value.
+  The v1/count-at-estimate alternative is withdrawn: it could grant a
+  next cycle that a crashed cycle had already paid for.
+
+#### 14.13.8 What this section does NOT do
+
+No per-task budget changes (§14.7 unchanged). No accounting of provider
+billing (P8 owns usage capture). No scheduling policy (G5 partitions
+work; G4 only gates whether a cycle may start).
+
+### 14.14 Finding partitioning (G5 — which findings may run in parallel)
+
+**Status: DRAFT v2 (2026-11-17), batched with §14.11–§14.13. v2: file-
+granular interaction (no anchor-parallelism on one path), and the S3
+advisory/mechanical confusion corrected — disjointness comes from the
+partition rule itself, with P6 worktrees + P12 conflict refusal as the
+backstop.**
+
+**Purpose.** HANDOFF G5: findings that touch the same file or section must
+serialize; independent findings may run in parallel across workers
+(§14.7 `maxParallel`). G1 has no file scope today, so G5 needs one field.
+
+#### 14.14.1 Amendment to §14.10.1 (additive, draft-stage)
+
+`audit-finding` gains a closed-shape field:
+
+```jsonc
+"scopeRefs":["src/runner/attempt.ts", "docs/21-p9-m3-…#§3"]
+```
+
+- Each entry is a repo-relative path, optionally with `#<anchor>` for a
+  section. An empty array is **legal but conservative** (see the unscoped
+  rule). Entries are validated at intake: no absolute paths, no `..`
+  segments, no glob characters (globs are for S3 `scope`, not findings).
+- This is an additive amendment to the §14.10 draft; §14.10's status line
+  is updated to note it. Recorded in the Change Ledger.
+
+#### 14.14.2 Interaction relation and groups
+
+Two open `code-fix` findings **interact** iff (v2: file-level, not
+anchor-level):
+- their `scopeRefs` **paths** overlap at file granularity (path-prefix
+  overlap counts: `src/` overlaps `src/x.ts`; the same path always
+  overlaps, whatever the anchors say — anchors are documentation and norm
+  linkage, never a license to run two writers on one file, see 14.14.4),
+  **or**
+- they share an `affectedNorm` (same `doc` and `anchor`).
+
+Groups are the **connected components** of the interaction graph over the
+open `code-fix` findings of a cycle. Within a group, findings run **serially
+in intake order**. Across groups, they may run in parallel up to
+`maxParallel`.
+
+#### 14.14.3 Unscoped rule
+
+A finding with `scopeRefs: []` interacts with **every** other open finding.
+All unscoped findings therefore collapse into one serial group. This is the
+conservative default: an unscoped finding cannot be proven disjoint, so it
+cannot run beside anything. (Implication: a poorly-scoped auditor makes the
+loop slower, not wrong. That is the intended failure direction.)
+
+#### 14.14.4 Worker disjointness — what is and is NOT enforced (v2 fix)
+
+v1 claimed the S3 disjointness check "enforces, mechanically", that
+parallel groups share no files. It does not: S3 (docs/11 §4) says
+`scope`/`notFiles` disjointness is **advisory for scheduling**, with
+enforcement living in the worker's sandbox + git. v2 states the real
+layers:
+
+- Task `scope.files` (S3) is set to the group's `scopeRefs` path union
+  and the advisory check runs before the wave — a **planning signal**
+  that refuses a partition the scheduler believes is wrong, not a proof.
+- Disjointness by construction: 14.14.2 (v2) already puts every pair of
+  findings touching one path in the same group, and a group is one task,
+  so **parallel tasks never share a scope path** — the partition rule
+  itself is the guarantee, not the check.
+- Backstop for anything that escapes the rule (manual rewrite, bug):
+  each task runs in its own P6 worktree pinned at the cycle base commit,
+  so parallel writes cannot corrupt each other; same-file edits from two
+  tasks surface as a **merge conflict at P12**, which refuses the
+  candidate (never auto-resolves) and re-queues it with evidence. A
+  conflict proves the partition was wrong; it loses no work.
+- Scope expansion: a fix that must touch a file outside its group's
+  union is a contract violation the worktree boundary does not police
+  (the worktree grants write access to the whole checkout). P12's
+  conflict-on-merge is the durable detector; a post-hoc diff-scope audit
+  (candidate diff ⊆ scope union) is a cheap additional check listed as
+  O-G5-3 (v2), default: enforce at integration, refusal `scope-escape`.
+
+#### 14.14.5 Derived, not stored as authority
+
+The partition is a **derived projection** recomputed each cycle from the
+open findings (same derived-vs-desired rule as §14.12.4). It may be cached,
+but a cache is never an input: the partition is recomputed from the records
+at dispatch. The cycle's partition digest is included in the
+`convergence-verdict` `inputsDigest` (§14.12.4), so the schedule a verdict
+relied on is reproducible.
+
+#### 14.14.6 Owner decisions for partitioning
+
+- **O-G5-1** Unscoped findings collapse to one serial group (drafted above)
+  vs. be treated as overlapping only with same-`surface` findings. The
+  drafted default is the stricter one; the looser variant trades safety for
+  throughput and needs evidence first.
+- **O-G5-2** File-granular overlap (v2, drafted above): directory-prefix
+  overlap still serializes; two anchors in the SAME file never run in
+  parallel (v1's anchor rule is gone — see 14.14.4 for why the platform
+  cannot grant below-file isolation). A future below-file rule needs a
+  merge-layer mechanism, not a schema promise.
+- **O-G5-3 (v2)** Scope-escape audit: enforce candidate-diff ⊆ scope
+  union at P12 integration (`scope-escape` refusal), default ON —
+  defense-in-depth for 14.14.4's disclosed residual.
+
+#### 14.14.7 What this section does NOT do
+
+No dispatch implementation, no worker spawn (P9/P11), no merge of parallel
+group outputs (P12 integrates tested candidates; G5 only decides which
+groups may run at once).
+
+### 14.15 Batch draft: adversarial-audit scope and ratification order
+
+**Status: DRAFT v2 (2026-11-17).** The four sections above are one
+contract drafted in one pass and attacked as one contract, with
+per-section disposition:
+
+- **Audit order (suggested):** G1 amendment (§14.10.1 `scopeRefs`) →
+  G2 (§14.11, supplies the digest ruling G1 deferred) → G3 (§14.12, consumes
+  G1+G2 states) → G4 (§14.13, independent) → G5 (§14.14, consumes G1
+  `scopeRefs` and G2 norm identity).
+- **Ratification:** each section's `O-*` decisions are independent; the owner
+  may ratify G4/G5 while G2/G3 are still under audit. A blocker in one
+  section reopens only that section — EXCEPT edits to a shared interface
+  (v2): `scopeRefs` (G1↔G5), norm identity/digest rules (G2↔G1 intake,
+  G2↔G3 verdict), and the verdict table (G3↔G4 precedence) reopen the
+  consuming sections for dependency-impact review before ratification.
+- **Implementation order (after all four ratified):** G1 → G5 → G2 → G3 → G4
+  (dependency order), each with its own test suite and its own Change Ledger
+  row, as with P0–P15.
+- **Open decisions summary:** O-G2-1…5, O-G3-1…2, O-G4-1…4, O-G5-1…3
+  (above). All are drafted with a default; none is ratified.
