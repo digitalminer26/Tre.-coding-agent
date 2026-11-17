@@ -5487,5 +5487,132 @@ class TestV38Cycle6Audit(Base):
         self.assertFalse(healed._owed_attempt())
 
 
+class TestV38Cycle7Audit(Base):
+    """AUD51 cycle 4 (findings 1-5, minor test gaps, ALL five
+    reproduced surviving 128 against f134600): documented sidecar/
+    counter behaviors with NO suite coverage — each cell here is
+    mutation-verified against the exact variant from the c4 table.
+    Production code is UNCHANGED: every documented behavior was
+    correct; only its test evidence was missing."""
+
+    def _put(self, name, data):
+        p = os.path.join(self.dir, name)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return p
+
+    def _get(self, name):
+        p = os.path.join(self.dir, name)
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except FileNotFoundError:
+            return None
+
+    def test_F96_counter_state_unparsable_is_corrupt_not_live(self):
+        """c4-K6: `_counter_state` must report corrupt=True for an
+        EXISTING record failing the grammar (a regex-fail->corrupt-
+        False variant reads garbage as live evidence, closing the
+        F67 grammar-heal path); the parse half still yields the
+        fail-closed cap+1/exhausted pair."""
+        self.led = self.mk()
+        self._put("resolve-attempts", b"garbage!" * 2)   # 16 bytes
+        n, exh, corrupt = self.led._counter_state()
+        self.assertEqual((n, exh, corrupt),
+                         (self.led.repair_attempt_cap + 1, True, True),
+                         "unparsable 16-byte record: corrupt must "
+                         "be True (live=False) with fail-closed parse")
+
+    def test_F96_owed_clear_heals_overlong_width(self):
+        """c4-K13: clearing an OVER-LONG owed witness must re-
+        establish the 16-byte width (drop-the-fix_width variant left
+        the record 17 bytes: fail-closed forever, a healthy resolve
+        'succeeding' over a witness no reader accepts)."""
+        self.led = self.mk()
+        self._put("resolve-owed", b"OWED" + b"\0" * 12 + b"\0")  # 17
+        self.assertTrue(self.led._owed_attempt())
+        self.led._clear_owed()
+        self.assertEqual(len(self._get("resolve-owed")), 16,
+                         "clear must heal the declared fixed width")
+        self.assertFalse(self.led._owed_attempt())
+
+    def test_F96_repair_fill_loop_completes_short_first_write(self):
+        """c4-K15: the repair fill's CHECKED loop must land all 16
+        bytes when the device short-writes the first pwrite (a
+        single-pwrite variant leaves 1 byte with no retry). Shim:
+        only the fill's off==0 write of the OWED payload is capped
+        to one byte; the loop must continue and land the record."""
+        self.led = self.mk()
+        real_pwrite = os.pwrite
+        calls = []
+
+        def short_fill(fd, data, off, _r=real_pwrite, _c=calls):
+            if off == 0 and data.startswith(b"OWED") and len(data) > 1:
+                _c.append("capped")
+                return _r(fd, data[:1], off)
+            return _r(fd, data, off)
+
+        self.led._write_owed()          # healthy owed witness first
+        self.led.faults = FsFaults(clear_fsync_fault=True)
+        os.pwrite = short_fill
+        try:
+            with self.assertRaises(OSError):   # the faulted clear raises
+                self.led._clear_owed()
+        finally:
+            os.pwrite = real_pwrite
+        self.assertIn("capped", calls,
+                      "short-write shim never saw the repair fill payload")
+        self.assertEqual(self._get("resolve-owed"),
+                         b"OWED" + b"\0" * 12,
+                         "checked fill loop must land all 16 bytes")
+
+    def test_F96_sidecar_write_zero_progress_raises_EIO(self):
+        """c4-K18: a zero-progress pwrite in `_sidecar_write` raises
+        EIO (a `break` mutant reports success over an unwritten
+        sidecar). F89/F90 pin the twins in the clear loop; this is
+        the create-path loop. fd->path map via an os.open spy
+        (F88 recipe), zero forced only on the counter sidecar."""
+        self.led = self.mk()
+        real_open, real_pwrite = os.open, os.pwrite
+        opened = {}
+
+        def spy_open(path, *a, _o=opened, _r=real_open):
+            fd = _r(path, *a)
+            _o[fd] = os.fspath(path)
+            return fd
+
+        def zero_on_counter(fd, data, off, _o=opened, _r=real_pwrite):
+            if _o.get(fd, "").endswith("resolve-attempts"):
+                return 0
+            return _r(fd, data, off)
+
+        os.open, os.pwrite = spy_open, zero_on_counter
+        try:
+            with self.assertRaises(OSError) as cm:
+                self.led._write_counter(1)
+        finally:
+            os.open, os.pwrite = real_open, real_pwrite
+        self.assertEqual(cm.exception.errno, errno.EIO,
+                         "zero-progress sidecar write must raise EIO, "
+                         "never return 'success'")
+
+    def test_F96_write_counter_default_derives_exhausted(self):
+        """c4-K24: `_write_counter`'s exhausted=None default derives
+        the flag from `_attempts_exhausted()` — writing over a sticky
+        `X` record keeps it sticky (an exhausted=False default — the
+        surviving mutant — silently downgrades the record)."""
+        self.led = self.mk()
+        self._put("resolve-attempts",
+                  ("4 X").encode() + b"\0" * (16 - 3))  # over cap: sticky
+        self.assertTrue(self.led._attempts_exhausted())
+        self.led._write_counter(2)          # default branch
+        body = self._get("resolve-attempts").rstrip(b"\0").decode()
+        self.assertEqual(body, "2 X",
+                         "default must keep the exhausted flag sticky")
+
+
 if __name__ == "__main__":
     unittest.main()
