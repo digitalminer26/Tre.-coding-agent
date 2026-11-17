@@ -5901,3 +5901,307 @@ class TestV38Cycle10Audit(Base):
         self.assertEqual(cls2["valid_repairs"], [],
                          "a REPAIR named in a malformed auth file is DEAD "
                          "(named-basis rule), not valid-on-partial-parse")
+
+
+class TestV38Cycle11Audit(Base):
+    # AUD52 c2 (owner adjudication of the auditor's unadjudicated
+    # survivors): two genuine pin gaps behind SURVIVED mutants.
+    def test_F100_settle_resolves_before_act_even_on_a_strippable_tail(self):
+        """AUD52-c2 mutant T1 (drop settle()'s leading _resolve_locked):
+        SURVIVED. settle()'s docstring is explicit — resolve-before-act
+        ALWAYS. A whitespace tail is NOT the killer (the fast path
+        itself returns _resolve_locked()); the observable divergence is
+        a NONBLANK unterminated tail with a resolve-IO fault: the BASE
+        refuses durability-pending with ZERO settlement bytes (the
+        leading resolve is charged and fails), while the mutant writes
+        the settlement byte and returns a classification over
+        unconfirmed bytes. Pin: refusal first; after the fault clears,
+        the retry resolves AND settles, in that order.
+        Mutation-verified: RED naming F100 under the T1 mutant."""
+        self.seed(b'{"ok":1}\n\n{part')
+        faults = FsFaults()
+        self.led = self.mk(faults)
+        faults.resolve_io_fault = True
+        with self.assertRaises(LedgerError) as cm:
+            self.led.settle()
+        self.assertEqual(cm.exception.code, STATE_PENDING,
+                         "F100: settle must resolve BEFORE acting — a "
+                         "failing resolve forbids the settlement byte")
+        self.assertEqual(self.raw(), b'{"ok":1}\n\n{part',
+                         "F100: the refused settle wrote ZERO bytes")
+        faults.resolve_io_fault = False
+        cls = self.led.settle()
+        self.assertEqual(cls["state"], STATE_UNMASKED)
+        self.assertFalse(self.led.durability_pending())
+        self.assertEqual(self.raw(), b'{"ok":1}\n\n{part\n',
+                         "F100: the fault-cleared retry settles the tail")
+
+    def test_F101_operator_reset_never_clears_the_pending_mark(self):
+        """AUD52-c2 row R2 (variant: reset ALSO clears the pending mark
+        "convenience"): the auditor's run was INVALID (it wrote a
+        marker instead of clearing one); the owner re-ran the valid
+        variant — full suite GREEN, so the contract "resets ONLY the
+        sticky counter/flag — it does NOT clear the pending mark" was
+        unpinned. Here: a live durable-pending window at counter 0
+        (reset precondition allows), reset must leave the P marker and
+        the durability-pending decision EXACTLY as they were — zero
+        log bytes. Mutation-verified: RED naming F101 under a reset
+        variant that clears the sidecar."""
+        self.seed(b'{"t":"WATERMARK","hostToken":"H0","watermark":0,'
+                  b'"confirmGen":"G0"}')
+        self.led = self.mk()
+        self.led._write_pending(0, False)      # live unresolved window
+        self.assertTrue(self.led.durability_pending())
+        self.assertEqual(self.led.status()["decision"], STATE_PENDING)
+        self.led.operator_resolve_reset()      # counter 0: allowed
+        self.assertTrue(self.led.durability_pending(),
+                        "F101: reset must NOT clear the pending mark")
+        self.assertEqual(self.led.status()["decision"], STATE_PENDING,
+                         "F101: the unresolved window still refuses")
+        self.assertEqual(self.raw(),
+                         b'{"t":"WATERMARK","hostToken":"H0","watermark":0,'
+                         b'"confirmGen":"G0"}',
+                         "F101: reset performs no ledger write")
+
+    def test_F102_authorize_verifies_the_entry_hash_not_just_the_offset(self):
+        """AUD52-c2 mutant A10 (authorize's entry check drops the
+        `_sha(raw) != e["hash"]` comparison, keeping only `raw is None`):
+        SURVIVED all runs — no test ever handed authorize an occurrence
+        entry whose hash does not match the line at its offset. The
+        offset alone must NOT be an authorization handle: a forged hash
+        on a real malformed line is an unknown occurrence (refused
+        BEFORE the membership check), never the downstream
+        not-unmasked error, and zero AUTH bytes.
+        Mutation-verified: RED naming F102 under the A10 mutant."""
+        self.seed(CORRUPT + b"\n")
+        self.led = self.mk()
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize([{"offset": 0, "hash": "deadbeef"}],
+                               auth_id="A102", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-entry-unknown-occurrence",
+                         "F102: a forged hash at a live offset is an "
+                         "UNKNOWN occurrence — the hash is checked, not "
+                         "just the offset's existence")
+        self.assertFalse(os.path.exists(self.led.auth_path),
+                         "F102: refusal before any AUTH byte")
+
+    def test_F103_whitespace_only_tail_is_stripped_not_settled(self):
+        """AUD52-c2 mutant T3 (drop settle()'s second fast-path disjunct
+        "fragment strips empty"): SURVIVED. Contract (settle + classify
+        agree): a whitespace-only unterminated tail is TERMINATED —
+        settle resolves and returns the classification with ZERO
+        settlement bytes; only a NONBLANK fragment earns a byte.
+        Mutation-verified: RED naming F103 under the T3 mutant (it
+        appends the newline, mutating the raw file)."""
+        self.seed(b'{"t":"WATERMARK","hostToken":"H0","watermark":5,'
+                  b'"confirmGen":"G0"}\n   ')
+        self.led = self.mk()
+        cls = self.led.settle()
+        self.assertEqual(cls["state"], STATE_OK)
+        self.assertFalse(self.led.durability_pending())
+        self.assertEqual(self.raw(),
+                         b'{"t":"WATERMARK","hostToken":"H0","watermark":5,'
+                         b'"confirmGen":"G0"}\n   ',
+                         "F103: a strippable tail is resolved, never "
+                         "settled — zero bytes")
+
+    def test_F104_settlement_reserve_bound_is_strictly_greater(self):
+        """AUD52-c2 mutant T4 (settle's `size + 1 > LOG_CAP` flipped to
+        >=): SURVIVED — F99 pinned the READ-side cap boundary but the
+        settlement-write boundary is its own comparison. Two legs pin
+        the boundary from BOTH sides (AUD53-c3 finding 1: the original
+        second leg started at cap+2, so a one-byte-slack bound
+        (`size + 1 > LOG_CAP + 1`) survived it): at size exactly
+        LOG_CAP-1 the byte still fits (final size == cap is legal); at
+        size EXACTLY LOG_CAP with a nonblank tail the settle refuses
+        log-cap-exceeded with zero bytes. Mutation-verified: RED under
+        the T4 mutant (refuses the fitting byte) AND under a +1-slack
+        mutant (writes the byte that must not fit)."""
+        from unittest import mock
+        cap = 40
+        body = b'{"t":"W","h":0}\n'
+        self.seed(body + b" " * (cap - 1 - len(body) - 2) + b"{x")
+        self.assertEqual(len(self.raw()), cap - 1)
+        self.led = self.mk()
+        with mock.patch("p9m3.ledger.LOG_CAP", cap):
+            cls = self.led.settle()          # 39+1 > 40 is False: fits
+            self.assertEqual(cls["state"], STATE_UNMASKED)
+            self.assertEqual(len(self.raw()), cap,
+                             "F104: the byte that lands EXACTLY on the "
+                             "cap must be written")
+        self.seed(b"{")     # size EXACTLY cap+1 = new cap, nonblank tail
+        before = self.raw()
+        with mock.patch("p9m3.ledger.LOG_CAP", cap + 1):
+            with self.assertRaises(LedgerError) as cm:
+                self.led.settle()
+            self.assertEqual(cm.exception.code, "log-cap-exceeded")
+            self.assertEqual(self.raw(), before,
+                             "F104: the refusal at EXACTLY LOG_CAP "
+                             "wrote zero bytes (byte-for-byte, "
+                             "AUD53-c1 finding 1)")
+
+    def test_F105_log_names_authids_only_through_schema_valid_records(self):
+        """AUD52-c2 mutant A2 (_log_names drops the _schema_kind filter
+        and matches any line whose JSON parses with that authId):
+        SURVIVED. Contract: an id named ONLY inside a malformed line —
+        even one that is valid JSON ({"authId":...} with no schema) —
+        is INVISIBLE to the already-used rule; malformed bytes are
+        never an authorization-history basis (F53(b) pins the valid
+        REPAIR twin). Mutation-verified: RED naming F105 under the A2
+        mutant (it answers auth-id-already-used here)."""
+        bad1 = CORRUPT + b"-a2x"
+        bad2 = CORRUPT + b"-a2y"
+        jonr = b'{"authId":"X52"}'   # valid JSON, schema-INVALID: malformed
+        self.seed_at([(0, bad1), (len(bad1) + 1, bad2),
+                      (len(bad1) + len(bad2) + 2, jonr)])
+        self.led = self.mk()
+        self.assertEqual(self.led.classify()["state"], STATE_UNMASKED)
+        aid = self.led.authorize([self.occ(len(bad1) + 1, bad2)],
+                                 auth_id="X52", test_only=True)
+        self.assertEqual(aid, "X52",
+                         "F105: a malformed line naming X52 is not "
+                         "history — the id stays mintable-by-operator")
+
+    def test_F106_mint_retry_is_bounded_at_its_64th_attempt(self):
+        """AUD52-c2 mutant A6 (mint loop range(64) -> range(1<<20)):
+        SURVIVED — F55 pins the collision REFUSAL but not the BOUND
+        the docstring promises ("the bounded retry REFUSES"). Under a
+        persistent collision exactly 64 candidates are consumed and
+        the refusal is auth-id-mint-collision with zero bytes; a loop
+        that outlives the bound (here: a 100th call) fails the pin.
+        Mutation-verified: RED naming F106 under the A6 mutant (it
+        hammers past 100 attempts)."""
+        import unittest.mock as mock
+        import p9m3.ledger as lmod
+        bad = CORRUPT + b"-a6"
+        self.seed_at([(0, bad)])
+        self.led = self.mk()
+        occs = [self.occ(0, bad)]
+        stuck = self.led.authorize(occs, auth_id="STUCK", test_only=True)
+        auth_before = read_or_empty(self.led.auth_path)
+        calls = []
+
+        def gen():
+            if len(calls) >= 99:      # the 100th call trips the guard
+                raise AssertionError("mint loop ran past its bound")
+            calls.append(1)
+            return stuck
+        with mock.patch.object(lmod, "_mint_ulid", side_effect=gen):
+            with self.assertRaises(LedgerError) as cm:
+                self.led.authorize(occs)
+        self.assertEqual(cm.exception.code, "auth-id-mint-collision")
+        self.assertEqual(len(calls), 64,
+                         "F106: the documented bound is 64 attempts")
+        self.assertEqual(read_or_empty(self.led.auth_path), auth_before,
+                         "F106: the fail-closed refusal writes ZERO new "
+                         "AUTH bytes (AUD53-c3 finding 2)")
+
+    def test_F107_default_authorize_requires_the_unmasked_state(self):
+        """AUD52-c2 mutant A9 (authorize's `occurrences is None` leg
+        drops the state gate): SURVIVED — no test names the error
+        authorize-not-unmasked at all. Default authorize derives the
+        list from the classification; when nothing is unmasked the
+        derivation is meaningless and MUST refuse (an empty list is
+        not a grantable occurrence set — the mutant wrote an AUTH
+        with zero occurrences). Mutation-verified: RED naming F107
+        under the A9 mutant."""
+        self.seed(b'{"t":"WATERMARK","hostToken":"H0","watermark":1,'
+                  b'"confirmGen":"G0"}\n')      # healthy: state ok
+        self.led = self.mk()
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize()
+        self.assertEqual(cm.exception.code, "authorize-not-unmasked")
+        self.assertFalse(os.path.exists(self.led.auth_path),
+                         "F107: refusal before any AUTH byte")
+
+    def test_F108_auth_size_cap_boundary_is_strictly_greater(self):
+        """AUD52-c2 mutant A15 (authorize's `len(payload)+2 > CAPS`
+        flipped to >=): SURVIVED — "auth-too-large" appeared in zero
+        tests; neither the refusal nor its exact boundary was pinned.
+        Here: one byte over the cap refuses with zero bytes; a payload
+        landing EXACTLY at the cap is written. The check's `+2` is the
+        two-byte framing reservation (leading delimiter + trailing
+        newline, cf. _frame); the physically appended record is
+        payload + ONE newline (AUD53-c1 finding 3). Zero-write claims
+        are byte-for-byte snapshots, not length-only (AUD53-c1
+        findings 2).
+        Mutation-verified: RED naming F108 under the A15 mutant (it
+        refuses the fitting payload)."""
+        import unittest.mock as mock
+        import p9m3.ledger as lmod
+        a, b, c = CORRUPT + b"-a15x", CORRUPT + b"-a15y", CORRUPT + b"-a15z"
+        # two-digit offsets + same-length payloads + same-length auth ids
+        # => every AUTH payload is byte-for-byte the same length.
+        self.seed_at([(10, a), (40, b), (70, c)])
+        self.led = self.mk()
+        self.led.authorize([self.occ(10, a)], auth_id="A15idA",
+                           test_only=True)
+        after1 = len(read_or_empty(self.led.auth_path))
+        payload_len = after1 - 1
+        self.led.authorize([self.occ(40, b)], auth_id="A15idB",
+                           test_only=True)   # distinct occurrence, same length
+        after2 = len(read_or_empty(self.led.auth_path))
+        new_len = after2 - after1 - 1
+        self.assertEqual(new_len, payload_len,
+                         "F108: fixture must mint an equal-length payload")
+        occ3 = self.occ(70, c)
+        before = read_or_empty(self.led.auth_path)
+        with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 1}):
+            with self.assertRaises(LedgerError) as cm:
+                self.led.authorize([occ3], auth_id="A15idC",
+                                   test_only=True)   # same length: +1 over
+            self.assertEqual(cm.exception.code, "auth-too-large")
+        self.assertEqual(read_or_empty(self.led.auth_path), before,
+                         "F108: the refused authorize wrote zero bytes "
+                         "(byte-for-byte)")
+        with mock.patch.dict(lmod.CAPS, {"AUTH": payload_len + 2}):
+            aid = self.led.authorize([occ3], auth_id="A15idD",
+                                     test_only=True)
+        self.assertEqual(aid, "A15idD")
+        data = read_or_empty(self.led.auth_path)
+        self.assertEqual(data[:len(before)], before,
+                         "F108: the accepted authorize appends ONLY the "
+                         "framed record over the untouched prefix")
+        self.assertEqual(data[len(data) - 1:], b"\n",
+                         "F108: the appended record is newline-framed")
+        self.assertEqual(len(data), len(before) + payload_len + 1,
+                         "F108: the payload EXACTLY at cap is written")
+
+    def test_F109_auth_write_zero_progress_raises_eio(self):
+        """AUD52-c2 mutant A16 (authorize's checked-write `n <= 0`
+        flipped to n < 0): the auditor recorded a live HANG — zero
+        progress silently loops forever. F96 pinned the sidecar twin;
+        the AUTH path's own zero-progress contract (OSError EIO,
+        documented as failure) was unpinned. fd->path spy (F88/F96
+        recipe), zero forced only on authorizations.jsonl; a 10th
+        consecutive zero means the loop did not fail-fast.
+        Mutation-verified: RED naming F109 under the A16 mutant."""
+        self.seed_at([(0, CORRUPT + b"-a16")])
+        self.led = self.mk()
+        real_open, real_write = os.open, os.write
+        opened = {}
+        zeros = []
+
+        def spy_open(path, *a, _o=opened, _r=real_open):
+            fd = _r(path, *a)
+            _o[fd] = os.fspath(path)
+            return fd
+
+        def spy_write(fd, data, _o=opened, _z=zeros, _r=real_write):
+            if _o.get(fd, "").endswith("authorizations.jsonl"):
+                _z.append(1)
+                if len(_z) > 9:      # the 10th zero trips the guard
+                    raise AssertionError("zero-progress write not bounded")
+                return 0
+            return _r(fd, data)
+        os.open, os.write = spy_open, spy_write
+        try:
+            with self.assertRaises(OSError) as cm:
+                self.led.authorize([self.occ(0, CORRUPT + b"-a16")],
+                                   auth_id="A16", test_only=True)
+        finally:
+            os.open, os.write = real_open, real_write
+        self.assertEqual(cm.exception.errno, errno.EIO,
+                         "F109: zero-progress AUTH write must raise EIO")
+        self.assertEqual(len(zeros), 1,
+                         "F109: the FIRST zero fails fast")
