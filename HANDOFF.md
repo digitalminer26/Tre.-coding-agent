@@ -1,3 +1,34 @@
+## 2026-11-17 (LATE) — AUD51 extension (user budget: 3 confirming cycles c6-c8, terra) EXECUTED and CLOSED UNCONFIRMED; no CYCLE CLEAN within budget
+
+**Cycles:** c6 (pre-written confirming prompt) CYCLE FINDINGS 1 — M2
+double-failure shape SURVIVED (the c5 REFUTED note was wrong about
+that shape; owner-reproduced, F98 pin = TestV38Cycle9Audit, unique
+killer mutation-verified) → commit 733f101. c7 (NEW region: read-side
+decision layer, owner-enumerated 25-row sweep — prompt at
+`~/.tre/audits/aud51-c7-prompt.txt`) CYCLE FINDINGS 5 (P4/P5/P7
+promote-refusal legs, C3 exact LOG_CAP boundary, K1 malformed-AUTH
+named-basis rule; all owner-reproduced individually, production
+correct) → F99 pin class TestV38Cycle10Audit, each mutant RED naming
+its cell (unique killers) → commit 8bae545. c8 (final confirming
+re-run) CYCLE INCOMPLETE 0f — the auditor executed 1/25 rows (K1:
+re-verified KILLED by F99) before its turn budget ended; its novel
+abort (decision computed -> on_allowed in promote) PASSes; spot-
+checks 3/3. Extension closed UNCONFIRMED in 21a (entries c6/c7/c8).
+
+**Final state:** HEAD 2774254; production `reference/p9m3/ledger.py`
+UNCHANGED since the c0 fix (defect-free across the whole AUD50+51
+audit arc); suite **142 tests F61-F99, gate green zero-warning x2**;
+pin classes F98/F99 added. All artifacts: `~/.tre/audits/aud51-c{6,7,8}-*`.
+
+**TO GET A CLEAN VERDICT (only if the user extends budget again):**
+c8's failure was EXECUTION (turn budget), not the code. Do NOT
+re-kick the full c8 prompt; write a c9 prompt containing ONLY the
+24 un-run rows of the decision-layer table (S1-S7,P1-P9,C1-C6,K1-
+K3 minus K1 — K1 is confirmed) + a cheap already-covered note, same
+5-field abort recipe and 3 verbatim spot-checks from the c7 entry.
+Everything else is owner-verified (F99 unique killers at pin time;
+mutation harness recipes are in the c7/c8 session logs).
+
 ## 2026-11-17 — AUD51 round CLOSED (max 5 cycles, no CLEAN → UNCONFIRMED; all findings fixed+pinned); RESUME POINT: optional CONFIRMING cycle 6 ready to kick after reboot
 
 **State on disk (all committed; clean tree expected at resume — verify
