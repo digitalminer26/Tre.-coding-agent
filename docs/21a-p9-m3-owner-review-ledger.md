@@ -7243,10 +7243,13 @@ scheduled cycles miss):
   silent-always-on wirings (sidecar/sidecar-dir/resolve fsync
   -io raw truthiness); the c1 repair-order item was PROVEN
   safe (exposure closed, no shipped defect). Corrected tally:
-  AUD49 production fixes = 4 wiring fixes (one commit 7c0a7a3)
-  + 3 earlier-seam fixes (7d9ac0c: dispatch arity, partial
-  contract, leak) + 1 latent-leak batch (0d49e00); test pins
-  added F84-F88.
+  AUD49 PRODUCTION fixes = 4 wiring fixes (one commit 7c0a7a3)
+  + 2 earlier production-seam fixes (7d9ac0c: signature-bind
+  dispatch arity, clear_partial_write callable contract);
+  TEST-only fixes accounted separately: F79 leak closure
+  (7d9ac0c) + 4-site leak batch (0d49e00); test pins added
+  F84-F88. (Re-counted per AUD50 cycle-1 finding 2: git show
+  confirms the leak commits touch test_ledger.py only.)
 
 ## AUDIT ROUND AUD50 (2026-11-17, auditor: fresh-context
 gpt-6.1-terra per owner instruction, 5 cycles — OPEN)

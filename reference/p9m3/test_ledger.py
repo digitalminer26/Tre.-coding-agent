@@ -1,4 +1,4 @@
-"""Fixture suite F1-F88 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F89 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -4901,6 +4901,60 @@ class TestV38Cycle6Audit(Base):
                      and not promo and heal == STATE_OK,
                      "POST-consumption fault: raises, owed stays, never "
                      "ok, no promotion, heals healthy")
+
+    def test_F89_sidecar_partial_ceiling_consults_predicate_once(self):
+        """AUD50 cycle 1 (finding 1, minor test gap): the sidecar
+        partial seam's contract is ONE-SHOT — the predicate is
+        consulted exactly ONCE per operation and its value ceilings
+        only the FIRST pwrite (continuation is unthrottled;
+        ledger.py `_sidecar_write`). The per-iteration re-consult
+        mutant — semantically wrong (it changes invocation count AND
+        turns the one-shot ceiling into a repeated throttle) —
+        passed all 121; this pins invocation count == 1 (via a
+        CALLABLE) and the 4+12 two-write shape of the ceiling."""
+        def owed_at(dd):
+            with open(os.path.join(dd, "resolve-owed"), "rb") as fh:
+                return fh.read()
+
+        for tag in ("first-then-hostile", "counting"):
+            calls = []
+            if tag == "counting":
+                def val(p=None, _c=calls):
+                    _c.append(p)
+                    return 4
+            else:
+                def val(p=None, _c=calls):
+                    _c.append(p)
+                    # no-arg fallback must ALSO return a ceiling (the
+                    # one-shot value is int(); answering True would
+                    # crash the int() path and change the shape)
+                    return 4 if p is not None else 4
+            d = os.path.join(self.dir, "onshot_" + tag)
+            os.makedirs(d, mode=0o700, exist_ok=True)
+            led = Ledger(d, faults=FsFaults(sidecar_partial_write=val),
+                         repair_attempt_cap=3)
+            n = [0]
+            real = os.pwrite
+
+            def counting(fd, buf, off, *a, _r=real, _n=n):
+                _n[0] += 1
+                return _r(fd, buf, off, *a)
+            os.pwrite = counting
+            try:
+                led._write_owed()
+            finally:
+                os.pwrite = real
+            self.assertEqual(
+                owed_at(d), b"OWED".ljust(16, b"\0"),
+                "one-shot ceiling %s: full payload must land" % tag)
+            self.assertEqual(
+                n[0], 2,
+                "one-shot ceiling %s: exactly 2 pwrites (4+12), got %d"
+                % (tag, n[0]))
+            self.assertEqual(
+                len(calls), 1,
+                "one-shot ceiling %s: predicate consulted EXACTLY ONCE "
+                "(per-iteration re-consult mutant: F89 goes RED)" % tag)
 
     def test_F88_silent_fsync_seams_really_suppress_their_fsync(self):
         """AUD49-close audit finding (major, test strength): F87's
