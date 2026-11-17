@@ -205,7 +205,15 @@ def _partial_limit(value, path=None):
     pwrite tripping the zero-progress guard BEFORE any zero lands,
     F81(c)); a callable is consulted through `_dispatch_fault` like
     every other seam and its return value interpreted recursively
-    (int or None)."""
+    (int or None). NEGATIVE VALUES ARE OUT OF CONTRACT and take the
+    fail-closed side by construction (AUD50 c2, finding 1, pinned by
+    F90): the slice [:negative] silently shortens the write, and on
+    the PERSISTENT clear loop the last single byte then yields an
+    empty slice -> zero-progress OSError with the witness UNTOUCHED
+    (never an abs() normalization: a silent 1-byte throttle would
+    turn a caller's nonsense value into 16 successful writes). On
+    the ONE-SHOT sidecar path the shortened first write is simply
+    followed by the unthrottled continuation."""
     if callable(value):
         value = _dispatch_fault(value, path)
     if value is None:

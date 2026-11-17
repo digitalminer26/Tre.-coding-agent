@@ -1,4 +1,4 @@
-"""Fixture suite F1-F89 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F90 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -4901,6 +4901,49 @@ class TestV38Cycle6Audit(Base):
                      and not promo and heal == STATE_OK,
                      "POST-consumption fault: raises, owed stays, never "
                      "ok, no promotion, heals healthy")
+
+    def test_F90_negative_partial_limits_fail_closed_never_abs(self):
+        """AUD50 cycle 2 (finding 1, minor): the abs(int(value))
+        mutant — normalizing an out-of-contract NEGATIVE partial
+        limit into a silent 1-byte throttle — passed all 122. The
+        shipped contract (now documented at `_partial_limit`) takes
+        the FAIL-CLOSED side: on the persistent clear loop a
+        negative limit shortens each segment and ends in an empty
+        slice -> zero-progress OSError with the owed witness
+        UNTOUCHED and still reading OWED; the one-shot sidecar path
+        shortens only the first write and the continuation completes.
+        Pinned both ways: abs-mutant completes the clear -> F90 RED."""
+        # persistent clear path: negative -> OSError, witness intact
+        d = os.path.join(self.dir, "neg_clear")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        led = Ledger(d, faults=FsFaults(clear_partial_write=-1),
+                     repair_attempt_cap=3)
+        led._write_owed()
+        led._write_counter(0, exhausted=False)
+        err = None
+        try:
+            led._clear_owed()
+        except OSError:
+            err = sys.exc_info()[1]
+        with open(os.path.join(d, "resolve-owed"), "rb") as fh:
+            raw = fh.read()
+        self.assertTrue(
+            isinstance(err, OSError) and raw == b"OWED".ljust(16, b"\0"),
+            "negative clear limit must fail closed with the witness "
+            "untouched (abs-mutant clears it): err=%r raw=%r"
+            % (err, raw))
+        # one-shot sidecar path: shortened first write, still completes
+        d2 = os.path.join(self.dir, "neg_sidecar")
+        os.makedirs(d2, mode=0o700, exist_ok=True)
+        led2 = Ledger(d2, faults=FsFaults(sidecar_partial_write=-1),
+                      repair_attempt_cap=3)
+        led2._write_owed()
+        with open(os.path.join(d2, "resolve-owed"), "rb") as fh:
+            raw2 = fh.read()
+        self.assertEqual(
+            raw2, b"OWED".ljust(16, b"\0"),
+            "one-shot sidecar negative limit: continuation still "
+            "completes the payload")
 
     def test_F89_sidecar_partial_ceiling_consults_predicate_once(self):
         """AUD50 cycle 1 (finding 1, minor test gap): the sidecar

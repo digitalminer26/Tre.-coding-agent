@@ -7270,3 +7270,26 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   findings folded by this entry; R2 folded as F88 (test-only,
   mutation-verified; production tree UNCHANGED by the fix —
   the seam behavior itself was never wrong, its PIN was).
+
+- AUD50-c1 (terra, HEAD bc0ef42): CYCLE FINDINGS — 2.
+  c1-F1 minor/TEST ACCEPTED+FIXED 058c8e5: sidecar partial
+  one-shot ceiling unpinned (per-iteration re-consult mutant
+  passed 121) -> F89 pins predicate-consult-count==1 + the 4+12
+  write shape; owner re-ran the auditor recipe: F89 kills it
+  (failures=1). c1-F2 minor/RECORD ACCEPTED+FIXED 058c8e5: the
+  corrected tally had counted test-only leak commits (7d9ac0c
+  F79-closure, 0d49e00 batch) as production fixes — git show
+  confirms test-file-only; re-counted. Gates 122 OK zero-warning.
+  Not clean (2 accepted findings).
+- AUD50-c2 (terra, HEAD 058c8e5): CYCLE FINDINGS — 2.
+  c2-F1 minor/PROD-DOC+TEST ACCEPTED+FIXED (this commit):
+  negative partial-write limits were unspecified — the
+  abs(int(value)) mutant passed 122; shipped fail-closed
+  behavior VERIFIED by owner on both paths (persistent clear
+  loop -> zero-progress OSError, witness untouched; one-shot
+  sidecar -> shortened first write, continuation completes) —
+  contract now documented at `_partial_limit` (never abs()
+  normalization) and pinned by F90 (abs mutant: F90 RED,
+  failures=1). c2-F2 minor/RECORD ACCEPTED+FIXED: cycle results
+  lived only in commit messages; 21a now carries the per-cycle
+  entries (this list). Not clean (2 accepted findings).
