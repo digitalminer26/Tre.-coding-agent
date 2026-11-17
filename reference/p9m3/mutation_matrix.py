@@ -302,6 +302,57 @@ def run_test(root, target, timeout, expect_ran=None):
         "assertion failure" if kind == "fail" else "error", exc_name)
 
 
+# Required REASON substring per case: the failure path each probe
+# exists to exercise. Group cases also pin the exception type so a
+# wrong exception cannot satisfy them.
+REASONS = {
+    "syntaxerror-raised-in-pin": "infrastructure failure",
+    "importerror-in-pin": "infrastructure failure",
+    "syntaxerror-at-module-import": "driver wrote no record",
+    "filenotfound-in-pin": "infrastructure failure",
+    "assertion-kill-stays-RED": "through the pin's own method",
+    "expected-oserror-kill-stays-RED": "through the pin's own method",
+    "subtest-kill-inside-pin-stays-RED": "through the pin's own method",
+    "skip-is-ERROR": "skips/expected-results",
+    "xfail-is-ERROR": "skips/expected-results",
+    "count-mismatch-is-ERROR": "expected exactly",
+    "wrapped-importerror-is-ERROR": "infrastructure failure",
+    "context-chained-infra-is-ERROR": "infrastructure failure",
+    "failureexception-remapped-infra-is-ERROR": "infrastructure failure",
+    "subtest-remapped-infra-is-ERROR": "infrastructure failure",
+    "ordinary-exceptions-attr-not-walked-RED": "(DomainError)",
+    "ordinary-exceptions-attr-str-members-RED": "(DomainError)",
+    "realgroup-infra-member-is-ERROR": "(ExceptionGroup, error kind)",
+    "realgroup-nested-infra-is-ERROR": "(ExceptionGroup, error kind)",
+    "realgroup-non-infra-stays-RED": "through the pin's own method (ExceptionGroup)",
+    "user-class-named-ImportError-stays-RED": "through the pin's own method (ImportError)",
+    "two-deaths-is-ERROR": "not exactly one clean death",
+}
+
+def reason_coverage_errors(names, reasons):
+    """Coverage of the selftest REASONS table (post-audit): every case
+    declares a non-blank string reason, every reason belongs to a case,
+    and case names are unique. Returns a list of failure strings; never
+    raises, whatever the reason values are."""
+    errs = []
+    if len(set(names)) != len(names):
+        errs.append("selftest: duplicate case names")
+    for n in names:
+        if n not in reasons:
+            errs.append("selftest %s: no REASONS entry (reason check "
+                        "cannot be silently skipped)" % n)
+    for k in reasons:
+        if k not in names:
+            errs.append("selftest REASONS key %r matches no case" % k)
+    # An empty reason is "" in every detail string: it would silently
+    # restore the verdict-only check. Non-strings cannot be matched at all.
+    for k, v in reasons.items():
+        if not isinstance(v, str) or not v.strip():
+            errs.append("selftest %s: REASON is empty or not a string — "
+                        "the reason check would be a no-op" % k)
+    return errs
+
+
 def selftest_classifier():
     """AUD54-post-audit finding: the CLASSIFIER itself must be tested
     before it is trusted. A SyntaxError/ImportError raised inside the
@@ -466,61 +517,19 @@ def selftest_classifier():
          "        self.fail('death two')\n",
          "m_gate_multi.T", "ERROR", None),
     ]
-    # Required REASON substring per case: the failure path each probe
-    # exists to exercise. Group cases also pin the exception type so a
-    # wrong exception cannot satisfy them.
-    REASONS = {
-        "syntaxerror-raised-in-pin": "infrastructure failure",
-        "importerror-in-pin": "infrastructure failure",
-        "syntaxerror-at-module-import": "driver wrote no record",
-        "filenotfound-in-pin": "infrastructure failure",
-        "assertion-kill-stays-RED": "through the pin's own method",
-        "expected-oserror-kill-stays-RED": "through the pin's own method",
-        "subtest-kill-inside-pin-stays-RED": "through the pin's own method",
-        "skip-is-ERROR": "skips/expected-results",
-        "xfail-is-ERROR": "skips/expected-results",
-        "count-mismatch-is-ERROR": "expected exactly",
-        "wrapped-importerror-is-ERROR": "infrastructure failure",
-        "context-chained-infra-is-ERROR": "infrastructure failure",
-        "failureexception-remapped-infra-is-ERROR": "infrastructure failure",
-        "subtest-remapped-infra-is-ERROR": "infrastructure failure",
-        "ordinary-exceptions-attr-not-walked-RED": "(DomainError)",
-        "ordinary-exceptions-attr-str-members-RED": "(DomainError)",
-        "realgroup-infra-member-is-ERROR": "(ExceptionGroup, error kind)",
-        "realgroup-nested-infra-is-ERROR": "(ExceptionGroup, error kind)",
-        "realgroup-non-infra-stays-RED": "through the pin's own method (ExceptionGroup)",
-        "user-class-named-ImportError-stays-RED": "through the pin's own method (ImportError)",
-        "two-deaths-is-ERROR": "not exactly one clean death",
-    }
     bad = []
-    # Coverage check (post-audit): every case MUST declare its reason and
-    # every reason MUST belong to a case. A missing key used to fall back
-    # to "" (which every detail contains) and silently drop the reason
-    # check; a stale key hid a renamed case. Both now fail the battery.
     names = [c[0] for c in cases]
-    if len(set(names)) != len(names):
-        bad.append("selftest: duplicate case names")
-    for n in names:
-        if n not in REASONS:
-            bad.append("selftest %s: no REASONS entry (reason check "
-                       "cannot be silently skipped)" % n)
-    for k in REASONS:
-        if k not in names:
-            bad.append("selftest REASONS key %r matches no case" % k)
-    # An empty reason is "" in every detail string: it would silently
-    # restore the verdict-only check. Reject blank values outright.
-    for k, v in REASONS.items():
-        if not isinstance(v, str) or not v.strip():
-            bad.append("selftest %s: REASON is empty — the reason check "
-                       "would be a no-op" % k)
+    bad.extend(reason_coverage_errors(names, REASONS))
+    valid_reason = {k for k, v in REASONS.items()
+                    if isinstance(v, str) and v.strip()}
     import builtins
     has_group = hasattr(builtins, "BaseExceptionGroup")
     work = tempfile.mkdtemp(prefix="mutmatrix-selftest-")
     try:
         for case in cases:
             name, source, target, want, expect_ran = case[:5]
-            if name not in REASONS:
-                continue  # already reported as a coverage failure above
+            if name not in valid_reason:
+                continue  # reported by reason_coverage_errors
             needs_group = len(case) > 5 and case[5]
             if needs_group and not has_group:
                 # Visible, never silently passed: this interpreter cannot
