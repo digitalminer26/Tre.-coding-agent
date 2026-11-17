@@ -7502,3 +7502,25 @@ findings, terra is the auditor, run 5 cycles until clear"):
   127 OK zero-warning x2. Clean tally: 0/1 (attempt-3 report is
   INCOMPLETE per its own verdict — not a clean cycle; findings
   also bar clean).
+
+- AUD51-c2 (terra, HEAD da8bd7e, attempt 1, no filter-abort):
+  CYCLE INCOMPLETE (self-assessed: assignment 1's one-row-per-
+  branch table not produced; assignment 3 survivor judged
+  insufficiently isolated). FINDINGS 0 — every executed check
+  passed: variant batch E 6/6 (append-cap `>`->`>=` killed by
+  C6_13/C6_16/F59; outcome-enum drop killed by F49; blank-line
+  disable SURVIVED but owner-verified the auditor's variant was
+  EQUIVALENT (JSON parse still rejects blanks; not a true skip
+  implementation); trailing-newline disable killed by F45;
+  dup-key hook->dict killed by C6_20; decision-site journal-
+  validation skip killed by C6_12/C6_1/C6_20/C6_21); record
+  spot-check 3/3 VERIFIED against c1 entry verbatim; abort point
+  (os.abort at _journal_append write post-cap-check) survivor
+  journal [] consistent with all-or-nothing append framing.
+  127 OK zero-warning x2. Clean tally: 0/2.
+  OWNER-SIDE PROMPT DEFECT (2nd occurrence of the AUD50-c3
+  lesson): 'enumerate every branch' has no verifiable DONE form
+  for a table an auditor builds itself — c3 prompt switches to
+  OWNER-ENUMERATED branch lists (DONE = one result row per
+  given branch ID) and a mechanical novelty check (grep list
+  provided; novelty = absent-from-list, not judgment).
