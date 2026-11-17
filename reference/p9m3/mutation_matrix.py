@@ -61,6 +61,8 @@ DRIVER = (
     "# wrapper raised `from` an ImportError IS.\n"
     "INFRA = (SyntaxError, ImportError, FileNotFoundError, PermissionError,\n"
     "         MemoryError, SystemExit, KeyboardInterrupt)\n"
+    "import builtins\n"
+    "EG = getattr(builtins, 'BaseExceptionGroup', None)  # None before 3.11\n"
     "def _infra(exc):\n"
     "    seen, stack = set(), [exc]\n"
     "    while stack:\n"
@@ -72,10 +74,12 @@ DRIVER = (
     "            return True\n"
     "        stack.append(e.__cause__)\n"
     "        stack.append(e.__context__)\n"
-    "        # exception groups (3.11+): members are part of the chain\n"
-    "        subs = getattr(e, 'exceptions', None)\n"
-    "        if isinstance(subs, tuple):\n"
-    "            stack.extend(subs)\n"
+    "        # exception groups (3.11+): members are part of the chain, but\n"
+    "        # ONLY for a real BaseExceptionGroup — an ordinary exception\n"
+    "        # with an `exceptions` attribute is not a group (duck-typed\n"
+    "        # metadata must never be walked or crash the driver).\n"
+    "        if EG is not None and isinstance(e, EG):\n"
+    "            stack.extend(e.exceptions)\n"
     "    return False\n"
     "class Rec(unittest.TestResult):\n"
     "    def __init__(self):\n"
@@ -402,40 +406,49 @@ def selftest_classifier():
          "        with self.subTest('b'):\n"
          "            raise ImportError('dependency failed')\n",
          "m_infr_sub.T.test_pin", "ERROR", None),
-        # Stand-in group (an Exception with an `exceptions` tuple, the
-        # same attribute BaseExceptionGroup exposes) so the member walk
-        # is exercised on EVERY interpreter, not just 3.11+.
-        ("group-infra-member-is-ERROR",
+        # Duck-typed `exceptions` on an ORDINARY exception is metadata,
+        # not a group: it must neither be walked (a handled ImportError
+        # in it is no infra failure) nor crash the driver (a str member).
+        ("ordinary-exceptions-attr-not-walked-RED",
          "import unittest\n"
-         "class G(Exception):\n"
-         "    def __init__(self, msg, members):\n"
-         "        super().__init__(msg)\n"
-         "        self.exceptions = tuple(members)\n"
+         "class DomainError(Exception):\n"
+         "    def __init__(self):\n"
+         "        self.exceptions = (ImportError('handled optional import'),)\n"
          "class T(unittest.TestCase):\n"
          "    def test_pin(self):\n"
-         "        raise G('dependency', [ImportError('missing')])\n",
-         "m_infr_eg.T.test_pin", "ERROR", None),
-        ("nested-group-infra-is-ERROR",
+         "        raise DomainError()\n",
+         "m_kill_attr.T.test_pin", "RED", None),
+        ("ordinary-exceptions-attr-str-members-RED",
          "import unittest\n"
-         "class G(Exception):\n"
-         "    def __init__(self, msg, members):\n"
-         "        super().__init__(msg)\n"
-         "        self.exceptions = tuple(members)\n"
+         "class DomainError(Exception):\n"
+         "    def __init__(self):\n"
+         "        self.exceptions = ('ordinary metadata',)\n"
          "class T(unittest.TestCase):\n"
          "    def test_pin(self):\n"
-         "        inner = G('inner', [FileNotFoundError('x')])\n"
-         "        raise G('outer', [ValueError('ok'), inner])\n",
-         "m_infr_eg2.T.test_pin", "ERROR", None),
-        ("group-non-infra-stays-RED",
+         "        raise DomainError()\n",
+         "m_kill_attrstr.T.test_pin", "RED", None),
+        # Real BaseExceptionGroup cases: run only where the builtin
+        # exists (Python 3.11+). Skipped LOUDLY elsewhere — see the
+        # selftest loop; they are never silently passed.
+        ("realgroup-infra-member-is-ERROR",
          "import unittest\n"
-         "class G(Exception):\n"
-         "    def __init__(self, msg, members):\n"
-         "        super().__init__(msg)\n"
-         "        self.exceptions = tuple(members)\n"
          "class T(unittest.TestCase):\n"
          "    def test_pin(self):\n"
-         "        raise G('domain', [ValueError('bad value')])\n",
-         "m_kill_eg.T.test_pin", "RED", None),
+         "        raise BaseExceptionGroup('dep', [ImportError('missing')])\n",
+         "m_infr_rg.T.test_pin", "ERROR", None, True),
+        ("realgroup-nested-infra-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        inner = BaseExceptionGroup('in', [FileNotFoundError('x')])\n"
+         "        raise BaseExceptionGroup('out', [ValueError('ok'), inner])\n",
+         "m_infr_rg2.T.test_pin", "ERROR", None, True),
+        ("realgroup-non-infra-stays-RED",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise BaseExceptionGroup('dom', [ValueError('bad')])\n",
+         "m_kill_rg.T.test_pin", "RED", None, True),
         ("user-class-named-ImportError-stays-RED",
          "import unittest\n"
          "class ImportError(Exception):\n"
@@ -454,9 +467,20 @@ def selftest_classifier():
          "m_gate_multi.T", "ERROR", None),
     ]
     bad = []
+    import builtins
+    has_group = hasattr(builtins, "BaseExceptionGroup")
     work = tempfile.mkdtemp(prefix="mutmatrix-selftest-")
     try:
-        for i, (name, source, target, want, expect_ran) in enumerate(cases):
+        for case in cases:
+            name, source, target, want, expect_ran = case[:5]
+            needs_group = len(case) > 5 and case[5]
+            if needs_group and not has_group:
+                # Visible, never silently passed: this interpreter cannot
+                # prove the real-group walk. Printed as SKIP, not OK.
+                print("SELFTEST %-36s SKIP (needs BaseExceptionGroup, "
+                      "Python>=3.11; this is %s)"
+                      % (name, sys.version.split()[0]))
+                continue
             mod = target.split(".")[0]
             with open(os.path.join(work, mod + ".py"), "w") as f:
                 f.write(source)
