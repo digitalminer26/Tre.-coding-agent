@@ -5616,3 +5616,106 @@ class TestV38Cycle7Audit(Base):
 
 if __name__ == "__main__":
     unittest.main()
+class TestV38Cycle8Audit(Base):
+    """AUD51 cycle 5 (findings A11/A14/R3, minor test gaps, all
+    reproduced surviving 133 at f6e4d1c; the cycle's fourth finding
+    M2 was REFUTED owner-side — both mutant shapes of the suppressed
+    propagation are killed by F68/F72/F74/F75/F78). Append/resolve-
+    core contract cells: intent preservation across the post-write
+    pending update, the D marker strictly after BOTH fsyncs, and the
+    resolve sequence's parent-directory fsync effect (F88/F95-
+    recipe spies; production code unchanged — every behavior was
+    correct, only its evidence was missing)."""
+
+    def _fdmap_spies(self, opened, synced, captures=None):
+        """F88 recipe: map fd->path so each fsync records its target;
+        `captures` optionally runs a callable at every fsync."""
+        real_open, real_fsync = os.open, os.fsync
+
+        def spy_open(path, *a, _o=opened, _r=real_open):
+            fd = _r(path, *a)
+            _o[fd] = os.fspath(path)
+            return fd
+
+        def spy_fsync(fd, _o=opened, _s=synced, _r=real_fsync, _c=captures):
+            _s.append(_o.get(fd, "?"))
+            if _c is not None:
+                _c(_o.get(fd, "?"))
+            return _r(fd)
+        return spy_open, spy_fsync
+
+    def test_F97_repair_intent_survives_the_post_write_pending_update(self):
+        """c5-A11: the pending update AFTER the ledger write must
+        PRESERVE the intent ('R') — dropping the intent there let a
+        crash after the data write (fsync faults) read the window
+        back as a PLAIN append ('-'), the wrong protocol owning the
+        unresolved window. Pinned via the fsync seam: the record at
+        raise time still carries R."""
+        self.led = self.mk()
+        self.led.faults.fsync_fault = True
+        framed = b"\n" + b'{"t":"WATERMARK","hostToken":"H0","watermark":1,"confirmGen":"G0"}\n'
+        with self.assertRaises(OSError):
+            with self.led._lock("append"):
+                self.led._append_bytes(framed, intent="R")
+        self.assertEqual(self.led._pending_intent(), "R",
+                         "post-write pending update must keep intent R")
+
+    def test_F97_durable_D_written_only_after_both_fsyncs(self):
+        """c5-A14: INTENT-FIRST doc — D lands only AFTER the data AND
+        parent-dir fsyncs covered the bytes. Spy: capture the pending
+        sidecar content AT the dir fsync; a D-before-dir-fsync
+        variant reads '... D' while the directory is still unsynced
+        (a crash there leaves a durable-marked append whose directory
+        entry may not exist). Production: the record is still P."""
+        self.led = self.mk()
+        framed = b"\n" + b'{"t":"WATERMARK","hostToken":"H0","watermark":1,"confirmGen":"G0"}\n'
+        opened, synced = {}, []
+        seen = []
+
+        def capture(path):
+            if path == self.dir:      # the dir fsync moment
+                try:
+                    with open(os.path.join(self.dir, "last-append"),
+                              "rb") as f:
+                        seen.append(f.read().rstrip(b"\0"))
+                except FileNotFoundError:
+                    seen.append(b"<absent>")
+
+        real_open, real_fsync = os.open, os.fsync
+        spy_open, spy_fsync = self._fdmap_spies(opened, synced, capture)
+        os.open, os.fsync = spy_open, spy_fsync
+        try:
+            with self.led._lock("append"):
+                self.led._append_bytes(framed)
+        finally:
+            os.open, os.fsync = real_open, real_fsync
+        rec = [r for r in seen]
+        self.assertTrue(rec and all(b"P" in r and b"D" not in r
+                                    for r in rec),
+                        "EVERY dir fsync must see the pending record "
+                        "still P — D only AFTER both fsyncs: %r" % (rec,))
+        # and D IS written afterwards (the happy path ends durable)
+        self.assertEqual(self.led._read_pending(), (0, True))
+
+    def test_F97_resolve_sequence_fsyncs_parent_dir(self):
+        """c5-R3: the RESOLVE SEQUENCE is fsync(file), fsync(PARENT
+        DIR), full read — dropping the dir leg survived 133 (a fresh
+        resolve observed zero dir fsyncs). Spy asserts the dir fsync
+        EFFECT happens on a resolve over an existing ledger."""
+        self.led = self.mk()
+        led2 = self.mk()
+        # ensure the ledger file exists for the file leg
+        framed = b"\n" + b'{"t":"WATERMARK","hostToken":"H0","watermark":1,"confirmGen":"G0"}\n'
+        with led2._lock("append"):
+            led2._append_bytes(framed)
+        opened, synced = {}, []
+        real_open, real_fsync = os.open, os.fsync
+        spy_open, spy_fsync = self._fdmap_spies(opened, synced)
+        os.open, os.fsync = spy_open, spy_fsync
+        try:
+            led2._resolve_io()
+        finally:
+            os.open, os.fsync = real_open, real_fsync
+        self.assertIn(led2.dir, synced,
+                      "resolve sequence must fsync the parent dir "
+                      "(drop-dir leg survived the suite): %r" % (synced,))
