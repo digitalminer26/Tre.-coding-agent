@@ -209,10 +209,17 @@ def _partial_limit(value, path=None):
     fail-closed side by construction (AUD50 c2, finding 1, pinned by
     F90): the slice [:negative] silently shortens the write, and on
     the PERSISTENT clear loop the last single byte then yields an
-    empty slice -> zero-progress OSError with the witness UNTOUCHED
-    (never an abs() normalization: a silent 1-byte throttle would
-    turn a caller's nonsense value into 16 successful writes). On
-    the ONE-SHOT sidecar path the shortened first write is simply
+    empty slice -> zero-progress OSError (never an abs()
+    normalization: a silent 1-byte throttle would turn a caller's
+    nonsense value into 16 successful writes). The fail-closed
+    INVARIANT (AUD51 pre-fold, close audit finding 3, precision):
+    the abort happens before the tail-first zeroing can reach the
+    OWED HEAD, so the record still READS OWED — the owed INDICATION
+    is preserved; bytes 4..15 may take zeros (a canonical record is
+    byte-identical because those bytes were zero anyway; a hostile
+    non-canonical witness is not, and 'untouched' was never a
+    byte-preservation claim for it — F90 pins both arms). On the
+    ONE-SHOT sidecar path the shortened first write is simply
     followed by the unthrottled continuation."""
     if callable(value):
         value = _dispatch_fault(value, path)
@@ -811,7 +818,16 @@ class Ledger:
     def _read_pending(self):
         """(offset, durable) of the last byte-producing append, or None.
         v38 cycle-1 fix 5: a CORRUPT record fails CLOSED as PENDING
-        (offset 0) — never `None` (which would read as no window)."""
+        (offset 0) — never `None` (which would read as no window).
+        AUD51 pre-fold (close-audit finding 1, HIGH): the grammar is
+        enforced on EVERY token, not just its shape. The writer emits
+        `"%d %s %s"` with a NON-NEGATIVE decimal offset, flag D/P, and
+        intent in {"-","R"}; a reader that took ANY int() (a `-1 D`
+        record read durable at a negative offset) or accepted ANY
+        third token (`0 D garbage` read durable, _pending_intent
+        echoed "garbage") flipped corrupt records to OK — the exact
+        fail-open this family exists to prevent. OUT-OF-GRAMMAR now
+        fails CLOSED as (0, False) like every other corruption."""
         try:
             fd = os.open(self._pending_side, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
@@ -830,10 +846,14 @@ class Ledger:
         parts = raw.decode("utf-8", "replace").strip().split()
         if len(parts) not in (2, 3) or parts[1] not in ("D", "P"):
             return (0, False)
-        try:
-            return int(parts[0]), parts[1] == "D"
-        except ValueError:
+        # AUD51 pre-fold: STRICT token grammar — ASCII digits only
+        # (isdigit() would accept non-ASCII decimal digits), and a
+        # present intent token must be one the writer can emit.
+        if not parts[0].isascii() or not parts[0].isdigit():
             return (0, False)
+        if len(parts) == 3 and parts[2] not in ("-", "R"):
+            return (0, False)
+        return int(parts[0]), parts[1] == "D"
 
     def _write_pending(self, offset, durable, intent="-"):
         """INTENT-FIRST protocol: callers write the P INTENT (intent='-')
@@ -858,8 +878,12 @@ class Ledger:
             raw = os.pread(fd, 24, 0)
         finally:
             os.close(fd)
-        parts = raw.decode().strip().split()
-        return parts[2] if len(parts) >= 3 else "-"
+        parts = raw.decode("utf-8", "replace").strip().split()
+        # AUD51 pre-fold (close-audit finding 1): intent is a CONTRACT
+        # token — only what the writer can emit is echoed ("-" default,
+        # "R" repair); anything else (out-of-grammar, non-UTF8 bytes)
+        # reads as the default, never as garbage.
+        return parts[2] if len(parts) >= 3 and parts[2] in ("-", "R") else "-"
 
     def _log_repair_intent(self, auth_id):
         """Append-only journal of repair attempts: one intent line before

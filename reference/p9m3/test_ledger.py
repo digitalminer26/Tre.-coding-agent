@@ -4902,6 +4902,67 @@ class TestV38Cycle6Audit(Base):
                      "POST-consumption fault: raises, owed stays, never "
                      "ok, no promotion, heals healthy")
 
+    def test_F93_pending_strict_token_grammar_fails_closed(self):
+        """AUD51 pre-fold (close-audit finding 1, HIGH, production):
+        the pending sidecar's documented 'corrupt fails CLOSED'
+        contract was enforced on token SHAPE only — a reader that
+        took any int()/any third token flipped OUT-OF-GRAMMAR records
+        to durable OK: `-1 D` read (−1,True) 'ok' (no byte offset is
+        negative), `0 D garbage` read (0,True) 'ok' with
+        _pending_intent() echoing 'garbage' (the writer only ever
+        emits '-', 'R'). All three arms now pinned: (a) sign/radix:
+        ASCII-digits-only offset (a digit-only mutant using isdigit()
+        would accept non-ASCII decimal digits that int() decodes);
+        (b) intent token, when present, must be in {'-','R'};
+        (c) _pending_intent() NEVER echoes a token outside the
+        contract (reads the '-' default, incl. over non-UTF8 bytes
+        the lenient decode used to survive). In-grammar records
+        (2-token legacy, 3-token, repair) stay LIVE — the
+        fail-closed fix must not wedge healthy windows."""
+        for payload, tag in ((b"-1 D", "negative offset"),
+                             (b"0 D garbage", "bogus intent token"),
+                             (b"\xd9\xd9 D", "non-UTF8 offset"),
+                             ("١٢ D".encode("utf-8"),
+                              "non-ASCII decimal digits (int() accepts)")):
+            with self.subTest(tag):
+                self.led = self.mk()
+                self.led.append_watermark("H0", 1, "G0")
+                self.assertFalse(self.led.durability_pending())
+                side = os.path.join(self.dir, "last-append")
+                fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+                try:
+                    os.write(fd, payload)
+                finally:
+                    os.close(fd)
+                rec = self.led._read_pending()
+                self.assertTrue(
+                    rec is not None and rec == (0, False)
+                    and self.led.durability_pending()
+                    and self.led.status()["decision"] == STATE_PENDING
+                    and self.led._pending_intent() == "-",
+                    "%s: out-of-grammar last-append must fail CLOSED "
+                    "as pending with the default intent: %r" % (tag, rec))
+        # in-grammar arms stay LIVE (the fix must not over-reach)
+        for payload, want, tag in (
+                (b"12 D", (12, True), "legacy 2-token"),
+                (b"5 D -", (5, True), "3-token plain"),
+                (b"16 D R", (16, True), "3-token repair")):
+            with self.subTest(tag):
+                self.led = self.mk()
+                self.led.append_watermark("H0", 1, "G0")
+                side = os.path.join(self.dir, "last-append")
+                fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+                try:
+                    os.write(fd, payload)
+                finally:
+                    os.close(fd)
+                self.assertEqual(self.led._read_pending(), want, tag)
+                self.assertEqual(
+                    self.led._pending_intent(),
+                    "R" if tag.endswith("repair") else "-", tag)
+
     def test_F92_pending_int_offset_and_counter_grammar_edges(self):
         """AUD50 cycle 6 (findings 1-3, minor test gaps in the F91
         neighborhoods, all three reproduced surviving 124): (a)
@@ -5041,6 +5102,37 @@ class TestV38Cycle6Audit(Base):
             "negative clear limit must fail closed with the witness "
             "untouched (abs-mutant clears it): err=%r raw=%r"
             % (err, raw))
+        # AUD51 pre-fold (close-audit finding 3): the invariant is the
+        # owed INDICATION, not byte-identity — a hostile NON-CANONICAL
+        # witness may take zeros in the tail (bytes 4..15) before the
+        # zero-progress abort, but the tail-first order means the
+        # OWED HEAD is never reached while the limit is negative, and
+        # every reader still fails the record closed as OWED. An
+        # abs() mutant clears the head and reads clear.
+        d3 = os.path.join(self.dir, "neg_hostile")
+        os.makedirs(d3, mode=0o700, exist_ok=True)
+        hostile = b"\xaa" * 16
+        fd3 = os.open(os.path.join(d3, "resolve-owed"),
+                      os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd3, hostile)
+        finally:
+            os.close(fd3)
+        led3 = Ledger(d3, faults=FsFaults(clear_partial_write=-1),
+                      repair_attempt_cap=3)
+        err3 = None
+        try:
+            led3._clear_owed()
+        except OSError:
+            err3 = sys.exc_info()[1]
+        with open(os.path.join(d3, "resolve-owed"), "rb") as fh:
+            raw3 = fh.read()
+        self.assertTrue(
+            isinstance(err3, OSError) and raw3[:4] == b"\xaa" * 4
+            and led3._owed_attempt() is True,
+            "negative limit on a non-canonical witness: OSError, OWED "
+            "HEAD intact, record still reads owed (abs-mutant zeroes "
+            "the head -> reads clear): err=%r raw=%r" % (err3, raw3))
         # one-shot sidecar path: shortened first write, still completes
         d2 = os.path.join(self.dir, "neg_sidecar")
         os.makedirs(d2, mode=0o700, exist_ok=True)
@@ -5075,12 +5167,19 @@ class TestV38Cycle6Audit(Base):
                     _c.append(p)
                     return 4
             else:
+                # AUD51 pre-fold (close-audit finding 4): this case was
+                # named 'first-then-hostile' but answered 4 forever —
+                # identical to 'counting'. The predicate now FLIPS:
+                # the FIRST consultation returns the 4-byte ceiling,
+                # any later consultation returns None (no ceiling).
+                # Under the shipped one-shot contract only the first
+                # answer is ever observed (4+12, 2 pwrites, 1 call);
+                # a per-iteration re-consult mutant sees the None and
+                # writes the continuation UNTHROTTLED — the flip is
+                # observable in the write SHAPE, not just the count.
                 def val(p=None, _c=calls):
                     _c.append(p)
-                    # no-arg fallback must ALSO return a ceiling (the
-                    # one-shot value is int(); answering True would
-                    # crash the int() path and change the shape)
-                    return 4 if p is not None else 4
+                    return 4 if len(_c) == 1 else None
             d = os.path.join(self.dir, "onshot_" + tag)
             os.makedirs(d, mode=0o700, exist_ok=True)
             led = Ledger(d, faults=FsFaults(sidecar_partial_write=val),
