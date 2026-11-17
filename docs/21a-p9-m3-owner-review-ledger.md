@@ -7303,10 +7303,12 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   matrix (carried); attempt 2 was INVALID — not fresh context
   (the kick script reused the c3 session file and the model
   resumed; harness-side process defect, guarded: the kick now
-  REFUSES an existing session file); attempt 3 fresh: ran the
-  consuming-pair matrix incl. the read-failure contract
-  (resolve_io_fault -> round fails, no cleared marker over an
-  unread basis, charge+ witness retained: PASS) and the c2
+  REFUSES an existing session file); attempt 3 fresh: ran a
+  PARTIAL consuming-pair matrix — its resolve_io_fault cell
+  faults at the HEAD of _resolve_io BEFORE the full read
+  (ledger.py:1623-1627), establishing marker+charge retention
+  but NOT an actual read_raises path test [precision per
+  c4-F1, accepted] and the c2
   abs-mutant re-run (F90 RED), found c3-F1 (minor/RECORD,
   FIXED in the c1 entry wording above: "test-file-only" was
   false of commit 7d9ac0c), then declared ITSELF incomplete on
@@ -7315,3 +7317,22 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   criteria), not the auditor's; c4+ prompts carry explicit
   per-assignment DONE-criteria and a no-scope-extension rule.
   Clean tally after c3: 0/3.
+
+- AUD50-c4 (terra, HEAD 8844a78): CYCLE FINDINGS — 1. All four
+  assignments DONE per their bounded criteria. c4-F1 minor/
+  RECORD ACCEPTED+FIXED (c3 entry edit above): it overclaimed
+  attempt 3 as running "the read-failure contract" when its own
+  transcript says PARTIAL matrix with the resolve_io_fault
+  firing pre-read. Verified-clean work this cycle: (A) all four
+  7c0a7a3 dispatch reverts KILLED (F87/F88/F89 as appropriate);
+  (B) 4 NEW mutants — clear head-before-tail (killed by F79,
+  F90), _sidecar_fix_width no-op (F67,F72,F73,F78,F10), pending
+  -intent omission (F23,C7_3), premature counter-zero (F64,F76
+  ,F77,F82) — ALL KILLED; (3) the bounded 10-cell consuming-
+  pair FAULT MATRIX RUN, ALL PASS (charge/witness/marker
+  retention judged against cited doc lines; silent-fsync cells
+  correctly disclaimed as page-visible, not crash-durability
+  proof) — the carried AUD49 fault-matrix remainder is now
+  EXECUTED within its bounded scope; (4) c2 abs-mutant re-run
+  RED vs F90. Not clean (1 accepted record finding). Clean
+  tally: 0/3.
