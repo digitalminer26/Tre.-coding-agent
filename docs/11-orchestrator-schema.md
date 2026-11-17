@@ -148,6 +148,7 @@ cite the row):
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
 | 2026-11-15 | §14.10 (rewritten v2) | **G1 OWNER REVIEW ROUND 1 FOLDED — §14.10 draft v2 (owner decisions R1–R8, recorded verbatim in new §14.10.4).** R1-B: class SPLIT into routed `route:code-fix|human-review` x domain `surface:code|test|doc|spec` (the vocabulary the live R5 round actually classified in); `surface:spec`+`route:code-fix` invalid at intake. R2-A: new second kind `audit-finding-update` fully specified (findingId, to, dispositionBy, authority, supersedes; no `from` — derivable under S5 single-writer; update-on-closed refused; one supersede encoding replaces the old companion-record half-mechanism). R3: emission authority — auditors append findings only via supervisor intake (id minted there, R7: fresh conforming ULID, collision-refused, caller ids test-only per F55/F56); supervisor is sole appender of updates; `dispositionBy:owner` requires a TTY-confirmed-channel reference (D2 precedent) in `authority` — closes implementer-downgrades-own-blocker. R4: minors never auto-hold sign-off, owner decides escalations; `accepted-fix` binds to repro re-run green (semantics pinned here; consumer enforces). R5-A: bounded `claim` + REQUIRED `findingRef` -> episode `findings/` (S4 layout amendment in-place). R6: `affectedNorm` now object `{doc,anchor,sha256|null}`, digest mandated-or-not deferred to G2, at-most-one-norm-per-finding. R8: opinion-holds-sign-off rule MOVED to G3 (enforcement) — §14.10 supplies `verdictBasis` only. `residual-risk-accepted` demoted from finding class to `closed-residual` DISPOSITION (authority REQUIRED). Still DRAFT, NOT implemented, no module touched. | G1 finding-record schema (draft v2, owner round-1 folded) |
+| 2026-11-18 | §14.11–§14.15 (v9→v10) | **TERRA AUDIT ARC cycle 8 (auditor gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c8-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 11 MAJOR + 1 MINOR on draft v9; all fixed into v10.** C8-B1 owner-act consumption acked before its effects were durable → **effect binding**: every `owner-act` record carries `effectRecordIds[]` (possibly empty), consumption is complete only when every named effect record is fsynced in the log, recovery re-derives acts whose effects are missing and re-applies them (idempotently), and a queued act with an empty effect set is explicitly attested as observation-only (14.10.3). C8-B2 the A/B/O finalization classes plus the queue-drain precedence had an undefined corner (what when a class-B condition and a class-O condition coexist at one boundary) → precedence pinned **mechanically and totally**: O dominates for verdict (boundary exists, UNCLEAN, needs-owner), B dominates for append-blocking during the same critical section until it converts or clears; no condition may hold both; recovery consults the table in fixed evaluation order (14.12.2). C8-B3 remote-disposition closure allowed "the supervisor asked the provider and got nothing" as no-call evidence → a **durable fence**: absence of any observed request for an intent closes ONLY via `provider-inability-evidence` (verbatim provider response or provider-evidenced non-support, captured at query time, per-`dispatchId`), never via operator memory or an empty local query (14.13.4a). C8-B4 the residual-cap accounting had two paths (per-round recount vs cumulative count) that drift on re-admit → **ONE state machine**: residuals are counted once at boundary commit, re-admission reuses the stored count unless a re-resolution event (`residual-cure` op, owner-gated) mutates it; recounting the log is forbidden (14.13.4a). C8-M5 `residual-cure` had no owner-act schema and CLI display re-serialized payloads → `residual-cure` joins the closed op enum with a per-op payload; CLI display binds to the canonical payload BYTES, never a re-serialization (14.10.3). C8-M6 the usage fold pipeline order was prose → per-stream PIPELINE pinned (parse → sequence-domain placement → gap scan → cumulative reconciliation → sum), LATE null-seq statement rule pinned (a null-seq statement arriving after a gap on its stream lands UNKNOWN-side), gap resolution defined (provider-statement reconciliation closes a gap ONLY forward, never retroactive restatement), conformance vectors corrected to the precedence rule (14.13.4a). C8-M7 queue handoff lacked act-level identity → every act carries a channel-assigned `actId` (unique per channel stream); ack/dedup keys are `(queueReceiptId, actId)`; the full crash matrix (pre-fsync / post-fsync-pre-log / post-log-pre-ack) is closed and recovery dedups by actId (14.12.2 step 5). C8-M8 the coverage set had two derivations (disposition-time vs fold-time) that could disagree → ONE derivation function over the complete per-stream request set, consumed identically by fold and disposition; `provider-inability-evidence` record shape pinned (producer, capture rules, freshness) (14.13.4a). C8-M9 money domain vectors contradicted the parser (trailing-zero/precision rules disagreed between prose and vectors) → parser accepts RFC-decimal strings under ONE normalization (strip trailing zeros; six fractional digits max; more ⇒ refused at ingest, never rounded), conversion units pinned for every `*Usd` field, the "integer micro-cent" spelling is WITHDRAWN (1e-6 domain, micro-cent 1e-8 is a 100× split), serialization canonical = stripped form (14.13.4a). C8-M10 the history-integrity-fault identity tuple was ambiguous across cycles and the first-detection position undefined → identity tuple PINNED (`(faultKind, boundaryId\|null, affectedRecordId\|null, evidenceRefs-set-hash)` — one tuple per kind, members are durable record IDs), `detectionAnchorId` REQUIRED naming the anchor record, first-detection position defined as the lowest replay position any detector reports, two independent detectors reporting the same tuple ⇒ ONE record (14.12.3). C8-M11 the boundary elapsed tail could be computed across a boot discontinuity → `cycle-boundary` gains `bootIdAtBoundary`, `bootIdAtClosed`, `monoMsAtBoundary`, `finalizationTailMs`: tail computed ONLY when bootIds match, else null (fail-closed, reported unknown), monotonic domain pinned per boot (14.13.4a). C8-M12 the ancestor-qualification rule cited a nonexistent `verdict:"passed"` → qualification consumes the ACTUAL acceptance enum (`complete` — vocabulary corrected), binds `checkedAtSha` (evidence qualifies only the sha it was computed against), and an `evidence-invalidation` record (durable, owner-act-sourced, target+reason) removes qualification from replay onward (14.12.2 r4). C8-M13 the group crash window left ids ambiguous between draft and commit → the DRAFT IS the durable source: member ids are assigned at draft time, recovery re-emits the byte-identical plan from the draft, cross-restart dedup is by `groupId`, same-`groupId`-different-bytes ⇒ fail closed `needs-owner` (14.11.2). C8-M14 the deferral active-window rule let obligations move backward through the chain → obligations NEVER move backward; early terminal outcome on a non-tail deferral is legal; laundering counter `maxDeferralLaundering` counts chain records since the last OWNER-granted window reset (`reset-chain-with-new-window` owner-act op is the sole reset — supervisor-side laundering never resets), cap hit appends `deferral-loop` (sole trigger of the state) (14.14.5). C8-M15 intent-phase transitions were ambiguously inventoried "under `dispatch-intent`" while `dispatch-intent` is a per-DISPATCH pre-call record → **`intent-phase` is its own S5 envelope kind** (own inventory entry; discriminated schema with `outcome`, canonical `callId`, uniqueness domain in 14.13.4a); `idempotencyKey` placement rule pinned: non-null ONLY on `call-started` (14.12.4b, 14.13.4a). MINOR c8-m16: the `task-tip-archived` artifact contract was "e.g. a git bundle" + a blob digest that proves bytes, not closure → ONE accepted format (prerequisite-free v3 git bundle), closure enumeration AND verification BEFORE the record appends (header/prereq check, recorded-identity presence, parent closure, `maxArchiveBytes`/`maxArchiveObjects` bounds), record fields pinned (`tipSha`, `objectCount`, `verifiedAt`), publication-before-prune order closed (ref deleted only after durable record + sha256 re-verify; crash windows leave ref-kept or GC-eligible orphan), replay re-runs closure checks and ANY failure ⇒ `task-tip-lost` fail-closed (14.14.4). Envelope inventory extended with the v10 kinds (`provider-inability-evidence`, `evidence-invalidation`, `deferral-loop`, `intent-phase`); `deferral-loop-disposition` is an owner-act op, not a kind. DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v10, terra c8 folded) |
 | 2026-11-17 | §14.11–§14.15 (v8→v9) | **TERRA AUDIT ARC cycle 7 (gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c7-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 9 MAJOR + 1 MINOR on draft v8; all fixed into v9.** C7-B1 the owner-act closed schemas omitted the ratify/reject/supersede ops the norm lifecycle REQUIRES acts for → the op enum now covers every owner-gated transition with a closed per-op payload (explicit nulls), the enumeration is closed (a kind without a schema cannot receive acts), CLI display binds to the canonical payload bytes, and `unprovenId` has ONE normative source (14.10.3). C7-B2 the usage fold still had undefined domains (null statementSeq ordering across providers, gap detection without sequence domains) → sequence domain is PER-PROVIDER-STREAM `(providerAccountId, dispatchId)`; dense-sequence gap detection per stream; null-cumulative semantics pinned (second null cumulative on a stream ⇒ component UNRESOLVED UNKNOWN); UNRESOLVED UNKNOWN is the SOLE failure mode of the fold — every partial rule now terminates in it, never a stale value (14.13.4a). C7-B3 the queue-handoff drain wasn't linearized (two drains, receipt dedup scope) → drain is single-owner under the S5 flock, one FIFO pass per critical section, queueReceiptId dedup is episode-global, and the boundary commits over the drained prefix only (14.12.2 step 5). C7-B4 remote-terminal-disposition covered requests but not the disposition's own coverage proof → evidence-provided set-equality now quantifies over the COMPLETE request set per stream incl. intents with no observed request (proven-not-issued closes them); a disposition over a partial set is refused; accept-residual-risk requires per-dispatchId provider-cannot-evidence proof (14.13.4a). C7-M5 intent phases lacked per-call identity → `callId` per provider call, first phase MUST be `intent-open`, phases strictly ordered once per callId, crash windows settled by durable attestation rules (14.13.4a). C7-M6 money domain was prose-only → canonical money domain pinned: USD micro (10^-6) integer cents everywhere, provider statements converted once at ingest with rounding policy recorded, sums are int64-exact, overflow past 2^53 ⇒ component UNRESOLVED UNKNOWN (14.13.4a). C7-M7 residual-inherited blocked later rounds' cleanliness with no re-resolution ROUTE → the route is defined: a residual re-resolves when a green repro-run (or owner disposition) closes the SURVIVING finding whose chain recorded the residual; re-check per boundary; re-resolution clears the clause forward, never retroactively (14.12.2). C7-M8 history-integrity-fault records lacked fields and the verdict consumed cached values → fault record fields pinned (faultKind incl. `policy-digest-mismatch`, evidenceRefs, first-detection position, one record per fault instance); verify-then-copy: every verdict input is RECOMPUTED from the prefix, a cache mismatch is itself a fault; disposition schema per faultKind (14.12.3). C7-M9 `closed.ts` as elapsed endpoint conflicted with finalization time → elapsed interval split: `closed.ts − admit.ts` is the NORMATIVE cycle elapsed; reconciliation/finalization tail is `finalizationTailMs` (monoMsAtBoundary − monoMsAtClose, boot-continuity required — gap ⇒ unknown fail-closed), reported separately, summed only in explicit wallclock accounting (14.13.4a). C7-M10 deferral "exactly one per submission" collided with legitimate re-deferral → deferrals form a LINEAR CHAIN per submission (first `deferralOf:null`, successors cite predecessor; branch/cycle/cross-submission citation refused at append); ACTIVE window = chain tail's; terminal outcome binds to the tail; clean predicate consumes derived receipt state, laundering bound counts chain records (14.14.5). C7-M11 "durable gate evidence" for intervening commits admitted incomplete verdicts and unrelated records → QUALIFYING evidence defined: green repro-run bound to that sha, or acceptance `verdict:"passed"` bound to that sha, with episode/task lineage, not invalidated; traversal bounds `maxAncestryWalkCommits`/`Bytes` — exceed ⇒ unproven ⇒ refused (14.12.2 r4). C7-M12 group framing had TWO identifiers (`groupId` vs legacy `atomicGroupId`) → ONE identifier `group.groupId` (legacy field name outside `group{}` is malformed framing); writer builds the whole group in memory, one write(), retry-or-abort on short write; memberCount ∈ [2,64], index bounds, groupId uniqueness + content-binding, crash windows closed (visibility vs ack distinct, groupId dedup on recovery) (14.11.2). C7-M13 "MUST NOT append" vs "unclean boundary remains appendable" gave incompatible outcomes → ONE finalization DECISION TABLE with classes A (met) / B (drain-progressing: blocks append, converts to O past `quiesceWaitMaxMs` via durable `quiesce-stall`) / O (owner-only: appends UNCLEAN, never blocks the log) — every examined condition assigned to exactly one class with boundary-existence + cleanliness + verdict effects; deferred receipts are O, owed filings are B; recovery and budget accounting consult the table only (14.12.2). MINOR c7-m14: envelope inventory completed (`history-integrity-fault`, `task-tip-archived`, intent phase-transitions under `dispatch-intent`, queue receipts documented as queue-file-only records with log standing via drained `owner-act`); `providerAccountId` REQUIRED on every fold statement; `taskTipTree` = the SINGLE commit-tree sha (the v8 `objectIds[]` spelling withdrawn); task-tip retention domain = through the last replay that depends on the gate, with the `task-tip-archived` bundle migration path; `task-tip-lost` stays fail-closed (14.12.4b, 14.14.4). DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v9, terra c7 folded) |
 | 2026-11-17 | §14.11–§14.15 (v7→v8) | **TERRA AUDIT ARC cycle 6 (gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c6-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 9 MAJOR + 1 MINOR on draft v7; all fixed into v8.** C6-B1 the pending-act queue could converge past a queued hold / strand a cure → queue-admission HANDOFF STATE MACHINE under the SAME S5 flock as the log (engage → drain FIFO INTO the current critical section with queue-receipt-id dedup → quiesce+boundary in one critical section; queued cures apply to the CURRENT cycle; queue = transport buffer, authority = drained owner-act records; lost queue file fails closed to needs-owner citing channel ack receipts) (14.12.2 step 5). C6-B2 ancestor repro reuse didn't implement the claimed closure → ancestor reuse requires (i) A proven RECORDED ANCESTOR of C by walking ALL parents (incl. merge parents) over fully-present objects — shallow/graft/missing ⇒ unproven ⇒ refused; (ii) EVERY commit in C∖A carries its own durable gate/acceptance evidence; then (iii) the v7 trace conditions — checked in that order, any failure ⇒ exact-candidate execution (14.12.2 r4). C6-B3 deferral broke the receipt outcome invariant → `submission-deferral` is a NONTERMINAL state in a defined receipt lifecycle (`open → deferred → filed XOR refused`), refusal classes apply unchanged in the deferral's window, deferred receipts are owed work of windowOf.cycle AND no boundary closes CLEAN with any receipt deferred, laundering rule moved into body text (14.14.5). C6-B4 the usage fold was not a total function → per-provider billing-stream identity `(providerAccountId, dispatchId)`; correction graph ≤1 correction per target, contradiction/unanchored-delta/held-correction/collision ⇒ component UNRESOLVED UNKNOWN (consumes headroom, blocks clean — "refused malformed" never leaves a stale value); cumulative-inclusion stated; streams starting with deltas need a baseline marker; sort (statementSeq asc, providerStatementId), null-seq sequenced last among themselves, second null-seq cumulative ⇒ unknown (14.13.4a). Majors: C6-M5 history-integrity-fault unified — ONE entry/disposition/exit paragraph (fault record kinds incl. fenceless-boundary + duplicate-fence matching rules; gates: unclean+needs-owner forward, dispatch not blocked, verdicts from RECOMPUTED values never a bad cache; per-fault owner dispositions, episode clears only with zero undispositioned faults, faulted boundaries marked never rewritten) (14.12.3, referenced from 14.12.2/14.14.4); C6-M6 remote-terminal-disposition vocabulary PINNED to `accept-residual-risk | evidence-provided` (ledger shorthand retired), evidence-provided requires fresh per-dispatchId terminal evidence covering the COMPLETE request set (partial ⇒ refused), accept-residual-risk never claims terminality, unknown spend stays blocked until spend-reconciliation, requires provider-cannot-evidence proof (14.13.4a); C6-M7 owner-act payloads = CLOSED per-op schemas (explicit nulls; kinds without a schema cannot receive acts) + supervisor INDEPENDENTLY reconstructs and verifies the canonical bytes (CLI digest is a claim) + same compromised-supervisor/same-user limits retained (14.10.3); C6-M8 group framing fields `group:{groupId,memberIndex,memberCount}` — one-pass completeness from the lines themselves, short-write counterexample closed, visibility vs fsync-durability as separate axes (14.11.2); C6-M9 canonicalizer renamed `tre-canonical-json/1` (ONE for the contract) with full value domain: NFC before dup-key detection, integers only −2^53..2^53 no exponents, byte-order key sort, escaping rules, 1 MiB cap, shipped conformance vectors, intake stores canonical bytes / replay verifies stored bytes (14.12.3); C6-M10 intent lifecycle phases `intent-open → call-started → call-settled{issued|no-call|proven-not-issued}` with durable negative attestation, uncertain-call recovery via provider evidence or intent-time idempotency keys, observed-but-unledgered requests reconciled not ignored, retention rule for intent/request evidence (14.13.4a); C6-M11 `usage-recovered` gains `statementSeq`/`correctionOf` (it is a fold statement) (14.12.4b); C6-M12 elapsed interval end = `closed.ts` for EVERY cycle (covers reconciliation/finalization time), boot-continuity via monoMsAtClose + boot identity, gap without continuity ⇒ unknown fail-closed (14.13.4a); C6-M13 chain-member derived states WIRED into cleanliness: open counts at survivor severity; `residual-inherited` is not open but makes its OWN round unclean (named clause of the clean predicate); a later round clean only if the residual is re-resolved; discharged imposes nothing (14.12.2). MINOR c6-m14: gate record carries the full taskTip identity payload (tip+tree+complete ordered parents in the LOG) + OBJECT-RETENTION obligation via per-episode ref; unreadable T ⇒ `task-tip-lost` actionable refusal, never a pass (14.14.4). DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v8, terra c6 folded) |
 | 2026-11-17 | §14.11–§14.15 (v6→v7) | **TERRA AUDIT ARC cycle 5 (gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c5-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 9 MAJOR + 1 MINOR on draft v6; all fixed into v7.** C5-B1 the all-actor fence could converge past a durably queued owner hold → owner acts linearized through a DURABLE pending-act queue (append before apply; quiesce requires an EMPTY queue; nonempty queue blocks clean closure), fence engagement durable via `fence-engaged` (crash between engage and boundary re-derives the fence; a boundary line with no fence-engaged is history-fault) (14.12.2 step 5). C5-B2 repro-path tree equality on an ancestor did not prove the accepted fix was tested → ancestor reuse permitted ONLY under a proven-complete dependency closure: every ancestor between the repro artifact and the accepted candidate carries its own recorded repro/gate evidence, else the repro must execute the candidate artifact itself (14.12.2 r4). C5-B3 `remote-terminal-unproven` had no resolution path (budget-extension is a spend act, not a terminality proof) → typed owner `remote-terminal-disposition` act (`evidence-closed` requires fresh provider terminal evidence per the set-equality rule / `accept-open-risk` waives terminality while interval accounting stays unknown — needs-owner until then, never silently clean) (14.13.4a, 14.14.4). C5-B4 task-commit identity check "parent == gated tip" rejected the ordinary gated merge tip → merge-tree consumes the recorded taskTip `T` itself (object id + tree + recorded parents re-read from the object store); the parent relation claim is dropped from verification, identity is `T`'s content address (14.14.4). Majors: C5-M5 policy canonicalization pinned — `tre-policy-json/1` v7 rules (RFC 8785-style key sort, shortest-form integers, no duplicate keys, UTF-8 NFC, revision stores content-addressed bytes + canonicalizer version; replay without the stored bytes refused, never re-canonicalized from a display form) (14.12.3); C5-M6 group visibility — "file length stabilizing" heuristic WITHDRAWN, visibility is decidable in ONE pass from group framing (group seq + terminal count), snapshots discard incomplete groups by framing, not by waiting (14.11.2); C5-M7 next-window deferral unbound to eventual filing → durable `submission-deferral` record (supervisor-authored, one per deferred submission, same critical section as the receipt; filing must cite it; owed-work counts against quiesce; laundering rule: a deferred submission may not be re-receipted into a later window without a new deferral) (14.14.5); C5-M8 late usage had no deterministic correction order → provider statements carry monotonic `statementSeq` + `correctionOf`; fold orders by (statementSeq, providerStatementId), corrections replay deterministically, out-of-order/gapped statements fail closed to unknown (14.13.4a); C5-M9 zero-dispatch closure vacuous → `dispatch-intent` durable record BEFORE any provider call (session id minted at intent time), close proves set-equality against a complete provider session query, provider calls with no intent are contract violations, incomplete query proves nothing (interval stays OPEN), empty set proven by gap-free intent stream (14.13.4a); C5-M10 envelope table internally inconsistent → full S5 envelope incl. `schema`, all v7 kinds enumerated with producers, `mode` specified on usage-recovered, examples relabeled illustrative pseudocode (normative shape = prose field lists + named schemas; "each object parses alone" withdrawn) (14.12.4b); plus c5-M2 (trust boundary + owner-act payload canonicalization/consumption — landed as c5-M1 numbering) and c5-M11 escape-obligation states + waiver + unclean-close + committed-boundary divergence = permanent `history-integrity-fault`, never retroactive refusal (14.12.2/14.12.3/14.14.4). MINOR: envelope/example consistency (folded with c5-M10). Needs-owner row extended (unproven without disposition, nonempty pending queue, history-integrity-fault). DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v7, terra c5 folded) |
@@ -1502,6 +1503,20 @@ structural, same posture as F53 (mint, don't trust):
   - `elapsed-reconciliation`: `{ targetKind, targetId,
     acceptedElapsedS, method }` (v9, c7-B1: same record alignment)
   - `dispatch-authorization-drop`: `{ authorizationId }`
+  - `residual-cure` (v10, c8-M5 — the §14.12.2
+    `residual-re-resolution` route of v9 required
+    `authority:"tty:…"` but no op in this closed enum could carry
+    it, so the contract's own cure was refused by the completeness
+    rule that mandates it): `{ findingId, survivorId,
+    route:"accepted-fix|fresh-finding-cycle", evidenceRef }` —
+    field-for-field with the §14.12.2 record (v9, c7-M7 shape;
+    `evidenceRef` = the repro-green artifact ref for
+    `route:"accepted-fix"`, or the new finding id whose lineage
+    cites the record for `route:"fresh-finding-cycle"`; REQUIRED
+    non-null in both routes — the route is unfunded without it).
+    One act cures ONE (`findingId`, `survivorId`) pair; the
+    record's `authority` is supervisor-stamped from the act, as
+    everywhere.
   **Completeness & binding (v9, c7-B1):** the enumeration is CLOSED
   and COMPLETE — every privileged record kind in §14.11–§14.15 whose
   intake requires owner authority MUST have a listed op schema; a kind
@@ -1515,9 +1530,17 @@ structural, same posture as F53 (mint, don't trust):
   both digest equality AND field presence — a resulting-record field
   that affects the disposition but is absent from the op schema makes
   the record REFUSED, never accepted on a partial digest.
-  **The TTY confirmation binds the supervisor-verified operation
-  (v9, c7-B1):** the CLI displays the supervisor-resolved `op` and
-  canonical payload digest BEFORE collecting the confirmation, and
+  **The TTY confirmation binds the FULL supervisor-verified
+  operation (v9, c7-B1; display strengthened v10, c8-M5):** the CLI
+  displays the supervisor-resolved `op` and the COMPLETE canonical
+  payload — EVERY field and value rendered from the exact
+  supervisor-verified canonical bytes, explicit `null`s included
+  (v10: a digest alone proves byte consistency of something, not
+  that the operator read the right thing — informed confirmation
+  requires the operator to see every authority-relevant value, e.g.
+  a `survivorId` or `residualCapUsd` differing from intent), PLUS
+  the canonical payload digest (for operator cross-check against
+  their own channel record), BEFORE collecting the confirmation, and
   the `owner-act` record carries `op` + `payloadDigest` recomputed
   and verified by the supervisor (a CLI assertion alone never
   confirms an operation the display did not show). **Verification (v8):** the SUPERVISING
@@ -1530,13 +1553,29 @@ structural, same posture as F53 (mint, don't trust):
   payload by serializing differently). Confirmation of the operation
   itself binds via the interactive channel record as before; the
   compromised-supervisor and same-user limits above still apply
-  unaltered. **Consumption (v7):**
-  one owner-act authorizes exactly ONE privileged record — validation
+  unaltered. **Consumption (v7, effect-bound v10, c8-B1/c8-M5):**
+  one owner-act authorizes exactly ONE privileged record — OR one
+  atomic group (the successor-ratification group of §14.11.2 is ONE
+  authorized effect: consumption counts the whole group once; a
+  half-applied group is malformed per §14.11.2 framing, so partial
+  consumption cannot occur) — validation
   refuses a second privileged record naming the same owner-act id
   (redelivery of the identical privileged record is idempotent by ITS
   record id; a different payload under a consumed act is refused);
   multi-operation intent requires multi-field payloads defined per op
   or separate acts.
+  **Effect binding (v10, c8-B1):** the `owner-act` record carries
+  `effectRecordIds` — the ids of the authorized privileged record(s):
+  exactly one id, or exactly the member ids of the authorized atomic
+  group. `effectApplied` is a replay-DERIVED state: true iff every
+  named record exists in the log and validates against the act's op
+  schema. An act with `effectApplied:false` is an **outstanding
+  effect**: class B in the §14.12.2 finalization decision table (the
+  supervisor owes the effect and can complete it) — no boundary (of
+  ANY cleanliness) appends while a drained act's effect is owed, and
+  an un-drained queue entry (class B) or a class-O-shaped act follows
+  the queue rules — an acknowledged act NEVER closes a boundary its
+  effect has not entered.
 - The orchestrator routes on `route` alone and holds no disposition
   power beyond `accepted-fix`/`rejected-duplicate`/`superseded`
   bookkeeping transitions.
@@ -1721,14 +1760,37 @@ doc (v2, blocker fix — replay can reconstruct `norms.json` from
   crash BEFORE the group's write() is visible as: nothing on disk
   (write() never began) or an incomplete tail (fence truncates) —
   both leave the pair unapplied and the successor correctly drafted;
-  crash AFTER write() but before fsync/ack: same — nothing was acked,
-  the tail is incomplete-or-truncatable, and a complete-but-unacked
-  group at tail is also truncated by the fence (the fence truncates
-  INCOMPLETE groups; a complete group whose write was never acked may
-  be RETAINED — readers may see it early (visibility precedes ack
-  across the crash), and the protocol's idempotency means re-emitting
-  an acked-once group is deduped by `groupId` on recovery, never
-  doubled). The
+  crash AFTER write() but before fsync/ack — ONE recovery rule
+  (v10, c8-M13; v9 said BOTH "a complete-but-unacked group at tail
+  is also truncated" AND "may be RETAINED" in adjacent sentences —
+  mutually exclusive outcomes for the same crash point, and the
+  reader rule below says a complete observed group is NEVER
+  truncated, so the truncate branch contradicted the reader
+  contract): recovery runs the tail fence, which classifies the tail
+  group by the shared framing predicate ONLY. INCOMPLETE tail group
+  ⇒ truncated (never fully visible; truncation is safe). COMPLETE
+  tail group (all members present + trailing newline) ⇒ RETAINED,
+  ALWAYS — the fence NEVER truncates a complete group, because a
+  reader may already have observed it (visibility precedes ack
+  across the crash); retaining is correct BECAUSE the retry is
+  idempotent by construction, not by luck. **Retry identity —
+  deterministic, pinned (v10, c8-M13; v9 gave no durable source for
+  the group's identity, so a re-emitted group either minted fresh
+  member ids (changing a content-addressed groupId — a different
+  group) or reused the ULID with drifted content (malformed ⇒ fail
+  closed — a guaranteed defect either way)):** the writer's group
+  PLAN is built deterministically in the durable draft state BEFORE
+  the write — member record ids, groupId, and exact canonical line
+  bytes are a pure function of the pre-write draft (the draft IS
+  the durable source: ids assigned at draft time, never re-minted
+  at emit time). Recovery re-emits THE PLAN, byte-identical (same
+  ids, same bytes), and append-if-absent applies: a tail group with
+  the SAME groupId and byte-identical members ⇒ the write already
+  landed; skip the re-emit, ack it, done (dedup by groupId — never
+  doubled). A tail group with the SAME groupId and DIFFERENT bytes ⇒
+  malformed ⇒ fail closed `needs-owner` (a deterministic plan
+  cannot produce different bytes; divergence means state corruption)
+  . The
   replay rule is group-aware — a half-group (successor `ratified`
   without the paired predecessor `superseded` inside the same
   complete-line group, delimited by the trailing newline of the group's
@@ -2161,17 +2223,45 @@ the round is those auditors plus the `audit-finding` records with
    unrelated repro-run, proving nothing): the evidence record must be
    (a) a `repro-run` with `result:"green"` bound (via
    `executedArtifactDigest`) to exactly that commit's sha, OR (b) an
-   `acceptance` record bound to that commit's sha with
-   `verdict:"passed"` (any other verdict — `incomplete`, `blocked`,
-   `failed` — does NOT qualify), AND in both cases (c) PROVENANCE:
+   `acceptance` record with `verdict:"complete"` (the CLOSED §14.3
+   acceptance enum `complete|incomplete|blocked|uncertain` — v10,
+   c8-M12: v9 required `verdict:"passed"`, A VALUE THE ACCEPTANCE
+   SCHEMA CANNOT PRODUCE, so route (b) was legally dead and a
+   conforming P14 `complete` acceptance never qualified; there is no
+   "passed"/"failed" acceptance verdict and none is added) bound to
+   that commit's sha: bound via `checkedAtSha` EQUAL to that sha on
+   EVERY PASSING criterion (`pass:true` — a `complete` verdict is
+   necessary not sufficient: any passing criterion checked at a
+   different sha, or lacking `checkedAtSha`, does not bind the
+   acceptance to THIS commit and the commit does not qualify;
+   v10, c8-M12 — `pass:false` criteria carry no binding sha and are
+   irrelevant to a complete verdict's qualification), AND in both
+   cases (c) PROVENANCE:
    the record names the episode and task (revision) the candidate
    belongs to or a recorded dispatch lineage linking it to this
    task's candidate chain — an acceptance for an unrelated task or a
    DIFFERENT episode with no lineage link does not qualify (an
    unrelated green repro of the same sha is not THIS candidate's
-   gate), (d) NOT INVALIDATED: no later record in the log marks the
-   evidence invalidated/superseded (an invalidated gate is absent
-   evidence, fail closed). Traversal bounds (v9, c7-M11): the walk
+   gate), (d) NOT INVALIDATED — the mechanism is the acceptance
+   record's OWN `invalidatedBy` field (v10, c8-M12, replacing the
+   undefined "a later record marks it invalidated": a `repro-run`
+   record is IMMUTABLE and never carries invalidation; for an
+   acceptance, qualification fails iff its record's `invalidatedBy`
+   is non-null (the field names the invalidating record — the
+   check is present-or-null on the acceptance record itself, replay
+   trivially deterministic). To invalidate a REPRO-RUN's
+   qualification there is exactly ONE route (v10, c8-M12): an
+   append-only `evidence-invalidation` record `{ envelope,
+   targetKind:"repro-run", targetRecordId, reasonCode,
+   reasonDigest, ownerActRef }` — owner-act consumption-bound
+   (§14.10.3), appended only after the target's `owner-act`
+   consumption lands, and a target that any committed boundary's
+   verdict already consumed is ALSO invalidated retroactively for
+   FUTURE reuse qualification only: past verdicts stand as appended
+   (the log never rewrites), the invalidation binds forward from its
+   position; replay rule: an evidence record is unqualified at any
+   position ≥ the invalidation's log position (an invalidated gate
+   is absent evidence, fail closed). Traversal bounds (v9, c7-M11): the walk
    is bounded by the episode policy `maxAncestryWalkCommits`
    (default 512) AND `maxAncestryWalkBytes` (default 64 MiB of
    object reads); exceeding either bound leaves the closure UNPROVEN
@@ -2350,7 +2440,15 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    critical section: each drained act is appended as an `owner-act`
    record carrying its original queue-receipt id (deduped against
    redelivery: an act whose queue-receipt id already appears as an
-   `owner-act` in the log is skipped). Drained acts are therefore IN
+   `owner-act` in the log is skipped), AND its authorized effect
+   record(s) are validated and appended in the SAME critical section,
+   immediately after the act (act → effect(s) → next queue entry —
+   v10, c8-B1: an act drained without its effect is an outstanding
+   effect, class B; the quiesce check at step (c) can never pass with
+   one, so no boundary commits between an act and its effect; the
+   successor-ratification group of §14.11.2 is one such effect —
+   both members appended as the atomic group, same lock).
+   Drained acts are therefore IN
    the evaluated prefix — a queued cure (a waiver act) applies to the
    CURRENT cycle and can close it; it is never stranded waiting for a
    later window.
@@ -2379,38 +2477,63 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    (c) QUIESCE CHECK — under the lock, queue empty AND no owed work;
    the emptiness check and the boundary append are the SAME critical
    section, so no act can slip in between check and commit. "Queue
-   empty" means **no unmatched entry** (v9, c7-B3): a queue entry
-   with no `owner-act` in the log citing its receipt id — a partially
+   empty" means **no unmatched entry** (v9, c7-B3; matching fixed
+   v10, c8-M7): a queue entry with no `owner-act` in the log citing
+   its receipt id **or its actId** — a partially
    drained queue is indistinguishable from this and replays
    identically (drain resumes at the first unmatched entry; drained
-   prefix entries dedup by receipt id, so partial-drain replay is
-   idempotent without a drain cursor).
+   prefix entries dedup by receipt id AND actId, so partial-drain
+   replay is idempotent without a drain cursor). An entry whose
+   drain landed the act but not its effect is likewise NOT matched
+   (effect owed, class B — c8-B1).
    (d) boundary + verdict append; FENCE state `engaged → open`
    (implicit: the fence ends with the critical section; a queue write
    that finds no `fence-engaged` without a following boundary in the
    log is a post-window act admitted normally).
-   **Identity & ack inventory (v9, c7-B3):** every act carries a
-   channel-assigned `actId` (unique per acting channel episode;
-   stable across redelivery of the same confirmation) and each queue
-   append gets a `queueReceiptId` unique for all time within the
-   episode (monotonic per-writer counter + writer id — content may
-   repeat, receipt ids never do). Dedup is BY `queueReceiptId` only;
-   a redelivered act with a NEW receipt id but identical payload is
-   a SECOND act unless it repeats an already-drained receipt id —
-   channels therefore redeliver receipt ids, and a channel that
-   cannot is non-conforming. The queue append IS the ack: the receipt
-   (actId, queueReceiptId, ts) is returned only after fsync, and the
-   channel keeps its own append-only ack log (durable, independent
-   of the queue file) so loss of the queue file is DETECTED as
-   ack-log entries with no matching queue record or log
-   `owner-act` — the episode fails closed to `needs-owner` citing
-   those entries (loss of a transport buffer is an incident, never a
-   silent drop).
+   **Identity & ack inventory (v9, c7-B3; dedup key fixed v10,
+   c8-M7):** every act carries a channel-assigned `actId` (unique
+   per acting channel episode; stable across redelivery of the same
+   confirmation) and each queue append gets a `queueReceiptId`
+   unique for all time within the episode (monotonic per-writer
+   counter + writer id — content may repeat, receipt ids never do).
+   **v9's "Dedup is BY `queueReceiptId` only" is RETRACTED
+   (v10, c8-M7):** a crash after the queue fsync but before the
+   channel durably records the receipt lets a retry mint a NEW
+   receipt id for the same `actId`, and receipt-only dedup admits it
+   twice — for a one-act-consumption op that is not exactly-once
+   delivery. The dedup key is the STABLE `actId` (assigned before
+   submission, never re-minted): the drain skips a queue entry whose
+   `actId` already appears in a log `owner-act`; a queue APPEND for
+   an `actId` already present in the queue file is a redelivery —
+   the existing entry (with its original receipt id) is returned,
+   never duplicated; a same-`actId` append whose canonical payload
+   DIFFERS is a conflict ⇒ refused at append + `needs-owner`
+   (channel collision or lie — fail closed). `queueReceiptId` stays
+   the per-append transport marker: a drained `owner-act` cites the
+   receipt of the entry it drained, and crash recovery resumes the
+   drain at the first queue entry with no matching log `owner-act`
+   (matching by BOTH receipt id and actId per the rule above).
+   Channels keep `actId` stable across redelivery; a channel that
+   cannot is non-conforming. Crash windows (conformance-tested,
+   v10, c8-M7): crash before the queue fsync ⇒ nothing durable, a
+   retry with the same actId appends fresh (idempotent); crash after
+   queue fsync before the receipt is returned/recorded ⇒ the retry
+   finds the entry by actId and re-returns its receipt (no second
+   entry, no second act); crash after ack before drain ⇒ the entry
+   waits in the queue and drains exactly once (actId dedup). The
+   queue append IS the ack: the receipt (actId, queueReceiptId, ts)
+   is returned only after fsync, and the channel keeps its own
+   append-only ack log (durable, independent of the queue file) so
+   loss of the queue file is DETECTED as ack-log entries with no
+   matching queue record or log `owner-act` — the episode fails
+   closed to `needs-owner` citing those entries (loss of a transport
+   buffer is an incident, never a silent drop).
    A nonempty queue at any quiesce check blocks CLEAN closure (unclean
    boundary remains appendable per c5-M3). Crash recovery:
    `fence-engaged` with no following boundary ⇒ the cycle remains open;
    restart resumes finalization from queue + log state (drain is
-   idempotent by queue-receipt id, resuming at the first unmatched
+   idempotent by queue-receipt id AND actId — v10, c8-M7 — resuming
+   at the first unmatched
    entry). Queue durability/replay: the queue file is NOT authoritative
    history — authority is the drained `owner-act` log records; the
    queue is a transport buffer, and replay reconstructs pending state
@@ -2436,19 +2559,32 @@ have disjoint, exhaustive effects:
 | Class | Condition (examples) | Boundary append? | Boundary verdict inputs | Cycle state after |
 |---|---|---|---|---|
 | **A — met/disposed** | receipts all filed/refused; owed filings drained; completion FSM settled; queue drained to empty; obligations met/waived/discharged; remote-terminal disposed; deferrals resolved in-window | YES | clean contribution | closes per verdict table (clean possible) |
-| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
+| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; drained `owner-act` with an outstanding effect (`effectRecordIds` not all present in the log, v10 c8-B1); mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
 | **O — owner-only (unclosable-clean, closable-unclean)** | active `finding-hold`; unresolved `scope-escape`; `remote-terminal-unproven` without disposition; history-integrity-fault; deferred receipt still `deferred` (window elapsed or still open); nonempty pending-act queue whose entries are all class-O-shaped acts (holds/dispositions); escape-obligation open without waiver | YES — boundary appends, UNCLEAN | every unclean predicate of the verdict table fires; `needs-owner` | closed UNCLEAN + `needs-owner`; obligations carry into the next window (deferral) or stay episode-global (escape, fault); NEVER retroactively re-cleaned |
 
-Precedence is mechanical: a cycle is not finalizable iff ≥1 condition
-is in B and NONE in O forces an immediate unclean close — wait-for-B
-becomes O past `quiesceWaitMaxMs` (so B never livelocks), and O never
-blocks the append, only cleanliness. A deferred receipt is O (blocks
+Precedence is mechanical (v10, c8-B2 — total, no silent waiver): a
+cycle is closable-unclean iff NO condition is in B (any single B —
+regardless of which O conditions co-occur — blocks the append until it
+drains or converts); if ≥1 condition is in O (and none in B) the
+boundary appends UNCLEAN; if all are A the boundary appends clean. An
+O condition NEVER waives a B drain obligation: an owed filing pending
+plus an open scope escape means the boundary waits for the filing,
+then closes unclean for the escape — the escape's unclean verdict is
+computed at that later boundary, not skipped past. B→O conversion at
+`quiesceWaitMaxMs` is the ONLY route past a stalled B (so B never
+livelocks), and O never blocks the append, only cleanliness — BUT a
+converted condition's owed item does not evaporate: the `quiesce-stall`
+record names it (`refConditionRecordIds`), and the carried-forward
+obligation is consumed by the NEXT window's drain as work the previous
+cycle left owed (counted there, reported at every later boundary until
+filed). A deferred receipt is O (blocks
 clean; does not block append) — this is the single normative reading
 of the v8 "deferred blocks every clean boundary" rule; owed filings
 are B (they block append until drained, because the supervisor OWES
 them and can complete them). The queue rule restated through the
 table: a queue entry whose act would change verdict inputs is B until
-drained (drain is mandatory before append), and an entry parked past
+drained (drain is mandatory before append, effect included per
+c8-B1), and an entry parked past
 `quiesceWaitMaxMs` is O (durable needs-owner, transport incident per
 the ack-log rule). Deterministic for recovery: replaying the prefix
 re-derives each condition's class from records alone.
@@ -2530,20 +2666,51 @@ pinned completely):** input
 must be a JSON document whose values are: strings (Unicode,
 normalized to NFC BEFORE duplicate-key detection — two keys that are
 distinct pre-NFC but equal post-NFC are duplicates and REFUSED);
-numbers (v9, c7-M6 — the v8 "integers only" rule REFUSED the
+numbers (v9, c7-M6; money domain corrected v10, c8-M9 — the v8
+"integers only" rule REFUSED the
 contract's own values: `20.0` (policy cap), `1.8`, `1.5`, `12.4`
 (owner reconciliation and records) are legitimate and must
 canonicalize; a rule no live document can satisfy is a defect, not a
 safety property. **Fixed-point decimal domain, exact and closed:** a
 number's SOURCE form must match
 `^-?(0|[1-9][0-9]*)(\.[0-9]{1,6})?$` — no exponent, no leading zeros,
-at most SIX fractional digits (the money domain is USD at micro
-precision: 1e-6 USD is the smallest representable unit, every `*Usd`
-field of every record, payload and policy is a value of this domain,
-and an amount finer than 1e-6 USD is unrepresentable and refused —
-micro-precise means the scaled integer `value × 10^6` fits the
-integer range below). Integers outside −2^53..2^53 (or decimals
-whose scaled integer `value × 10^6` exceeds 2^53) are refused.
+at most SIX fractional digits. **Range — bounds pinned (v10, c8-M9):**
+the domain is CLOSED at ±(2^53 − 1) = ±9007199254740991 on the scaled
+integer (`value × 10^6` for decimals, the value itself for integers);
+v9's ambiguous "outside −2^53..2^53" ellipsis is disambiguated — v9's
+prose admitted integers through 2^53 while its own vector 5 refused
+2^53; the closed bound is normative and agrees with both vectors
+(vectors 5–6). Input parsing (v10, c8-M9): the parser accepts RFC
+8259 inter-token whitespace (space, tab, LF, CR between tokens); the
+canonical OUTPUT contains none — this is what makes "two submits
+differing only in insignificant whitespace canonicalize to the SAME
+bytes" true (v9 stated that intake rule while vector 7 refused such
+input outright; the two were mutually unsatisfiable). Whitespace
+inside a numeric literal is malformed and refused. **Money domain
+(v10, c8-M9 — units pinned):** every `*Usd` field of every record,
+payload and policy is an amount in MICRO-USD (10^-6 USD, the smallest
+representable unit = 1 micro-USD) whose scaled integer is the exact
+micro-USD count. v9's §14.13.4a/changelog prose "USD micro (10^-6)
+integer **cents**" is WITHDRAWN (v10, c8-M9): a micro-cent is 1e-8
+USD — a unit the ledger never handled, and the ambiguous name would
+license a 100× implementation split. **Ingest conversion (v10,
+c8-M9 — the v9 rule "an amount finer than 1e-6 USD is refused" is
+RETRACTED as an ingest rule:** a provider that bills $0.0000005 has
+real spend; refusing its statement strands money unaccounted):
+provider amounts arrive in the provider's native unit/currency and
+the supervisor converts ONCE at ingest to micro-USD with the closed
+deterministic rule round-half-away-from-zero, recording on the
+statement record `originalAmount` (provider's amount, verbatim
+string), `originalUnit` (provider's unit id), `conversionPolicyRef`
+(the named conversion basis used), and the converted value.
+Conversion is applied once, never re-derived from a display form; a
+correction carries the provider's native unit and converts under the
+policy recorded for its STREAM — a correction whose recorded policy
+differs is a stream-identity mismatch, refused malformed. Overflow
+past 2^53 − 1 scaled after conversion ⇒ component UNRESOLVED UNKNOWN
+(not a refused record — spend the provider already incurred cannot be
+un-acknowledged by dropping its statement; the unknown blocks
+admission and clean closure like any component unknown).
 **Canonical serialization (v9):** strip trailing zeros from the
 fraction; if the fraction becomes empty, write the integer form (so
 `20.0` → `20`, `1.50` → `1.5`, `0.000001` → `0.000001`); `-0` and
@@ -2569,9 +2736,12 @@ byte-level; `→` separates source document bytes from canonical bytes,
 4. `{"a":0.1234567}` → REFUSED (7 fractional digits)
 5. `{"a":9007199254740992}` → REFUSED (2^53 exclusive edge)
 6. `{"a":9007199254740991}` → `{"a":9007199254740991}`
-7. `{"a":␠20.0␠}` → REFUSED (whitespace inside strings only; raw
-   whitespace outside a string is invalid JSON here) — canonical form
-   of `{ "a" : 20.0 }` INSIDE a JSON string is untouched content
+7. `{"a":␠20.0␠}` → `{"a":20}` (corrected v10, c8-M9 — v9 said
+   REFUSED, contradicting the intake rule that whitespace-variant
+   submits collapse to one blob; inter-token whitespace PARSES and
+   strips; whitespace INSIDE a numeric literal, e.g. `{a:1 0}`, is
+   malformed and refused — and whitespace inside a STRING, e.g.
+   `{"a":" 20.0 "}`, is untouched content: `{"a":" 20.0 "}`)
 8. `{"é":1,"é":2}` (U+0065 U+0301 vs U+00E9 — NFC-equal keys) →
    REFUSED (post-NFC duplicate key)
 9. `{"b":1,"a":[true,null],"":1}` → `{"":1,"a":[true,null],"b":1}`
@@ -2624,28 +2794,62 @@ ONE definition; 14.12.2 and 14.14.4 reference THIS paragraph):**
   faultKind: "counter-divergence" | "fenceless-boundary" |
   "disproven-authority" | "duplicate-fence" | "policy-digest-mismatch"
   (v9), boundaryId|null, affectedRecordId|null, evidenceRefs[],
-  recomputedDigest|null, reportedDigest|null }` — **per-kind field
-  requirements (v9, c7-M8; v8 required all fields for every kind,
+  recomputedDigest|null, reportedDigest|null, detectionAnchorId }` —
+  **per-kind field
+  requirements (v9, c7-M8; identity tuple PINNED v10, c8-M10; v8
+  required all fields for every kind,
   which a pre-boundary duplicate-fence or fenceless pre-state cannot
   satisfy):** `counter-divergence`: boundaryId, recomputedDigest,
   reportedDigest REQUIRED; `fenceless-boundary`: boundaryId REQUIRED
   (the boundary EXISTS — that is the fault), digests null;
   `disproven-authority`: affectedRecordId REQUIRED (the record whose
   authority is disproven), boundaryId set iff that record lies in a
-  committed boundary's prefix, else null; `duplicate-fence`: the
-  SECOND fence record's cycle, boundaryId null when no boundary
+  committed boundary's prefix, else null; `duplicate-fence`:
+  affectedRecordId = the SECOND fence record's recordId REQUIRED
+  (v10, c8-M10 — v9 said "the second fence record's CYCLE" but the
+  fault record HAS no `cycle` field: the second fence record's own
+  recordId is the anchor, and its cycle is derivable from that
+  record on replay — no field is invented, the identity is
+  replay-stable), boundaryId null when no boundary
   follows yet (the fault is detected pre-boundary — a fault record
   is appended at DETECTION with the fields the detection has;
   missing-at-detection fields stay null forever, never backfilled);
   `policy-digest-mismatch`: affectedRecordId = the policy-revision
   record, recomputedDigest = sha256 of stored bytes, reportedDigest =
   recorded digest, boundaryId null (set only if a specific boundary's
-  resolution was the detection point). **Detection idempotency (v9,
-  c7-M8):** a fault is appended ONCE per (faultKind, identity tuple)
-  where the identity tuple is the kind's REQUIRED non-null fields —
+  resolution was the detection point). **Stable identity tuple (v10,
+  c8-M10 — one tuple per kind; every member a durable record ID,
+  none detector-dependent):** `counter-divergence` = (faultKind,
+  boundaryId); `fenceless-boundary` = (faultKind, boundaryId);
+  `disproven-authority` = (faultKind, affectedRecordId);
+  `duplicate-fence` = (faultKind, affectedRecordId) [second fence
+  recordId]; `policy-digest-mismatch` = (faultKind,
+  affectedRecordId). Digest values and `evidenceRefs` are NEVER
+  identity members: two independent detectors of the same fault may
+  legitimately produce different digests (partial recomputation
+  progress) or different evidence sets, and identity keyed on them
+  would re-append the same fault once per detector (v9's "the kind's
+  REQUIRED non-null fields" admitted exactly that defect — digests
+  are required for counter-divergence, so a second detector with a
+  different digest was a "different" fault). `evidenceRefs`
+  cardinality ≥ 1 REQUIRED (a detection without evidence appends no
+  fault record). **First-detection position — defined (v10,
+  c8-M10):** the required field `detectionAnchorId` names the
+  recordId whose verification (or whose absence, for the
+  pre-boundary kinds) first triggered the fault; the §14.12.4b
+  inventory's "first-detection position" means exactly this field —
+  NOT the fault record's own append position (a re-detection appends
+  nothing, so only the anchor is stable across detectors).
+  **Detection idempotency (v9, c7-M8; identity = the pinned tuple):**
+  a fault is appended ONCE per identity tuple —
   a re-detection matching an existing undispositioned-or-
   dispositioned fault record of the same identity is NOT re-appended
-  (dedup skip); disposition coverage is set-checked on replay: the
+  (dedup skip, regardless of which detector found it — CONFORMANCE
+  VECTOR, v10, c8-M10: two independent detectors report the same
+  duplicate-fence with different `evidenceRefs` and different
+  recomputed digests ⇒ exactly ONE fault record in the log (the
+  first-appended); the second detection dedups); disposition
+  coverage is set-checked on replay: the
   episode flag is clear only when EVERY fault record in the prefix
   has a citing disposition (any undispositioned record — including
   one appended after the last disposition — keeps the flag set).
@@ -2844,7 +3048,16 @@ not inference, is the evidence of "every assigned auditor").
   "policyRevision":7, "policyDigest":"sha256:…", // resolves to a policy-revision record in the prefix (v5)
   "streakAfter":1, "confirmingUsed":0,   // writer's claimed cache values (v5) — recovery recomputes by recurrence and refuses divergence
   "admissionEvidenceIds":["01J…"],       // cycle admit AND closed records consumed (14.13.4a order)
-  "partitionSnapshotId":"01J…" },        // the 14.14.5 snapshot this cycle ran (v4)
+  "partitionSnapshotId":"01J…",          // the 14.14.5 snapshot this cycle ran (v4)
+  // Elapsed-tail accounting PERSISTED at the boundary (v10, c8-M11
+  // — v9 computed finalizationTailMs in the deciding process but the
+  // schema persisted NEITHER sample, so a crash between boundary and
+  // verdict left the charged tail unreconstructible — recovery could
+  // not reproduce the value it must re-charge):
+  "bootIdAtBoundary":"01J…",             // boot identity record of THIS append (REQUIRED)
+  "bootIdAtClosed":"01J…",               // boot identity record the closed sample belongs to (REQUIRED)
+  "monoMsAtBoundary":4921173,            // this boot's monotonic sample at this append (REQUIRED int)
+  "finalizationTailMs":41200,            // MEASURED tail (monoAtBoundary − monoAtClosed under one boot identity) OR null (REQUIRED field, null = cross-boot/no continuity ⇒ tail UNKNOWN, fail closed)
 // (membership = log position up to this line — no cutoffRecordId to race, v4;
 //  appended only after the v5 drain-and-fence quiesce check passes)
 // repro-run record (v5, c3): the machine-checkable evidence every
@@ -2960,14 +3173,24 @@ the example-syntax clause below.**
   exactly one fault record per fault instance (re-detection cites it,
   never duplicates it) (v9, c7-m14).
 - `task-tip-archived` — producer: supervisor retention path; `{
-  gateId, bundleRef, sha256 }` (v9, c7-m14; only when the per-episode
+  gateId, bundleRef, sha256, tipSha, objectCount, verifiedAt }`
+  (v9, c7-m14; fields pinned v10, c8-m16 per the §14.14.4 artifact
+  contract; only when the per-episode
   ref is pruned inside the replay horizon).
-- **Intent phase transitions (v9, c7-m14):** each phase transition of
-  a provider call is its OWN `dispatch-intent` KIND record (append-
-  only; one record per phase per `callId`, `phase` is the
-  discriminator) — producer: supervisor dispatch lane; so the
-  inventory counts them under `dispatch-intent`, and the phase-ORDER
-  rules (14.13.4a) are the kind's validation.
+- **Intent phase transitions (v9, c7-m14; KIND UNIFIED v10,
+  c8-M15):** each phase transition of a provider call is its OWN
+  `intent-phase` KIND record (append-only; one record per phase per
+  `callId`, `phase` is the discriminator) — producer: supervisor
+  dispatch lane. v9's inventory claimed these counted "under
+  `dispatch-intent`" while §14.13.4a's closed schema names the wire
+  kind `intent-phase` — a producer following one text was rejected
+  by a validator following the other; ONE kind now: `intent-phase`
+  is its own S5 envelope kind (distinct from `dispatch-intent`,
+  which remains the pre-call per-DISPATCH record), the phase-ORDER
+  rules (14.13.4a) are its validation, and the full discriminated
+  schema (incl. `outcome`, canonical `callId` encoding, uniqueness
+  domain, idempotency-key placement, restart validation) is defined
+  in §14.13.4a and consumed identically by producer and validator.
 - **Queue receipts (v9, c7-m14):** queue entries and their receipts
   live in the QUEUE FILE, not the S5 log — they are NOT S5 envelope
   kinds and carry the queue-file's own record shape (queueId,
@@ -2985,6 +3208,18 @@ the example-syntax clause below.**
   recovery — recovery re-derives O for the stalled condition from
   this record even if the wall clock elapsed while down)
   (§14.12.2 finalization decision table, v9, c7-M13).
+- **v10 (c8) record kinds:** `provider-inability-evidence` —
+  producer: supervisor provider path (captured provider responses
+  verbatim; shape, provenance and freshness per §14.13.4a's
+  `accept-residual-risk` rule, v10 c8-M8); `evidence-invalidation`
+  — producer: TTY operator via owner-act consumption (target,
+  reason, replay position semantics per §14.12.2 r4, v10 c8-M12);
+  `deferral-loop` — producer: supervisor intake in the same
+  critical section as the chain-cap refusal (sole trigger of the
+  `deferral-loop` state, per §14.14.5, v10 c8-M14);
+  `intent-phase` — producer: supervisor dispatch lane (the unified
+  phase kind, v10 c8-M15 above). `deferral-loop-disposition` is an
+  OWNER-ACT op (§14.10.3 closed enum), not its own kind.
 - `scope-escape-resolution`, `partition`, `dispatch-authorization`,
   `submission-receipt`, `policy-revision`, `repro-run` — producers and
   fields as specified in place (14.14.4/.5, 14.12.4, 14.12.3, 14.12.2
@@ -3337,10 +3572,22 @@ trichotomy). Restart rules:
   3. Apply remaining records sorted by `(statementSeq ascending,
      providerStatementId lexicographic)`; `mode:"cumulative"` SETs the
      component value; `mode:"delta"` ADDs.
-     **Null-sequence precedence — ONE rule (v9, c7-B2 replaces v8's
-     contradictory pair):** records with `statementSeq:null` are NOT
-     interleaved into the seq order at all: they form a separate
-     pending set with a single precedence rule — a null-seq statement
+     **Null-sequence precedence — ONE rule (v9, c7-B2; pipeline
+     pinned v10, c8-M6):** the fold evaluates a per-stream PIPELINE
+     over IMMUTABLE raw records: (1) collect raw statements (dedup
+     identity, step 1's redelivery rules); (2) build the correction
+     graph and compute the EFFECTIVE statement set by replacement in
+     the graph (a corrected statement leaves the set; its
+     `statementSeq` position stays CLAIMED by the correcting record —
+     the gap check runs on effective statements' seq coverage, so a
+     correction never erases a sequence number or hides a gap);
+     (3) gap-check the effective set for contiguity over
+     [minSeq..maxSeq]; (4) order effective sequenced statements by
+     `(statementSeq, providerStatementId)` and apply; (5) the
+     null-seq set is applied per the precedence rule below. Records
+     with `statementSeq:null` are NOT interleaved into the seq order
+     at all: they form a separate pending set with a single
+     precedence rule — a null-seq statement
      contributes its value ONLY while the component has no accepted
      sequenced value yet, and ANY accepted sequenced statement
      supersedes every pending null-seq statement for that component
@@ -3348,13 +3595,40 @@ trichotomy). Restart rules:
      in step 3 while step 4 said the sequenced statement "replaces"
      it — under one lock those orderings could disagree; here the
      rule is value-level: sequenced wins, definitionally, no sort
-     involved). Only delta-mode or single-value per-request records
-     may carry null; a SECOND null-seq cumulative on the same
+     involved). **LATE null-seq (v10, c8-M6 — pins the case the v9
+     vector list got wrong): a null-seq statement arriving when the
+     component ALREADY has an accepted sequenced value is
+     non-contributing AND non-degrading** — it does not enter the
+     pending set, does not consume the "second null cumulative ⇒
+     unknown" trigger (that trigger counts null-seq cumulatives in
+     the PENDING set only), and does NOT block clean closure (the v9
+     conformance vector "sequenced then null-seq cumulative
+     degrades the boundary" contradicted the precedence rule above it
+     for the same prefix; the vector is corrected below — the rule
+     is normative and the vector now agrees with it). Only
+     delta-mode or single-value per-request records
+     may carry null; a SECOND null-seq cumulative PENDING on the same
      component ⇒ unresolved unknown. A single accepted null-seq
      cumulative degrades to "value known at < seq ∞": it blocks CLEAN
      closure (an unaugmented ∞-value is never clean-final); it is
      replaced — and the block lifted — when a sequenced statement
      lands for that stream.
+     **Gap resolution (v10, c8-M6 — a gap must be closable without
+     erasing the fault):** a sequence gap makes the component an
+     unresolved unknown (above); the unknown resolves by EITHER (i)
+     the missing statement(s) arriving (the fold re-derives total
+     and the gap simply no longer exists in the new prefix — no
+     erasure needed: the fault is derived, never stamped), OR (ii)
+     ONE owner `spend-reconciliation` for that component with
+     `providerRecovery` proving the missing statement is
+     unrecoverable (the one-time reconciliation rule applies — the
+     gap unknown is an ordinary component unknown and consumes the
+     ordinary resolution route; no gap-specific record kind
+     exists). Until resolved, the gap blocks clean closure and
+     admission per the unknown rule and is reported in every
+     boundary's standing notes (component, stream, missing seq
+     range) so a long-lived gap stays visible, never silently
+     carried.
   4. Collision rules: two records, same stream and `statementSeq`,
      same identity ⇒ dedup (idempotent); same seq, DIFFERENT
      identity ⇒ the fold REFUSES the sequence AND the affected
@@ -3369,13 +3643,19 @@ trichotomy). Restart rules:
      and blocks clean closure; it is never silently dropped and never
      folded by arrival order. Ordering is unavailable from a provider
      at all ⇒ the component is `unknown` likewise.
-  **Fold conformance vectors (v9, c7-B2):** the contract's test suite
-  ships executable fold fixtures — gap-before-boundary (unknown, not
-  max-accepted), null-seq cumulative then sequenced (sequenced wins),
-  sequenced then null-seq cumulative (∞-statement degrades the
-  boundary but never overwrites), same-identity different-value
-  (component unknown, old value does NOT stand), correction chain and
-  correction cycle, delta-stream with and without baseline marker —
+  **Fold conformance vectors (v9, c7-B2; corrected v10, c8-M6):**
+  the contract's test suite ships executable fold fixtures —
+  gap-before-boundary (unknown, not max-accepted), null-seq
+  cumulative then sequenced (sequenced wins), **sequenced then a
+  LATE null-seq cumulative (non-contributing and NON-degrading per
+  the c8-M6 precedence rule: the late null-seq statement neither
+  overwrites the sequenced value nor forces a standing note that
+  blocks clean — the v9 vector text contradicted the precedence rule
+  above it for the same prefix; the rule is normative, this vector
+  agrees with it, and an implementation that degrades on a late
+  null-seq is the defect)**, same-identity different-value (component
+  unknown, old value does NOT stand), correction chain and correction
+  cycle, delta-stream with and without baseline marker —
   a fold implementation that disagrees with any vector is a defect,
   not an interpretation.
   Identity & dedup (v6,
@@ -3444,10 +3724,30 @@ trichotomy). Restart rules:
   (producer: the supervisor dispatch lane; validator: the same lock
   path — no other producer is permitted):
   `intent-phase { id, ts, dispatchId, callId, attemptNumber, phase,
-  idempotencyKey|null, evidenceRef|null }` where
-  `phase ∈ { intent-open | call-started | call-settled }` and a
-  settled record carries `outcome ∈ { issued | no-call |
-  proven-not-issued }`. Validation rules (v9, c7-M5): the FIRST phase
+  idempotencyKey|null, evidenceRef|null, outcome|null }` (v10,
+  c8-M15: the CLOSED discriminated schema carries `outcome` in every
+  intent-phase record — REQUIRED non-null exactly when `phase ==
+  "call-settled"` with `outcome ∈ { issued | no-call |
+  proven-not-issued }`, and REQUIRED null for `intent-open` and
+  `call-started`; v9's field list omitted `outcome` from the schema
+  while its rules required it — validators and producers disagreed
+  on the wire shape). `phase ∈ { intent-open | call-started |
+  call-settled }`. **Canonical `callId` encoding & collision domain
+  (v10, c8-M15):** `callId` = sha256 over the canonical encoding
+  (tre-canonical-json/1) of `["call", dispatchId, attemptNumber]`
+  hex — content-addressed, so the SAME (dispatchId, attemptNumber)
+  pair can never produce two different callIds, and a restart
+  resumes by recomputing ids from the dense counter recovered from
+  the prefix (the highest durable `attemptNumber` for the
+  dispatchId + 1); a collision between a NEW callId and an existing
+  one is impossible by construction (dense counter), and one
+  observed anyway ⇒ history-integrity-fault, fail closed.
+  **Idempotency-key placement (v10, c8-M15):** `idempotencyKey` is
+  non-null ONLY on `call-started` (the provider-visible submission),
+  unique per `(providerAccountId, idempotencyKey)` across the
+  episode, assigned BEFORE the socket opens and carried verbatim to
+  the provider — the no-call evidence rule (c8-B3) queries on
+  exactly this key. Validation rules (v9, c7-M5): the FIRST phase
   record for a `callId` MUST be `intent-open`; phases for one `callId`
   are strictly ordered, each recorded ONCE (`call-started` twice for
   one callId ⇒ history-fault); `call-settled` requires its
@@ -3462,16 +3762,29 @@ trichotomy). Restart rules:
   negative attestation **whose evidence source is named and
   independent: the supervisor's own word is not evidence under the
   doctrine (v9, c7-M5) — a `no-call` settlement requires
-  `evidenceRef` naming either (a) provider evidence that the session
+  `evidenceRef` naming EITHER (a) provider evidence that the session
   contains no request for that `callId`'s idempotency key / session
-  window, or (b) a pre-call crash artifact under the §14.3 crash
-  table showing the process died before the call socket was opened
-  (e.g. the intent append fsynced and no outbound-connection record
-  durable); absent such evidence the phase stays uncertain, interval
+  window, OR (b) a crash artifact from an INDEPENDENTly enforced
+  durable fence (v10, c8-B3): the contract's alternative is a
+  LOG-BEFORE-SOCKET FENCE whose state is durable OUTSIDE the crashing
+  process (the OS/session-manager connection ledger, or the
+  provider-side session listing), and it proves no-call only when
+  the fence's own coverage proves no outbound connection for that
+  session window crossed the fence boundary before the crash. The
+  v9 phrasing "the intent append fsynced and no outbound-connection
+  record durable" is RETRACTED (v10, c8-B3): absence of a record
+  written BY the crashing process is exactly the pre-call-crash
+  case — the process may have opened the socket and died before
+  logging it, and the provider can still execute and bill the
+  request. Absence of the crashing process's own records is NEVER
+  negative evidence; only an independent authority's COMPLETE record
+  set (naming its coverage window) can prove the socket was never
+  opened**; absent
+  such evidence the phase stays uncertain, interval
   OPEN — fail-closed forever absent provider cooperation is the
   ACCEPTED outcome, stated honestly (v9, c7-M5): `no-call` without
   independent evidence is not derivable and the contract does not
-  pretend otherwise**; an `intent-open` with no `call-started` and no
+  pretend otherwise; an `intent-open` with no `call-started` and no
   attestation is NOT no-call — it stays uncertain, interval OPEN;
   (ii) crash after
   `call-started`, before the response id lands — the call is
@@ -3554,10 +3867,26 @@ trichotomy). Restart rules:
   at append (validator error, nothing lands). **Validity
   (v8, c6-M6; v9, c7-B4 coverage binding) — what "a valid
   disposition" means (the verdict-table reference resolves here):**
+  **Coverage set — one derivation (v10, c8-M8):** the per-dispatch
+  set the `evidence-provided` check consumes is DERIVED, not quoted:
+  for each dispatch, `callUniverse` = every `callId` in the
+  dispatch's prefix (`dispatch-intent`/`intent-phase` records) —
+  including `intent-open` calls never started; `issuedSet` = callIds
+  settled `issued` with a ledgered provider request (content-
+  addressed); `provenNoCall` = callIds settled `no-call`/
+  `proven-not-issued` on independent evidence (never absence —
+  c8-B3). Coverage for the dispatch is TRUE iff every member of
+  `callUniverse` is in `issuedSet` with terminal usage evidence OR
+  in `provenNoCall`, the `issuedSet` ledger equals the provider's
+  observed session set (c5-M9 set-equality, fresh evidence), and
+  `callUniverse \ (issuedSet ∪ provenNoCall) = ∅` — an intent whose
+  call is neither issued nor independently proven not-issued defeats
+  coverage no matter how complete the ledger for the others is.
   - `evidence-provided`: for EVERY id in `dispatchIds`, `evidenceRefs`
     must name durable provider evidence that independently satisfies
-    the c5-M9 set-equality rule for that dispatch's COMPLETE request
-    set (a cancel confirmation for ONE request of a multi-request
+    the c5-M9 set-equality rule and the coverage derivation above
+    for that dispatch's COMPLETE call universe (a cancel
+    confirmation for ONE request of a multi-request
     dispatch does NOT cover the dispatch — coverage is per-dispatch
     and complete, checked by the validating supervisor against each
     dispatch's request ledger); evidence must be FRESH (acquired after
@@ -3567,22 +3896,55 @@ trichotomy). Restart rules:
   - `accept-residual-risk`: the owner explicitly accepts that requests
     of unknown remote state MAY STILL BE RUNNING. It closes the
     TERMINALITY question only — it NEVER proves terminality (records
-    say "closed by owner risk acceptance", never "terminal"), and the
-    unknown SPEND component stays separately unresolved: while ANY
-    dispatch in the interval has an unresolved spend VALUE, the
-    unknown-spend rule still consumes headroom (14.13.2) and
-    admission stays blocked until a `spend-reconciliation` or measured
-    recovery fixes each value. Under `accept-residual-risk` the
-    unknown VALUE is not left unbounded: the owner act carries
-    `residualCapUsd` (v9, c7-B4 — a canonical microUsd amount,
-    §"money" under tre-canonical-json/1) that enters the folded
-    component as a KNOWN-BOUNDED-UNKNOWN charge: headroom is consumed
-    at the cap until measured recovery replaces it downward; "unknown
-    ⇒ block forever with no number" is closed by the cap, and the cap
-    itself is spend subject to the same accounting. `accept-residual-risk` REQUIRES
+    say "closed by owner risk acceptance", never "terminal"). **The
+    residual-cap accounting state machine — ONE path (v10, c8-B4
+    replaces v9's two contradictory rules):** `residualCapUsd` is
+    declared, in the contract's own words, an **OWNER-ACCEPTED
+    EXPOSURE ALLOWANCE, not a provider-enforced maximum** — nothing
+    in the contract bounds what the provider may actually bill; the
+    cap is the owner's authority to carry the unknown forward as a
+    PROVISIONAL charge. Admission accounting, exactly one sequence:
+    (1) on an accepted `accept-residual-risk` disposition, headroom
+    is consumed by `residualCapUsd` as a **provisional component
+    charge** (the loop may admit, having paid the owner's stated
+    exposure); (2) provider statements arriving later fold NORMALLY
+    against the same stream identity — a measured cumulative that
+    lands replaces the provisional charge (up OR down: measured
+    beats accepted, the standing rule); (3) if measured spend exceeds
+    the cap, the difference is real spend: the next boundary's
+    recurrence consumes it, and if the loop can no longer afford the
+    difference the boundary is `budget-exhausted` (the cap never
+    forgives overage, only postpones its accounting); (4) while the
+    provisional charge stands, the boundary carries a standing note
+    `residualExposureUsd` — never silently aged out. v9's
+    simultaneous "the unknown SPEND component stays separately
+    unresolved… admission stays blocked until a
+    `spend-reconciliation` fixes each value" is RETRACTED for
+    components covered by an accepted residual cap (that pairing made
+    the cap both a resolved charge and an unresolved unknown —
+    deadlock or free admission depending on which sentence an
+    implementation read); admission is blocked while an uncapped
+    unknown value exists, and permitted at the cap when the owner
+    has carried it. `accept-residual-risk` REQUIRES
     providerRecovery evidence that the provider cannot supply
-    terminality (an owner may not wave away evidence the provider
-    would give). Residual risk is reported at every later boundary
+    terminality — and its SHAPE, provenance and freshness are now
+    pinned (v10, c8-M8, replacing "the supervisor queried and it
+    failed" as self-proving evidence): the referenced record is a
+    `provider-inability-evidence` durable record — producer: the
+    supervisor provider path, BUT its authority is the provider's
+    own API response captured VERBATIM (the raw response bytes,
+    content-addressed, with request endpoint, query parameters,
+    timestamp, and a capability-declaration reference from the
+    provider's published documentation showing the query scope is the
+    ONLY available terminality query); a bare supervisor assertion
+    "the query failed" is NOT provider-inability evidence (a network
+    blip must not wave away evidence the provider would give) — the
+    record must show the provider RESPONDED (error body or empty
+    capability), or a bounded series of retry attempts each with
+    captured responses spanning at least half of `reconcileDeadlineS`
+    — per dispatchId, fresh (acquired after the
+    `remote-terminal-unproven` record's ts). Residual risk is
+    reported at every later boundary
     referencing the interval (a standing note, never silently aged
     out). A budget extension NEVER resolves terminality (caps ≠
     facts). The interval never resolves by timeout alone.
@@ -3802,11 +4164,49 @@ honestly, including what git DOES NOT catch:
   as any boundary/verdict derived from the gate is inside the episode
   replay window, so a FRESH replay store can always re-verify.
   Migration obligation (v9): pruning the ref before the replay horizon
-  requires exporting the identity closure (T + parents + trees, e.g.
-  a git bundle content-addressed by the recorded ids) into the
-  episode's artifact store and recording a `task-tip-archived {
-  gateId, bundleRef, sha256 }` record; replay verifies bundle
-  integrity against the gate's recorded ids. No ref AND no valid
+  requires exporting the identity closure into the
+  episode's artifact store under a CHECKABLE artifact contract
+  (v10, c8-m16 — "e.g. a git bundle" plus a blob digest proved
+  nothing: a digest-valid bundle missing tree or parent closure
+  passed the digest check yet failed every replay that needed the
+  closure; a blob digest establishes BYTES, never CLOSURE):
+  **Format:** exactly ONE accepted form — a git bundle in
+  version-3 (v3) header form, PREREQUISITE-FREE (the header lists
+  the tip T and NO prerequisite lines: the bundle must be
+  self-contained, so "reachable from T" is total by construction,
+  not relative to a live object store). **Closure enumeration &
+  verification BEFORE the record appends:** the supervisor runs
+  `git verify-pack`-equivalent closure enumeration ON THE BUNDLE:
+  (1) parse v3 header, confirm the single/prerequisite tip(s) equal
+  the gate's recorded tip sha(s) and zero prerequisites; (2) every
+  object in the gate's recorded identity (tip commit, its tree,
+  every recorded parent commit and their trees — the full recorded
+  identity list) is PRESENT and digest-valid inside the bundle;
+  (3) the tip commit's parent list resolves entirely to recorded
+  parents present in the bundle; (4) resource bounds: bundle ≤
+  `maxArchiveBytes` (episode policy, default 2 GiB) and object
+  count ≤ `maxArchiveObjects` (default 10^6) — exceed ⇒ archival
+  REFUSED (the ref is KEPT, the gate stays ref-backed; failing
+  closed on resources never deletes history). Only after (1)-(4)
+  pass: write the bundle with the §14.12.3 publication protocol
+  (write-temp → fsync(temp) → rename-excl → fsync(dir)), THEN
+  append `task-tip-archived { gateId, bundleRef, sha256,
+  tipSha, objectCount, verifiedAt }` (v10, c8-m16: `tipSha` = the
+  verified tip, `objectCount` from enumeration step 4, `verifiedAt`
+  = ts of the passing closure check — a record whose fields were
+  never computed cannot be written); fsync the log. **Prune order
+  (publication-before-prune, v10, c8-m16):** the per-episode ref
+  is deleted ONLY after the task-tip-archived record is durable
+  (fsynced) AND its sha256 re-verifies against the stored bytes at
+  record time; crash between publication and record ⇒ orphan blob,
+  GC-eligible under the same rule as policy blobs (no record names
+  it); crash between record and prune ⇒ ref still present, archive
+  redundant but harmless (replay prefers the ref, falls back to
+  the archive). **Replay verification:** a replay that finds no ref
+  loads the named bundle, RE-RUNS closure checks (1)-(3) against
+  the gate's recorded ids, and treats ANY failure — digest,
+  missing object, header mismatch, prerequisite line — as T
+  unreadable ⇒ `task-tip-lost`, fail-closed. No ref AND no valid
   archive ⇒ replay treats T as unreadable ⇒ `task-tip-lost`,
   fail-closed.
   At integration, if T's object (or any parent/tree the recorded
@@ -3980,31 +4380,84 @@ LINEAR, ACYCLIC path in the prefix: two deferrals naming the same
 `deferralOf` (a branch), a `deferralOf` naming a deferral of a
 DIFFERENT submissionId, or a cycle are malformed — refused at append
 (`deferral-branch` validation error); no branch can exist, so no
-branch arbitration is needed. **Active window (v9, c7-M10):** the
-derived ACTIVE window of a submission is the `windowOf` of the
-chain's unique TAIL (the deferral no other deferral cites) — owed
-work counts against the tail's window only; replay recomputes the
-tail deterministically, so a crash between two deferrals leaves a
-well-defined active window (whichever record landed is the tail).
-**Terminal outcome binding (v9):** `viaDeferralId` MUST name the
-chain TAIL deferral (the active one at processing time) — a terminal
-record citing a non-tail deferral while a later deferral exists is
-malformed (the obligation moved; a filing in an earlier window than
-the active one is a violation, not an early gift: refused).
+branch arbitration is needed. **Active window — obligations NEVER move
+backward (v9, c7-M10; corrected v10, c8-M14 — v9 said owed work
+counts against "the tail's window ONLY", so appending a successor
+deferral to cycle 3 at cycle 2's finalization appeared to erase
+cycle 2's owed terminal outcome, contradicting the paragraph above
+binding the outcome no later than the deferral's own window):** the
+derived ACTIVE window (where the TERMINAL outcome must be produced)
+is the tail's `windowOf`, and replay recomputes the tail
+deterministically (whichever record landed is the tail). But an
+incurred obligation is never erased by a later chain record: EVERY
+window from the receipt's original window through the tail's window
+carries the deferred receipt as a standing owed-work note in its
+boundary (the boundary's standing notes list it while the receipt is
+nonterminal), each such boundary is UNCLEAN while deferred (the
+deferred-receipt-is-O rule already forces this — O blocks clean, and
+draining a deferral into a successor deferral during window W's drain
+leaves W closing UNCLEAN, never clean), and elapsed/spend already
+consumed processing the receipt in window W stays charged to W —
+re-deferral moves the FUTURE terminal-outcome duty, never past
+charges and never the visibility of the obligation. Serialisation
+(v10, c8-M14): a successor deferral is appended ONLY inside the S5
+critical section of a drain of the CURRENT active window (the same
+lock that appends that window's boundary) — a re-deferral can never
+race a boundary append into a window that has already finalized, and
+a deferral naming a window not strictly later than its predecessor's
+is refused at append (backwards or same-window deferral is a
+livelock attempt, malformed).
+**Terminal outcome binding (v9; window rule
+clarified v10, c8-M14):** `viaDeferralId` MUST name the
+chain TAIL deferral (the active one at processing time). The
+terminal outcome is produced no later than the TAIL window's
+boundary — processing it EARLIER (in any earlier window of the
+chain, including the original receipt window) is LEGAL and good: an
+early terminal outcome satisfies every window's standing obligation
+simultaneously (the outcome record discharges the whole chain, and
+each earlier window's standing note clears at the first boundary
+appended after the outcome lands); what is malformed is a terminal
+record naming a NON-TAIL deferral as the discharged obligation while
+a later deferral is still active (citing stale lineage), or a
+terminal outcome whose timestamp position is after the tail
+window's boundary.
 **Clean-predicate integration (v9, c7-M10):** the clean/needs-owner
 predicates consume the DERIVED receipt state (`open`, `deferred`
 (active window = tail's), `filed`, `refused`), never the count of
 deferral records: any receipt in `deferred` — one deferral or ten —
-blocks clean per the v8 rule, and the laundering bound (chain
-length > `maxConfirmingCycles + 1` ⇒ `deferral-loop`, needs-owner)
-counts distinct deferral RECORDS in the chain. **Laundering rule (v8, explicit body text —
+blocks clean per the v8 rule, and the laundering bound
+counts distinct deferral RECORDS in the chain — see the cap rule
+below for the ONE representation (v10, c8-M14). **Laundering rule (v8, explicit body text —
 v7 stated it in the ledger only):** a deferred submission may NOT be
 re-receipted into any window by a fresh receipt; re-admission of a
 deferred `submissionId` reuses the ORIGINAL receipt + deferral, and a
 second deferral of the same submissionId requires `deferralOf` naming
-the prior deferral (a deferral chain is finite: a chain of length >
-`maxConfirmingCycles + 1` is refused `deferral-loop`, needs-owner —
-deferral cannot livelock findings out of filing forever). The v5-era sentence
+the prior deferral (a deferral chain is finite — ONE
+representation, v10, c8-M14, replacing v9's simultaneously-derived
+AND-refused state: a successor deferral whose append would make
+chain length > `maxConfirmingCycles + 1` is REFUSED at append, and
+the refusal is itself durably observable — the supervisor appends a
+`deferral-loop` record `{ envelope, submissionId, chainTipId,
+limit: maxConfirmingCycles + 1, receiptId }` in the SAME critical
+section as the refusal (producer: supervisor; this record is the
+SOLE trigger of the `deferral-loop` state — replay derives it from
+this durable record, never from counting a chain the append refused,
+closing the counterexample where the triggering record could be
+invisible to replay). While any `deferral-loop` record lacks a
+disposition: needs-owner, every later boundary unclean (standing
+note citing it), and the chain is FROZEN — no further deferral of
+that submission may append (a frozen chain accepts exactly two
+terminal exits: the terminal outcome itself — filing or refusal of
+the submission — or an owner disposition `deferral-loop-disposition`
+{ envelope, loopId, decision: "force-file" | "force-refuse" |
+"reset-chain-with-new-window", ownerActRef } — consumption-bound per
+§14.10.3; `reset-chain-with-new-window` starts a NEW chain (fresh
+receipt lineage, `deferralOf:null`, laundering counter restarts
+ONLY with the owner's explicit act, and the prior chain's standing
+notes stay reported until the terminal outcome lands). Deferral
+cannot livelock findings out of filing forever: without an owner,
+the frozen chain drains to force-file/force-refuse at needs-owner —
+the owner act is the ONLY reset, and it is recorded.) The v5-era sentence
 "every finding receipted before this line … participates" is
 superseded by the filing rule above (receipt alone never grants
 partition membership; the sentence's intent — include the previous
