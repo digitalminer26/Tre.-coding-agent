@@ -7629,7 +7629,33 @@ findings, terra is the auditor, run 5 cycles until clear"):
   ROUND EXTENDED (user budget): confirming cycles c7 and c8
   authorized — round clears on the FIRST CYCLE CLEAN among them.
 
-- AUD51 ROUND STATUS (2026-11-17, pre-extension): UNCONFIRMED — no cycle reached
+- AUD51-c7 (terra, HEAD 16f3185; CONFIRMING cycle 2 — NEW region:
+  read-side decision layer, owner-enumerated 25-row sweep): CYCLE
+  FINDINGS 5, all minor/TEST (owner-reproduced individually — each
+  mutant alone 137 OK at 16f3185; production behavior correct):
+  - P4 promote() post-resolve durability-pending refusal unpinned
+    (stubbed-OK resolve + pending window: mutant ran the callback);
+  - P5 promote() post-resolve exhaustion refusal unpinned (same
+    shape, sticky-X counter);
+  - P7 promote() malformed-AUTH refusal unpinned (healthy log + one
+    non-AUTH line: classify ok + malformed flag, mutant promoted);
+  - C3 classify framing `> LOG_CAP` vs `>=` unpinned at the exact
+    boundary (shrunk-cap fixture: >= flipped exactly-cap to unknown);
+  - K1 stage-3 malformed-AUTH named-basis rule unpinned (valid
+    REPAIR + malformed line appended AFTER the valid AUTH: mutant
+    kept the repair valid/ok).
+  P1 EQUIVALENT accepted on owner inspection: _resolve_locked
+  re-runs the strict journal gate under the same lock. Sweep:
+  20/25 killed by the existing suite; novel abort (recovery branch
+  witness -> counter-charge, c7-new): survivor PASS (owed witness
+  16 B, counter absent, pending (0,False), journal measured-verified
+  55 B/1 record, durability-pending). Spot-check 3/3 VERBATIM (F98
+  unique killer re-confirmed; 6d63ae6 historical repro; F97 A14).
+  FIXED by NEW PIN CLASS TestV38Cycle10Audit F99 (five cells, each
+  mutation-verified against its c7 variant: all five RED naming
+  F99, unique killers). 142 OK zero-warning x2. Commit 8bae545.
+
+- AUD51 ROUND CLOSED (2026-11-17, pre-extension): UNCONFIRMED — no cycle reached
   the CYCLE CLEAN verdict within max 5 (c1/c2: 0 findings but self-
   assessed INCOMPLETE on execution; c3/c4/c5: findings 2/5/4 — all
   minor, ALL accepted findings fixed and mutation-pinned by F93
