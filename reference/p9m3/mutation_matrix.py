@@ -493,12 +493,28 @@ def selftest_classifier():
         "two-deaths-is-ERROR": "not exactly one clean death",
     }
     bad = []
+    # Coverage check (post-audit): every case MUST declare its reason and
+    # every reason MUST belong to a case. A missing key used to fall back
+    # to "" (which every detail contains) and silently drop the reason
+    # check; a stale key hid a renamed case. Both now fail the battery.
+    names = [c[0] for c in cases]
+    if len(set(names)) != len(names):
+        bad.append("selftest: duplicate case names")
+    for n in names:
+        if n not in REASONS:
+            bad.append("selftest %s: no REASONS entry (reason check "
+                       "cannot be silently skipped)" % n)
+    for k in REASONS:
+        if k not in names:
+            bad.append("selftest REASONS key %r matches no case" % k)
     import builtins
     has_group = hasattr(builtins, "BaseExceptionGroup")
     work = tempfile.mkdtemp(prefix="mutmatrix-selftest-")
     try:
         for case in cases:
             name, source, target, want, expect_ran = case[:5]
+            if name not in REASONS:
+                continue  # already reported as a coverage failure above
             needs_group = len(case) > 5 and case[5]
             if needs_group and not has_group:
                 # Visible, never silently passed: this interpreter cannot
@@ -515,7 +531,7 @@ def selftest_classifier():
             # Verdict alone is not evidence (post-audit): the detail must
             # also carry the REASON this case exists to prove, so an
             # unrelated ERROR (driver crash, wrong death) cannot pass.
-            reason = REASONS.get(name, "")
+            reason = REASONS[name]
             ok = verdict == want and reason in detail
             print("SELFTEST %-36s %-5s %s (%s)"
                   % (name, verdict, "OK" if ok else "WANT %s/%r" % (want, reason),
