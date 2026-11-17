@@ -7576,3 +7576,45 @@ findings, terra is the auditor, run 5 cycles until clear"):
   Arabic-Indic arm). 133 OK zero-warning x2. Commit f6e4d1c.
   Clean tally: 0/1 — c5 is the round's LAST cycle (max 5): clean
   clears the round; findings close it UNCONFIRMED with residuals.
+
+- AUD51-c5 (terra, HEAD d0498df — audited code f6e4d1c; FINAL cycle
+  of the round; append/resolve-core sweep, all 24 rows reported):
+  CYCLE FINDINGS 4 — 3 ACCEPTED, 1 REFUTED, all minor/TEST:
+  - A11 post-write pending update must preserve intent 'R' (a
+    drop-intent variant left the unresolved window owned by the
+    wrong protocol) — accepted.
+  - A14 durable D must land only AFTER BOTH fsyncs (a D-before-dir-
+    fsync variant survived) — accepted.
+  - R3 resolve sequence's parent-dir fsync (drop-leg: zero dir
+    fsyncs observed) — accepted.
+  - M2 `_arm_owed` fallback-failure propagation — REFUTED: both
+    mutant shapes (suppress-always / suppress-only-on-double-
+    failure) RED via F68/F72/F74/F75/F78. Auditor mis-executed
+    (its repro bypassed the suite).
+  FIXED by NEW PIN CLASS TestV38Cycle8Audit F97 (three cells, each
+  mutation-verified: A11/A14/R3 RED naming their F97 cell; A14
+  pinned by asserting EVERY dir-fsync moment sees the record P —
+  the first draft's any-P assertion let the mutant through and was
+  fixed before accepting). 20/24 killed by the existing suite (the
+  2 documented EQUIVALENTs A7/A13 + 3 found); novel abort
+  (counter-zero -> _clear_owed entry, c5-new): survivor PASSes
+  (owed intact, counter 0, no OK served). Spot-check 3/3 VERBATIM.
+  136 OK zero-warning x2. Commit 05ac1fc.
+
+- AUD51 ROUND CLOSED (2026-11-17): UNCONFIRMED — no cycle reached
+  the CYCLE CLEAN verdict within max 5 (c1/c2: 0 findings but self-
+  assessed INCOMPLETE on execution; c3/c4/c5: findings 2/5/4 — all
+  minor, ALL accepted findings fixed and mutation-pinned by F93
+  (c1), F95 (c3), F96 (c4), F97 (c5); 1 refuted with owner repro).
+  RESIDUAL NOTE (why UNCONFIRMED ≠ at-risk): every finding across
+  the round was TEST STRENGTH (documented behavior correct but
+  unpinned) — the only PRODUCTION defect was c0's F-1 (hostile-
+  bytes crash in `_pending_intent`), fixed pre-round. The round
+  swept ALL FOUR regions (pending reader, journal, counter/owed/
+  sidecar, append/resolve) with owner-enumerated branch lists:
+  79 owner-given variants, 68 killed by suite, 6 proven EQUIVALENT,
+  9 real gaps pinned (F95/F96/F97 + F93 arms); 5 novel abort
+  boundaries, all survivors PASS their documented contracts; all
+  spot-checks VERBATIM across c2-c5. Final: 136 tests, zero-
+  warning x2, HEAD 05ac1fc. A CONFIRMING CLEAN cycle 6 is cheap
+  (same 24-row re-run); the round was closed at the user-set max.
