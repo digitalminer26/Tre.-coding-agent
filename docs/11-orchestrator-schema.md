@@ -2975,6 +2975,16 @@ the example-syntax clause below.**
   the drained `owner-act` record (which cites its `queueReceiptId`);
   this is why the envelope table has no queue-receipt row (transport
   buffer, not history — 14.12.2 step 5).
+- `quiesce-stall` — producer: supervisor finalization retry path (the
+  same process that owns the drain turn, on exceeding
+  `quiesceWaitMaxMs` — no timer daemon; the deadline is checked at
+  each finalization re-attempt and at every queue/log append inside
+  an engaged fence); fields `{ stalledCondition, classBefore:"B",
+  classAfter:"O", waitedMs, refConditionRecordIds[] }`; appended to
+  the LOG (class-B→O conversion is a log-visible fact, replayed by
+  recovery — recovery re-derives O for the stalled condition from
+  this record even if the wall clock elapsed while down)
+  (§14.12.2 finalization decision table, v9, c7-M13).
 - `scope-escape-resolution`, `partition`, `dispatch-authorization`,
   `submission-receipt`, `policy-revision`, `repro-run` — producers and
   fields as specified in place (14.14.4/.5, 14.12.4, 14.12.3, 14.12.2
