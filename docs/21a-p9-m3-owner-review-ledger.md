@@ -7210,3 +7210,60 @@ exhaustive-value census over declared seams found in
 one pass what two zero-finding auditor passes could
 not — the census is now a permanent test (F87), not a
 cycle activity.
+
+AUD49 CLOSE-RECORD AUDIT + WITHDRAWAL (2026-11-17, owner-run
+independent audit of the ROUND CLOSED entry — per the standing
+lesson that fresh-context audits of the RECORD itself find what
+scheduled cycles miss):
+- AUD49-R1 (major, RECORD, ACCEPTED): the close entry claims the
+  3-clean-cycle gate passed ("3 effective clean passes"), but the
+  retained transcripts say cycles 3 AND 4 ended **CYCLE
+  INCOMPLETE** (both verbatim: they could not render the round
+  clean without the asserted census), cycle 5's "3 effective"
+  phrasing re-labels incompletes as cleans without owner
+  authority. Gate status under the round-open definition: at
+  most ONE clean cycle (c2) + one clean cycle (c5, post-fix).
+  THE AUD49 CLOSE IS WITHDRAWN: AUD49 = OPEN-until-reverified;
+  its code work stands (no production defect found since), the
+  GATE EVIDENCE does not. AUD49 is closed only when the AUD50
+  cycles below satisfy the clean gate against the c5+ tree.
+- AUD49-R2 (major, TEST, ACCEPTED+FIXED bc0ef42): F87's
+  silent-drop cells never observed whether os.fsync RAN — the
+  always-skip mutant (consults the seam, drops the fsync even
+  at fault=False) passed all 120 tests. New F88 spies
+  os.open/os.fsync and asserts the durability EFFECT per seam
+  per value (bool + callable both directions, each seam varied
+  against the other's default); the R2 mutant AND three more
+  (always-do file, always-do dir, always-skip dir) KILLED,
+  each naming F88. 121 OK zero-warning.
+- AUD49-R3 (minor, DOC, ACCEPTED): the FINAL STATE tally mixed
+  counting conventions ("5 production defects ... 4
+  silent-always-on") — the four c5 fixes are: ONE callable-
+  value TypeError (sidecar_partial_write raw int()) + THREE
+  silent-always-on wirings (sidecar/sidecar-dir/resolve fsync
+  -io raw truthiness); the c1 repair-order item was PROVEN
+  safe (exposure closed, no shipped defect). Corrected tally:
+  AUD49 production fixes = 4 wiring fixes (one commit 7c0a7a3)
+  + 3 earlier-seam fixes (7d9ac0c: dispatch arity, partial
+  contract, leak) + 1 latent-leak batch (0d49e00); test pins
+  added F84-F88.
+
+## AUDIT ROUND AUD50 (2026-11-17, auditor: fresh-context
+gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
+
+- CLEAN-CYCLE DEFINITION (binding for this round, closes the
+  R1 ambiguity): a cycle counts CLEAN iff (a) its transcript
+  verdict is FINDINGS NONE / CLEAN (no ACCEPTED finding of any
+  severity), AND (b) it is not INCOMPLETE — every assignment in
+  its prompt was executed; incomplete cycles are carried, never
+  counted. Gate: 3 such cycles -> ROUND CLOSED; the round may
+  run up to 7 cycles before closing UNCONFIRMED with residual
+  notes.
+- SCOPE: HEAD bc0ef42 — the AUD49 c5 increment (7c0a7a3) +
+  F88 (bc0ef42) + the record corrections above; all AUD49
+  carried remainders (full state-space arms, threaded-race
+  proof, remaining fault matrix) stay in scope.
+- PRE-FOLD (the owner-run close-record audit): R1/R3 record
+  findings folded by this entry; R2 folded as F88 (test-only,
+  mutation-verified; production tree UNCHANGED by the fix —
+  the seam behavior itself was never wrong, its PIN was).
