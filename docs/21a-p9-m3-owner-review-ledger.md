@@ -7336,3 +7336,26 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   EXECUTED within its bounded scope; (4) c2 abs-mutant re-run
   RED vs F90. Not clean (1 accepted record finding). Clean
   tally: 0/3.
+
+- AUD50-c5 (terra, HEAD d918cf4): CYCLE FINDINGS — 2. All four
+  assignments DONE per bounded criteria. Full FsFaults field-
+  consumption audit: all 19 seams consumed at cited sites, no
+  probe.py/ledger.py contradiction. Mutant batch C: 3/5 killed
+  (D-marker-before-fsync F20/F35/F46; reset-clears-witness F62/
+  F70/F74/F75/F78; omit-creation-dir-fsync F87/F88); NOVEL
+  crash point SIGKILL at operator_resolve_reset counter-zero
+  ENTRY: survivor preserves counter+1/witness/pending — PASS
+  (novelty: F27,C7_3,F61/F62,F79,F85 checked). Record spot-
+  check 3/3 confirmed (c4 F79+F90 head-tail claim, sidecar
+  single-frame claim, c1 F89 re-consult claim all reproduced).
+  c5-F1 minor/TEST ACCEPTED+FIXED (this commit): malformed-
+  pending-token -> None mutant (garbage last-append reads 'no
+  window', decision ok) passed 123 — F91(a) pins fail-closed
+  pending per ledger.py:830-832; owner reproduced the mutant
+  first (OK, survived). c5-F2 minor/TEST ACCEPTED+FIXED: over-
+  cap-counter -> not-exhausted mutant passed 123 — F91(b) pins
+  the range-check exhaustion (valid `4 -` over cap 3 -> EXHAUSTED,
+  resolve refuses); owner reproduced (OK, survived). Both
+  mutants re-run post-fix: F91 RED (failures=1) each.
+  124 OK zero-warning. Not clean (2 accepted findings). Clean
+  tally: 0/3.
