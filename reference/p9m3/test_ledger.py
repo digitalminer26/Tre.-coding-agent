@@ -5055,6 +5055,76 @@ class TestV38Cycle6Audit(Base):
                          "_write_pending record must be 24 bytes "
                          "(ljust(23) mutant): %d" % size)
 
+    def test_F95_journal_frame_boundary_and_creation_dirfsync_effect(self):
+        """AUD51 cycle 3 (findings 1-2, minor test gaps, both
+        reproduced surviving 127): (a) the journal reader rejects an
+        UNTERMINATED trailing record (frame-boundary damage) — an
+        'accept the tail' variant (append a newline before parsing)
+        survived the suite: a complete record missing its newline
+        was never distinguished from damage; pinned here BOTH ways
+        (valid unterminated tail -> damage; terminated tail ->
+        parses). (b) `_journal_append` fsyncs the parent directory
+        when the journal file is CREATED by that call (same
+        durability contract F88 spies for sidecars) — dropping the
+        dir fsync survived 127; pinned with an os.open/os.fsync spy
+        asserting the DIR fsync effect runs exactly on creation,
+        not on the existing-file append."""
+        import p9m3.ledger as L
+        self.led = self.mk()
+        jp = os.path.join(self.dir, "repair_intent.jsonl")
+        # (a) unterminated tail is damage; the same bytes + "\n" parse
+        fd = os.open(jp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, b'{"t":"REPAIR-INTENT","authId":"A","at":1}')
+        finally:
+            os.close(fd)
+        with self.assertRaises(L.LedgerError):
+            self.led._journal_records()
+        fd = os.open(jp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, b'{"t":"REPAIR-INTENT","authId":"A","at":1}\n')
+        finally:
+            os.close(fd)
+        self.assertEqual(len(self.led._journal_records()), 1,
+                         "terminated record must parse (the reject-"
+                         "everything variant is not the contract)")
+        # (b) creation dir fsync effect (F88 spy recipe, journal path)
+        real_open, real_fsync = os.open, os.fsync
+        d2 = os.path.join(self.dir, "jdirfsync")
+        os.makedirs(d2, mode=0o700, exist_ok=True)
+        led2 = Ledger(d2)
+        opened, synced = {}, []
+
+        def spy_open(path, *a, _o=opened, _r=real_open):
+            fd = _r(path, *a)
+            _o[fd] = os.fspath(path)
+            return fd
+
+        def spy_fsync(fd, _o=opened, _s=synced, _r=real_fsync):
+            _s.append(_o.get(fd, "?"))
+            return _r(fd)
+
+        os.open, os.fsync = spy_open, spy_fsync
+        try:
+            led2._journal_append({"t": "REPAIR-INTENT", "authId": "A1",
+                                  "at": 1})
+            first = list(synced)
+            led2._journal_append({"t": "REPAIR-INTENT", "authId": "A2",
+                                  "at": 2})
+            second = list(synced)[len(first):]
+        finally:
+            os.open, os.fsync = real_open, real_fsync
+        self.assertTrue(
+            any(s == d2 for s in first)
+            and any(s.endswith("repair_intent.jsonl") for s in first),
+            "creating append must fsync BOTH the journal file and its "
+            "parent directory (drop-dir-fsync variant): %r" % (first,))
+        self.assertTrue(
+            all(not s.endswith(d2) and s != d2 for s in second)
+            and any(s.endswith("repair_intent.jsonl") for s in second),
+            "existing-journal append fsyncs the file, not the dir: "
+            "%r" % (second,))
+
     def test_F92_pending_int_offset_and_counter_grammar_edges(self):
         """AUD50 cycle 6 (findings 1-3, minor test gaps in the F91
         neighborhoods, all three reproduced surviving 124): (a)
