@@ -64,7 +64,9 @@ DRIVER = (
     "                  traceback.extract_tb(tb)]\n"
     "        tmod = sys.modules[type(test).__module__]\n"
     "        self.deaths.append([test.id(), kind, frames,\n"
-    "                            getattr(tmod, '__file__', '')])\n"
+    "                            getattr(tmod, '__file__', ''),\n"
+    "                            [c.__name__ for c in\n"
+    "                             type(err[1]).__mro__]])\n"
     "    def addError(self, test, err):\n"
     "        unittest.TestResult.addError(self, test, err)\n"
     "        self._die(test, 'error', err)\n"
@@ -85,7 +87,9 @@ DRIVER = (
     "            kind = 'fail' if issubclass(\n"
     "                err[0], AssertionError) else 'error'\n"
     "            self.deaths.append([test.id(), kind, frames,\n"
-    "                                getattr(tmod, '__file__', '')])\n"
+    "                                getattr(tmod, '__file__', ''),\n"
+    "                                [c.__name__ for c in\n"
+    "                                 err[0].__mro__]])\n"
     "res = Rec()\n"
     "suite = unittest.TestLoader().loadTestsFromName(sys.argv[1])\n"
     "suite.run(res)\n"
@@ -190,7 +194,11 @@ def run_test(root, target, timeout, expect_ran=None):
                      setUp/tearDown/loader deaths are NOT kills and
                      message text can no longer fake the frame)
       "ERROR"      - nothing proven: no record, bad count, zero
-                     declared count, death elsewhere, skips
+                     declared count, death elsewhere, skips, or an
+                     INFRASTRUCTURE error (SyntaxError/ImportError-
+                     family/FileNotFoundError/PermissionError/
+                     MemoryError) through the pin (post-audit: those
+                     prove nothing about the pin's assertion)
       "TIMEOUT"    - the run outlived `timeout`
     AUD54c1 f1: nonzero rc is NOT a kill. c1 f3: runner text is NOT
     trusted (out-of-band JSON only). c1 f2: `Ran 0 tests ... OK` is
@@ -243,9 +251,24 @@ def run_test(root, target, timeout, expect_ran=None):
     if len(deaths) != 1:
         return "ERROR", "not exactly one clean death: %d deaths (ran %d)" \
             % (len(deaths), ran)
-    tid, kind, frames, modfile = deaths[0]
+    tid, kind, frames, modfile = deaths[0][:4]
+    mro = deaths[0][4] if len(deaths[0]) > 4 else []
     if tid != target:
         return "ERROR", "the death is %r, not the named pin" % tid
+    # AUD54-post-audit finding: an error whose traceback passes through
+    # the pin is NOT a kill when the exception is an infrastructure
+    # failure — SyntaxError/ImportError (broken dependency, bad
+    # mutant copy, environment drift) proves nothing about the pin's
+    # assertion. The driver records the exception's MRO so this check
+    # cannot be fooled by message text or a re-raised wrapper.
+    infra = {"SyntaxError", "ImportError", "ModuleNotFoundError",
+             "FileNotFoundError", "PermissionError", "MemoryError",
+             "SystemExit", "KeyboardInterrupt"}
+    hit = infra.intersection(mro)
+    if kind == "error" and hit:
+        return "ERROR", ("error death is an infrastructure failure (%s) "
+                         "through the pin — not evidence of a kill"
+                         % ", ".join(sorted(hit)))
     method = target.rsplit(".", 1)[-1]
     # structured frame identity (c2 f1+f2): the death must pass
     # THROUGH the pin's own method in the test module — works for
@@ -260,7 +283,118 @@ def run_test(root, target, timeout, expect_ran=None):
         "assertion failure" if kind == "fail" else "error")
 
 
+def selftest_classifier():
+    """AUD54-post-audit finding: the CLASSIFIER itself must be tested
+    before it is trusted. A SyntaxError/ImportError raised inside the
+    pin used to score RED (traceback frames matched, exception type
+    never inspected) — an infrastructure failure masquerading as a
+    kill. Each case writes a probe module into a temp dir and asserts
+    the verdict: INFRA cases must be ERROR (no false RED) and real
+    kills must stay RED (the gate never silently over-ERRORs a
+    genuine kill — a mismatch either way prints and aborts the matrix
+    with exit 1)."""
+    cases = [
+        # (name, module source, target, expected verdict, expect_ran)
+        ("syntaxerror-raised-in-pin",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise SyntaxError('broken dependency')\n",
+         "m_infr_syntax.T.test_pin", "ERROR", None),
+        ("importerror-in-pin",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        import definitely_missing_module_xyz\n",
+         "m_infr_import.T.test_pin", "ERROR", None),
+        ("syntaxerror-at-module-import",
+         "def broken(:\n",
+         "m_infr_brokenmod.T.test_pin", "ERROR", None),
+        ("filenotfound-in-pin",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        open('/definitely/not/here/xyz')\n",
+         "m_infr_fnf.T.test_pin", "ERROR", None),
+        ("assertion-kill-stays-RED",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        self.assertEqual(1, 2)\n",
+         "m_kill_assert.T.test_pin", "RED", None),
+        ("expected-oserror-kill-stays-RED",
+         "import errno, unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise OSError(errno.EIO, 'device made no progress')\n",
+         "m_kill_oserror.T.test_pin", "RED", None),
+        ("subtest-kill-inside-pin-stays-RED",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        with self.subTest('branch'):\n"
+         "            self.fail('subtest death')\n",
+         "m_kill_subtest.T.test_pin", "RED", None),
+        ("skip-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        self.skipTest('not evidence')\n",
+         "m_gate_skip.T.test_pin", "ERROR", None),
+        ("xfail-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    @unittest.expectedFailure\n"
+         "    def test_pin(self):\n"
+         "        self.fail('expected failure')\n",
+         "m_gate_xfail.T.test_pin", "ERROR", None),
+        ("count-mismatch-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        pass\n",
+         "m_gate_count.T.test_pin", "ERROR", 2),
+        ("two-deaths-is-ERROR",
+         "import unittest\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        self.fail('death one')\n"
+         "    def test_sibling(self):\n"
+         "        self.fail('death two')\n",
+         "m_gate_multi.T", "ERROR", None),
+    ]
+    bad = []
+    work = tempfile.mkdtemp(prefix="mutmatrix-selftest-")
+    try:
+        for i, (name, source, target, want, expect_ran) in enumerate(cases):
+            mod = target.split(".")[0]
+            with open(os.path.join(work, mod + ".py"), "w") as f:
+                f.write(source)
+            verdict, detail = run_test(work, target, timeout=30,
+                                       expect_ran=expect_ran)
+            ok = verdict == want
+            print("SELFTEST %-36s %-5s %s (%s)"
+                  % (name, verdict, "OK" if ok else "WANT %s" % want,
+                     detail[:72]))
+            if not ok:
+                bad.append("selftest %s: got %s, want %s (%s)"
+                           % (name, verdict, detail, want))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return bad
+
+
 def main():
+    # A broken classifier cannot certify ANY kill: run its own battery
+    # first and abort loudly if a case misclassifies (post-audit:
+    # infra errors must never score RED).
+    st_fails = selftest_classifier()
+    if st_fails:
+        print("\nCLASSIFIER SELFTEST FAILED (%d):" % len(st_fails))
+        for f in st_fails:
+            print("  -", f)
+        return 1
+    print()
     src_dir = os.path.join(PKG, "p9m3")
     with open(os.path.join(src_dir, "ledger.py")) as f:
         src = f.read()
