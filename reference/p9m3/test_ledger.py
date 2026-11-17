@@ -5790,3 +5790,114 @@ class TestV38Cycle9Audit(Base):
         self.assertEqual(healed._read_counter(), 0)
         self.assertFalse(healed._owed_attempt())
         self.assertEqual(healed.status()["decision"], STATE_OK)
+
+
+class TestV38Cycle10Audit(Base):
+    """AUD51 cycle 7 (findings P4/P5/P7/C3/K1, minor test gaps — all
+    owner-reproduced surviving 137 at 16f3185; production behavior
+    correct in every repro, the pins are the evidence). Decision-
+    layer cells: the two post-resolve defensive refusals in the
+    binding promote() path, the malformed-AUTH binding refusal, the
+    exact LOG_CAP framing boundary, and the stage-3 rule that a
+    MALFORMED authorization file invalidates every REPAIR named in
+    it. (P1 of the c7 sweep was proven EQUIVALENT on inspection:
+    _resolve_locked re-runs the strict journal gate under the same
+    lock — no pin.)"""
+
+    def test_F99_promote_refuses_durability_pending_after_resolve(self):
+        """AUD51 c7 finding 1 (P4): the binding path refuses a
+        durability-pending window EVEN IF the resolve stage returned
+        OK — the check is defense-in-depth after _resolve_locked, so
+        it is pinned at the seam the contract speaks to (a resolve
+        stage returning OK must never bypass the pending refusal)."""
+        from unittest import mock
+        led = self.mk(repair_attempt_cap=3)
+        led._write_pending(0, False)         # unresolved window, no D
+        self.assertTrue(led.durability_pending())
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value={"state": STATE_OK,
+                                             "authorization_file_malformed": False}):
+            r = led.promote(lambda: {"allowed": "CALLBACK-RAN"})
+        self.assertEqual(r, {"allowed": False, "decision": STATE_PENDING},
+                         "a pending window must refuse binding promotion "
+                         "even on a resolve stage that answered OK (the "
+                         "P4 mutant ran the callback)")
+
+    def test_F99_promote_refuses_exhaustion_after_resolve(self):
+        """AUD51 c7 finding 2 (P5): sticky exhaustion refuses binding
+        promotion EVEN IF the resolve stage returned OK (same
+        defense-in-depth contract; the P5 mutant ran the callback)."""
+        from unittest import mock
+        led = self.mk(repair_attempt_cap=3)
+        led._write_counter(1, exhausted=True)
+        self.assertTrue(led._attempts_exhausted())
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value={"state": STATE_OK,
+                                             "authorization_file_malformed": False}):
+            r = led.promote(lambda: {"allowed": "CALLBACK-RAN"})
+        self.assertEqual(r, {"allowed": False, "decision": STATE_EXHAUSTED},
+                         "exhaustion must refuse binding promotion even "
+                         "on a resolve stage that answered OK")
+
+    def test_F99_promote_refuses_malformed_auth_file_naturally(self):
+        """AUD51 c7 finding 3 (P7): a classify that answers `ok` with
+        authorization_file_malformed=True must NOT promote — the
+        binding refusal decision is AUTH_FILE_MALFORMED, reached
+        naturally (healthy log + one non-AUTH line in the auth file,
+        zero stubs; the P7 mutant ran the callback)."""
+        led = self.mk()
+        with open(led.auth_path, "wb") as f:
+            f.write(b"this is not an AUTH line\n")
+        cls = led.classify()
+        self.assertEqual(cls["state"], STATE_OK)
+        self.assertTrue(cls["authorization_file_malformed"])
+        r = led.promote(lambda: {"allowed": "CALLBACK-RAN"})
+        self.assertEqual(r, {"allowed": False,
+                             "decision": AUTH_FILE_MALFORMED},
+                         "a malformed authorization file must refuse "
+                         "binding promotion whatever classify answered")
+
+    def test_F99_log_cap_boundary_is_strictly_greater(self):
+        """AUD51 c7 finding 4 (C3): the framing bound is `len > LOG_CAP`
+        — data EXACTLY at the cap is readable and classifies; only
+        past-cap is `unknown`. Pinned under a shrunk LOG_CAP (the
+        constant is module-global; the mutant `>=` flipped the
+        exactly-cap row to unknown)."""
+        from unittest import mock
+        with mock.patch("p9m3.ledger.LOG_CAP", 4):
+            led = self.mk()
+            self.seed(b"   \n")               # exactly 4 bytes
+            self.assertEqual(led.classify()["state"], STATE_OK,
+                             "data exactly AT the cap classifies (the C3 "
+                             "mutant answered unknown)")
+            self.seed(b"   \nx\n")            # 6 bytes: past the cap
+            self.assertEqual(led.classify()["state"], STATE_UNKNOWN,
+                             "past-cap still unknown")
+
+    def test_F99_malformed_auth_file_invalidates_named_repairs(self):
+        """AUD51 c7 finding 5 (K1): stage 3 names a REPAIR's auth ONLY
+        through an authorization file that is WELL-FORMED — once the
+        file turns malformed, the REPAIR loses its named basis
+        (valid_repairs 0, decision unmasked-malformed), it does not
+        stay valid on the half of the file that parsed (the K1
+        mutant kept the repair valid: state ok, 1 valid repair)."""
+        corrupt = CORRUPT + b"-k1"
+        self.seed_at([(0, corrupt)])
+        self.led = self.mk()
+        auth = self.led.authorize([self.occ(0, corrupt)], auth_id="A1",
+                                  test_only=True)
+        self.assertEqual(self.led.repair(auth)["outcome"], "repaired")
+        cls = self.led.classify()
+        self.assertEqual(cls["state"], STATE_OK)
+        self.assertEqual(len(cls["valid_repairs"]), 1)
+        # the same-file flip: one malformed line AFTER the valid AUTH
+        with open(self.led.auth_path, "ab") as f:
+            f.write(b"garbage-not-auth\n")
+        cls2 = self.led.classify()
+        self.assertTrue(cls2["authorization_file_malformed"])
+        self.assertEqual(cls2["state"], STATE_UNMASKED,
+                         "the masked occurrence re-surfaces once its "
+                         "authorization basis is malformed")
+        self.assertEqual(cls2["valid_repairs"], [],
+                         "a REPAIR named in a malformed auth file is DEAD "
+                         "(named-basis rule), not valid-on-partial-parse")
