@@ -1,3 +1,59 @@
+## 2026-11-17 — AUD51 round CLOSED (max 5 cycles, no CLEAN → UNCONFIRMED; all findings fixed+pinned); RESUME POINT: optional CONFIRMING cycle 6 ready to kick after reboot
+
+**State on disk (all committed; clean tree expected at resume — verify
+`git status --porcelain` is empty apart from untracked strays):**
+- HEAD chain: `5d99b3f` (docs 21a: c5 entry + round-closure note) ←
+  `05ac1fc` (F97 tests) ← `d0498df` (docs c4) ← `f6e4d1c` (F96) ←
+  `0997afc` (docs c3) ← `f134600` (F95).
+- `reference/p9m3/ledger.py`: **frozen — no production change since the
+  c0 fix**; every c1–c5 finding was test-strength (correct behavior,
+  missing pin). `reference/p9m3/test_ledger.py`: **136 tests, F61–F97**,
+  zero-warning gate (`cd reference && python3 -W error::ResourceWarning
+  -m unittest p9m3.test_ledger`) passed TWICE at 05ac1fc.
+- Round trajectory: c1 0f / c2 0f (both self-assessed INCOMPLETE on
+  execution — the owner then switched to ENUMERATED branch lists, which
+  fixed the prompt defect) / c3 2f → F95 / c4 5f → F96 / c5 4f → F97
+  (3 accepted) + 1 REFUTED (M2: owner repro showed both mutant shapes
+  die to F68/F72/F74/F75/F78). Max 5 hit with no CYCLE CLEAN → closed
+  UNCONFIRMED per the round-open gate (docs/21a end carries the full
+  entry + residual note: the only production defect of the whole round
+  was c0's `_pending_intent` hostile-bytes crash, fixed pre-round).
+
+**TO RESUME (confirming cycle 6 — the only open option):**
+1. Prompt is PRE-WRITTEN and reboot-safe:
+   `~/.tre/audits/aud51-c6-prompt.txt` (c5's 24-row append/resolve
+   table re-run on the fixed code + new abort-boundary recipe + 3
+   spot-checks quoting the c5 21a entry verbatim; the three F97 rows
+   A11/A14/R3 are marked "must kill now", M2 row marked "c5 REFUTED —
+   verify the suite kills it").
+2. Kick: `sh ~/.tre/audits/aud51-kick.sh 6` (model defaults to
+   gpt-6.1-terra; refuses if `aud51-c6-sess.jsonl` exists — fresh
+   context is binding). ~4–6 min; watch
+   `/Users/xilcilus/.tre/audits/aud51-c6-out.txt` (err in
+   `aud51-c6-err.txt`, pid in `aud51-c6.pid`).
+3. On completion read the tail for the verdict line:
+   - `CYCLE CLEAN` → append the c6 entry to docs/21a, then REPLACE the
+     round-closure line's status UNCONFIRMED → **CONFIRMED CLEAN (c6)**
+     (keep the note that c1–c5 never hit clean — the clean criterion
+     was re-specified as one confirming clean cycle on the fixed code),
+     commit docs, Telegram summary. Round done for real.
+   - `CYCLE FINDINGS — n` → owner-repro each finding in a tmp copy
+     (`tmp_aud51c6owner/`, mutation-verify the new pin kills it before
+     accepting), add F98 pin(s), commit test+docs, then decide whether
+     the user extends the cycle budget for a c7 confirming pass.
+   - `CYCLE INCOMPLETE` → treat per the c3 lesson: do NOT re-run the
+     same prompt blindly; enumerate the missing rows into the next
+     prompt explicitly.
+4. Gate hygiene at resume: re-run the double suite ONCE before kicking
+   (should be 136 OK × 2 zero-warning). Telegram standing pref: send
+   the short summary when the cycle lands.
+
+**Artifacts map (reboot-safe, all outside the repo):** prompts
+`~/.tre/audits/aud51-c{1..6}-prompt.txt`; per-cycle
+`aud51-c<N>-{out,err}.txt`, `aud51-c<N>-sess.jsonl`, `aud51-c<N>.pid`;
+kick script `aud51-kick.sh` (usage comment inside). c1 ran as
+attempt1/attempt2 (attempt1 INCOMPLETE — archived side by side).
+
 ## 2026-11-15 — P9/M3 reference impl (v38 cycle-5) LANDED in working tree; next goal: AUTOMATE the audit-fix loop — ORCHESTRATION GAP documented (not yet built)
 
 **Current workstream (p9m3 reference ledger/probe — `reference/p9m3/`,
