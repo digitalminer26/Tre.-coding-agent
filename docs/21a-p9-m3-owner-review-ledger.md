@@ -7423,3 +7423,41 @@ was NOT run):
   overclaim-vs-transcript — corrected in place); (4) provider
   response filters can abort an audit run mid-stream (c6 att.1)
   — validate cycle output size before counting.
+
+AUD51 ROUND — OPEN (2026-11-17, owner instruction: "address the
+findings, terra is the auditor, run 5 cycles until clear"):
+- GATE DEFINITION (owner, round-open, binding): a cycle is CLEAN
+  iff its report is 'CYCLE CLEAN' (zero accepted findings AND all
+  bounded assignments executed — AUD50's definition unchanged).
+  Unlike AUD50's 3-clean gate, this round CLEARS ON THE FIRST
+  CLEAN CYCLE (user: "until clear"); max 5 cycles; if all 5 have
+  findings the round closes UNCONFIRMED with residual notes.
+- CYCLE 0 (owner, pre-round — user-delivered terra findings
+  F-1..F-4, all ACCEPTED+FIXED at commit 2767d1c):
+  - F-1 HIGH PRODUCTION `_pending_intent`: decoded the record raw
+    (non-UTF8 bytes -> UnicodeDecodeError CRASH, not fail-closed)
+    and echoed ANY 3rd token as the intent. Fixed: decode with
+    errors='replace', strict ASCII-digit offset grammar, intent
+    restricted to {-, R}. Repro owner-ran: hostile bytes crashed
+    the read pre-fix.
+  - F-2 minor/DOC `clear_partial_write`: docstring implied the
+    OWED record survives a mid-clear abort "untouched"; actual
+    invariant (verified): abort happens BEFORE tail-first zeroing
+    reaches the OWED head, so the record still READS OWED —
+    'untouched' was not a byte-preservation claim for
+    non-canonical witnesses. Docstring corrected to the invariant.
+  - F-3 minor/TEST F90 lacked a non-canonical witness arm: added
+    hostile 0xAA*16 witness (written 0600 via os.open to pass the
+    access-control check) pinning raw-shape fail-closed
+    (_owed_attempt is True, first 4 bytes intact).
+  - F-4 minor/TEST F89's 'first-then-hostile' predicate never
+    flipped (returned 4 always == the counting arm): fixed to
+    `4 if len(calls)==1 else None`.
+  - NEW PIN F93 `test_F93_pending_strict_token_grammar_fails_
+    closed`: negative offset / bogus intent token / non-UTF8
+    bytes / Arabic-Indic digits (which raw int() ACCEPTS — the
+    isdigit-vs-ASCII hole) all fail closed to (0, False, '-').
+    Mutation-verified as a batch: oldgrammar, unicode_digits
+    (isdigit without isascii), intent_echo, sidecar reconsult,
+    abs_partial — all 5 RED naming their pins; 126 OK
+    zero-warning x2.
