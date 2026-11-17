@@ -1,4 +1,4 @@
-"""Fixture suite F1-F91 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F92 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -4901,6 +4901,66 @@ class TestV38Cycle6Audit(Base):
                      and not promo and heal == STATE_OK,
                      "POST-consumption fault: raises, owed stays, never "
                      "ok, no promotion, heals healthy")
+
+    def test_F92_pending_int_offset_and_counter_grammar_edges(self):
+        """AUD50 cycle 6 (findings 1-3, minor test gaps in the F91
+        neighborhoods, all three reproduced surviving 124): (a)
+        `_read_pending` int-offset ValueError branch (ledger.py:835)
+        -> None mutant reads a corrupt pending record as 'no window';
+        (b) `_parse_counter` EXISTING-but-corrupt final return
+        (ledger.py:468-469, the cap+1/True fail-closed) -> (0,False)
+        mutant — F34's corpus never reaches this branch because its
+        entries are SHORT files caught by the length check, so only
+        a GRAMMAR-failing record padded to exactly 16 bytes
+        exercises it; (c) the over-cap range check is STRICT `n >
+        cap` (ledger.py:465): an `n >= cap` mutant makes the
+        exactly-cap valid record `cap -` exhausted — pin the
+        boundary BOTH ways (cap -> live/not-exhausted; cap+1 ->
+        exhausted, the latter already pinned by F91(b))."""
+        import p9m3.ledger as L
+        # (a) valid token shape, non-integer offset -> fail closed
+        self.led = self.mk()
+        self.led.append_watermark("H0", 1, "G0")
+        side = os.path.join(self.dir, "last-append")
+        fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, b"abc D R")
+        os.close(fd)
+        rec = self.led._read_pending()
+        self.assertTrue(
+            rec is not None and rec == (0, False)
+            and self.led.durability_pending()
+            and self.led.status()["decision"] == STATE_PENDING,
+            "non-integer pending offset must fail CLOSED as pending "
+            "(None mutant reads 'no window' -> ok): %r" % (rec,))
+        # (b) grammar-failing record of EXACTLY 16 bytes
+        cdir = os.path.join(self.dir, "gram16")
+        os.makedirs(cdir, mode=0o700, exist_ok=True)
+        side = os.path.join(cdir, "resolve-attempts")
+        fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, b"two -" + b"\0" * 11)     # exactly 16, bad grammar
+        os.close(fd)
+        led2 = Ledger(cdir, repair_attempt_cap=3)
+        n, exh = led2._parse_counter()
+        self.assertTrue(
+            n == 4 and exh is True and led2._attempts_exhausted(),
+            "grammar-failing FULL-WIDTH record must parse (cap+1, "
+            "True) — the length-check branch cannot catch it: %r"
+            % ((n, exh),))
+        with self.assertRaises(L.LedgerError) as cm:
+            led2.resolve()
+        self.assertEqual(cm.exception.code, STATE_EXHAUSTED)
+        # (c) strict boundary: exactly cap stays LIVE (not exhausted)
+        side = os.path.join(cdir, "resolve-attempts")
+        fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, b"3 -" + b"\0" * 13)
+        os.close(fd)
+        led3 = Ledger(cdir, repair_attempt_cap=3)
+        n, exh = led3._parse_counter()
+        self.assertTrue(
+            n == 3 and exh is False
+            and led3._attempts_exhausted() is False,
+            "exactly-cap valid record is LIVE, not exhausted "
+            "(`>=' mutant exhausts it): %r" % ((n, exh),))
 
     def test_F91_malformed_pending_and_overcap_counter_fail_closed(self):
         """AUD50 cycle 5 (findings 1+2, minor test gaps): two

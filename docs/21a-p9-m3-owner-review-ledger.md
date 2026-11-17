@@ -7359,3 +7359,27 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   mutants re-run post-fix: F91 RED (failures=1) each.
   124 OK zero-warning. Not clean (2 accepted findings). Clean
   tally: 0/3.
+
+- AUD50-c6 (terra, HEAD 4218dd8): CYCLE FINDINGS — 3. (Attempt
+  1 aborted on a provider response-filter trip mid-run, invalid,
+  not counted; attempt 2 complete.) New-pin neighborhood sweep
+  (assignment 1): c5's fix neighborhoods STILL had unpinned
+  fail-closed branches — the sweep's systemic bet paid: c6-F1
+  minor/TEST ACCEPTED+FIXED: `_read_pending` int-offset
+  ValueError branch -> None mutant survived 124 (corrupt
+  'abc D R' reads 'no window'); c6-F2 minor/TEST ACCEPTED+
+  FIXED: `_parse_counter` corrupt-final-return -> (0,False)
+  mutant survived 124 (F34's corpus is all SHORT files — the
+  length branch masks the grammar branch; a GRAMMAR-failing
+  record padded to exactly 16 bytes reaches it); c6-F3 minor/
+  TEST ACCEPTED+FIXED: over-cap check is strict `n > cap`; the
+  `>=` mutant survived 124 (exactly-cap `3 -` record would go
+  exhausted). All three reproduced surviving 124 by the owner,
+  all three pinned by F92 (pending fail-closed on non-int
+  offset; full-width grammar-fail -> (cap+1,True)+EXHAUSTED;
+  exactly-cap LIVE boundary both sides) and all three re-run
+  RED naming F92 (failures=1 each). Note: the c6 prompt header
+  carried a stale suite count (123 vs actual 124) — owner-side
+  prompt-template noise, corrected here; not a code/record
+  finding against prior entries. 125 OK zero-warning. Not
+  clean (3 accepted findings). Clean tally: 0/3.
