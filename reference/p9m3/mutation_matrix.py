@@ -72,6 +72,10 @@ DRIVER = (
     "            return True\n"
     "        stack.append(e.__cause__)\n"
     "        stack.append(e.__context__)\n"
+    "        # exception groups (3.11+): members are part of the chain\n"
+    "        subs = getattr(e, 'exceptions', None)\n"
+    "        if isinstance(subs, tuple):\n"
+    "            stack.extend(subs)\n"
     "    return False\n"
     "class Rec(unittest.TestResult):\n"
     "    def __init__(self):\n"
@@ -398,6 +402,40 @@ def selftest_classifier():
          "        with self.subTest('b'):\n"
          "            raise ImportError('dependency failed')\n",
          "m_infr_sub.T.test_pin", "ERROR", None),
+        # Stand-in group (an Exception with an `exceptions` tuple, the
+        # same attribute BaseExceptionGroup exposes) so the member walk
+        # is exercised on EVERY interpreter, not just 3.11+.
+        ("group-infra-member-is-ERROR",
+         "import unittest\n"
+         "class G(Exception):\n"
+         "    def __init__(self, msg, members):\n"
+         "        super().__init__(msg)\n"
+         "        self.exceptions = tuple(members)\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise G('dependency', [ImportError('missing')])\n",
+         "m_infr_eg.T.test_pin", "ERROR", None),
+        ("nested-group-infra-is-ERROR",
+         "import unittest\n"
+         "class G(Exception):\n"
+         "    def __init__(self, msg, members):\n"
+         "        super().__init__(msg)\n"
+         "        self.exceptions = tuple(members)\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        inner = G('inner', [FileNotFoundError('x')])\n"
+         "        raise G('outer', [ValueError('ok'), inner])\n",
+         "m_infr_eg2.T.test_pin", "ERROR", None),
+        ("group-non-infra-stays-RED",
+         "import unittest\n"
+         "class G(Exception):\n"
+         "    def __init__(self, msg, members):\n"
+         "        super().__init__(msg)\n"
+         "        self.exceptions = tuple(members)\n"
+         "class T(unittest.TestCase):\n"
+         "    def test_pin(self):\n"
+         "        raise G('domain', [ValueError('bad value')])\n",
+         "m_kill_eg.T.test_pin", "RED", None),
         ("user-class-named-ImportError-stays-RED",
          "import unittest\n"
          "class ImportError(Exception):\n"
