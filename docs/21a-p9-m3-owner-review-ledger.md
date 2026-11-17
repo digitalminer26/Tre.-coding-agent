@@ -7383,3 +7383,43 @@ gpt-6.1-terra per owner instruction, 5 cycles — OPEN)
   prompt-template noise, corrected here; not a code/record
   finding against prior entries. 125 OK zero-warning. Not
   clean (3 accepted findings). Clean tally: 0/3.
+
+AUD50 ROUND STATUS — CLOSED UNCONFIRMED (2026-11-17, owner
+decision at 6 effective cycles: c1,c2,c3(att.3; att.1 incomplete,
+att.2 invalid-session harness defect),c4,c5,c6 — one cycle
+BEYOND the owner's 5-cycle instruction; the prepared c7 prompt
+was NOT run):
+- CLEAN GATE: 0/3 clean cycles — every cycle returned accepted
+  findings (minor-only after c1), so the binding 3-clean gate was
+  never met. Per the round-open up-to-7 rule the round closes
+  UNCONFIRMED WITH RESIDUAL NOTES rather than claiming clean.
+- WHAT THE 6 CYCLES ESTABLISH (verified work, independent of the
+  gate): PRODUCTION CODE IS STABLE — git diff 7c0a7a3..HEAD on
+  ledger.py is ONE docstring hunk (F90 contract); every finding
+  after AUD49 c5 was test-strength or record accuracy, and every
+  one was reproduced by the owner before accepting, fixed with a
+  mutation-verified pin (F88 F89 F90 F91 F92; +41 pins F61-F92
+  suite now 125, zero-warning), and re-run RED against its
+  mutant. Carried remainders EXECUTED in bounded scope: the
+  consuming-pair fault matrix (c4, 10/10 PASS incl. charge/
+  witness/marker retention), 4 crash points (c3/c5 survivors
+  all PASS), full 19-seam consumption/probe-consistency table
+  (c5, no dead seam, no contradiction), dispatch-revert kills x2
+  sweeps (c1/c4), 20+ novel mutants (killed or pinned).
+- RESIDUAL (honest): the neighborhood-sweep pattern kept paying
+  pin gaps every cycle (c5: 2, c6: 3) with NO drop to zero — a
+  fresh sweep of a different neighborhood would plausibly find
+  more UNPINNED fail-closed branches (test-strength debt, not
+  demonstrated wrong behavior). The suite is strong; 'clean'
+  by the strict definition remains unproven. A future round
+  should sweep the c4-matrix fixture area and the append/
+  settle seams' branch neighborhoods.
+- PROCESS LESSONS LANDED: (1) kick script now REFUSES an existing
+  session file (c3 att.2 resumed a prior context — invalid
+  cycle); (2) auditor prompts must carry BOUNDED per-assignment
+  DONE-criteria + no-self-scope-extension (c3's honest
+  self-incompletes came from unbounded assignments); (3) record
+  entries must match transcripts verbatim (c3-F1/c4-F1 both
+  overclaim-vs-transcript — corrected in place); (4) provider
+  response filters can abort an audit run mid-stream (c6 att.1)
+  — validate cycle output size before counting.
