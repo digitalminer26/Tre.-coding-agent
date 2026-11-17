@@ -1516,9 +1516,17 @@ doc (v2, blocker fix — replay can reconstruct `norms.json` from
   transition commits** — creation and drafting of a successor change
   nothing about the predecessor. At the successor's ratification
   commit, the supervisor appends the predecessor's `superseded`
-  transition as an inseparable part of the same append transaction
-  (one critical section; either both lines exist or neither — a
-  half-applied pair is a malformed log ⇒ fail closed, `needs-owner`).
+  transition as **one JSONL line pair flushed in a single write() under
+  the S5 lock** — an `atomic-group` framing the S5 writer guarantees:
+  lines carry a shared `atomicGroupId` and the writer emits the group
+  with one buffer flush (bytes are contiguous in the file), and the
+  replay rule is group-aware — a half-group (successor `ratified`
+  without the paired predecessor `superseded` inside the same
+  complete-line group, delimited by the trailing newline of the group's
+  last line) is a torn tail: the reader discards the incomplete group
+  entirely (the successor stays drafted) and re-derives, exactly as S5
+  treats a torn final line. A group appearing mid-log (not at the tail)
+  that is still half ⇒ malformed log ⇒ fail closed, `needs-owner`.
   **Current-norm selection:** the current norm for a `{doc, anchor}`
   locant is the unique non-superseded `ratified` norm with that locant;
   zero ⇒ none (code-fix intake refuses `norm-unknown`); more than one
