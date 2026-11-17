@@ -92,7 +92,7 @@ DRIVER = (
     "        tmod = sys.modules[type(test).__module__]\n"
     "        self.deaths.append([test.id(), kind, frames,\n"
     "                            getattr(tmod, '__file__', ''),\n"
-    "                            _infra(err[1])])\n"
+    "                            _infra(err[1]), type(err[1]).__name__])\n"
     "    def addError(self, test, err):\n"
     "        unittest.TestResult.addError(self, test, err)\n"
     "        self._die(test, 'error', err)\n"
@@ -114,7 +114,7 @@ DRIVER = (
     "                err[0], AssertionError) else 'error'\n"
     "            self.deaths.append([test.id(), kind, frames,\n"
     "                                getattr(tmod, '__file__', ''),\n"
-    "                                _infra(err[1])])\n"
+    "                                _infra(err[1]), err[0].__name__])\n"
     "res = Rec()\n"
     "suite = unittest.TestLoader().loadTestsFromName(sys.argv[1])\n"
     "suite.run(res)\n"
@@ -276,7 +276,7 @@ def run_test(root, target, timeout, expect_ran=None):
     if len(deaths) != 1:
         return "ERROR", "not exactly one clean death: %d deaths (ran %d)" \
             % (len(deaths), ran)
-    tid, kind, frames, modfile, infra_hit = deaths[0]
+    tid, kind, frames, modfile, infra_hit, exc_name = deaths[0]
     if tid != target:
         return "ERROR", "the death is %r, not the named pin" % tid
     # AUD54-post-audit: an infrastructure failure anywhere in the
@@ -286,8 +286,8 @@ def run_test(root, target, timeout, expect_ran=None):
     # to an infra type, so `kind` is not trusted for this check).
     if infra_hit:
         return "ERROR", ("death is an infrastructure failure in the "
-                         "exception chain (%s kind) — not evidence "
-                         "of a kill" % kind)
+                         "exception chain (%s, %s kind) — not evidence "
+                         "of a kill" % (exc_name, kind))
     method = target.rsplit(".", 1)[-1]
     # structured frame identity (c2 f1+f2): the death must pass
     # THROUGH the pin's own method in the test module — works for
@@ -298,8 +298,8 @@ def run_test(root, target, timeout, expect_ran=None):
                and fr[1] == method for fr in frames):
         return "ERROR", ("%s death named the pin but never ran its "
                          "method body (setUp/tearDown/loader?)" % kind)
-    return "RED", "1 %s through the pin's own method" % (
-        "assertion failure" if kind == "fail" else "error")
+    return "RED", "1 %s through the pin's own method (%s)" % (
+        "assertion failure" if kind == "fail" else "error", exc_name)
 
 
 def selftest_classifier():
@@ -466,6 +466,32 @@ def selftest_classifier():
          "        self.fail('death two')\n",
          "m_gate_multi.T", "ERROR", None),
     ]
+    # Required REASON substring per case: the failure path each probe
+    # exists to exercise. Group cases also pin the exception type so a
+    # wrong exception cannot satisfy them.
+    REASONS = {
+        "syntaxerror-raised-in-pin": "infrastructure failure",
+        "importerror-in-pin": "infrastructure failure",
+        "syntaxerror-at-module-import": "driver wrote no record",
+        "filenotfound-in-pin": "infrastructure failure",
+        "assertion-kill-stays-RED": "through the pin's own method",
+        "expected-oserror-kill-stays-RED": "through the pin's own method",
+        "subtest-kill-inside-pin-stays-RED": "through the pin's own method",
+        "skip-is-ERROR": "skips/expected-results",
+        "xfail-is-ERROR": "skips/expected-results",
+        "count-mismatch-is-ERROR": "expected exactly",
+        "wrapped-importerror-is-ERROR": "infrastructure failure",
+        "context-chained-infra-is-ERROR": "infrastructure failure",
+        "failureexception-remapped-infra-is-ERROR": "infrastructure failure",
+        "subtest-remapped-infra-is-ERROR": "infrastructure failure",
+        "ordinary-exceptions-attr-not-walked-RED": "(DomainError)",
+        "ordinary-exceptions-attr-str-members-RED": "(DomainError)",
+        "realgroup-infra-member-is-ERROR": "(ExceptionGroup, error kind)",
+        "realgroup-nested-infra-is-ERROR": "(ExceptionGroup, error kind)",
+        "realgroup-non-infra-stays-RED": "through the pin's own method (ExceptionGroup)",
+        "user-class-named-ImportError-stays-RED": "through the pin's own method (ImportError)",
+        "two-deaths-is-ERROR": "not exactly one clean death",
+    }
     bad = []
     import builtins
     has_group = hasattr(builtins, "BaseExceptionGroup")
@@ -486,13 +512,17 @@ def selftest_classifier():
                 f.write(source)
             verdict, detail = run_test(work, target, timeout=30,
                                        expect_ran=expect_ran)
-            ok = verdict == want
+            # Verdict alone is not evidence (post-audit): the detail must
+            # also carry the REASON this case exists to prove, so an
+            # unrelated ERROR (driver crash, wrong death) cannot pass.
+            reason = REASONS.get(name, "")
+            ok = verdict == want and reason in detail
             print("SELFTEST %-36s %-5s %s (%s)"
-                  % (name, verdict, "OK" if ok else "WANT %s" % want,
+                  % (name, verdict, "OK" if ok else "WANT %s/%r" % (want, reason),
                      detail[:72]))
             if not ok:
-                bad.append("selftest %s: got %s, want %s (%s)"
-                           % (name, verdict, detail, want))
+                bad.append("selftest %s: got %s (%s), want %s with reason %r"
+                           % (name, verdict, detail, want, reason))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return bad
