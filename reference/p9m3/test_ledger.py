@@ -1,4 +1,4 @@
-"""Fixture suite F1-F85 (+ the C6_* v38-cycle-6 audit pins) for the
+"""Fixture suite F1-F88 (+ the C6_* v38-cycle-6 audit pins) for the
 P9/M3 reference implementation — coverage BY FIXTURE FAMILY, not one
 test per label: F14 pinned inside test_F9_F14, F15's behavior pinned
 by test_F6 (duplicate spec row), V33 rows F23/F25 share numbers with
@@ -4901,6 +4901,62 @@ class TestV38Cycle6Audit(Base):
                      and not promo and heal == STATE_OK,
                      "POST-consumption fault: raises, owed stays, never "
                      "ok, no promotion, heals healthy")
+
+    def test_F88_silent_fsync_seams_really_suppress_their_fsync(self):
+        """AUD49-close audit finding (major, test strength): F87's
+        silent-drop cells assert payload-lands + predicate-consulted
+        but never observed WHETHER THE FSYNC RAN — a mutant that
+        consults the seam then skips os.fsync in EVERY case (fault
+        False included) passed all 120 tests. These cells SPY
+        os.open/os.fsync and assert the durability effect itself:
+        the sidecar FILE fsync runs iff `sidecar_fsync_fault` is
+        falsy; the creation-DIR fsync runs iff
+        `sidecar_dir_fsync_fault` is falsy — bool values AND both
+        directions of a callable predicate (each seam varied, the
+        other left at its False default)."""
+        real_open, real_fsync = os.open, os.fsync
+        for seam in ("sidecar_fsync_fault", "sidecar_dir_fsync_fault"):
+            file_seam = seam == "sidecar_fsync_fault"
+            for val, tag, active in (
+                    (False, "False", False),
+                    (True, "True", True),
+                    (lambda p=None: bool(p), "callable-True", True),
+                    (lambda p=None: not bool(p), "callable-False",
+                     False)):
+                d = os.path.join(self.dir, "fsynspy_%s_%s" % (seam, tag))
+                os.makedirs(d, mode=0o700, exist_ok=True)
+                led = Ledger(d, faults=FsFaults(**{seam: val}),
+                             repair_attempt_cap=3)
+                opened, synced = {}, []
+
+                def spy_open(path, *a, _o=opened, _r=real_open):
+                    fd = _r(path, *a)
+                    _o[fd] = os.fspath(path)
+                    return fd
+
+                def spy_fsync(fd, _o=opened, _s=synced, _r=real_fsync):
+                    _s.append(_o.get(fd, "?"))
+                    return _r(fd)
+
+                err = None
+                os.open, os.fsync = spy_open, spy_fsync
+                try:
+                    led._write_owed()
+                except OSError:
+                    err = sys.exc_info()[1]
+                finally:
+                    os.open, os.fsync = real_open, real_fsync
+                got_file = any(s.endswith("resolve-owed") for s in synced)
+                got_dir = d in synced
+                want_file = not (file_seam and active)
+                want_dir = not ((not file_seam) and active)
+                self.assertTrue(
+                    err is None and got_file is want_file
+                    and got_dir is want_dir,
+                    "fsync-spy cell %s/%s: no-error=%s file-fsync=%s "
+                    "(want %s) dir-fsync=%s (want %s) synced=%r"
+                    % (seam, tag, err is None, got_file, want_file,
+                       got_dir, want_dir, synced))
 
     def test_F85_true_crash_pins_seed_before_fill_repair_order(self):
         """AUD49 c1 (finding 3): the repair's SEED-BEFORE-FILL order is
