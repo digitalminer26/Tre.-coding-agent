@@ -7601,7 +7601,35 @@ findings, terra is the auditor, run 5 cycles until clear"):
   (owed intact, counter 0, no OK served). Spot-check 3/3 VERBATIM.
   136 OK zero-warning x2. Commit 05ac1fc.
 
-- AUD51 ROUND CLOSED (2026-11-17): UNCONFIRMED — no cycle reached
+- AUD51-c6 (terra, HEAD 6d63ae6 — docs-only successors of the
+  audited 05ac1fc; CONFIRMING cycle re-running the c5 24-row
+  append/resolve table on the fixed code): CYCLE FINDINGS 1:
+  - M2 double-failure shape — the c5 REFUTED note was WRONG about
+    that shape (its spot-check re-run flagged the discrepancy): the
+    suppress-ONLY-ON-DOUBLE-FAILURE mutant (fallback `except:
+    return`) survives the whole 136 suite. Owner-reproduced at
+    6d63ae6: mutant alone -> 136 OK; the suppress-ALWAYS shape
+    still dies 5 tests (F68 family) — the c5 killing was real but
+    covered only that shape. ACCEPTED (test gap; production
+    behavior correct).
+  Sweep result: 21/24 killed; A7/A13 EQUIVALENT confirmed again;
+  ALL THREE c5-finding rows now KILL (A11/A14/R3 -> F97 cells, as
+  required by the confirming prompt). Novel abort (decision window
+  at _complete_resolve entry, c6-new): survivor PASS on every
+  observed field (pending None, intent '-', owed True, counter
+  (1,F,F), status durability-pending) but the auditor measured the
+  WRONG journal pathname, so the five-field criterion FAILED ->
+  assignment PARTIAL (not counted as a code finding). Spot-check:
+  2/3 VERBATIM, 1 DISCREPANCY (= the M2 finding above). FIXED by
+  NEW PIN CLASS TestV38Cycle9Audit F98 (witness-open fault + one-
+  shot fallback-write fault: original EACCES propagates, nothing
+  lands, corrupt-zero fails closed, operator-reset heal re-arms;
+  mutation-verified: the double-failure mutant now RED naming
+  F98, unique killer). 137 OK zero-warning x2. Commit 733f101.
+  ROUND EXTENDED (user budget): confirming cycles c7 and c8
+  authorized — round clears on the FIRST CYCLE CLEAN among them.
+
+- AUD51 ROUND STATUS (2026-11-17, pre-extension): UNCONFIRMED — no cycle reached
   the CYCLE CLEAN verdict within max 5 (c1/c2: 0 findings but self-
   assessed INCOMPLETE on execution; c3/c4/c5: findings 2/5/4 — all
   minor, ALL accepted findings fixed and mutation-pinned by F93
