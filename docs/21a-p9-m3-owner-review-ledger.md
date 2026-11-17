@@ -7524,3 +7524,29 @@ findings, terra is the auditor, run 5 cycles until clear"):
   OWNER-ENUMERATED branch lists (DONE = one result row per
   given branch ID) and a mechanical novelty check (grep list
   provided; novelty = absent-from-list, not judgment).
+
+- AUD51-c3 (terra, HEAD 7c36b30, owner-enumerated branch lists —
+  the c2 prompt-defect fix WORKED: all 31 sweep rows reported, no
+  self-assessed incompleteness): CYCLE FINDINGS 2, both ACCEPTED,
+  both minor/TEST, both owner-reproduced surviving 127:
+  - F-1 `journal frame boundary`: an 'accept the unterminated tail'
+    variant (append b"\n" before parse) survived — a complete
+    record missing its newline was never distinguished from
+    damage. - F-2 `journal creation dir fsync`: dropping the
+    parent-dir fsync on journal CREATE survived (F88's spy covered
+    sidecars only). FIXED by NEW PIN F95
+    `test_F95_journal_frame_boundary_and_creation_dirfsync_effect`
+    (both directions of the tail rule; F88-recipe os.open/fsync
+    spy asserting the DIR fsync effect runs exactly on journal
+    creation and NOT on the existing-file append). Mutation-
+    verified: J5-accept-tail RED, J21-drop-dirfsync RED, both
+    naming F95; 128 OK zero-warning x2. Sweep result: 29/31 killed
+    (B1-B10, J1-J4, J6-J20 all RED with named killers; the c2
+    blank-line EQUIVALENTE confirmed again under the TRUE-skip
+    implementation — killed by C6_4). Novel abort (data+dir fsync
+    -> durable D marker, c3-new): survivor PASSes the pending-
+    marker contract (pending stays P, intent '-', status
+    durability-pending). Spot-check 3/3 VERBATIM (F49 outcome-
+    enum; decision-site validation skip; F94 vanished-sidecar
+    race). Commit f134600. Clean tally: 0/1 (round clears on the
+    FIRST clean cycle).
