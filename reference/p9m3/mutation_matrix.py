@@ -27,6 +27,8 @@ Matrix (id: mutation -> pin test, from the AUD52-c2/AUD53 cycle):
   A16  AUTH checked-write `n <= 0` -> `n < 0`         -> F109
 """
 import os
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +36,68 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.dirname(HERE)          # the `reference/` dir (import root)
+
+# AUD54-c1 finding 3: parsing the runner's TEXT output is forgeable —
+# a test can print fake `FAIL:`/`FAILED (...)` lines and flip an
+# ERROR into a claimed RED. So the worker below runs the target with
+# a real TestResult and dumps a machine record to a temp file the
+# test never sees as its own stdout. Classification uses ONLY that
+# record (plus "driver produced nothing" / timeout signals).
+# AUD54-c2 finding 2: traceback TEXT is still text — a setUp
+# exception whose message contains "\nin test_X" fooled the regex
+# frame check. The driver now records STRUCTURED frames (filename +
+# function name from traceback.extract_tb), so nothing is matched
+# against message text. (Threat model note: a test could read
+# MUTMATRIX_RESULT from os.environ and forge the record itself; the
+# matrix guards against accidents and drift, not an adversarial test
+# suite — an adversarial suite could equally edit mutation_matrix.py,
+# so that is out of scope.)
+DRIVER = (
+    "import json, os, sys, unittest, traceback\n"
+    "class Rec(unittest.TestResult):\n"
+    "    def __init__(self):\n"
+    "        unittest.TestResult.__init__(self)\n"
+    "        self.deaths = []\n"
+    "    def _die(self, test, kind, err):\n"
+    "        tb = err[2]\n"
+    "        frames = [[fr.filename, fr.name] for fr in\n"
+    "                  traceback.extract_tb(tb)]\n"
+    "        tmod = sys.modules[type(test).__module__]\n"
+    "        self.deaths.append([test.id(), kind, frames,\n"
+    "                            getattr(tmod, '__file__', '')])\n"
+    "    def addError(self, test, err):\n"
+    "        unittest.TestResult.addError(self, test, err)\n"
+    "        self._die(test, 'error', err)\n"
+    "    def addFailure(self, test, err):\n"
+    "        unittest.TestResult.addFailure(self, test, err)\n"
+    "        self._die(test, 'fail', err)\n"
+    "    def addSubTest(self, test, subtest, err):\n"
+    "        # c3-f1: the BASE addSubTest appends straight to\n"
+    "        # failures/errors WITHOUT calling addFailure/addError, so\n"
+    "        # a `with self.subTest(): self.fail(...)` would record\n"
+    "        # zero deaths and be classified GREEN. Record it with the\n"
+    "        # PARENT test's id and structured frames, in order.\n"
+    "        unittest.TestResult.addSubTest(self, test, subtest, err)\n"
+    "        if err is not None:\n"
+    "            frames = [[fr.filename, fr.name] for fr in\n"
+    "                      traceback.extract_tb(err[2])]\n"
+    "            tmod = sys.modules[type(test).__module__]\n"
+    "            kind = 'fail' if issubclass(\n"
+    "                err[0], AssertionError) else 'error'\n"
+    "            self.deaths.append([test.id(), kind, frames,\n"
+    "                                getattr(tmod, '__file__', '')])\n"
+    "res = Rec()\n"
+    "suite = unittest.TestLoader().loadTestsFromName(sys.argv[1])\n"
+    "suite.run(res)\n"
+    "rec = {'ran': res.testsRun,\n"
+    "     'collected': suite.countTestCases(),\n"
+    "     'deaths': sorted(res.deaths),\n"
+    "     'skipped': len(res.skipped),\n"
+    "     'expected_failures': len(getattr(res, 'expectedFailures', [])),\n"
+    "     'unexpected_successes': len(getattr(res, 'unexpectedSuccesses', []))}\n"
+    "with open(os.environ['MUTMATRIX_RESULT'], 'w') as f:\n"
+    "    json.dump(rec, f)\n"
+)
 
 MUTANTS = [
     # (id, old, new, test_name)
@@ -113,33 +177,116 @@ CLASS = "p9m3.test_ledger.TestV38Cycle11Audit"
 SUITE = "p9m3.test_ledger"
 
 
-def run_test(root, target, timeout):
-    """Run one unittest target in `root`; return (returncode, tail)."""
+def run_test(root, target, timeout, expect_ran=None):
+    """Run one unittest target in `root` via the JSON driver.
+    Return (verdict, detail) where verdict is one of:
+      "GREEN"      - driver record: ran == expect_ran, zero deaths,
+                     zero skips/xfail/xpass
+      "RED"        - exactly ONE death, its test id == the target,
+                     and its STRUCTURED frames include one whose
+                     file is the test module and whose function is
+                     the pin's own method (AUD54c2 findings 1-2:
+                     assertion AND error deaths both need the frame;
+                     setUp/tearDown/loader deaths are NOT kills and
+                     message text can no longer fake the frame)
+      "ERROR"      - nothing proven: no record, bad count, zero
+                     declared count, death elsewhere, skips
+      "TIMEOUT"    - the run outlived `timeout`
+    AUD54c1 f1: nonzero rc is NOT a kill. c1 f3: runner text is NOT
+    trusted (out-of-band JSON only). c1 f2: `Ran 0 tests ... OK` is
+    NOT green (expect_ran pins the count)."""
+    if expect_ran is not None and expect_ran < 1:
+        return "ERROR", "expect_ran must be >= 1, got %r" % (expect_ran,)
+    fd, rec_path = tempfile.mkstemp(prefix="mutmatrix-rec-", suffix=".json")
+    os.close(fd)
+    env = dict(os.environ, MUTMATRIX_RESULT=rec_path)
     try:
-        p = subprocess.run([sys.executable, "-B", "-m", "unittest",
-                            "-v", target],
-                           cwd=root, capture_output=True, text=True,
-                           timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT", ""
-    tail = (p.stdout + p.stderr).strip().splitlines()[-1:] or [""]
-    return p.returncode, tail[0]
+        try:
+            p = subprocess.run([sys.executable, "-B", "-c", DRIVER, target],
+                               cwd=root, capture_output=True, text=True,
+                               timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            return "TIMEOUT", "no output (timeout %ds)" % timeout
+        try:
+            with open(rec_path) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            tail = (p.stdout + p.stderr).strip().splitlines()[-1:] or [""]
+            return "ERROR", ("driver wrote no record (rc=%d); tail: %s"
+                             % (p.returncode, tail[0][:80]))
+        if p.returncode != 0:
+            return "ERROR", "runner exited rc=%d after writing a record" \
+                % p.returncode
+    finally:
+        try:
+            os.unlink(rec_path)
+        except OSError:
+            pass
+    ran = rec["ran"]
+    if rec.get("collected", ran) != ran:
+        return "ERROR", "collected %s but ran %d (tests dropped mid-run)" \
+            % (rec["collected"], ran)
+    if expect_ran is not None and ran != expect_ran:
+        return "ERROR", "ran %d test(s), expected exactly %d" \
+            % (ran, expect_ran)
+    if ran < 1:
+        return "ERROR", "ran %d test(s): empty suite is not evidence" % ran
+    if rec["skipped"] or rec["expected_failures"] \
+            or rec["unexpected_successes"]:
+        return "ERROR", "skips/expected-results present: ran=%d " \
+            "skipped=%d xfail=%d xpass=%d" % (
+                ran, rec["skipped"], rec["expected_failures"],
+                rec["unexpected_successes"])
+    deaths = rec["deaths"]
+    if not deaths:
+        return "GREEN", "ran %d, all passed" % ran
+    if len(deaths) != 1:
+        return "ERROR", "not exactly one clean death: %d deaths (ran %d)" \
+            % (len(deaths), ran)
+    tid, kind, frames, modfile = deaths[0]
+    if tid != target:
+        return "ERROR", "the death is %r, not the named pin" % tid
+    method = target.rsplit(".", 1)[-1]
+    # structured frame identity (c2 f1+f2): the death must pass
+    # THROUGH the pin's own method in the test module — works for
+    # asserts inside helpers the pin calls, and cannot be faked by
+    # exception message text.
+    here = os.path.realpath(modfile) if modfile else None
+    if not any(here and os.path.realpath(fr[0]) == here
+               and fr[1] == method for fr in frames):
+        return "ERROR", ("%s death named the pin but never ran its "
+                         "method body (setUp/tearDown/loader?)" % kind)
+    return "RED", "1 %s through the pin's own method" % (
+        "assertion failure" if kind == "fail" else "error")
 
 
 def main():
     src_dir = os.path.join(PKG, "p9m3")
-    src = open(os.path.join(src_dir, "ledger.py")).read()
+    with open(os.path.join(src_dir, "ledger.py")) as f:
+        src = f.read()
     work = tempfile.mkdtemp(prefix="mutmatrix-")
     fails = []
     try:
         # ---- full suite on the PRISTINE copy must be GREEN ----------
+        # AUD54c1 finding 2: "Ran 0 tests ... OK" is not green. The
+        # expected count is derived INDEPENDENTLY here (grep over the
+        # test source for def test_*), so the driver's count and this
+        # count are two sources that must agree. AUD54c3 finding 2:
+        # a grep count cannot see aliases (test_x = test_y) or
+        # inherited tests — if this gate ever fires on a legitimate
+        # restructure, FAIL LOUD here and update the declaration
+        # source by hand; the gate never fails silently toward GREEN.
+        with open(os.path.join(src_dir, "test_ledger.py")) as f:
+            test_src = f.read()
+        want = len(re.findall(r"^\s+def test_", test_src, re.M))
         base = os.path.join(work, "base")
         shutil.copytree(src_dir, os.path.join(base, "p9m3"))
-        rc, tail = run_test(base, SUITE, timeout=600)
-        print("BASE  full suite: %s  (%s)" % (
-            "GREEN" if rc == 0 else "NOT GREEN", tail))
-        if rc != 0:
-            fails.append("BASE suite is not green on a clean tree")
+        verdict, detail = run_test(base, SUITE, timeout=600, expect_ran=want)
+        print("BASE  full suite (%d tests declared): %s  (%s)"
+              % (want, verdict, detail))
+        if verdict != "GREEN":
+            fails.append("BASE suite is not green on a clean tree "
+                         "(%s: %s)" % (verdict, detail))
 
         # ---- each mutant must turn its pin test RED -----------------
         for mid, old, new, test in MUTANTS:
@@ -155,14 +302,21 @@ def main():
             path = os.path.join(root, "p9m3", "ledger.py")
             with open(path, "w") as f:
                 f.write(src.replace(old, new))
-            rc, tail = run_test(root, "%s.%s" % (CLASS, test), timeout=120)
-            if rc == "TIMEOUT" or rc != 0:
-                print("%-4s RED  as claimed by %s" % (mid, test))
-            else:
+            verdict, detail = run_test(root, "%s.%s" % (CLASS, test),
+                                       timeout=120)
+            if verdict == "RED":
+                print("%-4s RED  as claimed by %s (%s)"
+                      % (mid, test, detail))
+            elif verdict == "GREEN":
                 fails.append("%s: pin test %s PASSED under the mutant "
                              "(claim is false — the pin does not kill it)"
                              % (mid, test))
-                print("%-4s SURVIVED (%s green — claim broken)" % (mid, test))
+                print("%-4s SURVIVED (green — claim broken)" % mid)
+            else:
+                fails.append("%s: pin test %s %s under the mutant — the "
+                             "kill claim is UNPROVEN (%s)"
+                             % (mid, test, verdict, detail))
+                print("%-4s %s (%s)" % (mid, verdict, detail))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
