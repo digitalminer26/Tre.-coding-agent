@@ -158,8 +158,28 @@ if [ -d "$REPO_ROOT/.git" ] && command -v git >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$DEPS_STATUS" -ne 0 ] || [ "$SCAN_STATUS" -ne 0 ]; then
-  echo "quality-check: FAILED — dependency freeze and/or source scan failed (see messages above)" >&2
+# Check 8 — contract consistency gate (c27, post-v31-audit option D): pure
+#    node, reads docs/11-orchestrator-schema.md only, never writes; fails the
+#    gate on any of the mechanically-detectable defect classes the audit arc
+#    kept paying LLM rounds to find (status/version drift, ledger mechanics,
+#    enum/kind closure, pinned-clause deletion). Informational when the doc
+#    is absent (tarball deployments ship without docs/).
+if [ -f "$ROOT/docs/11-orchestrator-schema.md" ]; then
+  CC_OUT=$(mktemp)
+  node "$ROOT/scripts/contract-check.mjs" "$ROOT/docs/11-orchestrator-schema.md" >"$CC_OUT" 2>&1
+  CC_STATUS=$?
+  if [ "$CC_STATUS" -ne 0 ]; then
+    cat "$CC_OUT" >&2
+  else
+    tail -1 "$CC_OUT" >&2
+  fi
+  rm -f "$CC_OUT"
+else
+  CC_STATUS=0
+fi
+
+if [ "$DEPS_STATUS" -ne 0 ] || [ "$SCAN_STATUS" -ne 0 ] || [ "$CC_STATUS" -ne 0 ]; then
+  echo "quality-check: FAILED — dependency freeze, source scan, and/or contract check failed (see messages above)" >&2
   exit 1
 fi
 exit 0
