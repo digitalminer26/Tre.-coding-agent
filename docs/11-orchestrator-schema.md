@@ -162,6 +162,7 @@ mechanism).
 | 2026-11-18 | §14.10.3, §14.11.2, §14.12.2, §14.12.3, §14.13.4a, §14.14.4 | v12 self-audit findings 1–7 folded (draft v12→v13) | self-audit of v12, findings 1–7 |
 | 2026-11-18 | §14.11.2, §14.12.2, §14.12.3, §14.13.4a | v13 self-audit findings 1–5 + owner decision D5-a folded (draft v13→v14); two v13 auditor findings withdrawn on re-reading, recorded in the audit trail | self-audit of v13, findings 1–5; owner D5-a |
 | 2026-11-18 | §14.10.3, §14.11.2, §14.12.2, §14.12.3, §14.13.4a, §14.14.5 | **TERRA AUDIT ARC cycle 10 (auditor gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c10-terra-*`): CHANGES REQUESTED — 2 BLOCKER + 7 MAJOR on draft v15 (9 findings; arc verdict "not adoptable as-is, fixable without revisiting owner decisions"); all folded into v16.** C10-B1 the v15 bound-displacement demanded a correction of the SAME statement identity while the correction graph only accepts a NEW identity pointing at its target via `correctionOf` (the same-identity/different-value case is its unresolved-unknown conflict) — the advertised $20→$2 displacement was unimplementable → displacement requires a correction with its OWN statement identity on the same stream naming the bound-setter in `correctionOf` (at-most-once, no contradiction), plus five executable displacement vectors (displacement, held-correction, correction-of-correction, second-conflicting-correction, post-release correction) (14.13.4a). C10-B2 the admission sentence still used `observedLowerBoundUsd` (disagreeing with the effective-bound contradiction branch) and a pre-terminal `spend-reconciliation` could be read as replacing the hold below it (releasing headroom while leaves run) → ONE replay-defined formula `heldUsd = max(residualCapUsd, Σ effectiveLowerBoundUsd)` shared by admission, hold, exposure note and release; an accepted adjustment below the live hold NEVER reduces it while leaves are open (takes effect only at unit release); post-release lifecycle pinned: release is one durable once-only event, later corrections never reopen the unit, exceedance is new spend charged at once (14.13.4a). C10-M3 the v15 normative group-plan conformance vector was not a valid canonical line (noncanonical spacing, raw TAB inside a JSON string; escaped form omitted the spaces so decode ≠ digest input) → REPLACED with a checked canonical vector: member line `{"a":"x\"y\\z` + the two-character TAB escape + NFC `é` + `"}` + newline, 20 exact bytes, hex `7b2261223a22785c22795c5c7a5c74c3a9227d0a`, sha256 `b66d0493…667e0`, the canonical 31-char containing string spelled out, NFC + control-character cases covered (14.11.2). C10-M4 the new round-trip inequality (noncanonical stored encoding, EQUAL digests) had no per-kind fault-field rule → third detection mode bound into `group-plan-mismatch` fields (recomputedDigest == reportedDigest is its signature; evidence = the record itself; re-emit forbidden, fail closed needs-owner) (14.11.2, 14.12.3). C10-M5 retry lineage kept superseded attempts in `callUniverse` but never in `issuedSet`/`provenNoCall` — a fully-evidenced crash+retry could never reach coverage → coverage computed over the LINEAGE PROJECTION `logicalOps` with clause (d) requiring every superseded attempt to belong to a valid settled lineage; three coverage vectors (retry-true, two-charges-unknown, unlineaged-false) (14.13.4a). C10-M6 "MATCHED iff receipt AND actId" contradicted the drain's act-identity skip and the same-act/new-receipt conformance vector (the entry matched forever-nowhere) → ONE rule: matching is by act identity alone, soundness carried by the append invariant (at most one queue entry per act identity for all time; append returns the existing entry+original receipt); receipt drift = new `queue-receipt-divergence` fault kind, act consumed once, boundary UNCLEAN (14.12.2 step 5(c), 14.12.3). C10-M7 a tail window finalizing with neither outcome (B→O conversion or frozen chain) left the deferral obligation with no admissible settlement — terminal outcome after the tail boundary was malformed everywhere → carried-forward obligation + FORWARD SETTLEMENT: after tail finalization a terminal outcome appends against the original chain settling forward (discharges the loop record, clears the note at the NEXT boundary, never alters the recorded UNCLEAN boundary); owner dispositions across a finalized window pinned; stall/cap/owner-action replay vector (14.14.5). C10-M8 `providerAccountId` is REQUIRED on every owner reconciliation record naming usage but was absent from the closed `spend-reconciliation` payload (a conforming owner could not authorize one) → added to payload AND record with explicit null placement (required for dispatch-attributable spend, null-only for elapsed/cycle overhead), mismatch refused, reconstruction conformance test (14.10.3, 14.13.4a). C10-M9 a second `channel-open` reusing a `channelId` demanded a history-integrity-fault the CLOSED enum could not represent → new `channel-id-collision` kind with identity tuple, required fields (evidenceRefs name both channel-open records), drain refusal + needs-owner, entry condition (f) added (14.12.2, 14.12.3). DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v16, terra c10 folded) |
+| 2026-11-18 | §14.12.2, §14.12.3, §14.12.4b, §14.13.4a, §14.14.5 | **TERRA AUDIT ARC cycle 11 (auditor gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c11-terra-*`): CHANGES REQUESTED — 2 BLOCKER + 6 MAJOR on draft v16 (8 findings, numbered 1–8; arc verdict "not adoptable as-is, fixable without revisiting owner decisions"); all 8 folded into v17.** C11-B1 the post-release correction arithmetic was false: "$30 released, correction to $25 ⇒ released Σ $7 ABOVE the corrected picture, charged as new spend" — $32 released vs $27 corrected is $5 BELOW, and a decrease is never new spend (adjacent lifecycle rule disagrees with the vector) → post-release accounting is ONE replay-defined formula `charged(P) = max(releasedTotal, correctedTotal(P))` with increments computed against the current charged total (never re-charging an exceedance), normative vectors V-e1 (increase-then-partial-decrease) + V-e2 (decrease-only: no spend, no refund) (14.13.4a). C11-B2 "refund applies against the released total" named no carrier, producer, or validation (the sole refund-carrying record `spend-reconciliation` is a one-time resolution — its chain, required fields, and floor rule forbid it) → the ONLY refund route is a superseding `spend-reconciliation` naming the chain tip in `supersedesReconciliation`, passing full validation (providerRecovery evidence, TTY act, floor rule restated for released units); released unit never reopened, append-only preserved (14.13.4a). C11-M3 correction sequence coverage was undefined for both identities (S5+S6+S7, S8 `correctionOf:"S5"`: v15 said the corrected statement "leaves the set" while its seq "stays CLAIMED by the correcting record" yet S8 carries its OWN seq — one effective statement in two sequence positions; claim only 5 ⇒ apparent gap at 8, claim only 8 ⇒ seq 5 erased; same ambiguity compounds for S11⇒S8) → raw-stream SEQUENCE OCCUPANCY and EFFECTIVE-VALUE placement are SEPARATE: every accepted RAW statement (corrections included) permanently occupies its own `statementSeq` (replacement never vacates/moves/double-books a position); replacement affects VALUE ordering only — the correcting value enters at the correction's OWN seq sort position; the gap check runs over the RAW OCCUPANCY set (a correction can neither hide a gap nor create a phantom one); normative fixtures: contiguous stream with correction (occupancy {5,6,7,8}, final cumulative $2) + held-correction-of-held-correction (S11⇒S8 with S5 absent: both held, whole chain re-plays in one deterministic fold when S5 lands) (14.13.4a). C11-M4 displacing the maximum bound erased a still-valid observation: leaf with uncorrected S1=$18, S2=$20, valid S3 corrects S2⇒$2 — "replace the bound with the corrected cumulative" loses the $18 and release at $2 passes with S1 still in the graph → the correction graph replaces the TARGETED OBSERVATION, then the bound is recomputed as the maximum across ALL effective observations (uncorrected siblings survive); executable competing-observation vector (S1 $18, S2 $20, S2⇒$2 ⇒ bound $18, release at $2 forbidden) (14.13.4a). C11-M5 the release's "one durable event" has no kind, fields, producer, or §14.12.4b inventory entry (replay cannot distinguish "released once at $32" from "not yet released" in the crash window) → new `residual-unit-release` record `{ envelope, residualDispositionId, unitId, coveredLeafRecordIds[], releasedUsd (sole source of the frozen releasedTotal), evidenceRefs[] }`; append-if-absent keyed by `(residualDispositionId, unitId)` (different bytes ⇒ `counter-divergence` fault, identical ⇒ idempotent); fsync BEFORE any boundary consuming the headroom (consuming without the record ⇒ fail-closed history-integrity fault); replay state = record presence, never a boundary-derived cache (14.12.4b, 14.13.4a). C11-M6 step 5(c) contradicts itself twice (matched iff receipt AND actId vs "matching is by act identity alone") and the at-most-one-entry invariant has no pre-append detection: a second entry for act A (new receipt R2′) sits in the queue while entry 1 drains, R2 vs R2′ never compared, boundary CLEAN (fault kind names the drain comparison as its detection point — bypassable) → matching is by act identity alone (receipts never compared at drain; receipt drift = `queue-receipt-divergence`), and a PRE-DRAIN FULL SCAN over every durable entry (P1-matched and drained included, per channel) runs before ANY drain, ordered by seq, first failure wins: duplicate act identity ⇒ `queue-receipt-divergence` (fields extended to carry both entries' receipts + record ids); the single MATCHED vocabulary is SPLIT into THREE pinned predicates evaluated per entry over the whole queue on every recovery — P1 transport match (act identity only; receipt equality structural at append), P2 integrity (receipt + byte-identical payload vs the matched act; drift detected at the pre-drain scan, never first-drain skip), P3 effect completion (matched act without effect record = class B effect owed, c8-B1 — fails the emptiness test, never "unmatched"); counterexample pinned: two same-act entries with drifting receipts, first drained then crash — the scan visits both regardless of drained state (14.12.2 step 5(c), 14.12.3). C11-M7 the c10 collision fix (channel-id-collision) makes `(channelId, actId)` non-unique — an entry of channel B drains against channel A's fence/receipt/act context (cross-wired drain, wrong channel charged) → queue-entry identity is the TRIPLE `(channelOpenRecordId, channelId, actId)`: the queue-receipt entry now carries `channelOpenRecordId` (required, envelope-carried), entry append and drain both match all three fields, and a fault on a channel-open record names the duplicate's entries via `affectedRecordId` = its record id (14.12.2 step 5(c), 14.12.3, 14.12.4b). C11-M8 forward settlement said a late terminal outcome settles "against the ORIGINAL chain" naming the last-active deferral while the binding rule requires the ACTIVE tail and refuses non-tail citations (after `grant-new-window` the old tail is not active — a delayed drain's forward settlement was simultaneously legal and malformed; the reset head itself violates the v9 linearity rule with `deferralOf:null`) → ONE replay-defined receipt-level state machine spanning chain generations: generation = segment delimited by reset heads, active generation contains the chain tip, reset supersedes every unfinalized fact of prior generations; explicit reset-head exemption (`deferralOf:null` valid IFF no prior deferral exists OR `resetOfLoopId` naming a `deferral-loop` whose `grant-new-window` disposition authorizes this record, at most one reset head per loop record — a second refused `deferral-branch`); stale-direction invalidation (terminal-outcome appends and pending drain directions validate `viaDeferralId` against the ACTIVE tail at append time; superseded-generation citation refused as `stale-deferral-lineage` validation error, prefix stays clean); the three receipt-level transitions (forward settlement, `waive-receipt`, `grant-new-window`) serialized one-per-S5-critical-section, first-admitted wins, later directives validated post-transition and refused if stale; normative race vectors (reset-vs-settlement both orders, waiver-vs-directed-drain both orders, second loop after reset with per-generation laundering counters) (14.14.5). DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v17, terra c11 folded) |
 | 2026-11-18 | §14.11.2, §14.12.2, §14.12.3, §14.13.4a | **v14 same-session review findings 1–5 folded (draft v14→v15), cycle-10 prep.** F1-B the v14 release-floor test compared AGGREGATE Σ terminal vs Σ lower bounds — one leaf's excess masked another leaf's contradiction (A bound $20/terminal $2, B bound $0/terminal $30 passed the sum test) → the release test is PER LEAF (leaf releases only at ≥ its OWN effectiveLowerBoundUsd) and the release is unit-granular (any contradicted leaf blocks the whole release); normative counterexample vector added. F2-B the contradiction branch said `heldUsd` "holds at Σ observedLowerBoundUsd" — dropping the accepted cap from the hold ($100 cap / $20 bounds ⇒ $20 charge while unresolved) → the hold keeps its full `max(residualCapUsd, Σ effectiveLowerBoundUsd)` formula until valid release. F3-M v14 offered owner `spend-reconciliation` as a lower-bound displacement route, contradicting the reconciliation schema ("never overrides a known ledger amount") → displacement ONLY via a graph-accepted `correctionOf` correction (a loosely worded statement is never displacement evidence; effectiveLowerBoundUsd defined post-correction). F4-M the group-plan wire encoding claimed "standard JSON escaping has exactly one form" (FALSE — `\"` vs `\u0022`, `\n` vs `\u000a`) so byte-identical re-emission was unimplementable → the containing record serializes under `tre-canonical-json/1` (the contract's single normative wire rule), member value = decoded text incl. terminator, digest over decoded UTF-8 bytes, round-trip inequality = `group-plan-mismatch`, byte-level conformance vector added. F5-m the D5-a acceptance claimed the forward jump's "only effect" is a boundary recorded UNCLEAN — it ALSO lifts B's append-blocking and moves escalation earlier → consequence restated precisely (unclean boundary may arrive early; authority never consumed; never a CLEAN boundary early); enum cross-reference points at §14.12.2 for the full statement. DECISIONS-REQUIRED: 0 | self-audit of v14, findings 1–5 |
 | 2026-11-18 | §14.11–§14.15 (v10→v11) | **TERRA AUDIT ARC cycle 9 (auditor gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c9-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 12 MAJOR + 1 MINOR on draft v10 (17 findings; several named as v10 fixes being INCOMPLETE); all fixed into v11.** C9-B1 the v10 "late null-seq is non-contributing AND non-degrading" rule let a late independent charge disappear ($10 cumulative + unproven late $5 closed clean) → late null-seq contributes ONLY under provider-backed inclusion evidence (non-contributing, non-degrading) or non-inclusion evidence (additive); with NEITHER the component is unresolved unknown; vectors re-corrected to the three cases (14.13.4a). C9-B2 a PARTIAL provider measurement replaced a residual-cap provisional charge and released headroom while the request kept running → replacement is PER COVERED LEAF by TERMINAL provider-complete evidence only; interim measurements never reduce provisional charges; headroom releases leaf-by-leaf; `spend-reconciliation` remains the owner route for pre-terminal adjustment (14.13.4a). C9-B3 a stalled authorized effect converted B→O and this read as authority consumed, and the act stored a payload DIGEST that cannot reconstruct a lost queue entry → owner-act records store the FULL canonical payload (≤16 KiB, self-contained) + digest; effect conversion unblocks append but NEVER authority (boundary UNCLEAN + needs-owner, `effectApplied` stays false until effects validate; §14.10.3 "no boundary of ANY cleanliness" corrected to "no CLEAN boundary" — the UNCLEAN conversion route stands, authority never converts) (14.10.3, 14.12.2). C9-B4 `evidence-invalidation` and the deferral-loop dispositions were consumed by the contract but ABSENT from the closed owner-act enum (a conforming validator refused them) → both join the closed enum with fully bound schemas (target kinds `repro-run\|acceptance`; loop decisions closed) (14.10.3). C9-M5 invalidation read an immutable acceptance record's own `invalidatedBy` (null can never transition under append-only — mid-episode invalidation was legally impossible) → invalidation is ONE append-only EVENT kind, the target's `invalidatedBy` reading is a deterministic replay FOLD, both target kinds covered, targets never mutated (14.10.3, 14.12.2 r4). C9-M6 idempotencyKey was "unique per (providerAccountId, idempotencyKey) across the episode" while the crash rule made same-key retry under a new callId legal → uniqueness is per LOGICAL PROVIDER OPERATION; retry lineage via `retryOfCallId` (linear, byte-identical request digest enforced), lineage folds to one ledgered request; two independent charges on one lineage ⇒ unresolved unknown (14.13.4a). C9-M7 queue matching mixed receipt-only / act-only / both rules and actId was only per-channel-episode unique (two streams minting `actId:A` → an act dropped) → ONE composite rule everywhere: matched iff `queueReceiptId` AND `(channelId, actId)` both equal; `channelId` minted once per channel via a durable `channel-open` record; conformance tests for both collision cases (14.12.2 step 5). C9-M8 coverage over an EMPTY callUniverse (crash before any `intent-open`) was vacuously true → a zero-call dispatch is covered ONLY by a `zero-call-closure` record with complete provider listing or fence coverage; empty universe + no closure ⇒ coverage FALSE (14.13.4a). C9-M9 one evidence record conflated "no call occurred" with "terminality unobtainable", admitting an HTTP 500 as proof → the two are SEPARATED with a CLOSED admissible-class list (documented not-supported code / doc citation / sustained-unreachability retry series — the last ONLY for the residual-cap route with explicit owner acknowledgment + required cap); timeouts/generic 5xx/empty local queries are never proof; unreachable ≠ non-support named as an interval that cannot converge except by owner acceptance (14.13.4a). C9-M10 the v10 ledger row described the CANONICAL-domain parse rule ("finer ⇒ refused, NEVER rounded") as the PROVIDER-INGEST rule while the body rounds half-away-from-zero at ingest → TWO NAMED DOMAINS stated once (canonical records: six-digit exact, finer refused, never rounded — the ledger's rule; provider-native: converted ONCE with recorded policy — the body's rule), exact-decimal parsing pinned (no binary-float intermediate), conversion basis is a digest-bound DECIMAL STRING, negative amounts/credits rules closed (14.12.3); the v10 row's "RFC-decimal strings" wording meant decimal TOKENS (JSON number literals matching the pinned regex — strings are not accepted amounts) and is clarified here, body normative. C9-M11 the durable group "draft" had no schema/fsync order/timestamp freeze, so byte-identical re-emission was unimplementable → the `group-plan` record (frozen member line digests incl. ts, consumption-bound) is appended BEFORE the group write, recovery RE-EMITS the plan record's bytes (never reconstructs), unplanned groups fail closed, divergent plans are never retried (14.11.2). C9-M12 archive checks (1)–(3) proved recorded identity, not usable closure (a bundle missing a nested blob passed) → check (4) is FULL RECURSIVE REACHABILITY in an isolated clone of the bundle alone (every commit/tree/blob/gitlink edge, zero missing, bounded walk), replay re-runs (1)–(4) + bounds, root/merge parent cases explicit, retention lane named as its providing layer (14.14.4). C9-M13 the deferral "terminal outcome by its own window" paragraph conflicted with successor-duty-moves, cap exits had two vocabularies, and reset counter semantics were dual-named → ONE lifecycle (drain produces terminal OR successor; deadline binds to chain TAIL; predecessors may close unclean with notes; no-outcome blocks finalize; terminal receipts never gain successors), the §14.10.3 op vocabulary is THE exits, reset retains the ORIGINAL receipt and starts a new chain head with `resetOfLoopId`, ONE laundering cap `maxConfirmingCycles + 1` counting records since the last reset head (14.14.5). C9-M14 the quiesce-stall conversion clock had no durable origin (restart reset the wait; two implementations both compliant) → `finalization-wait-anchor` record (conditionId, anchorTs, bootId) appended at first B observation, elapsed measured from the anchor across restarts, drains-evaluated-before-thresholds ordering pinned, stall records must cite their anchor, clock-jump absurdity is a `clock-domain` history-integrity-fault (new faultKind, tuple `(faultKind, affectedRecordId=anchor)`) (14.12.2, 14.12.3). C9-M15 route-(b) acceptance for plain intermediate commits had no producer (the advertised ancestor route was unavailable in the counterexample) → producer availability stated: acceptance binds only artifacts actually submitted; absence is NOT a defect — reuse refuses to EXACT-CANDIDATE execution (safe by default), "complete" over an empty/foreign-sha criterion set never qualifies (14.12.2 r4). C9-M16 the v10 ledger row claimed identity tuples containing an evidenceRefs-set-hash and "lowest reported anchor" first-detection — both contradicting the body → corrected HERE: tuples are (faultKind, boundaryId\|affectedRecordId) per kind (digests/evidenceRefs NEVER identity), first-detection = the first-APPENDED fault record's `detectionAnchorId`, permanent, no retro-amendment (body normative; ledger wording corrected) (14.12.3). MINOR c9-m17: cached `finalizationTailMs` needed replay enforcement → the boundary's tail is ALWAYS recomputed and validated (same boot ids, `monoMsAtBoundary ≥ monoMsAtClose`, exact delta equality) with mismatch ⇒ tail UNKNOWN + counter-divergence fault; charged total pinned to admit-to-close + tail, once (14.12.4, 14.13.4a). Envelope inventory gains the v11 kinds (`finalization-wait-anchor`, `channel-open`, `zero-call-closure`, `group-plan`) and the `evidence-invalidation` both-kinds amendment. DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v11, terra c9 folded) |
 | 2026-11-18 | §14.11–§14.15 (v9→v10) | **TERRA AUDIT ARC cycle 8 (auditor gpt-6.1-terra, detached one-shot, `~/.tre/audits/g2g5-c8-terra-*`): CHANGES REQUESTED — 4 BLOCKER + 11 MAJOR + 1 MINOR on draft v9; all fixed into v10.** C8-B1 owner-act consumption acked before its effects were durable → **effect binding**: every `owner-act` record carries `effectRecordIds[]` (possibly empty), consumption is complete only when every named effect record is fsynced in the log, recovery re-derives acts whose effects are missing and re-applies them (idempotently), and a queued act with an empty effect set is explicitly attested as observation-only (14.10.3). C8-B2 the A/B/O finalization classes plus the queue-drain precedence had an undefined corner (what when a class-B condition and a class-O condition coexist at one boundary) → precedence pinned **mechanically and totally**: O dominates for verdict (boundary exists, UNCLEAN, needs-owner), B dominates for append-blocking during the same critical section until it converts or clears; no condition may hold both; recovery consults the table in fixed evaluation order (14.12.2). C8-B3 remote-disposition closure allowed "the supervisor asked the provider and got nothing" as no-call evidence → a **durable fence**: absence of any observed request for an intent closes ONLY via `provider-inability-evidence` (verbatim provider response or provider-evidenced non-support, captured at query time, per-`dispatchId`), never via operator memory or an empty local query (14.13.4a). C8-B4 the residual-cap accounting had two paths (per-round recount vs cumulative count) that drift on re-admit → **ONE state machine**: residuals are counted once at boundary commit, re-admission reuses the stored count unless a re-resolution event (`residual-cure` op, owner-gated) mutates it; recounting the log is forbidden (14.13.4a). C8-M5 `residual-cure` had no owner-act schema and CLI display re-serialized payloads → `residual-cure` joins the closed op enum with a per-op payload; CLI display binds to the canonical payload BYTES, never a re-serialization (14.10.3). C8-M6 the usage fold pipeline order was prose → per-stream PIPELINE pinned (parse → sequence-domain placement → gap scan → cumulative reconciliation → sum), LATE null-seq statement rule pinned (a null-seq statement arriving after a gap on its stream lands UNKNOWN-side), gap resolution defined (provider-statement reconciliation closes a gap ONLY forward, never retroactive restatement), conformance vectors corrected to the precedence rule (14.13.4a). C8-M7 queue handoff lacked act-level identity → every act carries a channel-assigned `actId` (unique per channel stream); ack/dedup keys are `(queueReceiptId, actId)`; the full crash matrix (pre-fsync / post-fsync-pre-log / post-log-pre-ack) is closed and recovery dedups by actId (14.12.2 step 5). C8-M8 the coverage set had two derivations (disposition-time vs fold-time) that could disagree → ONE derivation function over the complete per-stream request set, consumed identically by fold and disposition; `provider-inability-evidence` record shape pinned (producer, capture rules, freshness) (14.13.4a). C8-M9 money domain vectors contradicted the parser (trailing-zero/precision rules disagreed between prose and vectors) → parser accepts RFC-decimal strings under ONE normalization (strip trailing zeros; six fractional digits max; more ⇒ refused at ingest, never rounded), conversion units pinned for every `*Usd` field, the "integer micro-cent" spelling is WITHDRAWN (1e-6 domain, micro-cent 1e-8 is a 100× split), serialization canonical = stripped form (14.13.4a). C8-M10 the history-integrity-fault identity tuple was ambiguous across cycles and the first-detection position undefined → identity tuple PINNED (`(faultKind, boundaryId\|null, affectedRecordId\|null, evidenceRefs-set-hash)` — one tuple per kind, members are durable record IDs), `detectionAnchorId` REQUIRED naming the anchor record, first-detection position defined as the lowest replay position any detector reports, two independent detectors reporting the same tuple ⇒ ONE record (14.12.3). C8-M11 the boundary elapsed tail could be computed across a boot discontinuity → `cycle-boundary` gains `bootIdAtBoundary`, `bootIdAtClosed`, `monoMsAtBoundary`, `finalizationTailMs`: tail computed ONLY when bootIds match, else null (fail-closed, reported unknown), monotonic domain pinned per boot (14.13.4a). C8-M12 the ancestor-qualification rule cited a nonexistent `verdict:"passed"` → qualification consumes the ACTUAL acceptance enum (`complete` — vocabulary corrected), binds `checkedAtSha` (evidence qualifies only the sha it was computed against), and an `evidence-invalidation` record (durable, owner-act-sourced, target+reason) removes qualification from replay onward (14.12.2 r4). C8-M13 the group crash window left ids ambiguous between draft and commit → the DRAFT IS the durable source: member ids are assigned at draft time, recovery re-emits the byte-identical plan from the draft, cross-restart dedup is by `groupId`, same-`groupId`-different-bytes ⇒ fail closed `needs-owner` (14.11.2). C8-M14 the deferral active-window rule let obligations move backward through the chain → obligations NEVER move backward; early terminal outcome on a non-tail deferral is legal; laundering counter `maxDeferralLaundering` counts chain records since the last OWNER-granted window reset (`reset-chain-with-new-window` owner-act op is the sole reset — supervisor-side laundering never resets), cap hit appends `deferral-loop` (sole trigger of the state) (14.14.5). C8-M15 intent-phase transitions were ambiguously inventoried "under `dispatch-intent`" while `dispatch-intent` is a per-DISPATCH pre-call record → **`intent-phase` is its own S5 envelope kind** (own inventory entry; discriminated schema with `outcome`, canonical `callId`, uniqueness domain in 14.13.4a); `idempotencyKey` placement rule pinned: non-null ONLY on `call-started` (14.12.4b, 14.13.4a). MINOR c8-m16: the `task-tip-archived` artifact contract was "e.g. a git bundle" + a blob digest that proves bytes, not closure → ONE accepted format (prerequisite-free v3 git bundle), closure enumeration AND verification BEFORE the record appends (header/prereq check, recorded-identity presence, parent closure, `maxArchiveBytes`/`maxArchiveObjects` bounds), record fields pinned (`tipSha`, `objectCount`, `verifiedAt`), publication-before-prune order closed (ref deleted only after durable record + sha256 re-verify; crash windows leave ref-kept or GC-eligible orphan), replay re-runs closure checks and ANY failure ⇒ `task-tip-lost` fail-closed (14.14.4). Envelope inventory extended with the v10 kinds (`provider-inability-evidence`, `evidence-invalidation`, `deferral-loop`, `intent-phase`); `deferral-loop-disposition` is an owner-act op, not a kind. DECISIONS-REQUIRED: 0 | G2–G5 contract (draft v10, terra c8 folded) |
@@ -1700,7 +1701,9 @@ Verbatim owner replies on the eight review points; folded as this v2:
 
 ### 14.11 Spec norm state (G2 — ratification as parseable state)
 
-**Status: DRAFT v16 (2026-11-18), batched draft of G2–G5 (§14.11–§14.14).
+**Status: DRAFT v17 (2026-11-18), batched draft of G2–G5 (§14.11–§14.14).
+v17 folds terra cycle-11 findings 1–8 (2 BLOCKER + 6 MAJOR; see the
+c11 Change Ledger row);
 v16 folds terra cycle-10 findings 1–9 (see the c10 Change Ledger row);
 v15 folds cycle-10 review findings 1–5 (per-leaf release floor +
 full-hold formula + correction-graph-only displacement in 14.13.4a;
@@ -2223,8 +2226,9 @@ ratified in another.
 
 ### 14.12 Convergence stop rule as data (G3 — the verdict, not "auditor says clean")
 
-**Status: DRAFT v16 (2026-11-18), batched with §14.11/§14.13/§14.14
-(v16: terra cycle-10 findings folded, see the c10 Change Ledger row;
+**Status: DRAFT v17 (2026-11-18), batched with §14.11/§14.13/§14.14
+(v17: terra cycle-11 findings 1–8 folded, see the c11 Change Ledger
+row; v16: terra cycle-10 findings folded, see the c10 Change Ledger row;
 v13: self-audit findings 1–7 folded, see the v13 Change Ledger row;
 v14: self-audit findings 1–5 + owner decision D5-a, see the v14 row). v12: owner decisions D0-b/D1-a/D2-b/D3-a/D4-a folded, see the v12
 Change Ledger row). v8
@@ -2656,38 +2660,63 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    (c) QUIESCE CHECK — under the lock, queue empty AND no owed work;
    the emptiness check and the boundary append are the SAME critical
    section, so no act can slip in between check and commit. "Queue
-   empty" means **no unmatched entry** (v9, c7-B3; matching fixed
-   v10, c8-M7; ONE matching rule v11, c9-M7; **RECONCILED v15,
-   cycle-10 audit finding 6 — v11's "MATCHED iff receipt AND actId"
-   contradicted the drain's act-identity skip and the conformance
-   vector "same act / new receipt ⇒ skipped": under the AND rule a
-   new-receipt entry cites a log act bearing the OLD receipt, so it
-   matches forever-nowhere while the drain skips it — quiescence and
-   recovery disagree about an empty queue. ONE rule now: the ACT
-   identity is the sole matching authority, guaranteed sound by an
-   append invariant.** An entry is MATCHED iff the log contains an
-   `owner-act` whose act identity `(channelId, actId)` equals the
-   entry's; the `queueReceiptId` equality is NOT a matching condition
-   — it is enforced STRUCTURALLY at append instead: a conforming
-   appender never creates a second queue entry for an existing act
-   identity (same-act append returns the EXISTING entry with its
-   ORIGINAL receipt — see the dedup paragraph below), so the queue
-   holds AT MOST ONE entry per `(channelId, actId)` for all time and
-   receipt drift cannot arise inside a conforming queue file. A
-   queue entry whose receipt differs from the one cited by the
-   matching log act (a nonconforming writer or corruption) is
-   matched by act identity iff its canonical payload is
-   byte-identical to the logged act's, and the discrepancy is
-   recorded as a `queue-receipt-divergence` history-integrity-fault
-   (kind added v15, §14.12.3 — detection evidence, never a second
-   consumption); a different payload under an existing act identity
-   stays the append-time conflict (refused + `needs-owner`). A
-   partially drained queue is indistinguishable from this and replays
-   identically (drain resumes at the first unmatched entry; drained
-   prefix entries dedup by the composite rule, so partial-drain
-   replay is idempotent without a drain cursor). An entry whose
-   drain landed the act but not its effect is likewise NOT matched
-   (effect owed, class B — c8-B1).
+   empty" means **no entry fails any of the THREE SEPARATE PREDICATES
+   below (v17, cycle-11 audit finding 6 — v15's single MATCHED/NOT-matched
+   vocabulary carried three different questions at once: v15 said an
+   entry was "MATCHED iff" the act identity existed while two
+   paragraphs later an act-landed-without-effect entry was "likewise
+   NOT matched" — an entry both matched and not matched — and the
+   drain's act-identity skip could bypass a second duplicate entry
+   before it was ever scanned. Matching is now THREE pinned
+   predicates, evaluated per durable entry over the WHOLE queue file,
+   every entry, on every recovery — never lazily and never only for
+   entries not yet matched:**
+   - **P1 transport match:** the log contains an `owner-act` whose
+     act identity `(channelId, actId)` equals the entry's. The
+     `queueReceiptId` equality is NOT a matching condition — it is
+     enforced STRUCTURALLY at append: a conforming appender never
+     creates a second queue entry for an existing act identity
+     (same-act append returns the EXISTING entry with its ORIGINAL
+     receipt — see the dedup paragraph below), so the queue holds AT
+     MOST ONE entry per `(channelId, actId)` for all time and receipt
+     drift cannot arise inside a conforming queue file.
+   - **P2 integrity:** the entry's `queueReceiptId` equals the
+     receipt cited by the P1-matched log act AND its canonical
+     payload is byte-identical to that act's. A nonconforming writer
+     or corruption that lands a second entry for an existing act
+     identity with a DRIFTING receipt but identical payload is
+     detected at the pre-drain scan (below, not at first-drain skip)
+     as a `queue-receipt-divergence` history-integrity-fault (kind
+     added v15, §14.12.3 — detection evidence, never a second
+     consumption); a different payload under an existing act identity
+     stays the append-time conflict (refused + `needs-owner`).
+   - **P3 effect completion:** if P1 is matched, the matched
+     `owner-act`'s effect record is also present (a landed act
+     without its effect is class B — effect owed, c8-B1). P3 failure
+     is NOT "unmatched" in the transport sense — the act consumed
+     once, the owed effect drives recovery — it fails the emptiness
+     test: an entry failing ANY predicate makes the queue NON-EMPTY
+     for quiescence; "matched" in every other paragraph of this
+     document means P1 only.
+   **Pre-drain full scan (v17, cycle-11 finding 6, normative before/after):**
+   before the drain consumes ANY entry — on every startup and before
+   every quiescence check — the recovery pass scans EVERY durable
+   entry in the queue file, INCLUDING P1-matched and already-drained
+   entries, for (i) duplicate act identities (two entries, same
+   `(channelId, actId)` — a nonconforming append; the SECOND is a
+   `queue-receipt-divergence` fault if its payload matches the logged
+   act, append-conflict `needs-owner` if it does not) and (ii)
+   receipt drift (P2). Counterexample pinned (v15 was bypass-prone):
+   two entries, same act, same payload, different receipts, NEITHER
+   drained; the first drains; crash; restart — the scan visits BOTH
+   entries regardless of the first's drained state and reports the
+   second's receipt drift; an implementation that resumes "at the
+   first unmatched entry" and stops at the first P1 hit silently
+   bypasses it (forbidden). A partially drained queue is
+   indistinguishable from this and replays identically (drain
+   resumes at the first entry failing P1; drained prefix entries
+   dedup by the composite rule, so partial-drain replay is
+   idempotent without a drain cursor).
    (d) boundary + verdict append; FENCE state `engaged → open`
    (implicit: the fence ends with the critical section; a queue write
    that finds no `fence-engaged` without a following boundary in the
@@ -2696,16 +2725,48 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    c8-M7; identity domain RE-PINNED v11, c9-M7 — "unique per acting
    channel episode" let TWO distinct channel streams each mint
    `actId:A`, and act-only drain skipping then DROPPED the second
-   stream's act): every act carries a channel-assigned `actId`
+   stream's act; BINDING TO THE CHANNEL-OPEN RECORD RE-PINNED v17,
+   cycle-11 audit finding 7 — a collision detection based on
+   `(channelId, actId)` alone cannot CITE the duplicate channel-open
+   as the drain requires: entries identifying acts by
+   `(channelId, actId)` give C2's entry the same identity as C1's
+   already-drained act, so it skips as consumed while the contract
+   simultaneously demands refusing entries citing the duplicate
+   channel-open — the specified identity does not supply that
+   citation):** every act carries a channel-assigned `actId`
    under the channel's **durable `channelId`** — the channel
    identity is minted once at channel establishment (ULID, recorded
    in a durable `channel-open` record in the log: `{ envelope,
    channelId, channelKind:"tty-cli", device }`, envelope kind added
-   to §14.12.4b, v11), and the ACT's identity is the composite
-   `(channelId, actId)`, globally unique across the episode
-   (collision between two channels' ids is impossible while
-   channelIds are distinct; a second `channel-open` reusing a
-   channelId is a history-integrity-fault, fail closed). `actId`
+   to §14.12.4b, v11), and every act and queue entry additionally
+   carries `channelOpenRecordId` — the envelope `recordId` of the
+   channel-open record that minted its channel (v16, copied from
+   the channel's own establishment record at act creation/queue
+   append; a channel cannot forge another channel's record id
+   because the appender copies it from the channel's session state,
+   which was set when the channel-open record was appended). The
+   ACT's identity is the composite
+   `(channelOpenRecordId, channelId, actId)` — a TRIPLE, globally
+   unique across the episode: under channel-id uniqueness the first
+   two components collapse to one authority, and when a second
+   `channel-open` reuses a `channelId` (history-integrity-fault,
+   `channel-id-collision`, fail closed — v15), the triple KEEPS the
+   two streams' acts DISTINCT instead of silently fusing them: C1's
+   and C2's `actId:A` entries carry different
+   `channelOpenRecordId`s, so dedup never consumes C2's entry as
+   "already drained", the drain's refusal cites the duplicate
+   channel-open record directly (its `recordId` is IN the entry's
+   identity), and the disposition is pinned (v16): while the
+   `channel-id-collision` episode is open, entries whose
+   `channelOpenRecordId` equals the DUPLICATE channel-open's record
+   id are NOT drained (refused per entry, episode stays needs-owner);
+   entries of the FIRST channel-open continue to drain normally —
+   already-drained first-channel acts are untouched (append-only),
+   and if the owner's disposition retires the duplicate channel, its
+   undrained entries are durably voided by a
+   `history-integrity-disposition` citing the collision fault and
+   listing the voided entries, never drained under any identity.
+   `actId`
    is stable across redelivery of the same
    confirmation) and each queue append gets a `queueReceiptId`
    unique for all time within the episode (monotonic per-writer
@@ -2715,21 +2776,31 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    channel durably records the receipt lets a retry mint a NEW
    receipt id for the same `actId`, and receipt-only dedup admits it
    twice — for a one-act-consumption op that is not exactly-once
-   delivery. The dedup key is the STABLE composite `(channelId,
-   actId)` (assigned before
+   delivery. The dedup key is the STABLE composite
+   `(channelOpenRecordId, channelId, actId)` (v17, cycle-11 finding
+   7 — the triple, per the identity re-pin above; the two channels'
+   acts under a REUSED channelId stay distinct because their
+   channel-open record ids differ; assigned before
    submission, never re-minted): the drain skips a queue entry whose
-   `(channelId, actId)` already appears in a log `owner-act`; a queue APPEND for
-   `(channelId, actId)` already present in the queue file is a
+   full triple already appears in a log `owner-act`; a queue APPEND for
+   the same triple already present in the queue file is a
    redelivery —
    the existing entry (with its original receipt id) is returned,
-   never duplicated; a same-`(channelId, actId)` append whose canonical payload
+   never duplicated; a same-triple append whose canonical payload
    DIFFERS is a conflict ⇒ refused at append + `needs-owner`
-   (channel collision or lie — fail closed). `queueReceiptId` stays
+   (channel collision or lie — fail closed); an append whose
+   `(channelId, actId)` matches an existing entry but whose
+   `channelOpenRecordId` DIFFERS is the channel-id-collision case —
+   it is NOT a redelivery and NOT silently a distinct act: it is
+   refused at append + the collision fault path (v17), because the
+   two channel-open records prove one of the two writers is
+   nonconforming. `queueReceiptId` stays
    the per-append transport marker: a drained `owner-act` cites the
-   receipt of the entry it drained AND its `(channelId, actId)`,
+   receipt of the entry it drained AND its full triple,
    and crash recovery resumes the
    drain at the first queue entry with no matching log `owner-act`
-   (matching by act identity per the reconciled rule above; the
+   (matching by act identity (the triple) per the reconciled
+   predicate rule above; the
    cited `queueReceiptId` must equal the entry's own receipt —
    drift there is the `queue-receipt-divergence` fault above, not
    a matching condition).
@@ -2738,14 +2809,25 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    receipt clause RE-PINNED v15, cycle-10 audit finding 6 — the v11
    vector asserted "same act / new receipt ⇒ skipped by act
    identity" while the AND-matching rule made that entry
-   permanently unmatched, contradicting the skip): same act / new
+   permanently unmatched, contradicting the skip; channel-collision
+   vectors PINNED v17, cycle-11 finding 7): same act / new
    receipt ⇒ the APPEND returns the existing entry with its
    original receipt (no second entry, no new receipt in the queue
    file; a writer that lands one anyway is detected at drain as
    `queue-receipt-divergence`, the act consumed once, the boundary
    is UNCLEAN needs-owner);
    different channels / same local `actId` ⇒ BOTH drain (composite
-   identity differs), neither dropped. Crash windows (conformance-tested,
+   identity differs), neither dropped;
+   two channel-opens C1/C2 with EQUAL channelId, each mints
+   `actId:A`, C1's act already drained: the pre-drain scan detects
+   the channel-id-collision from the channel-open pair; C2's queued
+   entry carries `channelOpenRecordId:C2` — it is NOT skipped as
+   already-consumed (the triple differs from C1's drained act), it
+   is refused citing the duplicate channel-open record C2 directly
+   (its recordId is in the entry's identity), the episode goes
+   needs-owner, C1's drained act is untouched (v17);
+   same triple / different payload ⇒ refused at append +
+   needs-owner (redelivery lie, v11). Crash windows (conformance-tested,
    v10, c8-M7): crash before the queue fsync ⇒ nothing durable, a
    retry with the same actId appends fresh (idempotent); crash after
    queue fsync before the receipt is returned/recorded ⇒ the retry
@@ -2827,7 +2909,8 @@ condition identity) a `finalization-wait-anchor` record
 `{ envelope, conditionId, conditionKind, anchorTs, bootId }`
 (`conditionId` = the identity of the condition the table names —
 e.g. the owed filing's source record id, the stalled act's
-`owner-act` id, the queue entry's `(channelId, actId)`; `anchorTs` =
+`owner-act` id, the queue entry's `(channelOpenRecordId,
+channelId, actId)` triple (v17, cycle-11 finding 7); `anchorTs` =
 wallclock ts at first observation; envelope kind added to §14.12.4b,
 v11); conversion past `quiesceWaitMaxMs` is measured from `anchorTs`
 (wallclock — the monotonic-domain rules above do NOT apply to this
@@ -3117,7 +3200,7 @@ ONE definition; 14.12.2 and 14.14.4 reference THIS paragraph):**
   is likewise NOT this fault (v14 D5-a — an accepted limitation,
   see §14.12.2 for its full consequence statement, v15); identity tuple
   = (faultKind, affectedRecordId = the anchor recordId),
-  boundaryId null pre-boundary) | "channel-id-collision" (v15, cycle-10 audit finding 9 — §14.12.2 requires a history-integrity-fault when a second `channel-open` reuses a `channelId`, but the CLOSED enum could not represent it, so a conforming validator refused the fault the contract mandates: the second `channel-open` record whose `channelId` duplicates an earlier one; identity tuple = (faultKind, affectedRecordId = the SECOND channel-open recordId), boundaryId null; required fields: affectedRecordId + evidenceRefs naming BOTH channel-open records (first and duplicate); digests null — the evidence is the pair of records; the duplicate channel's acts are NEVER drained — the drain refuses entries citing the duplicate channel-open and the episode goes needs-owner per the unified paragraph) | "queue-receipt-divergence" (v15, cycle-10 audit finding 6 — a queue entry whose cited `queueReceiptId` differs from the receipt recorded by the matching log `owner-act` (act identity equal, receipt drift — the nonconforming-writer case the reconciled matching rule routes here; §14.12.2 step 5 (c)); identity tuple = (faultKind, affectedRecordId = the matching `owner-act` recordId), boundaryId null; required fields: affectedRecordId + evidenceRefs naming the queue entry (content-addressed snapshot of its bytes at detection) and the `owner-act`; digests null; detection is at drain time, the act is consumed once (matching is by act identity), and every boundary from detection is UNCLEAN needs-owner until a `history-integrity-disposition` closes it), boundaryId|null, affectedRecordId|null, evidenceRefs[],
+  boundaryId null pre-boundary) | "channel-id-collision" (v15, cycle-10 audit finding 9 — §14.12.2 requires a history-integrity-fault when a second `channel-open` reuses a `channelId`, but the CLOSED enum could not represent it, so a conforming validator refused the fault the contract mandates: the second `channel-open` record whose `channelId` duplicates an earlier one; identity tuple = (faultKind, affectedRecordId = the SECOND channel-open recordId), boundaryId null; required fields: affectedRecordId + evidenceRefs naming BOTH channel-open records (first and duplicate); digests null — the evidence is the pair of records; the duplicate channel's acts are NEVER drained — the drain refuses entries citing the duplicate channel-open (v17, cycle-11 finding 7: refusal is decidable because each entry carries `channelOpenRecordId` in its identity — the duplicate channel's entries are exactly those whose `channelOpenRecordId` equals the fault's `affectedRecordId`) and the episode goes needs-owner per the unified paragraph) | "queue-receipt-divergence" (v15, cycle-10 audit finding 6 — a queue entry whose cited `queueReceiptId` differs from the receipt recorded by the matching log `owner-act` (act identity equal, receipt drift — the nonconforming-writer case the reconciled matching rule routes here; §14.12.2 step 5 (c)); identity tuple = (faultKind, affectedRecordId = the matching `owner-act` recordId), boundaryId null; required fields: affectedRecordId + evidenceRefs naming the queue entry (content-addressed snapshot of its bytes at detection) and the `owner-act`; digests null; detection is at the pre-drain full scan and at drain time (v17, cycle-11 finding 6 — the scan visits every durable entry including P1-matched and drained ones, so the second duplicate entry cannot be bypassed), the act is consumed once (matching is by act identity), and every boundary from detection is UNCLEAN needs-owner until a `history-integrity-disposition` closes it), boundaryId|null, affectedRecordId|null, evidenceRefs[],
   recomputedDigest|null, reportedDigest|null, detectionAnchorId }` —
   **per-kind field
   requirements (v9, c7-M8; identity tuple PINNED v10, c8-M10; v8
@@ -3185,7 +3268,12 @@ ONE definition; 14.12.2 and 14.14.4 reference THIS paragraph):**
   matching `owner-act` recordId), boundaryId null (v15, cycle-10
   audit finding 6 — detection is per act identity, so one tuple per
   drifted act; a second queue entry drifting for the same act is
-  the same tuple, deduped). **The kind set is CLOSED: every
+  the same tuple, deduped). **Evidence extension (v17, cycle-11
+  audit finding 6):** a pre-drain-scan detection MUST additionally
+  cite, in `evidenceRefs`, BOTH durable queue entries'
+  `(queueId, receiptId)` pairs and the P1-matched `owner-act`'s
+  `queueReceiptId` — the fault record alone must let replay see
+  which two entries disagreed without re-reading the queue file. **The kind set is CLOSED: every
   kind in the enum above MUST have an entry in this list and in the
   per-kind field rules — a kind without a binding here cannot be
   produced or validated (v14 closure rule; the defect class of c9-B4
@@ -3568,10 +3656,15 @@ the example-syntax clause below.**
   schema (incl. `outcome`, canonical `callId` encoding, uniqueness
   domain, idempotency-key placement, restart validation) is defined
   in §14.13.4a and consumed identically by producer and validator.
-- **Queue receipts (v9, c7-m14):** queue entries and their receipts
+- **Queue receipts (v9, c7-m14; entry shape extended v17, cycle-11
+  audit finding 7):** queue entries and their receipts
   live in the QUEUE FILE, not the S5 log — they are NOT S5 envelope
   kinds and carry the queue-file's own record shape (queueId,
-  receiptId, act payload, append ts); they gain log standing ONLY as
+  receiptId, act payload, append ts, AND the full act-identity triple
+  `(channelOpenRecordId, channelId, actId)` — v17: the entry must
+  carry `channelOpenRecordId` or the drain cannot cite the duplicate
+  channel-open on a collision refusal and cannot keep two channels'
+  acts distinct under a reused channelId); they gain log standing ONLY as
   the drained `owner-act` record (which cites its `queueReceiptId`);
   this is why the envelope table has no queue-receipt row (transport
   buffer, not history — 14.12.2 step 5).
@@ -3619,6 +3712,17 @@ the example-syntax clause below.**
   amended by v11: `evidence-invalidation` serves BOTH
   `repro-run` and `acceptance` targets as an append-only fold
   (c9-M5, §14.10.3/§14.12.2 r4).
+- **v17 (cycle-11) record kind:** `residual-unit-release` —
+  producer: supervisor residual-disposition path; `{ envelope,
+  residualDispositionId, unitId, coveredLeafRecordIds[], releasedUsd,
+  evidenceRefs[] }` (§14.13.4a, v17 cycle-11 finding 5 — the sole
+  durable source of the frozen post-release total `releasedTotal`;
+  append-if-absent keyed by `(residualDispositionId, unitId)`,
+  different bytes for the same key ⇒ `counter-divergence` fault,
+  identical bytes ⇒ idempotent redelivery; fsynced BEFORE any
+  boundary that consumes the released headroom; release state in
+  replay is the record's presence in the prefix, never a
+  boundary-derived cache).
 - `scope-escape-resolution`, `partition`, `dispatch-authorization`,
   `submission-receipt`, `policy-revision`, `repro-run` — producers and
   fields as specified in place (14.14.4/.5, 14.12.4, 14.12.3, 14.12.2
@@ -3664,8 +3768,9 @@ does not create them.
 
 ### 14.13 Design-cycle budget (G4 — the rounds/time/spend cap)
 
-**Status: DRAFT v16 (2026-11-18), batched with §14.11/§14.12/§14.14
-(v16: terra cycle-10 findings folded, see the c10 Change Ledger row;
+**Status: DRAFT v17 (2026-11-18), batched with §14.11/§14.12/§14.14
+(v17: terra cycle-11 findings 1–8 folded, see the c11 Change Ledger
+row; v16: terra cycle-10 findings folded, see the c10 Change Ledger row;
 v13: self-audit findings 1–7 folded, see the v13 Change Ledger row;
 v14: self-audit findings 1–5 + owner decision D5-a, see the v14 row).
 v12: owner decisions D0-b/D1-a/D2-b/D3-a/D4-a folded, see the v12
@@ -3924,10 +4029,27 @@ trichotomy). Restart rules:
   "unrecoverable", evidenceRef }`, and measured elapsed from durable
   dispatch records lands as a measured `elapsed-recovered` record
   (measured beats accepted exactly as spend does).
-  **One-time resolution (v4):** a component may be reconciled at most
-  once; a second reconciliation for the same (targetId, component) —
-  including a replayed or reordered one — is refused; redelivery of the
-  same record id is idempotent, any differing payload is refused.
+  **One-time resolution (v4; supersession chain v17, cycle-11 audit
+  finding 2 — v4's absolute once-only rule made the prescribed
+  post-release refund cure (14.13.4a: "a fresh `spend-reconciliation`")
+  unexecutable for any component already reconciled once: the only
+  specified route was refused by this very validator):** a component
+  may be reconciled at most once PER CHAIN POSITION: the FIRST
+  reconciliation for a (targetId, component) carries
+  `supersedesReconciliation:null`; a SECOND (or later) reconciliation
+  of the same (targetId, component) is refused UNLESS it names the
+  current chain tip record in `supersedesReconciliation` — forming a
+  LINEAR SUPERSESSION CHAIN (validated acyclic, one tip at a time; the
+  chain tip's accepted value is the effective value; every prior
+  reconciliation stays in the log, nothing is modified — append-only).
+  A second reconciliation WITHOUT a valid `supersedesReconciliation` —
+  including a replayed or reordered one — stays refused; redelivery of
+  the same record id is idempotent, any differing payload under the
+  same id is refused. Every superseding reconciliation re-passes the
+  FULL validation of the first (unresolved-or-released target,
+  providerRecovery evidence, TTY-confirmed act, floor checks against
+  the CURRENT effective bounds); an owner disposition is never
+  required to authorize one beyond the act itself.
 - **`parked` is NOT proof of stopped spend (v4, c2):** interval closure
   requires, regardless of task status, **independent liveness proof per
   dispatch identity** — the recorded attempt/session process is gone
@@ -4010,14 +4132,43 @@ trichotomy). Restart rules:
      over IMMUTABLE raw records: (1) collect raw statements (dedup
      identity, step 1's redelivery rules); (2) build the correction
      graph and compute the EFFECTIVE statement set by replacement in
-     the graph (a corrected statement leaves the set; its
-     `statementSeq` position stays CLAIMED by the correcting record —
-     the gap check runs on effective statements' seq coverage, so a
-     correction never erases a sequence number or hides a gap);
-     (3) gap-check the effective set for contiguity over
-     [minSeq..maxSeq]; (4) order effective sequenced statements by
-     `(statementSeq, providerStatementId)` and apply; (5) the
-     null-seq set is applied per the precedence rule below. Records
+     the graph. **Sequence occupancy vs effective-value placement are
+     SEPARATE (v17, cycle-11 audit finding 3 — v15 said the corrected
+     statement "leaves the set" while its seq position "stays CLAIMED
+     by the correcting record", yet the correction also carries its
+     OWN `statementSeq`: one effective statement occupying two
+     sequence positions was never defined, and either reading breaks
+     — claiming only the target's seq exposes an apparent gap at the
+     correction's own seq when a later statement lands; claiming only
+     the correction's seq erases the target's):** EVERY accepted RAW
+     statement (corrections included) permanently OCCUPIES its own
+     `statementSeq` in the stream — occupancy is a property of raw
+     identities only; replacement NEVER vacates, moves, or
+     double-books a sequence position. Replacement affects VALUE
+     ordering only: the target's value leaves the applied set, the
+     correcting record's value enters it AT THE CORRECTION'S OWN
+     SEQ POSITION (with its own `(statementSeq,
+     providerStatementId)` sort key). (3) gap-check the RAW
+     OCCUPANCY set (every accepted raw statement's seq, including
+     every correction's and every superseded target's) for
+     contiguity over [minOccupiedSeq..maxOccupiedSeq] — so a
+     correction can never hide a gap AND never creates a phantom
+     one; (4) order effective statements by `(statementSeq,
+     providerStatementId)` (the correcting record sorts at its OWN
+     seq) and apply; (5) the null-seq set is applied per the
+     precedence rule below. Fixtures (v16, normative): (i)
+     contiguous stream with correction — S5($20 cum), S6($21),
+     S7($22), S8 `correctionOf:"S5"`($2): occupancy {5,6,7,8}
+     contiguous ⇒ no gap; effective set {S8@5→ value applied at
+     S8's own seq 8: S8@8, S6@6, S7@7} applied in seq order 6,7,8 —
+     cumulative semantics mean the LAST-applied cumulative rules,
+     final value $2; (ii) held-correction-of-held-correction — S11
+     `correctionOf:"S8"` arrives while S8's own target S5 is absent:
+     both held; when S5 lands the whole chain re-plays in one
+     deterministic fold: S5 applies, S8 corrects it (value enters at
+     seq 8), S11 corrects S8 (value enters at seq 11) ⇒ final value
+     = S11's; partial chains never fold half-applied (the fold is
+     one total function over the full prefix). Records
      with `statementSeq:null` are NOT interleaved into the seq order
      at all: they form a separate pending set with a single
      precedence rule — a null-seq statement
@@ -4511,8 +4662,8 @@ trichotomy). Restart rules:
     observation exceeds it, rises the moment `Σ effectiveLowerBoundUsd`
     exceeds the cap, and is the measured Σ after the unit release —
     one number, no divergence between what is charged and what is
-    reported) while ANY leaf lacks terminal evidence. **Held charge while leaves are open (v13, audit finding 5; ONE formula for every consumer, v15, cycle-10 audit finding 2 — admission, hold, exposure note and release share it; the pre-v15 admission sentence still named the uncorrected `observedLowerBoundUsd`, which disagreed with the contradiction branch's effective-bound rule):** every admission check uses `heldUsd = max(residualCapUsd, Σ_leaves effectiveLowerBoundUsd)`, where `effectiveLowerBoundUsd` (defined once, at step 1 of the fold below, and replay-defined) is the leaf's largest cumulative value observed so far as adjusted by graph-accepted corrections (observations are lower bounds, never releases; a correction HELD PENDING — its target not yet in the prefix — does NOT adjust the bound; the bound moves only when the correction is applied by the fold). Observed spend above the cap is charged AT ONCE through `heldUsd`; the cap is never added on top of observations, so nothing is double-counted, and the unit release replaces `heldUsd` by Σ terminal amounts — **with the known-spend floor enforced PER LEAF at release (v14, audit finding 1; per-leaf test + hold formula corrected v15, cycle-10 review findings 1–2: a v14 AGGREGATE test would let one leaf's excess mask another leaf's contradiction, and v14's "holds at Σ observedLowerBoundUsd" could drop the charge below the accepted cap):** the release test is per leaf, never on sums — leaf `i` may release only if its terminal amount is ≥ its OWN `effectiveLowerBoundUsd`, defined as the largest cumulative value observed so far for that leaf, WHERE A VALID CORRECTION RECORD (accepted by the correction-graph rules above — the correction carries its OWN statement identity and names the bound-setting record in `correctionOf`; a redelivered record under the SAME identity with a different value is NOT a correction, it is the same-identity conflict ⇒ unresolved unknown (v15, cycle-10 audit finding 1: v15's first wording demanded "same identity" for the displacement, which made the advertised displacement unimplementable — the graph only accepts a correction as a NEW identity pointing at its target), at-most-once per target, no contradiction; a loosely worded statement is never displacement evidence, only a graph-accepted correction is) REPLACES the bound with the corrected cumulative (a provider correction attests the earlier observation was wrong; this is the ONLY route that LOWERS a bound — the owner `spend-reconciliation` route may still resolve the contradicted component per its own schema, but never accepts an amount BELOW a standing lower bound (reconciliation never overrides known spend, exactly as the schema above states (v15, cycle-10 finding 3: v14 offered reconciliation as the displacement alternative, contradicting it)); an owner who believes the terminal figure gets it by reconciling at ≥ the floor, never by silently releasing below it). COUNTEREXAMPLE VECTOR (v15, normative): leaf A bound $20 / terminal $2, leaf B bound $0 / terminal $30 — Σ terminal $32 ≥ Σ bounds $20 but leaf A's contradiction is unexplained: NO release; A stays non-terminal (unresolved unknown, needs-owner).
-  **Bound-displacement vectors (v15, cycle-10 audit finding 1 — the correction identity is the correction record's OWN `providerStatementId` with its own `statementSeq` on the same stream `(providerAccountId, dispatchId)`, pointing at the bound-setting record via `correctionOf`; the redelivered-same-identity case is the graph's unresolved-unknown conflict, never a displacement):** (a) displacement — leaf bound $20 from statement S5 (cumulative $20); provider later sends S8, `correctionOf:"S5"`, cumulative $2, accepted by the graph ⇒ `effectiveLowerBoundUsd` = $2 (the ONLY route that lowers a bound); release at terminal $2 is then legal (per-leaf test passes against the DISPLACED bound). (b) held correction — S8 arrives before S5 is in the prefix: the correction is HELD (target absent), the bound stays $20; when S5 lands the graph re-plays and S8 applies, bound becomes $2 forward from S5's append position — never retroactively (replay-defined fold over the full prefix reproduces this ordering deterministically). (c) correction-of-correction — legal iff each target has at most ONE correcting statement (c6-B4): S8 corrects S5, S11 corrects S8 ⇒ the chain applies in sequence order; S8's value binds nothing once S11 (higher seq) is accepted. (d) second conflicting correction — S8 `correctionOf:"S5"` ($2) AND S9 `correctionOf:"S5"` ($5), no correction relation between them ⇒ two corrections claim one target: at-most-once violated ⇒ component unresolved unknown (never "pick the later", never "pick the smaller"). (e) post-release correction — unit released at Σ terminal $32 (bounds all satisfied); a later graph-accepted correction rewrites a leaf's terminal $30 ⇒ $25 ⇒ released Σ exceeds the corrected picture by $7 ⇒ that $7 is NEW known spend charged at once against remaining budget (admission sees it; if the budget cannot carry it ⇒ needs-owner), the released unit stays released, no verdict is amended. Absent a graph-accepted correction, contradicted leaves stay non-terminal, the UNIT release does not happen at all (release is unit-granular: partial release over surviving contradictions is forbidden), and throughout `heldUsd` keeps its full formula `max(residualCapUsd, Σ effectiveLowerBoundUsd)` — the cap is never dropped from the hold while leaves remain open, and known spend is a permanent floor exactly as at every other point in the ledger. **Post-release lifecycle (v15, cycle-10 audit finding 1):** the unit release is ONE durable event (the released Σ terminal amounts recorded at release; a second release of the same unit is malformed — `heldUsd` transitions exactly once from hold to released Σ). A correction arriving AFTER release applies to the correction graph normally against the terminal record it names; if the corrected picture exceeds the released Σ, the difference is NEW known spend charged at once (a fresh admission-relevant amount, needs-owner only if the budget cannot carry it) — the released unit is NEVER reopened and no prior verdict retroactively changes (append-only); if it is below, nothing refunds below the released-and-known floor without a fresh `spend-reconciliation` at ≥ the standing bounds. The v11 per-leaf phrase
+    reported) while ANY leaf lacks terminal evidence. **Held charge while leaves are open (v13, audit finding 5; ONE formula for every consumer, v15, cycle-10 audit finding 2 — admission, hold, exposure note and release share it; the pre-v15 admission sentence still named the uncorrected `observedLowerBoundUsd`, which disagreed with the contradiction branch's effective-bound rule):** every admission check uses `heldUsd = max(residualCapUsd, Σ_leaves effectiveLowerBoundUsd)`, where `effectiveLowerBoundUsd` (defined once, at step 1 of the fold below, and replay-defined) is **the MAXIMUM over the leaf's EFFECTIVE observation values after correction-graph replacement (v17, cycle-11 audit finding 4 — a correction replaces its TARGET OBSERVATION in the graph, never "the bound": a leaf with uncorrected observations S1=$18 and S2=$20 whose S2 is validly corrected to $2 keeps the still-effective S1=$18 ⇒ bound $18, NOT $2 — replacing the bound wholesale erased a valid observation and would let release at $2 pass), recomputed from the prefix on every replay (observations are lower bounds, never releases; a correction HELD PENDING — its target not yet in the prefix — does NOT adjust the bound; the bound moves only when the correction is applied by the fold; cumulative-coverage interaction: a cumulative observation demonstrably covering an earlier one still counts independently toward the maximum — only a graph-accepted correction removes the value it names)**. Observed spend above the cap is charged AT ONCE through `heldUsd`; the cap is never added on top of observations, so nothing is double-counted, and the unit release replaces `heldUsd` by Σ terminal amounts — **with the known-spend floor enforced PER LEAF at release (v14, audit finding 1; per-leaf test + hold formula corrected v15, cycle-10 review findings 1–2: a v14 AGGREGATE test would let one leaf's excess mask another leaf's contradiction, and v14's "holds at Σ observedLowerBoundUsd" could drop the charge below the accepted cap):** the release test is per leaf, never on sums — leaf `i` may release only if its terminal amount is ≥ its OWN `effectiveLowerBoundUsd` as defined above (the max over its effective observations), WHERE A VALID CORRECTION RECORD (accepted by the correction-graph rules above — the correction carries its OWN statement identity and names the bound-setting record in `correctionOf`; a redelivered record under the SAME identity with a different value is NOT a correction, it is the same-identity conflict ⇒ unresolved unknown (v15, cycle-10 audit finding 1: v15's first wording demanded "same identity" for the displacement, which made the advertised displacement unimplementable — the graph only accepts a correction as a NEW identity pointing at its target), at-most-once per target, no contradiction; a loosely worded statement is never displacement evidence, only a graph-accepted correction is) REPLACES its target observation so the maximum is recomputed over the remaining effective observations (a provider correction attests the earlier observation was wrong; this is the ONLY route that LOWERS a bound — a bound set by a STILL-EFFECTIVE uncorrected observation never lowers (v17, cycle-11 finding 4 vector: S1=$18 + S2=$20, S3 corrects S2⇒$2 ⇒ bound stays $18, release below $18 is refused); the owner `spend-reconciliation` route may still resolve the contradicted component per its own schema, but never accepts an amount BELOW a standing lower bound (reconciliation never overrides known spend, exactly as the schema above states (v15, cycle-10 finding 3: v14 offered reconciliation as the displacement alternative, contradicting it)); an owner who believes the terminal figure gets it by reconciling at ≥ the floor, never by silently releasing below it). COUNTEREXAMPLE VECTOR (v15, normative): leaf A bound $20 / terminal $2, leaf B bound $0 / terminal $30 — Σ terminal $32 ≥ Σ bounds $20 but leaf A's contradiction is unexplained: NO release; A stays non-terminal (unresolved unknown, needs-owner).
+  **Bound-displacement vectors (v15, cycle-10 audit finding 1 — the correction identity is the correction record's OWN `providerStatementId` with its own `statementSeq` on the same stream `(providerAccountId, dispatchId)`, pointing at the bound-setting record via `correctionOf`; the redelivered-same-identity case is the graph's unresolved-unknown conflict, never a displacement):** (a) displacement — leaf bound $20 from statement S5 (cumulative $20); provider later sends S8, `correctionOf:"S5"`, cumulative $2, accepted by the graph ⇒ `effectiveLowerBoundUsd` = $2 (the ONLY route that lowers a bound); release at terminal $2 is then legal (per-leaf test passes against the DISPLACED bound). (b) held correction — S8 arrives before S5 is in the prefix: the correction is HELD (target absent), the bound stays $20; when S5 lands the graph re-plays and S8 applies, bound becomes $2 forward from S5's append position — never retroactively (replay-defined fold over the full prefix reproduces this ordering deterministically). (c) correction-of-correction — legal iff each target has at most ONE correcting statement (c6-B4): S8 corrects S5, S11 corrects S8 ⇒ the chain applies in sequence order; S8's value binds nothing once S11 (higher seq) is accepted. (d) second conflicting correction — S8 `correctionOf:"S5"` ($2) AND S9 `correctionOf:"S5"` ($5), no correction relation between them ⇒ two corrections claim one target: at-most-once violated ⇒ component unresolved unknown (never "pick the later", never "pick the smaller"). (e) post-release correction (RECOMPUTED v17, cycle-11 audit finding 1 — the v15 vector claimed a $30→$25 leaf correction puts the released Σ $7 ABOVE the corrected picture and charges that $7 as new spend: arithmetic error, $32 released vs $27 corrected is $5 BELOW, and a decrease is never new spend — an implementation following the vector disagreed with the adjacent lifecycle rule): post-release accounting is ONE replay-defined formula. Let `releasedTotal` be the FROZEN Σ recorded by the unit-release event (finding 5's durable record), and `correctedTotal(P)` the Σ over leaves of their terminal amounts as folded by the correction graph over prefix `P`. The post-release charged total is `charged(P) = max(releasedTotal, correctedTotal(P))` — an INCREMENT computed against the current charged total, never against `releasedTotal` again, so successive corrections can never re-charge the same exceedance: correction raises a leaf so `correctedTotal` = $40 against `releasedTotal` $32 ⇒ $8 NEW known spend charged at once (admission sees it; budget cannot carry ⇒ needs-owner); a further correction then lowers the picture to $36 ⇒ still $8 charged (max(32, 36) = 36 ⇒ $4 of the $8 stands, $4 was never spend — released at 32, corrected max 36), never a second $8; the $36→$27 case above ⇒ `correctedTotal` $27 < `releasedTotal` $32 ⇒ NO new spend, the $32 stays charged as known spend — a decrease alone NEVER refunds (the refund route is the superseding `spend-reconciliation` of the lifecycle paragraph below, finding 2), the released unit stays released, no verdict is amended. Vectors (v17, normative): V-e1 increase-then-partial-decrease: released $32; corrections lift corrected Σ to $40 ($8 new spend), then drop it to $36 (charge $4, cumulative new spend $4, the lifted-then-dropped $4 is not spend twice); V-e2 decrease-only: released $32 including a $30 leaf, correction rewrites it $30⇒$25 ⇒ corrected Σ $27 < $32 ⇒ charge stays $32, zero new spend, zero refund absent reconciliation. Absent a graph-accepted correction, contradicted leaves stay non-terminal, the UNIT release does not happen at all (release is unit-granular: partial release over surviving contradictions is forbidden), and throughout `heldUsd` keeps its full formula `max(residualCapUsd, Σ effectiveLowerBoundUsd)` — the cap is never dropped from the hold while leaves remain open, and known spend is a permanent floor exactly as at every other point in the ledger. **Post-release lifecycle (v15; durable record + refund route REWRITTEN v17, cycle-11 audit findings 1–2, 5):** the unit release is ONE durable `residual-unit-release` RECORD (kind added to the §14.12.4b introduced-record inventory, v17 — v15 asserted "one durable event" with no kind, fields, producer, or inventory entry, so replay could not distinguish "released once at $32" from "not yet released" in the crash window before the next boundary): producer: supervisor; fields `{ envelope, residualDispositionId, unitId, coveredLeafRecordIds[], releasedUsd (the FROZEN Σ terminal amounts — the sole source of `releasedTotal` above), evidenceRefs[] (the per-leaf terminal records + the §14.10.3 residual-cap disposition record the leaves hang off) }`; append is APPEND-IF-ABSENT keyed by `(residualDispositionId, unitId)`: a second release record for the same key with DIFFERENT bytes is malformed ⇒ `counter-divergence` fault + needs-owner; with identical bytes it is the idempotent redelivery replay already holds. Fsync order: the release record fsyncs BEFORE any boundary that consumes the released headroom (a boundary whose admission shows headroom released with no release record in the prefix is a `fenceless-boundary`-class history-integrity-fault, fail closed). Replay after crash: release state is the PRESENCE of the record in the prefix — never a boundary-derived cache. A correction arriving AFTER release applies to the correction graph normally against the terminal record it names; `charged(P) = max(releasedTotal, correctedTotal(P))` governs (above): exceedance is NEW known spend charged at once; a decrease is NOT spend and NOT a refund. The released unit is NEVER reopened and no prior verdict retroactively changes (append-only). The ONLY route to charge below `releasedTotal` afterwards (a refund) is a SUPERSEDING `spend-reconciliation` (§14.13.4a one-time-resolution chain, v17 finding 2): a fresh reconciliation naming the chain tip in `supersedesReconciliation`, passing full validation (providerRecovery evidence, TTY act, and the floor rule restated for released units: `acceptedUsd` ≥ the Σ of still-effective leaf observations for the covered component — the released-and-known floor survives until evidence-backed reconciliation replaces it); `charged` then becomes `max(newReconciledAggregate, corrections after it per the formula)`. The v11 per-leaf phrase
     ("headroom is released ONLY leaf-by-leaf") is RETRACTED by D2-b
     as inconsistent with holding the unknown whole — what survives
     of the v11 text is the per-leaf EVIDENCE-QUALITY rule (what
@@ -4650,7 +4801,8 @@ work; G4 only gates whether a cycle may start).
 
 ### 14.14 Finding partitioning (G5 — which findings may run in parallel)
 
-**Status: DRAFT v16 (2026-11-18), batched with §14.11–§14.13 (v16:
+**Status: DRAFT v17 (2026-11-18), batched with §14.11–§14.13 (v17:
+terra cycle-11 findings 1–8 folded, see the c11 Change Ledger row; v16:
 terra cycle-10 findings folded, see the c10 Change Ledger row; the v13
 gitlink fold (D3-a amendment) lives in THIS section though its header
 was never bumped — corrected here). v8 (terra
@@ -5028,7 +5180,11 @@ never excluded from safety because its dispatch waits.
 deferral is a NONTERMINAL state, not an outcome):** the "refusal/
 next-window record" is a DEFINED kind — `submission-deferral`
 `{ kind:"submission-deferral", id, ts, episodeId, receiptId,
-submissionId, deferralOf|null (v9, c7-M10), windowOf:{ cycle,
+submissionId, deferralOf|null (v9, c7-M10), resetOfLoopId|null
+(v17, cycle-11 audit finding 8 — non-null ONLY on a reset head
+granted by a `deferral-loop-disposition` `grant-new-window`; names
+the `deferral-loop` record; at most one reset head per loop record,
+v16), windowOf:{ cycle,
 partitionId:null }, reason }`
 (supervisor-authored; the chain head has
 `deferralOf:null`; appended in
@@ -5152,7 +5308,9 @@ The obligation is carried forward as the receipt's derived state
 the standing note every later boundary reports, and the malformed-
 position rule above gets ONE named exception: after the tail window
 has finalized, a terminal outcome is appended against the ORIGINAL
-chain (`viaDeferralId` still naming the last-active deferral) as a
+chain (`viaDeferralId` still naming the last-active deferral — valid
+ONLY while no reset head exists, v17 finding 8; superseded reading
+below) as a
 **forward settlement** — it settles the obligation at append time,
 discharges the loop record if one exists, clears the standing note
 at the NEXT boundary, and does NOT alter the finalized UNCLEAN
@@ -5173,6 +5331,72 @@ settled, original UNCLEAN boundary byte-unchanged in replay, the
 boundary AFTER the settlement reports the note cleared (v11's
 "terminal outcome after the tail window's boundary is malformed"
 holds ONLY for windows not yet finalized).
+**One active chain across generations (v17, cycle-11 audit finding
+8 — v15 left a contradiction across a reset: the forward-settlement
+rule said a late terminal outcome settles "against the ORIGINAL
+chain" naming the last-active deferral, while the terminal-outcome
+binding rule requires `viaDeferralId` to name the ACTIVE tail and
+refuses a non-tail citation — after `grant-new-window` the OLD tail
+is not active, so a delayed drain's forward settlement was simultaneously
+legal and malformed; and the reset head is itself a second deferral
+of the submission with `deferralOf:null`, violating the v9 linearity
+rule that every deferral after the first names its predecessor.
+ONE receipt-level state machine, replay-defined, spanning chain
+generations):**
+- **Generation:** a maximal chain segment delimited by reset heads.
+  Generation 0 is the original chain (head with `deferralOf:null`
+  and no `resetOfLoopId`); each `grant-new-window` reset head starts
+  generation k+1. The ACTIVE generation is the one containing the
+  chain tip (latest appended deferral of the submission); ACTIVE
+  TAIL = the tail of the active generation. Reset of a generation
+  SUPERSEDES every unfinalized fact of prior generations: their
+  obligations, standing-note drivers, drain directions, and loop
+  records derive from the active generation only.
+- **Reset-head exemption, explicit (v16):** a deferral record with
+  `deferralOf:null` is valid IFF (a) no other deferral of the same
+  `submissionId` exists in the prefix, OR (b) it carries
+  `resetOfLoopId` naming a `deferral-loop` record whose
+  `grant-new-window` disposition is the act authorizing THIS record
+  (consumption-bound one-for-one), and no prior reset head names the
+  same loop record — at most ONE reset head per loop record; a
+  second is refused at append (`deferral-branch`). Every other
+  deferral requires `deferralOf` naming its predecessor as before.
+- **Stale-direction invalidation (v16):** every terminal-outcome
+  append (including a forward settlement) and every pending drain
+  direction validates its `viaDeferralId` against the ACTIVE tail at
+  append time: a citation of a superseded generation's tail is
+  refused as malformed (`stale-deferral-lineage` validation error —
+  a refused append, not a history-integrity-fault: the prefix stays
+  clean; the loop record it cites is closed, so no obligation
+  evokes). The counterexample resolves: tail finalizes without an
+  outcome → owner `grant-new-window` appends reset head G1 → a
+  delayed drain attempts the forward settlement naming the OLD tail
+  ⇒ REFUSED stale lineage; the obligation now rides G1, and the next
+  drain produces its outcome against G1.
+- **Serialized transitions (v16):** the three receipt-level
+  transitions — forward settlement (drain), `waive-receipt`, and
+  `grant-new-window` reset — are appended ONLY inside the S5
+  critical section, one per section, and the derived state machine
+  consumes them in append order (first-admitted wins; concurrent
+  directives arriving after a transition are validated against the
+  post-transition state and refused if stale, per the rule above).
+  Race vectors (v16, normative): (i) reset vs forward settlement —
+  reset lands first ⇒ the settlement naming the old tail is refused
+  (above); settlement lands first ⇒ the loop record is already
+  discharged by the terminal outcome, so the `grant-new-window`
+  disposition targeting it is refused (disposition of a closed loop
+  record is malformed) and the receipt is terminal; (ii) waiver vs
+  directed drain — `waive-receipt` lands first ⇒ the receipt is
+  terminal (`refused`, `waived:true`), any later outcome append for
+  the submission is refused (rule (iv) covers waived receipts: a
+  terminal outcome never attaches to a terminal receipt); directed
+  drain lands first ⇒ the receipt is terminal via filing/refusal and
+  the waiver disposition is refused (waiving a terminal receipt is
+  malformed); (iii) second loop after reset — a laundering cap hit
+  in generation k+1 appends a NEW `deferral-loop` record (its own
+  `chainTipId`, own disposition); old-generation loop state never
+  re-arms, and laundering counters are per generation
+  (`deferralRecordsSince` the active generation's head).
 **Clean-predicate integration (v9, c7-M10):** the clean/needs-owner
 predicates consume the DERIVED receipt state (`open`, `deferred`
 (active window = tail's), `filed`, `refused`), never the count of
@@ -5332,10 +5556,10 @@ groups may run at once).
 
 ### 14.15 Batch draft: adversarial-audit scope and ratification order
 
-**Status: DRAFT v16 (2026-11-18; owner decisions D0–D4 + D5-a, the
+**Status: DRAFT v17 (2026-11-18; owner decisions D0–D4 + D5-a, the
 v13/v14 self-audit folds, the v14 same-session review fold (findings
-1–5) and the terra cycle-10 fold, see the v13/v14/v15/v16 Change
-Ledger rows).** The
+1–5), the terra cycle-10 fold and the terra cycle-11 fold, see the
+v13/v14/v15/v16/v17 Change Ledger rows).** The
 four sections above are one
 contract drafted in one pass and attacked as one contract, with
 per-section disposition:
