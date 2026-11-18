@@ -106,16 +106,32 @@ const stripComments = (t) => t.replace(/<!--[\s\S]*?(?:-->|$)/g, " ");
 //   backticks closes only on a run of exactly N) and copied VERBATIM —
 //   markers inside them are literal text, refs inside them stay live.
 //   Backslash escapes copy two chars. Unclosed comment or fence at EOF
-//   FAILS (silently masking the document tail is the laundromat). Lone \r
-//   (CR-only endings) FAILS: the line model is \n-only and CR would let a
-//   fence boundary hide a ref. Masked chars become spaces so line numbers,
-//   offsets and column positions survive for ledger bounds and slicing.
+//   FAILS (silently masking the document tail is the laundromat).
+//   Round-7: ANY CR (lone OR CRLF) FAILS — the line model is \n-only and
+//   a CR riding inside masked/live text breaks the byte-exact contract.
+//   A pending multi-line span is INTERRUPTED by a heading (r7-F2): the
+//   stray opener dies, the heading line is processed normally. A
+//   blockquote fence auto-closes when the blockquote ends (r7-F3) and
+//   every fence-state variable resets on every close path. Indented
+//   code blocks (4+ spaces / tab right after a blank line) are masked
+//   to the end of the indented run (r7-F6, documented exclusion).
 const scanModel = (text) => {
   const issues = [];
-  if (/\r(?!\n)/.test(text)) issues.push("lone \\r (CR-only line ending): C9's line model is \\n-only");
+  // Round-7 F5: stated policy is refuse ANY CR — lone OR part of CRLF.
+  // The line model is \n-only; CRLF would let \r ride along inside
+  // masked/live text and (regex-wise) a $-anchored grammar could see a
+  // CR-hidden trailing char. Byte-exact contract: \n endings only.
+  if (/\r/.test(text)) issues.push("carriage return (\\r): C9's line model refuses ANY CR (\\n-only byte contract, incl. CRLF)");
+  // r6-F1: JS multiline ^ ALSO treats U+2028/U+2029 as line boundaries
+  // while this scanner splits \n only. They are MASKED to spaces in the
+  // output (column-preserving): text after a mid-line separator can
+  // never anchor ^ as a phantom heading in the masked text, and
+  // legitimate CONTENT use of these codepoints (prose "C\u2028D") stays
+  // harmless. Lone \r stays fail-closed (whole-line model breaks).
   const lines = text.split("\n");
   const outLines = [];
-  let inComment = false, inFence = false, fenceChar = "", fenceLen = 0;
+  let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false;
+  let spanRun = 0; // r6-F2: open multi-line inline span (required closer run)
   const findRun = (str, from, n) => {
     for (let j = from; j < str.length; j++) {
       if (str[j] === "`") {
@@ -127,7 +143,7 @@ const scanModel = (text) => {
     }
     return -1;
   };
-  const processText = (ln, st) => {
+  const processText = (ln, st, openSpan) => {
     let res = "", i = 0;
     while (i < ln.length) {
       if (ln[i] === "\\" && i + 1 < ln.length) { res += ln[i] + ln[i + 1]; i += 2; continue; }
@@ -135,7 +151,19 @@ const scanModel = (text) => {
         let n = 0;
         while (ln[i + n] === "`") n++;
         const close = findRun(ln, i + n, n);
-        if (close === -1) { res += ln.slice(i); i = ln.length; break; }
+        // r5-F1: an UNCLOSED backtick run MID-LINE is literal text
+        // (CommonMark) — the scan CONTINUES past it; a `<!--` later on
+        // the line is still a comment opener.
+        if (close === -1) {
+          // r6-F2: an unclosed run opens a MULTI-LINE span (CommonMark
+          // pairs it with the next run of the SAME length, on any later
+          // line). Content lines until the closer are never heading/
+          // fence/comment material; §refs inside them stay LIVE (spans
+          // are norm text). The remainder of the opener line is span
+          // content too (copied; `<!--` inside span content is literal).
+          if (openSpan) { st.spanRun = n; i = ln.length; break; }
+          res += "`".repeat(n); i += n; continue;
+        }
         res += ln.slice(i, close + n); i = close + n; continue;
       }
       if (ln.startsWith("<!--", i)) {
@@ -147,50 +175,163 @@ const scanModel = (text) => {
     }
     return res;
   };
+  // r6-F3: fences open THROUGH a blockquote prefix (> ```): a line is
+  // tested plain first, then with its "> " prefix(es) stripped (CommonMark
+  // strips one optional space). The closer must carry the same shape, and
+  // the r5-F3 indent rule holds (closer indent <= opener indent).
+  const fenceMatch = (ln, expectBq) => {
+    let rest = ln, indent = 0, bq = false;
+    const lead = rest.match(/^( {0,3})/); if (lead) { indent = lead[1].length; rest = rest.slice(indent); }
+    if (expectBq) {
+      const bp = rest.match(/^(?:>[ ]?)+/);
+      if (!bp) return null;
+      bq = true; rest = rest.slice(bp[0].length);
+      const lead2 = rest.match(/^( {0,3})/); if (lead2) { indent = lead2[1].length; rest = rest.slice(lead2[1].length); }
+    }
+    const m = rest.match(/^(`{3,}|~{3,})(.*)$/);
+    if (!m) return null;
+    if (m[1][0] === "`" && m[2].includes("`")) return null;
+    return { marker: m[1], indent, bq };
+  };
+  // r6-F2 scope: CommonMark pairs inline code WITHIN a block — a
+  // pending span dies at a blank line (paragraph end) and a FENCE line
+  // interrupts the paragraph (opener becomes literal, fence opens).
+  // Lines that are block-openers (table rows, headings, ">") never OPEN
+  // a pending span: their inline code is scoped to their own line/cell.
+  const canOpenSpan = (ln) => !/^(?: {0,3}(?:#{1,6} |\||>|~~~|```))/.test(ln);
+  let prevBlank = true; // r7-F6: start-of-file behaves like a blank line
+  let codeIndent = -1;  // r7-F6: active indented-code block (indent width)
+  const indentWidth = (ln) => {
+    const m = ln.match(/^ +/); if (m) return m[0].length;
+    const t = ln.match(/^\t/); return t ? 4 : 0;
+  };
   for (const ln of lines) {
+    const isBlank = !ln.trim();
+    // r7-F6: inside an indented code block — blank lines and lines at
+    // >= the opener's indent keep the block; anything else ends it and
+    // is processed normally from here.
+    if (codeIndent >= 0) {
+      if (isBlank) { outLines.push(" ".repeat(ln.length)); prevBlank = true; continue; }
+      if (indentWidth(ln) >= codeIndent) { outLines.push(" ".repeat(ln.length)); prevBlank = false; continue; }
+      codeIndent = -1;
+    }
     if (inFence) {
-      const cm = ln.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-      if (cm && cm[1][0] === fenceChar && cm[1].length >= fenceLen) inFence = false;
-      outLines.push(ln.replace(/./g, " "));
-      continue;
+      const cm = !fenceBq && ln.match(/^( {0,3})(`{3,}|~{3,})[ \t]*$/);
+      const cb = fenceBq && ln.match(/^( {0,3})(?:>[ ]?)+( {0,3})(`{3,}|~{3,})[ \t]*$/);
+      const marker = cm ? cm[2] : cb ? cb[3] : null;
+      const mIndent = cm ? cm[1].length : cb ? cb[2].length : 99;
+      // r5-F3: char match, run >= opener, closer indent <= opener indent.
+      // r7-F3: EVERY close path resets the full fence state (not just the
+      // inFence flag) so a later open cannot inherit stale opener shape.
+      if (marker && marker[0] === fenceChar && marker.length >= fenceLen && mIndent <= fenceIndent) {
+        inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false;
+        outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      }
+      // r7-F3: a blockquote fence cannot outlive its blockquote — a blank
+      // line or a line WITHOUT the ">" prefix ends both. The line that
+      // ended the blockquote is LIVE and falls through for normal
+      // processing (it was never fence content).
+      if (fenceBq && (isBlank || !/^( {0,3})(?:>[ ]?)/.test(ln))) {
+        inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false;
+        if (isBlank) { outLines.push(" ".repeat(ln.length)); prevBlank = true; continue; }
+      } else {
+        outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      }
     }
     if (inComment) {
       const c = ln.indexOf("-->");
-      if (c === -1) { outLines.push(" ".repeat(ln.length)); continue; }
+      if (c === -1) { outLines.push(" ".repeat(ln.length)); prevBlank = isBlank; continue; }
       inComment = false;
       const st = {};
-      outLines.push(" ".repeat(c + 3) + processText(ln.slice(c + 3), st));
+      let out = processText(ln.slice(c + 3), st, canOpenSpan(ln));
+      if (st.spanRun) { spanRun = st.spanRun; out = out.replace(/`+/g, (m) => " ".repeat(m.length)); }
+      outLines.push(" ".repeat(c + 3) + out);
       if (st.inComment) inComment = true;
+      prevBlank = isBlank;
       continue;
     }
-    const fm = ln.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (fm && !(fm[1][0] === "`" && fm[2].includes("`"))) {
-      inFence = true; fenceChar = fm[1][0]; fenceLen = fm[1].length;
-      outLines.push(ln.replace(/./g, " "));
-      continue;
+    // Fence open is checked BEFORE the pending-span branch: a fence line
+    // interrupts the paragraph, so the opener run was literal (CommonMark).
+    const fm = fenceMatch(ln, false) ?? fenceMatch(ln, true);
+    if (fm) {
+      spanRun = 0;
+      inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq;
+      outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+    }
+    if (spanRun > 0) {
+      // r6-F2: pending multi-line span (paragraph scope). r7-F2: a blank
+      // line is the block boundary that ends the paragraph — the stray
+      // opener dies and everything from the boundary on is processed
+      // NORMALLY, so a heading after a blank line can never be swallowed
+      // into a pending span and its refs always stay visible (probe
+      // r7-heading-kills-span). A heading FUSED directly under the
+      // opener (no blank line) stays span content: r6-F2's deliberate
+      // policy that span content is never heading/fence/comment
+      // material — refs on such lines stay live regardless.
+      // (r6-F2 also had a line-loss bug: the blank boundary line was
+      // never pushed, misaligning every following line number.)
+      if (isBlank) {
+        spanRun = 0;
+      } else {
+        // Content line: copied (§refs inside stay LIVE) but NEVER heading/
+        // fence/comment material — leading space kills a phantom heading.
+        const c = findRun(ln, 0, spanRun);
+        if (c === -1) { outLines.push(" " + ln); prevBlank = false; continue; }
+        let runLen = 0; while (ln[c + runLen] === "`") runLen++;
+        spanRun = 0;
+        const st = {};
+        outLines.push(" " + " ".repeat(c + runLen) + processText(ln.slice(c + runLen), st, canOpenSpan(ln)));
+        if (st.inComment) inComment = true;
+        if (st.spanRun) spanRun = st.spanRun;
+        prevBlank = false;
+        continue;
+      }
+    }
+    // r7-F6: indented code block START — 4+ spaces (or a tab) directly
+    // after a blank line (outside fences/comments/pending spans, which
+    // are all handled above). Documented exclusion: content is code,
+    // masked to the end of the indented run.
+    if (prevBlank && indentWidth(ln) >= 4) {
+      codeIndent = indentWidth(ln);
+      outLines.push(" ".repeat(ln.length)); prevBlank = false; continue;
     }
     const st = {};
-    outLines.push(processText(ln, st));
+    let out = processText(ln, st, canOpenSpan(ln));
+    if (st.spanRun) {
+      // r6-F2: the opener run is masked once the span pairs (closer emits
+      // as spaces too) — backtick runs vanish from live text.
+      spanRun = st.spanRun;
+      out = out.replace(/`+/g, (m) => " ".repeat(m.length));
+    }
+    outLines.push(out);
     if (st.inComment) inComment = true;
+    prevBlank = isBlank;
   }
   if (inComment) issues.push("unclosed <!-- masks the rest of the document from C9");
   if (inFence) issues.push("unclosed code fence masks the rest of the document from C9");
-  return { masked: outLines.join("\n"), issues };
+  if (spanRun > 0) issues.push("unclosed multi-line inline span masks heading/fence structure from C9");
+  return { masked: outLines.join("\n").replace(/[\u2028\u2029]/g, " "), issues };
 };
 
+
 // Section map: every `### 14.N` header to the next one (or EOF).
+// Round-5 F2: boundaries are DISCOVERED in the masked text too (r4-F7
+// sliced contents from masked but discovered from raw — a commented-out
+// `### 14.12 fake` heading clobbered the real entry and fired 15 checks).
+// One scanModel pass, shared by the section map and C9 (scan9 = scanMain).
+const scanMain = scanModel(s);
+const maskedSecSource = scanMain.masked;
 const secNums = [];
 const secStarts = [];
-for (const m of s.matchAll(/^### (14\.\d+) /gm)) {
+for (const m of maskedSecSource.matchAll(/^### (14\.\d+) /gm)) {
   secNums.push(m[1]);
   secStarts.push(m.index);
 }
 const sections = new Map();
-// Round-4 c35 terra F7: sections come from the MASKED text (scanModel below),
-// so C1/C2/C8 share C9's masking model — a pin fenced away as example
-// content no longer survives C8, and inline-code `<!--` markers no longer
-// make C8 strip live text. Offsets survive: masking is line/column-aligned.
-const maskedSecSource = scanModel(s).masked;
+// Round-4 c35 terra F7: sections come from the MASKED text, so C1/C2/C8
+// share C9's masking model — a pin fenced away as example content no
+// longer survives C8, and inline-code `<!--` markers no longer make C8
+// strip live text. Offsets survive: masking is line/column-aligned.
 for (let i = 0; i < secNums.length; i++) {
   sections.set(secNums[i], maskedSecSource.slice(secStarts[i], i + 1 < secNums.length ? secStarts[i + 1] : maskedSecSource.length));
 }
@@ -316,10 +457,11 @@ check("C5 decision enums agree (12.4b ⊆ 12.4)", d21.length === 0, d21.join(","
 
 // ---------------------------------------------------------------------------
 // C6 — no undecided-authority idiom survives outside the ledger (checked on
-// comment-stripped body — an HTML comment is not norm but also not a place
-// the idiom is allowed to live).
-const body = s.split("\n").filter((l) => !/^\| \d{4}-\d{2}-\d{2} \|/.test(l)).join("\n");
-check("C6 no 'not decided here' idiom in body", !stripComments(body).includes("not decided here"));
+// MASKED body — r5 one-model close-out: C6 previously ran stripComments on
+// RAW text, a second masking model that fences could hide nothing from but
+// spans could; masked is the single source of what is live text).
+const body = maskedSecSource.split("\n").filter((l) => !/^\| \d{4}-\d{2}-\d{2} \|/.test(l)).join("\n");
+check("C6 no 'not decided here' idiom in body", !body.includes("not decided here"));
 
 // ---------------------------------------------------------------------------
 // C7 — kind-shaped ratchet: every backticked kebab word (≥3 components) in
@@ -333,6 +475,11 @@ check("C6 no 'not decided here' idiom in body", !stripComments(body).includes("n
 // allowlist quietly keeps laundering the term is now a FAILURE.
 // KNOWN LIMIT (documented spec boundary, see header): two-component terms
 // are NOT covered pending an authored record-kind inventory.
+// DECLARATION extraction (declaredKinds/unionKinds/decision enums, C4/C5)
+// DELIBERATELY reads the RAW document: the declarations live in fenced
+// jsonc blocks which are DATA to parse, not norm — masking them is not
+// what these checks consume. The one-model rule governs NORMAT text
+// (C1/C2/C6/C7/C8/C9): everything reading prose consumes scanModel.masked.
 const declaredKinds = new Set([...s.matchAll(/"kind":"([a-z][a-z0-9-]+)"/g)].map((m) => m[1]));
 const decisionValues = new Set([...set1, ...set2]);
 const allow = new Set([
@@ -366,8 +513,11 @@ const staleAllow = [...allow].filter(
   (k) => !declaredKinds.has(k) && !unionKinds.has(k) && !decisionValues.has(k) && !new RegExp(`\\b${k}\\b`).test(s),
 );
 check("C7 allowlist entries still exist in the document", staleAllow.length === 0, staleAllow.join(","));
-const iBody = sections.has("14.11") ? s.indexOf("### 14.11 ") : 0;
-const kindShaped = new Set([...stripComments(s.slice(iBody)).matchAll(/`([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})`/g)].map((m) => m[1]));
+const iBody = sections.has("14.11") ? maskedSecSource.indexOf("### 14.11 ") : 0;
+// r5 one-model close-out: the ratchet scans LIVE body text (masked) — a
+// novel term fenced out of norm no longer counts, and `<!--` inside an
+// inline span no longer makes stripComments strip live text.
+const kindShaped = new Set([...maskedSecSource.slice(iBody).matchAll(/`([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})`/g)].map((m) => m[1]));
 const novel = [...kindShaped].filter((k) => !declaredKinds.has(k) && !unionKinds.has(k) && !decisionValues.has(k) && !allow.has(k));
 check("C7 no unregistered kind-shaped term", novel.length === 0, novel.join(","));
 
@@ -396,7 +546,10 @@ const PINS = [
   ["14.12", "IN THE SAME revision; a bump that does neither is OUT OF CONTRACT"],
 ];
 for (const [sec, p] of PINS) {
-  const flat = strip(stripComments(sections.get(sec) ?? ""));
+  // r5 one-model close-out: sections are already masked (comment-free);
+  // the redundant stripComments used to eat LIVE `<!--` text copied
+  // verbatim inside inline spans — a divergence from C9, now gone.
+  const flat = strip(sections.get(sec) ?? "");
   check(`C8 pin survives in §${sec}: "${p.slice(0, 40)}…"`, flat.includes(strip(p)));
 }
 
@@ -421,7 +574,7 @@ for (const [sec, p] of PINS) {
 //   flag, never a partial exemption).
 // Remaining known boundary: refs in non-ledger table rows (section index,
 // P-table) are live cross-references and scanned as such — correct.
-const scan9 = scanModel(s);
+const scan9 = scanMain; // r5-F2: ONE scan serves the section map AND C9.
 const sScan = scan9.masked;
 const headingSet = new Set();
 for (const m of sScan.matchAll(/^#{2,4} ([0-9]+(?:\.[0-9]+)*[a-z]?)\.? /gm)) headingSet.add(m[1]);
@@ -446,7 +599,19 @@ const extPrefix = (before, line) =>
   // Findings records (r4-F6): the SAME record must bind a non-empty
   // "doc":"docs/…" directly before its own "anchor":" — two unrelated
   // objects on one line pair no more than the empty path doc:"docs/".
-  || /"doc"\s*:\s*"docs\/[^"]+"\s*,\s*"anchor"\s*:\s*"$/.test(before);
+  // r5-F4: a DUPLICATE "doc" key anywhere on the line makes the record
+  // ambiguous (last-key-wins parsers resolve doc:"local"), so the pairing
+  // is rejected — an ambiguous record is not an exemption.
+  // r6-F4: an ESCAPED QUOTE inside the doc value ("docs/a\"oops") is
+  // likewise refused: '"' is not a path character under the extPrefix
+  // grammar, and a quoted path is ambiguous to line-level scanning —
+  // fail-closed, same principle as duplicate keys.
+  // r7-F4: the value is constrained to PATH characters only (word chars,
+  // / . - _ + the document's "…" truncation marker): spaces, '?', '#'
+  // query/fragment syntax are NOT path characters — a loose value is
+  // rejected and the anchor is scanned as a plain ref (fail-closed).
+  || (/"doc"\s*:\s*"docs\/[A-Za-z0-9/._\u2026-]+"\s*,\s*"anchor"\s*:\s*"$/.test(before)
+      && (line.match(/"doc"\s*:/g) || []).length === 1);
 // Strict ref token (r3-F3): § + digits/dots/optional letter suffix, junk
 // after (any letter incl. Unicode, digit, dot) is a malformed token.
 const refGrammar = /^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))*[a-z]?$/;

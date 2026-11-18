@@ -405,6 +405,76 @@ test("empty doc path / split records do not launder (C9 r4-F6)", () => {
   runProbe("c9-split-records", m2, ["C9 every body §ref resolves"]);
 });
 
+// Round-6 F1 — U+2028/U+2029 are JS line terminators but the scanner's
+// line model is \n-only: they are masked to spaces so a mid-line
+// "heading" can never anchor ^; content use (C\u2028D) stays harmless.
+test("U+2028 phantom heading cannot resolve a ref (C9 r6-F1)", () => {
+  const mutated = base + "\ntext \u2028### 999 fake\n\u00a7999\n";
+  runProbe("c9-u2028-phantom", mutated, ["C9 every body §ref resolves"]);
+});
+
+// Round-6 F2 — multi-line inline spans: a heading inside a span is not a
+// heading (span content never gets heading/fence/comment interpretation),
+// but §refs inside span content stay LIVE. Positive controls: a legit
+// multi-line span (§ on a content line, resolved) and paragraph scoping
+// (a stray opener dies at the blank line; the ref below is live+valid).
+test("multiline span hides headings, keeps refs live (C9 r6-F2)", () => {
+  const mutated = base + "\n`start\n### 999 fake\nend`\n\u00a7999\n";
+  runProbe("c9-span-heading", mutated, ["C9 every body §ref resolves"]);
+});
+test("legit multiline span passes (r6-F2 positive)", () => {
+  const mutated = base + "\n`see\n\u00a714.1\nhere`\n";
+  runProbe("c9-span-legit", mutated, false);
+});
+
+// Round-6 F3 — fences open THROUGH a blockquote prefix (> ```): the
+// fenced § is data. Positive control: a ref after a properly closed
+// blockquote fence is live and must still be flagged when dangling.
+test("blockquote fence masks its content (C9 r6-F3)", () => {
+  const mutated = base + "\n> ```\n> \u00a7999\n> ```\n";
+  runProbe("c9-bq-fence", mutated, false);
+});
+test("ref after closed blockquote fence is live (r6-F3)", () => {
+  const mutated = base + "\n> ```\n> \u00a7999\n> ```\n\u00a7998\n";
+  runProbe("c9-bq-fence-tail", mutated, ["C9 every body §ref resolves"]);
+});
+
+// Round-6 F4 — an escaped quote inside the doc value is refused
+// (fail-closed: '"' is not a path char; ambiguous quoted paths are not
+// an exemption). Documented limitation.
+test("escaped quote in doc value refuses exemption (C9 r6-F4)", () => {
+  const mutated = base + "\n{\"doc\":\"docs/a\\\"oops\",\"anchor\":\"\u00a7999\"}\n";
+  runProbe("c9-escaped-quote-doc", mutated, ["C9 every body §ref resolves"]);
+});
+
+// Round-5 F1 — an UNCLOSED backtick run is literal text: the `<!--` that
+// follows still opens a comment (copying the line remainder laundered it).
+test("unclosed backtick does not hide a comment opener (C9 r5-F1)", () => {
+  const mutated = base + "\n`oops <!--\n### 999 Fake\n-->\n\u00a7999\n";
+  runProbe("c9-unclosed-backtick", mutated, ["C9 every body §ref resolves"]);
+});
+
+// Round-5 F2 — a COMMENTED-OUT `### 14.12 fake` heading is masked, not a
+// section boundary: discovery must use the masked text too (positive
+// control: this mutation must PASS, it used to fire 15 checks).
+test("commented fake heading neither launders nor clobbers (r5-F2)", () => {
+  const mutated = base + "\n<!--\n### 14.12 fake\n-->\n";
+  runProbe("c5-commented-heading", mutated, false);
+});
+
+// Round-5 F3 — a closer MORE indented than the opener does not close.
+test("deeper-indented closer leaves the fence open (C9 r5-F3)", () => {
+  const mutated = base + "\n```\n\u00a799999\n  ```\n";
+  runProbe("c9-closer-indent", mutated, ["C9 every body §ref resolves"]);
+});
+
+// Round-5 F4 — a duplicate "doc" key makes the record ambiguous; the
+// anchor pairing is refused (last-key-wins parsers resolve doc:"local").
+test("duplicate doc keys refuse the anchor exemption (C9 r5-F4)", () => {
+  const mutated = base + "\n{\"doc\":\"docs/a\", \"anchor\":\"\u00a7999\", \"doc\":\"local\"}\n";
+  runProbe("c9-dup-doc-keys", mutated, ["C9 every body §ref resolves"]);
+});
+
 // Round-4 F7 — a pin fenced away as example content does NOT survive C8:
 // sections come from the masked text, same model as C9.
 test("fenced pin fails C8 (r4-F7 shared masking)", () => {
@@ -418,4 +488,64 @@ test("fenced pin fails C8 (r4-F7 shared masking)", () => {
   const lineEnd = base.indexOf("\n", idx) === -1 ? base.length : base.indexOf("\n", idx);
   const mutated = base.slice(0, lineStart) + "```\n" + base.slice(lineStart, lineEnd) + "\n```" + base.slice(lineEnd);
   runProbe("c8-fenced-pin", mutated, ["C8 pin survives"]);
+});
+
+// ── Round-7 (cycle-2) probes ───────────────────────────────────────────
+
+// F2: heading interrupts an unmatched span — the heading text and every
+// line after it must be visible (never silently swallowed into a pending
+// span). Positive control: a planted ref in the heading line stays
+// VISIBLE (fires C9); negative control: the same ref inside a genuinely
+// paired multi-line span stays MASKED (no fire).
+test("F2 heading interrupts pending span (positive control)", () => {
+  runProbe("r7-heading-kills-span", base + "\n`unclosed\n\n## Heading §999 after stray opener\n\nbody\n",
+    ["C9 every body"]);
+  // Negative control: a GENUINE paired multi-line span still hides
+  // heading STRUCTURE (the fake ### inside live span content must not
+  // create a section — C1/C8 clean) and carries no dangling ref.
+  runProbe("r7-span-still-pairs", base + "\n`two runs\n### 999 fake heading\nend`\n", false);
+});
+
+// F3: a blockquote fence that never closes must not turn the whole tail
+// into invisible markdown — a §999 after it must still fire.
+test("F3 unclosed blockquote fence leaks no invisibility", () => {
+  runProbe("r7-bq-fence-leak", base + "\n> ```\n§999 after unclosed fence\n", ["C9 every body"]);
+});
+
+// F4: strict doc paths — a '"doc":"…"' value with characters outside
+// [A-Za-z0-9/._-] (? # spaces) is rejected as a path candidate, so its
+// following "anchor" is NOT exempted.
+test("F4 loose doc-value candidates are not consumed as paths", () => {
+  runProbe("r7-doc-loose-value",
+    base + '\n{ "doc":"docs/notes/weekly digest?x=1", "anchor":"§999" }\n',
+    ["C9 every body"]);
+  runProbe("r7-doc-hash-value",
+    base + '\n{ "doc":"docs/11-orchestrator-schema.md#s3.5", "anchor":"§999" }\n',
+    ["C9 every body"]);
+  // Positive control: a strict-path doc record still exempts its anchor.
+  runProbe("r7-doc-strict-ok",
+    base + '\n{ "doc":"docs/11-orchestrator-schema.md", "anchor":"§999" }\n', false);
+});
+
+// F5: stated policy is refuse ANY CR — CRLF too (byte-exact contract).
+test("F5 CRLF is refused (any-CR policy)", () => {
+  const crlf = base.replace(/\n/g, "\r\n");
+  const f = path.join(tmp, "r7-crlf.md");
+  fs.writeFileSync(f, crlf, "latin1");
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "latin1" });
+  assert.equal(r.status, 1, "CRLF file must exit 1");
+  assert.ok(r.stderr.includes("CR") || r.stderr.match(/carriage/i) !== null,
+    `stderr should name the CR policy:\n${r.stderr.slice(0, 400)}`);
+});
+
+// F6: indented code blocks are not paragraph continuation — a planted
+// §ref inside one stays invisible (documented exclusion).
+test("F6 indented code block masks its refs", () => {
+  const doc = base + "\n\ntext before\n\n    §999 in an indented code block\n\ntext after\n";
+  const f = path.join(tmp, "r7-indented-code.md");
+  fs.writeFileSync(f, doc);
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  if (r.stderr.includes("§999")) {
+    assert.fail("F6: §ref inside an indented code block must stay masked");
+  }
 });
