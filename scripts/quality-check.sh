@@ -69,80 +69,88 @@ DEPS_STATUS=$?
 SCAN_STATUS=0
 FILELIST=$(find "$DIR" -type f -name '*.ts' | sort)
 
-if [ -z "$FILELIST" ]; then
-  echo "quality-check: OK — no .ts files under $DIR (nothing to scan)."
-  if [ "$DEPS_STATUS" -ne 0 ]; then exit 1; fi
-  exit 0
-fi
-
 # Single-quote character, passed to awk so the program can live inside shell
 # single quotes without quoting acrobatics.
 SQ="'"
 
-awk -v sq="$SQ" -v dir="$DIR" '
-  function report(reason) {
-    cnt++
-    printf "%s:%d: %s\n", FILENAME, FNR, reason > "/dev/stderr"
-    bad = 1
-  }
-  function forbidden(spec,  d) {
-    # any relative/import path into node_modules is wrong
-    if (index(spec, "node_modules") > 0) return 1
-    # bare dist/ path: strip leading ./ and ../, then check for dist/ prefix
-    d = spec
-    while (d ~ /^\.\.\//) sub(/^\.\.\//, "", d)
-    while (d ~ /^\.\//)   sub(/^\.\//, "", d)
-    if (d ~ /^dist\//) return 1
-    return 0
-  }
-  # pos = position of the matched opening quote (regex consumed it)
-  function checkspec(line, pos,  c, spec, p) {
-    c = substr(line, pos)  # the quote character itself
-    spec = substr(line, pos + 1)
-    p = index(spec, c)
-    if (p > 0) spec = substr(spec, 1, p - 1)
-    if (forbidden(spec))
-      report("import path \"" spec "\" — no node_modules/ or bare dist/ imports")
-  }
-  FNR == 1 { files++ }
-  {
-    code = $0
-
-    # 1. no console.log(
-    if (index(code, "console.log(") > 0)
-      report("console.log( — debug output; use console.error/warn")
-
-    # 2. no TODO / FIXME markers
-    if (code ~ /TODO|FIXME/)
-      report("TODO/FIXME marker — resolve or remove")
-
-    # 3. no trailing whitespace
-    if (code ~ /[ \t]+$/)
-      report("trailing whitespace at end of line")
-
-    # 5. no tab characters
-    if (index(code, "\t") > 0)
-      report("tab character — indent with spaces")
-
-    # 4. no node_modules/ or bare dist/ in import/export/require specifiers
-    line = code
-    sub(/\/\/.*/, "", line)  # ignore // comments
-    if (match(line, "from[ \t]*[\"" sq "]"))
-      checkspec(line, RSTART + RLENGTH - 1)
-    if (match(line, "require[ \t]*\\([ \t]*[\"" sq "]"))
-      checkspec(line, RSTART + RLENGTH - 1)
-    if (match(line, "import[ \t]*\\([ \t]*[\"" sq "]"))
-      checkspec(line, RSTART + RLENGTH - 1)
-  }
-  END {
-    if (bad)
-      printf "quality-check: FAILED — %d violation(s) under %s\n", cnt, dir > "/dev/stderr"
-    else
-      printf "quality-check: OK — %d file(s) scanned under %s, no violations\n", files, dir > "/dev/stderr"
-    exit bad ? 1 : 0
-  }
-' $FILELIST
-SCAN_STATUS=$?
+if [ -z "$FILELIST" ]; then
+  echo "quality-check: OK — no .ts files under $DIR (nothing to scan)."
+else
+  # Feed the file list to awk ON STDIN instead of as argv: a large tree
+  # (e.g. a scan rooted at ~/.tre) overflowed the exec argument list —
+  # "/usr/bin/awk: Argument list too long" — and the early-exit path that
+  # used to follow it skipped the contract gate below entirely (c28 audit
+  # finding 5). One awk process reads one filename per input line and
+  # getline-scans each file itself, so counters stay global.
+  printf '%s\n' "$FILELIST" | awk -v sq="$SQ" -v dir="$DIR" '
+    function report(reason) {
+      cnt++
+      printf "%s:%d: %s\n", FILENAME, FNR, reason > "/dev/stderr"
+      bad = 1
+    }
+    function forbidden(spec,  d) {
+      # any relative/import path into node_modules is wrong
+      if (index(spec, "node_modules") > 0) return 1
+      # bare dist/ path: strip leading ./ and ../, then check for dist/ prefix
+      d = spec
+      while (d ~ /^\.\.\//) sub(/^\.\.\//, "", d)
+      while (d ~ /^\.\//)   sub(/^\.\//, "", d)
+      if (d ~ /^dist\//) return 1
+      return 0
+    }
+    # pos = position of the matched opening quote (regex consumed it)
+    function checkspec(line, pos,  c, spec, p) {
+      c = substr(line, pos)  # the quote character itself
+      spec = substr(line, pos + 1)
+      p = index(spec, c)
+      if (p > 0) spec = substr(spec, 1, p - 1)
+      if (forbidden(spec))
+        report("import path \"" spec "\" — no node_modules/ or bare dist/ imports")
+    }
+    function scanfile(code) {
+      # 1. no console.log(
+      if (index(code, "console.log(") > 0)
+        report("console.log( — debug output; use console.error/warn")
+      # 2. no TODO / FIXME markers
+      if (code ~ /TODO|FIXME/)
+        report("TODO/FIXME marker — resolve or remove")
+      # 3. no trailing whitespace
+      if (code ~ /[ \t]+$/)
+        report("trailing whitespace at end of line")
+      # 5. no tab characters
+      if (index(code, "\t") > 0)
+        report("tab character — indent with spaces")
+      # 4. no node_modules/ or bare dist/ in import/export/require specifiers
+      line = code
+      sub(/\/\/.*/, "", line)  # ignore // comments
+      if (match(line, "from[ \t]*[\"" sq "]"))
+        checkspec(line, RSTART + RLENGTH - 1)
+      if (match(line, "require[ \t]*\\([ \t]*[\"" sq "]"))
+        checkspec(line, RSTART + RLENGTH - 1)
+      if (match(line, "import[ \t]*\\([ \t]*[\"" sq "]"))
+        checkspec(line, RSTART + RLENGTH - 1)
+    }
+    {
+      f = $0
+      FILENAME = f
+      FNR = 0
+      files++
+      while ((getline code < f) > 0) {
+        FNR++
+        scanfile(code)
+      }
+      close(f)
+    }
+    END {
+      if (bad)
+        printf "quality-check: FAILED — %d violation(s) under %s\n", cnt, dir > "/dev/stderr"
+      else
+        printf "quality-check: OK — %d file(s) scanned under %s, no violations\n", files, dir > "/dev/stderr"
+      exit bad ? 1 : 0
+    }
+  '
+  SCAN_STATUS=$?
+fi
 
 # 7. guardrail hook presence (AUDIT 2026-10-21, info item) — INFORMATIONAL
 #    warning, never a failure: CI clones and tarball deployments legitimately
