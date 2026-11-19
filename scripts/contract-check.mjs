@@ -148,12 +148,14 @@ const scanModel = (text) => {
   let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1;
   let spanRun = 0; // r6-F2: open multi-line inline span (required closer run)
   const findRun = (str, from, n) => {
+    // r16-F2 (audit MED, r8-F2 REVERSED): CommonMark §6.1 — backslash
+    // escapes do NOT operate inside code spans: "`a \` b`" is one span.
+    // The old escape-skip refused to close on the escaped run, so
+    // "`a \` <!--" never closed the span and laundered every following
+    // line under a phantom comment. Backticks are inert for every
+    // downstream consumer of the masked text, so closing on escaped
+    // runs is both exact and safe.
     for (let j = from; j < str.length; j++) {
-      // r8-F2: a backslash escapes the next char (CommonMark), so an
-      // ESCAPED backtick run can never close a span. Without this the
-      // sequence "\`escaped\` then <!--" closed a pending span on the
-      // escaped run and laundered the following lines under a comment.
-      if (str[j] === "\\") { j++; continue; }
       if (str[j] === "`") {
         let m = 0;
         while (str[j + m] === "`") m++;
@@ -162,6 +164,115 @@ const scanModel = (text) => {
       }
     }
     return -1;
+  };
+  // r16-F1/F4 (audit HIGH/MED): CommonMark §4.6 HTML blocks. A top-level
+  // line starting a raw-HTML block swallows following lines as LITERAL
+  // block content — an HTML block is not Markdown, so a "<!--" inside a
+  // <div> block is NOT a comment opener and a visible paragraph after
+  // the block's blank-line end must not be masked under a phantom
+  // comment (the laundry: "<div>\n<!--\n\n§ref visible\n-->" reported
+  // OK). Types modelled: 1 (<script|pre|style|textarea>, closes on the
+  // closing TAG — r16A-F2: "</scripture>" must NOT close <script>, so
+  // the continuation needle is anchored by a TAG-END regex, not a raw
+  // substring), 3 (<? … ?>), 4 (<!A… >), 5 (<![CDATA[ … ]]>), 6/7
+  // (known tag / lone complete tag, close at a blank line). Line-leading
+  // "<!--" stays on the existing comment path (type 2, EOF fail-closed).
+  // r16A-F1 (audit HIGH): the old regex made ">" optional and searched
+  // the delimiter over the whole rest of the line, so malformed tags
+  // masked following prose — a launder route. Current rules by type:
+  // type 6 is a PREFIX rule (known name + whitespace, ">", "/>", or EOL,
+  // so a bare "<div" at end-of-line DOES open a block); type 7 needs a
+  // COMPLETE open or closing tag ("<foo" alone is not type 7); "<div!x>"
+  // is not an opener of any type.
+  // Type 1 requires the name followed by whitespace, ">", or EOL (NOT
+  // "/": "<script/>" is type 7 at most). Type 6 requires the name
+  // followed by whitespace, ">", "/>", or EOL. Type 7 requires a full
+  // open tag or closing tag with no trailing text.
+  // Start is detected ONLY at root context (no open list item, no quote
+  // prefix, indent < 4) — see the fail-closed guard at the open site.
+  let htmlType = 0, htmlNeedle = "";
+  const HTML_KNOWN = /^(address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|optgroup|option|ol|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
+  // r16A-F1: for type 7 the opener tag must be CLOSED (">" or "/>")
+  // right after its name or attributes — the delimiter is anchored
+  // directly after the tag, not searched anywhere in the remainder.
+  // r16c2-F2 (audit LOW): a bare "/" is a namespace separator in tag
+  // syntax ("<div/x" is junk, never an opener). Note that EOL is a
+  // valid terminator for type 6 ("<div" alone opens a block) but NOT
+  // for a type-7 tag, which needs its ">" on the line.
+  // r16c2-F4 (audit MED): TYPE 7 needs a FULL open-tag grammar — "<"
+  // tag-name, attributes (each: whitespace-run + attribute with optional
+  // whitespace around "=" and an unquoted / single- / double-quoted
+  // value), optional whitespace, optional "/", ">". "<foo attr="x">" is
+  // a complete tag: a type-7 opener (a lone tag on its own line). Type 6
+  // is a prefix rule (see above) and does not use this grammar. Types
+  // 3–5 have their own fixed-delimiter openers ("<?", "<!" + letter,
+  // "<![CDATA[") and are not governed by the tag grammar.
+  // r17-F1/F3 (audit HIGH, cycle-1): OPEN-tag and CLOSE-tag are SEPARATE
+  // CommonMark productions. An open tag is "<" name attr* ws* ["/"] ">";
+  // a closing tag is "</" name ws* ">" — a closing tag carries NO
+  // attribute grammar ("</foo x>" is junk text, opens nothing; the old
+  // combined regex gave closing tags the attribute grammar and let
+  // "</foo x>" mask the following prose). The NAME comes from a capture
+  // GROUP (r17-F1: the old strip-the-delimiters regex left
+  // 'div class="x"' in the name, so <div class="x"> never matched
+  // HTML_KNOWN, fell to type 7 — which a paragraph suppresses — and
+  // laundered "paragraph\n<div class=x>\n<!--\n\n§ref").
+  const TAG_NAME_SRC = "[A-Za-z][A-Za-z0-9-]*";
+  const ATTRS_SRC = "(?:[ \\t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \\t]*=[ \\t]*(?:\"[^\"]*\"|'[^']*'|[^\\s\"'=<>`]+))?)*";
+  const OPEN_TAG_RE = new RegExp("^<(" + TAG_NAME_SRC + ")(" + ATTRS_SRC + ")[ \\t]*/?>");
+  const CLOSE_TAG_RE = new RegExp("^</(" + TAG_NAME_SRC + ")[ \\t]*>");
+  const htmlBlockStart = (ln) => {
+    // r16c2-F3 (audit MED): the type-1 closer is a COMPLETE closing
+    // tag — "</" name + ONLY whitespace + ">": "</script x>" is junk,
+    // not a closer (the r16A-F2 needle "[ \t/>]|$" let it close the
+    // block mid-document and launder the following text under a
+    // phantom comment).
+    // r17-F2 (audit HIGH, cycle-1): the type-1 OPENER condition is
+    // CommonMark §4.6 exact: the name is followed by whitespace or ">"
+    // — WITH trailing content allowed — or EOL ("/" is NOT a
+    // delimiter, r19-F1). The old ">$" anchor
+    // required ">" at line end, so "<script>foo" never opened the block
+    // and a raw "<!--" beneath it became a phantom comment laundering
+    // every following line ("<script>foo\n<!--\n</script>\n\n§ref").
+    let m = ln.match(/^ {0,3}<(script|pre|style|textarea)(?:[ \t]|>|$)/i);
+    if (m) {
+      // r18-F3 (audit HIGH, cycle-1): the type-1 END condition is
+      // CommonMark §4.6 literal — "line contains an end tag `</script>`,
+      // `</pre>`, `</style>`, or `</textarea>`" — it does NOT require
+      // the closing name to match the opener. The old per-opener needle
+      // kept "<script>" open across "</style>", laundering everything
+      // between it and the blank line. The closer is ANY of the four
+      // names, and it is LITERAL: no whitespace before ">" (finding 4:
+      // "</script >" is NOT an end tag — adjudicated against BOTH
+      // reference implementations, commonmark.js and markdown-it
+      // commonmark preset, which agree; "</script x>" stays junk per
+      // r16c2-F3).
+      return { type: 1, needle: /<\/(?:script|pre|style|textarea)>/i };
+    }
+    if (/^ {0,3}<\?/.test(ln)) return { type: 3, needle: "?>", icase: false };
+    if (/^ {0,3}<!\[CDATA\[/.test(ln)) return { type: 5, needle: "]]>", icase: false };
+    if (/^ {0,3}<![A-Za-z]/.test(ln)) return { type: 4, needle: ">", icase: false }; // r17: spec says "an ASCII letter" (either case)
+    const body = ln.replace(/^ {0,3}/, "");
+    // r18-F1 (audit HIGH, cycle-1): type 6 is a PREFIX rule, not a
+    // complete-tag rule — §4.6: line begins with "<" or "</" followed
+    // by a listed name (case-insensitive), then "a space, a tab, the
+    // end of the line, the string `>`, or the string `/>`". The r17
+    // code required a full open/close-tag grammar, so "</div x>",
+    // "<div class=" and bare "<div" opened nothing and a following
+    // raw "<!--" became a phantom comment laundering every line under
+    // it. "/>" only as a STRING: "<div/ x>" is junk (spec probe).
+    if (/^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|>|\/>|$)/i.test(body)) return { type: 6, needle: null };
+    // r18-F2 (audit HIGH, cycle-1): type 7 per §4.6 is a complete
+    // OPEN tag (any name except pre/script/style/textarea — those
+    // returned type 1 above) OR a complete CLOSING tag, followed by
+    // zero or more spaces/tabs and the END OF THE LINE. The r17 code
+    // tested the trailing-EOF condition on the closing-tag match only,
+    // so "<foo>" (unknown open tag) never started type 7 and its raw
+    // content laundered everything to the blank line. Known names
+    // already returned type 6 above (types are tried in order, §4.6).
+    m = OPEN_TAG_RE.exec(body) ?? CLOSE_TAG_RE.exec(body);
+    if (m && /^[ \t]*$/.test(body.slice(m[0].length))) return { type: 7, needle: null };
+    return null;
   };
   const processText = (ln, st, openSpan, lineBase = 0, collect = false) => {
     // r15c3-F2 (audit HIGH): when collect, span-content ranges (in
@@ -334,6 +445,17 @@ const scanModel = (text) => {
   let codeIndent = -1;  // r7-F6: active indented-code block (opener indent)
   let codeFloor = 4;    // r8-F1: continuation threshold of the active indented-code block
   let listStack = [];   // r8-F3: content columns of currently-open list items (innermost last)
+  // r16A-F3 (audit HIGH): true paragraph tracking replaces the old
+  // "prevBlank" proxy for the ordered-marker interrupt rule: a heading
+  // or list line before "2. item" OPENS NO PARAGRAPH, so CommonMark
+  // legitimately starts the list there — the proxy wrongly refused it
+  // and masked the item's indented continuation. paraOpen is set at
+  // every loop exit: TRUE only for lines that are paragraph text
+  // (non-blank, not heading/setext/hr/quote/list content), FALSE for
+  // blank lines and every masked/block exit.
+  let paraOpen = false;
+  const ATX_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+  const HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
   let commentListDepth = -1; // r14-F1: open-list depth when inComment opened (-1 = top-level)
   // r8-F1: CommonMark tab stops (4 columns). " \t" REACHES column 4
   // (indented-code territory); a bare tab advances to the next stop.
@@ -374,6 +496,7 @@ const scanModel = (text) => {
   };
   const trackList = (ln) => {
     const w = indentWidth(ln);
+    const saved = listStack.slice(); // r16c2-F5: see refusal-restore below
     while (listStack.length && listStack[listStack.length - 1] > w) listStack.pop();
     // r15-F2a (audit HIGH): a line may open a CHAIN of list containers on
     // ONE line ("- - item" = outer item at content column 2, inner item
@@ -399,6 +522,29 @@ const scanModel = (text) => {
       if (L === null) return;
       const m = L.rest.match(/^([-+*]|[0-9]{1,9}[.)])([ \t]+)(?=\S)/);
       if (!m) return;
+      // r16-F3 / r16A-F3 (audit MED/HIGH): CommonMark §4.2 — an ordered
+      // marker may interrupt a PARAGRAPH only with start number 1;
+      // "paragraph\n2. not a list" keeps "2. not a list" as LAZY
+      // PARAGRAPH TEXT. But the r16 check used prevBlank as a proxy for
+      // "in paragraph", which wrongly refused legitimate starts after a
+      // heading or list line ("# H\n2. item\n\n    §99999" — the ref is
+      // item content, live). Now the check uses true paragraph state:
+      // refuse the push only when a paragraph is actually open.
+      // Refusing the push only ever EXPOSES (the line stays text), so
+      // any doubt (paraOpen=true after quote/prefixed text) cannot
+      // launder: item-continuation refs remain visible as root text.
+      // r16c2-F5 (audit HIGH): refusing the marker is CommonMark's LAZY
+      // continuation — "paragraph\n2. not a list" is paragraph text of
+      // the still-open container, so the pop above (which left the
+      // item's content column) must be UNDONE: restoring the stack
+      // keeps the item's continuation floor alive, and the item's
+      // indented §refs stay visible prose instead of being re-taxed as
+      // a top-level indented code block.
+      if (paraOpen && m[1][0] >= "0" && m[1][0] <= "9" && Number(m[1].slice(0, -1)) !== 1) {
+        listStack.length = 0;
+        for (const c of saved) listStack.push(c);
+        return;
+      }
       // r9-F1: marker padding advances by TAB STOPS (CommonMark tab stop
       // = 4 columns), not +4 per tab char: "-\tx" has content column 4.
       let col = L.col + m[1].length;
@@ -419,6 +565,26 @@ const scanModel = (text) => {
     // eats NBSP, form-feed, U+2028 etc., which killed pending spans and
     // indented-code runs on lines that are ordinary paragraph content.
     const isBlank = !/[^ \t]/.test(ln);
+    // r16A-F3: a blank line ends any open paragraph before this line's
+    // checks run (trackList / HTML type-7 interrupt rules consult it).
+    if (isBlank) paraOpen = false;
+    // r16-F1/F4: raw HTML block continuation (root context only, see
+    // htmlBlockStart). Block content is opaque: masked 1:1, no comment/
+    // fence/span/heading semantics inside (masking HTML block content
+    // follows the fence policy: non-prose blocks mask their content).
+    if (htmlType > 0) {
+      // r16A-F2: type 1 closes on a TAG-END-anchored regex (see
+      // htmlBlockStart) — "</scripture>" is NOT "</script>"; raw
+      // substring needles ("?>", ">", "]]>") keep includes().
+      const closes = htmlType >= 6
+        ? isBlank
+        : (htmlNeedle instanceof RegExp ? htmlNeedle.test(ln) : ln.includes(htmlNeedle));
+      pushLine(" ".repeat(ln.length));
+      prevBlank = isBlank;
+      if (closes) { htmlType = 0; htmlNeedle = ""; }
+      paraOpen = false; // block content is never an open paragraph
+      continue;
+    }
     // r7-F6: inside an indented code block — blank lines and lines at
     // >= the continuation floor keep the block; anything else ends it
     // and is processed normally from here. r8-F1: the floor is 4
@@ -427,7 +593,7 @@ const scanModel = (text) => {
     // item-column + 4 for code opened inside a list item.
     if (codeIndent >= 0) {
       if (isBlank) { pushLine(" ".repeat(ln.length)); prevBlank = true; continue; }
-      if (indentWidth(ln) >= codeFloor) { pushLine(" ".repeat(ln.length)); prevBlank = false; continue; }
+      if (indentWidth(ln) >= codeFloor) { pushLine(" ".repeat(ln.length)); prevBlank = false; paraOpen = false; continue; }
       codeIndent = -1;
     }
     if (inFence) {
@@ -467,7 +633,7 @@ const scanModel = (text) => {
       const cDepth = bp ? bp.depth : 0;
       if (marker && marker[0] === fenceChar && marker.length >= fenceLen && (!fenceBq || cDepth === fenceBqDepth)) {
         inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false; fenceListCol = -1;
-        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; paraOpen = false; continue;
       }
       // r7-F3: a blockquote fence cannot outlive its blockquote — a line
       // WITHOUT the ">" prefix ends both. The line that ended the
@@ -487,10 +653,10 @@ const scanModel = (text) => {
           inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false; fenceListCol = -1;
           // fall through: the shallower line is LIVE content.
         } else {
-          pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+          pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; paraOpen = false; continue;
         }
       } else {
-        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; paraOpen = false; continue;
       }
       }
     }
@@ -509,7 +675,7 @@ const scanModel = (text) => {
       }
       if (inComment) {
       const c = ln.indexOf("-->");
-      if (c === -1) { pushLine(" ".repeat(ln.length)); prevBlank = isBlank; continue; }
+      if (c === -1) { pushLine(" ".repeat(ln.length)); prevBlank = isBlank; paraOpen = false; continue; }
       inComment = false;
       const st = {};
       curRanges = [];
@@ -522,6 +688,10 @@ const scanModel = (text) => {
       if (st.inComment) inComment = true;
       if (st.inComment) commentListDepth = listStack.length; // r14-F1 re-open inherits HERE
       prevBlank = isBlank;
+      // r16A-F3: non-blank text after the comment closer starts a
+      // paragraph (fail-open direction: paraOpen=true only refuses the
+      // ordered-marker push and delays a type-7 HTML block).
+      paraOpen = !isBlank && ln.slice(c + 3).trim().length > 0 && !st.inComment;
       continue;
       }
     }
@@ -584,6 +754,102 @@ const scanModel = (text) => {
     // retest; items deeper than the line's own column are popped first
     // (r11-F1's pop must NEVER run for non-fence lines — that killed the
     // list-continuation exemption).
+    // r16-F1/F4 (audit HIGH/LOW): raw HTML block OPEN. CommonMark HTML
+    // blocks are opaque non-prose: after the opener, content lines are
+    // masked 1:1 with NO comment/fence/span/heading semantics — the
+    // audit laundry was "<div>\n<!--\n\n§99999\n-->" where CommonMark
+    // renders §99999 as VISIBLE prose: the "<!--" inside an open HTML
+    // block is raw text, NOT a comment opener, but the old model read
+    // it as one and hid every following line under a phantom comment.
+    // Detection context: the block opens only where CommonMark puts it
+    // — at root, i.e., after any open list item that the line's column
+    // dedents out of (a dedent closes the item AND leaves the line for
+    // block detection). A line that stays INSIDE an open item gets no
+    // HTML-block modeling: it processes as text, which can only ever
+    // EXPOSE refs, never hide them (an item-owned block that kept
+    // absorbing past a dedent WOULD launder — so it is deliberately
+    // not modeled). NO blockquote prefix / inside an open list item:
+    // r16A-F4 (audit HIGH): those contexts now DETECT a commit-worthy
+    // opener and FAIL CLOSED instead of silently falling through to
+    // text. The old fail-open assumed the unmodeled paths could only
+    // expose, but the masker's downstream comment engine disagrees
+    // with the renderer: "- <div>\n<!--\n  §ref\n-->" renders §ref as
+    // VISIBLE (the "<!--" is raw text inside the item's HTML block,
+    // closed by the blank line), while the unmodeled fall-through read
+    // "<!--" as a comment opener and HID the ref (probe-audited).
+    // Refusing is the only sound option: container-owned HTML blocks
+    // are not modelled.
+    if (!isBlank && ln.includes("<")) {
+      const wH = indentWidth(ln);
+      let insideItem = false;
+      for (const c of listStack) if (c <= wH) { insideItem = true; break; }
+      const inQuote = quotePrefix(ln).depth > 0;
+      if (insideItem || inQuote) {
+        const hbC = htmlBlockStart(quotePrefix(ln).rest);
+        if (hbC && !(hbC.type === 7 && paraOpen)) {
+          issues.push(`raw HTML block inside ${inQuote ? "a blockquote" : "a list item"} is unsupported by C9's container model`);
+          // Continue processing the line as text (fail-closed already
+          // fired; keeping the state machine on its old path avoids
+          // inventing an unverified container model mid-document).
+        }
+      }
+      // r16c2-F1 (audit HIGH): SAME-LINE container views. "- <div>"
+      // puts the HTML-block opener as the list item's FIRST block: the
+      // tag is not at the line root so the root detector never sees it,
+      // the item gets tracked, and the following "<!--" is read as a
+      // live comment — hiding §refs the renderer shows as visible
+      // prose. Walk the same-line marker chain (same lead/marker walk
+      // as trackList) and test each post-marker view for an opener:
+      // every container on this line starts fresh (no paragraph can be
+      // open before its first block), so even a type-7 match commits
+      // here — fail closed, container-owned blocks are not modelled.
+      {
+        let cv = ln, cvBase = 0;
+        for (let d = 0; ; d++) {
+          if (d >= 16) break; // trackList fails closed on the real chain
+          const L = leadUpTo(cv, cvBase, d === 0 ? 17 : 3);
+          if (L === null) break;
+          const m = L.rest.match(/^([-+*]|[0-9]{1,9}[.)])([ \t]+)(?=\S)/);
+          if (!m) break;
+          if (htmlBlockStart(L.rest.slice(m[0].length))) {
+            issues.push("raw HTML block opened on a list-marker line is unsupported by C9's container model");
+            break;
+          }
+          let col = L.col + m[1].length;
+          for (const ch of m[2]) col = ch === "\t" ? (((col >> 2) + 1) << 2) : col + 1;
+          if (col > L.col + m[1].length + 4) col = L.col + m[1].length + 1;
+          cv = L.rest.slice(m[0].length); cvBase = col;
+        }
+      }
+    }
+    if (!isBlank && !quotePrefix(ln).depth && ln.includes("<")) {
+      const wH = indentWidth(ln);
+      let insideItem = false;
+      for (const c of listStack) if (c <= wH) { insideItem = true; break; }
+      if (!insideItem) {
+        const hb = htmlBlockStart(ln);
+        if (hb && !(hb.type === 7 && paraOpen)) {
+          // The block commits: dedent out of any items deeper than this
+          // line's column (CommonMark closes them; trackList would pop
+          // identically if this line fell through to text processing).
+          while (listStack.length && listStack[listStack.length - 1] > wH) listStack.pop();
+          // A block whose closing condition is satisfied ON the opener
+          // line is a single-line block (CommonMark): mask it, no state.
+          // r16A-F2: regex needles are TAG-END anchored ("</script>" in
+          // "</scripture>" does NOT close on the opener line either).
+          const sameClose = hb.needle !== null && (hb.needle instanceof RegExp ? hb.needle.test(ln) : ln.includes(hb.needle));
+          if (!sameClose) { htmlType = hb.type; htmlNeedle = hb.needle; }
+          // Any committed HTML block ends a pending inline code span: a
+          // type-6 block interrupts the paragraph that owns the span, so
+          // the span's backtick run must not pair with a later run (the
+          // span-literal rule). Type 7 cannot commit while a span is
+          // open (it needs paraOpen=false), so clearing for all types
+          // is exact.
+          spanRun = 0;
+          pushLine(" ".repeat(ln.length)); prevBlank = isBlank; paraOpen = false; continue;
+        }
+      }
+    }
     let fm = fenceMatch(ln, false) ?? fenceMatch(ln, true);
     if (fm) {
       const wFence = indentWidth(ln);
@@ -591,7 +857,7 @@ const scanModel = (text) => {
       spanRun = 0;
       fenceListCol = listStack.length ? listStack[listStack.length - 1] : -1;
       inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq; fenceBqDepth = fm.depth || 0;
-      pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; paraOpen = false; continue;
     }
     if (listStack.length && !isBlank) {
       const s = consumeCol(ln, listStack[listStack.length - 1]);
@@ -600,7 +866,7 @@ const scanModel = (text) => {
         spanRun = 0;
         fenceListCol = listStack[listStack.length - 1];
         inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq; fenceBqDepth = fm.depth || 0;
-        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; paraOpen = false; continue;
       }
     }
     if (spanRun > 0) {
@@ -621,7 +887,7 @@ const scanModel = (text) => {
         // Content line: copied (§refs inside stay LIVE) but NEVER heading/
         // fence/comment material — leading space kills a phantom heading.
         const c = findRun(ln, 0, spanRun);
-        if (c === -1) { curRanges = [[0, ln.length + 1]]; pushLine(" " + ln); prevBlank = false; continue; }
+        if (c === -1) { curRanges = [[0, ln.length + 1]]; pushLine(" " + ln); prevBlank = false; paraOpen = true; continue; }
         let runLen = 0; while (ln[c + runLen] === "`") runLen++;
         spanRun = 0;
         const st = {};
@@ -637,6 +903,7 @@ const scanModel = (text) => {
         if (st.inComment) commentListDepth = listStack.length; // r14-F1
         if (st.spanRun) spanRun = st.spanRun;
         prevBlank = false;
+        paraOpen = true; // span content is paragraph text (r15-F3)
         continue;
       }
     }
@@ -657,7 +924,7 @@ const scanModel = (text) => {
         // running on any 4-column line; code inside a list item needs
         // item-content + 4.
         codeFloor = cont >= 0 && w >= cont + 4 ? cont + 4 : 4;
-        pushLine(" ".repeat(ln.length)); prevBlank = false; continue;
+        pushLine(" ".repeat(ln.length)); prevBlank = false; paraOpen = false; continue;
       }
     }
     if (!isBlank) trackList(ln); // blank lines preserve list continuation
@@ -679,6 +946,13 @@ const scanModel = (text) => {
     if (st.inComment) inComment = true;
     if (st.inComment) commentListDepth = listStack.length; // r14-F1: tag open depth at re-open
     prevBlank = isBlank;
+    // r16A-F3: paragraph state at the text fall-through. A non-blank
+    // line here is paragraph-ish content EXCEPT structural lines that
+    // open no paragraph: ATX headings and thematic breaks always close
+    // one; a setext underline only closes its own paragraph (a bare
+    // "==="/("---" run with no paragraph under it is literal text).
+    paraOpen = !isBlank && !ATX_RE.test(ln) && !HR_RE.test(ln) &&
+      !(/^ {0,3}(?:=+|-+)[ \t]*$/.test(ln) && paraOpen);
   }
   if (inComment) issues.push("unclosed <!-- masks the rest of the document from C9");
   if (inFence) issues.push("unclosed code fence masks the rest of the document from C9");

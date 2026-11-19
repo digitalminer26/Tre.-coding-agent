@@ -604,11 +604,21 @@ test("R8-D1 blockquote fence closes only at its own depth", () => {
   runProbe("r8-d2-after", base + "\n> ```\n> > ```\n> content\n> ```\n§999 after fence\n", ["C9 every body", "\u00a7999"]);
 });
 
-// FB: an ESCAPED backtick run (\\`a\\`) can never close a pending span;
-// without the escape rule the sequence laundered following lines under a
-// comment. The ref stays live (span content is live prose by policy).
-test("R8-FB escaped ticks cannot close a span or launder a comment", () => {
-  runProbe("r8-fb-escape", base + "\npara `\n\\`a\\` <!--\n§999 laundered?\n-->\n", ["C9 every body", "\u00a7999"]);
+// FB (r16-F2 REVERSAL): CommonMark §6.1 — backslash escapes do NOT
+// operate inside code spans: "`a \`" CLOSES the span at the escaped
+// backtick. The old rule (an escaped backtick cannot close a span) let
+// "`a \` <!--" stay open and hide every following line under a phantom
+// unclosed span; it is REVERSED: the escaped run closes the span, the
+// "<!--" after it opens a REAL comment, and the ref inside the comment
+// is masked (exit 0, ref never reported).
+test("R8-FB escaped ticks close a span (CommonMark §6.1); ref lands in a real comment", () => {
+  const doc = base + "\npara `a \\` <!--\n\u00a7999 in comment\n--> `\n";
+  const f = path.join(tmp, "r16-fb-escape.md");
+  fs.writeFileSync(f, doc);
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 0, `expected masked fixture: ${r.stderr}`);
+  assert.ok(!r.stderr.includes("\u00a7999"), "F2: §999 inside the comment must stay masked");
+  assert.ok(!r.stderr.includes("unclosed"), "F2: no phantom unclosed-span issue may remain");
 });
 
 // E1/E2: NBSP and form-feed are NOT blank lines (CommonMark: blank =
@@ -987,4 +997,208 @@ test("r15c4-T4: degenerate inputs never crash and stay fail-closed", () => {
   runProbe("r15c4-run50-mismatch-close", base + "\n" + "`".repeat(50) + " docs/audits/audit-x.md \u00a798.99 " + "`".repeat(49) + "\n", false);
   // CONTROL: plain genuine chain next to run probes stays exempt.
   runProbe("r15c4-run-clean-control", base + "\nsee docs/audits/audit-x.md \u00a798.99 tail\n", false);
+});
+
+// ── r16 cycle-1: HTML blocks & list-interruption (auditor F1/F3/F4) ──
+
+// F1+F2: a <div> (type-6) HTML block runs raw until the blank line —
+// the "<!--" inside it is RAW TEXT, never a comment opener. Old
+// behavior: the fake comment swallowed everything after it and MASKED
+// (rc=0) the §999 paragraph that follows the blank line; CommonMark
+// ends the block at the blank line, so that paragraph is LIVE prose
+// and must fire (rc=1). CONTROL: without the <div> the "<!--" is a
+// real comment and the same ref stays masked (rc=0).
+test("r16-F1 <!-- inside an HTML block never opens a comment; following ref fires", () => {
+  // The laundering pattern: fires after the fix (was masked before).
+  runProbe("r16-f1-div-block", base + "\n<div>\n<!--\n\n\u00a7999 after blank in html block\n-->\n", ["\u00a7999"]);
+  // CONTROL: same lines minus the <div> opener — comment is real, masked.
+  runProbe("r16-f1-no-div-control", base + "\n<!--\n\n\u00a7999 in comment\n-->\n", false);
+  // Raw HTML before the blank line is masked: ref INSIDE the block
+  // (before any blank) never reaches prose — type-6 content is raw.
+  runProbe("r16-f1-inside-block-masked", base + "\n<div>\n<!--\n\u00a7999 raw html text\n-->\n</div>\n", false);
+});
+
+// F4: <script> is a type-2 HTML block — content runs to </script> and is
+// masked as raw HTML (never scanned as prose). CONTROL: same text
+// outside any HTML block stays live prose and fires.
+test("r16-F4 raw HTML script content is masked, never prose", () => {
+  runProbe("r16-f4-script", base + "\n<script>\n\u00a7999\n</script>\n", false);
+  runProbe("r16-f4-noscript-control", base + "\nparagraph\n\n\u00a7999 live\n", ["\u00a7999"]);
+});
+
+// F3: CommonMark §4.2 — an ordered marker with start != 1 cannot
+// interrupt a paragraph. "paragraph\n2. not a list" stays ONE paragraph;
+// the list never opens, so the later 4-space-indented "    §999" (after
+// a blank) is an INDENTED CODE BLOCK → masked. Old behavior tracked the
+// "2." as a list item and reported the code-block ref as item prose.
+test("r16-F3 start!=1 ordered marker cannot interrupt a paragraph", () => {
+  runProbe("r16-f3-no-interrupt", base + "\nparagraph\n2. not a list\n\n    \u00a7999 code\n", false);
+  // CONTROL: start=1 DOES interrupt → real list → the same indented ref
+  // is now item continuation (live prose) and must fire.
+  runProbe("r16-f3-start1-interrupts", base + "\nparagraph\n1. real list item\n\n\u00a7999 item prose\n", ["\u00a7999"]);
+  // CONTROL: unordered marker always interrupts.
+  runProbe("r16-f3-dash-interrupts", base + "\nparagraph\n- real item\n\n\u00a7999 item prose\n", ["\u00a7999"]);
+});
+
+// ── r16A cycle: auditor findings F1–F4 (contract-check hardening) ──
+
+// F1 (audit HIGH): a raw HTML block opens ONLY on a COMPLETE tag.
+// Malformed openers ("<div!not-a-tag>", "<foo", "<script! foo>") must
+// NOT open a block: their following prose is LIVE and a bad ref fires.
+// Old behavior: the regex made ">" optional and searched the delimiter
+// over the whole line, so malformed tags masked following prose.
+test("r16A-F1 malformed HTML openers never start a block", () => {
+  runProbe("r16a-f1-div-bang", base + "\n<div!not-a-tag>\n\u00a7999 visible\n", ["\u00a7999"]);
+  runProbe("r16a-f1-foo-nogt", base + "\n<foo\n\u00a7999 visible\n", ["\u00a7999"]);
+  runProbe("r16a-f1-script-bang", base + "\n<script! foo>\n\u00a7999 visible\n", ["\u00a7999"]);
+  // CONTROL: the WELL-FORMED opener still opens a block and masks.
+  runProbe("r16a-f1-wellformed-control", base + "\n<div>\n\u00a7999 raw block text\n</div>\n", false);
+});
+
+// F2 (audit HIGH): the type-1 close needle is TAG-END anchored —
+// "</scripture>" must NOT close an open <script> block. Laundering
+// pattern: "<script>\n</scripture>\n<!--\n</script>\n\n§99999\n-->" —
+// if "</scripture>" wrongly closed the block mid-way, the following
+// "<!--" would be read as a comment opener and HIDE the ref. Under
+// correct semantics the block runs to the REAL </script>, the <!--
+// inside is raw text, and the ref is masked (rc=0) either way — so the
+// discriminating probe is the structure AFTER a close: a ref that only
+// fires when the block died at the fake closer must stay masked.
+test("r16A-F2 </scripture> does not close a <script> block", () => {
+  // </scripture> is NOT a closer: block continues; everything raw to
+  // the true </script>, ref masked. If the fake closer ended the block
+  // early, the lines between would be re-scanned and could fire.
+  runProbe("r16a-f2-fake-closer", base + "\n<script>\n</scripture>\n\u00a7999 still script\n</script>\n", false);
+  // CONTROL: the REAL closer ends the block; the same ref after it is
+  // live prose and fires.
+  runProbe("r16a-f2-real-closer-control", base + "\n<script>\nx\n</script>\n\n\u00a7999 live\n", ["\u00a7999"]);
+});
+
+// F3 (audit HIGH): the start!=1 interrupt rule must use TRUE paragraph
+// state, not the prevBlank proxy. A heading (or list, fence, hr) line
+// before "2. item" opens NO paragraph — CommonMark legitimately starts
+// the list there and its indented continuation is item content (LIVE).
+// The old proxy refused the push and masked the ref as indented code.
+test("r16A-F3 ordered marker after a heading starts a real list", () => {
+  runProbe("r16a-f3-heading-then-2", base + "\n# Heading\n2. item\n\n    \u00a7999 item prose\n", ["\u00a7999"]);
+  // CONTROL: a real PARAGRAPH before "2." still blocks the interrupt
+  // (r16-F3 policy intact): the indented ref is a code block, masked.
+  runProbe("r16a-f3-para-still-blocks-control", base + "\nparagraph text here\n2. not a list\n\n    \u00a7999 code\n", false);
+});
+
+// F4 (audit HIGH): a raw HTML block COMMITTING inside an open list item
+// or blockquote is not modelled — and the old fail-open silently fell
+// through to text, where the masker's comment engine read the block's
+// "<!--" as a comment opener and HID visible prose ("- <div>\n<!--\n
+// \n §ref\n-->" renders §ref visible, masker hid it). Now it FAILS
+// CLOSED with a named unsupported-container issue.
+test("r16A-F4 HTML block inside a list item fails closed", () => {
+  runProbe("r16a-f4-list-item", base + "\n- item\n  <div>\n  <!--\n\n  \u00a7999 visible\n  -->\n",
+    ["raw HTML block inside a list item is unsupported"]);
+  // CONTROL: same lines with the <div> OUTSIDE the item (dedented to
+  // root) — the modeled root path runs and the ref after the blank is
+  // live prose (fires), no unsupported-container issue.
+  runProbe("r16a-f4-root-control", base + "\n- item\n\n<div>\n<!--\n\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
+  // Blockquote variant also fails closed.
+  runProbe("r16a-f4-blockquote", base + "\n> <div>\n> <!--\n\n> \u00a7999\n",
+    ["raw HTML block inside a blockquote is unsupported"]);
+});
+
+// ── r17 cycle-1: auditor findings F1–F4 (HTML tag grammar) ──
+
+// F1 (audit HIGH): the tag NAME is a capture group — attributes must not
+// remain in it. "<div class="x">" opens a type-6 block (masked); the old
+// strip-delimiters regex made the name junk, demoting <div ...> to
+// type-7 (suppressed under a paragraph) so "paragraph\n<div class=x>\n
+// <!--\n\n§999\n-->" laundered the ref (renderer shows it: the comment
+// is raw text inside the div block, closed by the blank line).
+test("r17-F1 open tag with attributes opens a block", () => {
+  runProbe("r17-f1-div-attr-launder", base + "\nparagraph text\n<div class=\"x\">\n<!--\n\n\u00a7999 live\n-->\n", ["\u00a7999"]);
+  // CONTROL: inside the div block (no blank before the ref) the raw
+  // text is masked — exactly what the renderer shows as block content.
+  runProbe("r17-f1-div-attr-masked-control", base + "\n<div class=\"x\">\n\u00a7999 raw\n</div>\n", false);
+  // Space around '=' is legal attribute syntax: still a block opener.
+  runProbe("r17-f1-attr-spaces", base + "\n<div class = \"x\">\n\u00a7999 raw\n</div>\n", false);
+  // Uppercase name + attributes: case-insensitive known name.
+  runProbe("r17-f1-uppercase-attr", base + "\n<DIV CLASS=\"x\">\n\u00a7999 raw\n</div>\n", false);
+});
+
+// F2 (audit HIGH): the type-1 opener allows TRAILING CONTENT after
+// ">" — "<script>foo" opens the block. Laundering pattern:
+// "<script>foo\n<!--\n</script>\n\n§999" — with the old ">$" anchor the
+// opener was missed, "<!--" became a phantom comment and hid every
+// following line; renderer: all of it is raw script content up to
+// </script>, and after the blank §999 is LIVE prose.
+test("r17-F2 type-1 opener with trailing content", () => {
+  runProbe("r17-f2-script-inline-launder", base + "\n<script>foo\n<!--\n</script>\n\n\u00a7999 live\n", ["\u00a7999"]);
+  // CONTROL: ref INSIDE the inline-opened block is masked raw text.
+  runProbe("r17-f2-script-inline-masked", base + "\n<script>foo\n\u00a7999 raw\n</script>\n", false);
+  // "<script foo>" (name + attribute, > at EOL) still opens.
+  runProbe("r17-f2-script-attr", base + "\n<script src=x>\n\u00a7999 raw\n</script>\n", false);
+});
+
+// F3 (audit HIGH, r17; expectation corrected in r18): closing tags in
+// the TYPE-7 production carry no attribute grammar ("</foo x>" is not a
+// complete closing tag), but §4.6 condition 6 is a PREFIX rule: "</"
+// followed by a listed name (case-insensitive) then "a space, a tab,
+// the end of the line, the string `>`, or the string `/>`" — so
+// "</div x>" DOES open a type-6 block (adjudicated: cmark and
+// markdown-it both keep the following prose raw block text). The r17
+// test expected junk/exit-1; that contradicted §4.6 and the refs.
+test("r17-F3 closing tags: exact grammar", () => {
+  // "</div x>" opens a type-6 block (prefix rule, space after name):
+  // the ref is masked raw block content, not live prose.
+  runProbe("r17-f3-close-attrs-junk", base + "\n</div x>\n\u00a7999 live\n", false);
+  // CONTROL: a well-formed closing tag opens a type-6 block (CommonMark
+  // §4.6) — the ref inside is raw block text, masked.
+  runProbe("r17-f3-close-plain-block", base + "\n</div>\n\u00a7999 raw\n", false);
+  // "</div>tail" ALSO opens a type-6 block (prefix rule: name + the
+  // string ">"), but the block ends at the blank line — so the ref
+  // after the blank is live prose and the probe must flag it.
+  runProbe("r17-f3-close-tail", base + "\nparagraph\n</div>tail\n\n\u00a7999 live\n", ["\u00a7999"]);
+});
+
+// F4 (audit MED): the type-4 declaration is "<!" + an ASCII LETTER
+// (either case) — "<!doctype html>" must open a declaration block and
+// close at the FIRST ">" (the continuation engine), so a ref after the
+// closing ">" is live prose while a ref inside the declaration is raw.
+test("r17-F4 declaration accepts lowercase doctype", () => {
+  runProbe("r17-f4-doctype-lower-masked", base + "\n<!doctype html\n\u00a7999 in declaration\n>\n\nnext para\n", false);
+  // Control: after the declaration closes, a ref is live.
+  runProbe("r17-f4-doctype-close-then-live", base + "\n<!doctype html>\n\n\u00a7999 live\n", ["\u00a7999"]);
+});
+
+// ── r19 audit: type-1 opener and type-6 name list vs CommonMark §4.6 ──
+// (verified against commonmark.js and markdown-it, both agree)
+
+// "<script/>" is NOT a type-1 opener (only whitespace, ">", or EOL may
+// follow the name). It is a type-7 candidate: the raw "<!--" beneath it
+// does not open a block that could mask the following prose, so the
+// §ref after the blank line is LIVE and must fire.
+test("r19-F1 self-closing <script/> does not open a type-1 block", () => {
+  runProbe("r19-f1-script-slash-live", base + "\n<script/>\n<!--\n\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
+  // CONTROL: the real type-1 opener keeps the block open to </script>.
+  runProbe("r19-f1-script-gt-control", base + "\n<script>\n\u00a7999 raw\n</script>\n", false);
+});
+
+// §4.6 type-6 list: "option" and "optgroup" are type-6 names (they can
+// interrupt a paragraph); "object" and "hgroup" are NOT.
+test("r19-F2 type-6 name list matches §4.6", () => {
+  runProbe("r19-f2-option-interrupts", base + "\nparagraph\n<option>\n<!--\n\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
+  runProbe("r19-f2-optgroup-interrupts", base + "\nparagraph\n<optgroup>\n<!--\n\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
+  // "object" is type 7 and cannot interrupt a paragraph: the paragraph
+  // continues, the "<!--" after the blank line is a real comment.
+  runProbe("r19-f2-object-no-interrupt", base + "\nparagraph\n<object>\n<!--\n\n\u00a7999 visible\n-->\n", false);
+});
+
+// r19 audit follow-ups: hgroup is NOT a type-6 name (paragraph-interrupt
+// probe), and a committed type-6 block ends a pending code span.
+test("r19-F3 hgroup is not a type-6 name", () => {
+  runProbe("r19-f3-hgroup-no-interrupt", base + "\nparagraph\n<hgroup>\n<!--\n\n\u00a7999 visible\n-->\n", false);
+});
+
+test("r19-F4 type-6 block interrupt clears a pending code span", () => {
+  // Both references render §999 as visible prose (the span died at the
+  // <div> block), so the ref after the span-closing run must fire.
+  runProbe("r19-f4-div-span-interrupt", base + "\npara `\n<div>\nraw\n\n` <!--\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
 });
