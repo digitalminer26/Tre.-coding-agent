@@ -10,7 +10,19 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+// Walk up from this test file to the repo root (the nearest ancestor that
+// contains BOTH the contract checker and the schema doc) so the probes work
+// regardless of how deep this test sits in the tree.
+let repoRoot = path.dirname(fileURLToPath(import.meta.url));
+for (;;) {
+  const parent = path.resolve(repoRoot, "..");
+  if (parent === repoRoot) throw new Error("no repo root above test dir");
+  repoRoot = parent;
+  if (
+    fs.existsSync(path.join(repoRoot, "scripts", "contract-check.mjs")) &&
+    fs.existsSync(path.join(repoRoot, "docs", "11-orchestrator-schema.md"))
+  ) break;
+}
 const SCRIPT = path.join(repoRoot, "scripts", "contract-check.mjs");
 const DOC = path.join(repoRoot, "docs", "11-orchestrator-schema.md");
 const base = fs.readFileSync(DOC, "utf8");
@@ -462,10 +474,21 @@ test("commented fake heading neither launders nor clobbers (r5-F2)", () => {
   runProbe("c5-commented-heading", mutated, false);
 });
 
-// Round-5 F3 — a closer MORE indented than the opener does not close.
-test("deeper-indented closer leaves the fence open (C9 r5-F3)", () => {
-  const mutated = base + "\n```\n\u00a799999\n  ```\n";
-  runProbe("c9-closer-indent", mutated, ["C9 every body §ref resolves"]);
+// Round-5 F3 (r13-F2 REVISED — the old rule was wrong): CommonMark bounds
+// a CLOSER's indent at <= 3, NOT at the opener's indent. "  ```" closes a
+// column-0 fence (the ref inside is fence content = masked; a ref AFTER
+// the closer is live — proving the fence really closed). Control: a
+// 4-space-indented marker never closes (it is itself fence content), so
+// the fence stays unclosed and fails.
+test("closer at indent <=3 closes; indent 4+ never closes (C9 r5-F3/r13-F2)", () => {
+  const closing = base + "\n```\n\u00a799998 fence content\n  ```\n\u00a799999 live after closer\n";
+  const fc = path.join(tmp, "c9-closer-indent-closes.md");
+  fs.writeFileSync(fc, closing);
+  const rc = spawnSync(process.execPath, [SCRIPT, fc], { encoding: "utf8" });
+  assert.equal(rc.status, 1, "F3-r13: the live ref after the closer must fire C9");
+  assert.ok(!rc.stderr.includes("\u00a799998"), "F3-r13: ref inside the closed fence must stay masked");
+  assert.ok(rc.stderr.includes("\u00a799999"), "F3-r13: ref after the closer must be live");
+  runProbe("c9-closer-indent-4", base + "\n```\n\u00a799999\n    ```\n", ["unclosed code fence"]);
 });
 
 // Round-5 F4 — a duplicate "doc" key makes the record ambiguous; the
@@ -499,7 +522,7 @@ test("fenced pin fails C8 (r4-F7 shared masking)", () => {
 // paired multi-line span stays MASKED (no fire).
 test("F2 heading interrupts pending span (positive control)", () => {
   runProbe("r7-heading-kills-span", base + "\n`unclosed\n\n## Heading §999 after stray opener\n\nbody\n",
-    ["C9 every body"]);
+    ["C9 every body", "\u00a7999"]);
   // Negative control: a GENUINE paired multi-line span still hides
   // heading STRUCTURE (the fake ### inside live span content must not
   // create a section — C1/C8 clean) and carries no dangling ref.
@@ -509,7 +532,7 @@ test("F2 heading interrupts pending span (positive control)", () => {
 // F3: a blockquote fence that never closes must not turn the whole tail
 // into invisible markdown — a §999 after it must still fire.
 test("F3 unclosed blockquote fence leaks no invisibility", () => {
-  runProbe("r7-bq-fence-leak", base + "\n> ```\n§999 after unclosed fence\n", ["C9 every body"]);
+  runProbe("r7-bq-fence-leak", base + "\n> ```\n§999 after unclosed fence\n", ["C9 every body", "\u00a7999"]);
 });
 
 // F4: strict doc paths — a '"doc":"…"' value with characters outside
@@ -518,10 +541,10 @@ test("F3 unclosed blockquote fence leaks no invisibility", () => {
 test("F4 loose doc-value candidates are not consumed as paths", () => {
   runProbe("r7-doc-loose-value",
     base + '\n{ "doc":"docs/notes/weekly digest?x=1", "anchor":"§999" }\n',
-    ["C9 every body"]);
+    ["C9 every body", "\u00a7999"]);
   runProbe("r7-doc-hash-value",
     base + '\n{ "doc":"docs/11-orchestrator-schema.md#s3.5", "anchor":"§999" }\n',
-    ["C9 every body"]);
+    ["C9 every body", "\u00a7999"]);
   // Positive control: a strict-path doc record still exempts its anchor.
   runProbe("r7-doc-strict-ok",
     base + '\n{ "doc":"docs/11-orchestrator-schema.md", "anchor":"§999" }\n', false);
@@ -545,7 +568,423 @@ test("F6 indented code block masks its refs", () => {
   const f = path.join(tmp, "r7-indented-code.md");
   fs.writeFileSync(f, doc);
   const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 0, `expected valid indented code fixture: ${r.stderr}`);
   if (r.stderr.includes("§999")) {
     assert.fail("F6: §ref inside an indented code block must stay masked");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Round-8 (c35 terra audits): masking-model fixes with probes.
+// A1: a blank-line paragraph continuation inside a list item is LIVE prose
+// (CommonMark) — its §ref must be flagged, not masked as indented code.
+test("R8-A1 list continuation paragraph keeps refs live", () => {
+  runProbe("r8-a1-list-cont", base + "\n- item\n\n    §999 list continuation\n", ["C9 every body", "\u00a7999"]);
+});
+
+// A2: code inside a list item (item-content col + 4) is still code — masked.
+test("R8-A2 indented code inside a list item stays masked", () => {
+  const doc = base + "\n- item\n\n      §999 code in item\n";
+  const f = path.join(tmp, "r8-a2-code-in-item.md");
+  fs.writeFileSync(f, doc);
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 0, `code-in-item: expected exit 0\n${r.stderr}`);
+});
+
+// D1: a DEEPER blockquote fence line ("> > ```") inside a depth-1
+// blockquote fence is fence CONTENT — it must not close the fence early
+// and expose following lines, and the plain-depth closer after it must.
+test("R8-D1 blockquote fence closes only at its own depth", () => {
+  const inside = base + "\n> ```\n> > ```\n> §999 still fence content\n> ```\n";
+  const fi = path.join(tmp, "r8-d1-inside.md");
+  fs.writeFileSync(fi, inside);
+  const ri = spawnSync(process.execPath, [SCRIPT, fi], { encoding: "utf8" });
+  assert.equal(ri.status, 0, `expected valid masked fixture: ${ri.stderr}`);
+  assert.ok(!ri.stderr.includes("§999"), "D1: §999 inside the fence must stay masked");
+  runProbe("r8-d2-after", base + "\n> ```\n> > ```\n> content\n> ```\n§999 after fence\n", ["C9 every body", "\u00a7999"]);
+});
+
+// FB: an ESCAPED backtick run (\\`a\\`) can never close a pending span;
+// without the escape rule the sequence laundered following lines under a
+// comment. The ref stays live (span content is live prose by policy).
+test("R8-FB escaped ticks cannot close a span or launder a comment", () => {
+  runProbe("r8-fb-escape", base + "\npara `\n\\`a\\` <!--\n§999 laundered?\n-->\n", ["C9 every body", "\u00a7999"]);
+});
+
+// E1/E2: NBSP and form-feed are NOT blank lines (CommonMark: blank =
+// spaces/tabs only) — they never kill a pending span or an indented-code
+// block. §999 stays inside the still-running code block.
+test("R8-E exotic whitespace lines are not blank", () => {
+  for (const [nm, ws] of [["formfeed", "\f"], ["nbsp", "\u00a0"]] as const) {
+    const doc = base + `\ntext\n\n    §999 code\n${ws}\n    more code\n`;
+    const f = path.join(tmp, `r8-e-${nm}.md`);
+    fs.writeFileSync(f, doc);
+    const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+    assert.equal(r.status, 0, `expected valid masked fixture: ${r.stderr}`);
+    assert.ok(!r.stderr.includes("§999"), `E-${nm}: §999 must stay masked (line is not blank)`);
+  }
+});
+
+// R8-F1: tab STOPS count — " \t" REACHES column 4, so after a blank line
+// it opens indented code (masked). A tab-indented ``` mid-paragraph does
+// NOT open a fence (a code block cannot interrupt a paragraph): the ref
+// on the tab-indented line stays live.
+test("R8-F1 tab-stop columns: space-tab opens code, tab-fence needs a block boundary", () => {
+  const code = base + "\ntext\n\n \t§999 tab-stop code\n";
+  const fc = path.join(tmp, "r8-f1-tabcode.md");
+  fs.writeFileSync(fc, code);
+  const rc = spawnSync(process.execPath, [SCRIPT, fc], { encoding: "utf8" });
+  assert.equal(rc.status, 0, `expected valid masked fixture: ${rc.stderr}`);
+  assert.ok(!rc.stderr.includes("§999"), "F1: §999 after ' \\t' must stay masked (col 4 code)");
+  runProbe("r8-g1-tabfence", base + "\nparagraph\n\t```\n\t§999 paragraph continuation\n", ["C9 every body", "\u00a7999"]);
+});
+
+// ---------------------------------------------------------------------------
+// Round-9 (terra audits): list-content-column precision + list fence death.
+// F1: tab padding after a list marker advances to the NEXT TAB STOP
+// ("-\tx" content column 4): with floor col+4, an 8-column line is
+// indented code (masked) while a 5-column line stays live continuation.
+test("R9-F1 tab padding after marker uses tab stops", () => {
+  const code = base + "\n-\tx\n\n        §999 code at col 8\n";
+  const fc = path.join(tmp, "r9-f1-code.md");
+  fs.writeFileSync(fc, code);
+  const rc = spawnSync(process.execPath, [SCRIPT, fc], { encoding: "utf8" });
+  assert.equal(rc.status, 0, `expected valid masked fixture: ${rc.stderr}`);
+  assert.ok(!rc.stderr.includes("§999"), "F1: 8-col line after '-\\tx' is code — must stay masked");
+  runProbe("r9-f1b-cont", base + "\n-\tx\n\n     §999 five-col continuation\n", ["C9 every body", "\u00a7999"]);
+});
+
+// F2: padding beyond 4 columns after the marker start makes the item's
+// first block an indented code block; content column drops to
+// markerEnd+1 ("-     x" -> column 2): a 6-column line is code (>= 2+4).
+test("R9-F2 >4-column padding: item content column is markerEnd+1", () => {
+  const code = base + "\n-     x\n\n      §999 item code (col 6 >= 2+4)\n";
+  const fc = path.join(tmp, "r9-f2-code.md");
+  fs.writeFileSync(fc, code);
+  const rc = spawnSync(process.execPath, [SCRIPT, fc], { encoding: "utf8" });
+  assert.equal(rc.status, 0, `expected valid masked fixture: ${rc.stderr}`);
+  assert.ok(!rc.stderr.includes("§999"), "F2: 6-col line is item code — must stay masked");
+  runProbe("r9-f2b-live", base + "\n-     x\n\n     §999 five-col paragraph\n", ["C9 every body", "\u00a7999"]);
+});
+
+// F3 (FAIL-OPEN): a fenced block opened INSIDE a list item must die with
+// the item — a non-blank line dedented below the item content column
+// ends both, and its §refs are live top-level prose. (Control: the same
+// fence keeps masking while lines stay at the item column.)
+test("R9-F3 list-contained fence dies at the item dedent", () => {
+  runProbe("r9-f3-dedent", base + "\n- item\n  ```\n  code\n§999 live after list end\n  ```\n", ["C9 every body", "\u00a7999"]);
+  const inside = base + "\n- item\n  ```\n  §999 inside fence\n  ```\nafter\n";
+  const fi = path.join(tmp, "r9-f3-inside.md");
+  fs.writeFileSync(fi, inside);
+  const ri = spawnSync(process.execPath, [SCRIPT, fi], { encoding: "utf8" });
+  assert.equal(ri.status, 0, `expected valid masked fixture: ${ri.stderr}`);
+  assert.ok(!ri.stderr.includes("§999"), "F3 control: ref inside a still-open item fence stays masked");
+});
+
+// ---------------------------------------------------------------------------
+// Round-10 (terra convergence): fenceListCol must tag the item that OWNS
+// the fence line (innermost column <= the line's absolute column — a
+// fence at an OUTER item's column with a deeper inner item open was
+// untagged and survived the item end = FAIL-OPEN), and the tag compares
+// against the column BEFORE any "> " strip (a blockquote fence inside a
+// list item died never: FAIL-OPEN).
+test("R10 fenceListCol: outer-item fence and blockquote-in-item fence die with the item", () => {
+  runProbe("r10-outer-item-fence", base + "\n- a\n  - b\n  ```\n  x\n§999 live after outer item\n  ```\n", ["C9 every body", "\u00a7999"]);
+  runProbe("r10-bq-in-item", base + "\n- item\n  > ```\n  > code\n> §999 live past item\n> ```\n", ["C9 every body", "\u00a7999"]);
+  // controls: fences still mask while their item is alive
+  const c1 = base + "\n- item\n  > ```\n  > §999 inside\n  > ```\nT\n";
+  const f1 = path.join(tmp, "r10-c1.md");
+  fs.writeFileSync(f1, c1);
+  const r1 = spawnSync(process.execPath, [SCRIPT, f1], { encoding: "utf8" });
+  assert.equal(r1.status, 0, `expected valid masked fixture: ${r1.stderr}`);
+  assert.ok(!r1.stderr.includes("§999"), "R10 control: bq fence inside a live item stays masked");
+});
+
+// ---------------------------------------------------------------------------
+// Round-11: tab-indented fences in list items. "-\tx\n\t```" opens the
+// fence at the item's tab-stop column (false-fire otherwise), and the
+// closer/dedent tests are container-relative via consumeCol — a tab that
+// CROSSES the item column is consumed partially (CommonMark strips the
+// container prefix tab-stop-wise and the overshot columns return as
+// spaces), so the fence lives; only a non-whitespace char before the
+// column is a true dedent (death). The listStack pop now runs ONLY on
+// fence-match lines (an unconditional pop killed list-continuation
+// exemptions: caught by the R8-A1/R9-F1/R9-F2 probes during development).
+test("R11 tab fences: item-column container prefix, partial-tab crossing", () => {
+  const open = base + "\n-\tx\n\t```\n\t§999 fence content\n\t```\nafter\n";
+  const fo = path.join(tmp, "r11-tab-open.md");
+  fs.writeFileSync(fo, open);
+  const ro = spawnSync(process.execPath, [SCRIPT, fo], { encoding: "utf8" });
+  assert.equal(ro.status, 0, `expected valid masked fixture: ${ro.stderr}`);
+  assert.ok(!ro.stderr.includes("§999"), "R11: tab fence inside tab item must mask §999");
+  // r12-F1 REVISED the r9-F3 expectation: a tab that OVERSHOOTS the item
+  // column is consumed PARTIALLY (container-prefix tab semantics), so the
+  // tab line is still fence content — masked. The fence never closes and
+  // the unclosed-fence issue fires; §999 stays masked.
+  runProbe("r11-overshoot", base + "\n- x\n  ```\n  a\n\t§999 tab-overshoot death\n", ["C9 every body", "unclosed code fence"]);
+});
+
+// ── Round 13 (F1: blockquote fence depth; F2: closer indent rule) ─────
+
+// R13-F1: a fence survives lines at its own depth or deeper, but ends
+// when its owning blockquote ends; the shallower line is live.
+test("R13-F1: BQ fences end on a line shallower than the opener", () => {
+  // A depth-1 fence survives a depth-2 content line and masks its own
+  // depth-1 content until its depth-1 closer:
+  runProbe("r13-bq-depth2-survives",
+    base + "\n> ```\n> > ```\n> §9999 still fence content\n> ```\n",
+    false);
+  // the depth-1 line is fence content (masked), depth-0 line kills the
+  // fence, ref on the depth-0 line is live:
+  runProbe("r13-bq-depth2-dies-at-0",
+    base + "\n> ```\n> > ```\n> content\n§9999 live\n",
+    ["C9 every body", "\u00a7999"]);
+  // fence at depth 1 with NO closer anywhere: dies at the depth-0 line
+  // and the depth-0 line goes live.
+  runProbe("r13-bq-depth1-dies-at-0",
+    base + "\n> ```\n> code\ntail §9999 live\n",
+    ["C9 every body", "\u00a7999"]);
+  // THE canonical HIGH case: fence OPENER at depth 2. It survives depth-2
+  // content lines (masked) and dies only at the first depth-1 line,
+  // which is the outer quote's LIVE content.
+  runProbe("r13-bq-depth2-opener-survives-depth2",
+    base + "\n> > ```\n> > §9999 in fence\n> > ```\n",
+    false);
+  runProbe("r13-bq-depth2-dies-at-depth1",
+    base + "\n> > ```\n> §9999 outer content\n",
+    ["C9 every body", "\u00a7999"]);
+});
+
+// R13-F2: CommonMark closer rule — closer indentation ≤ 3 (NOT ≤ opener
+// indent): a 2-space closer closes a 0-space opener; a ref after it is
+// live while a ref inside the fence body stays masked.
+test("R13-F2: closer indent bound is 3, not the opener's indent", () => {
+  const src = base + "\n```\n§99998 masked\n   ```\n§9999 live\n";
+  const f = path.join(tmp, "r13-f2-closer.md");
+  fs.writeFileSync(f, src);
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 1, "R13-F2: ref after the 3-space closer must fire C9");
+  assert.ok(r.stderr.includes("\u00a7999"), "R13-F2: §999 after closer is live");
+  assert.ok(!r.stderr.includes("\u00a799998"), "R13-F2: ref inside the fence body stays masked");
+});
+
+test("blockquote fence ends on an unmarked blank but not a marked blank", () => {
+  runProbe("bq-unmarked-blank", base + "\n> ```\n> code\n\n> §99999 live\n> ```\n", ["§99999"]);
+  runProbe("bq-marked-blank", base + "\n> ```\n> code\n>\n> §99999 masked\n> ```\n", false);
+  runProbe("bq-partial-blank", base + "\n> > ```\n>\n> §99999 live\n", ["§99999"]);
+});
+
+test("nested blockquote fence recognizes indentation between quote markers", () => {
+  runProbe("bq-spaced-nested", base + "\n>  > ```\n>  > §99999 masked\n>  > ```\n", false);
+  runProbe("bq-spaced-dedent", base + "\n>  > ```\n> §99999 live\n", ["§99999"]);
+  runProbe("bq-spaced-close", base + "\n>  > ```\n>   > ```\n> §99999 live\n", ["§99999"]);
+});
+
+test("quote opener does not consume indentation twice", () => {
+  runProbe("bq-four-space-opener", base + "\n    > ```\n> §99999 live\n> ```\n", ["§99999"]);
+  runProbe("bq-three-space-opener", base + "\n   > ```\n   > §99999 masked\n   > ```\n", false);
+});
+
+test("unsupported list within blockquote fails closed", () => {
+  runProbe("bq-list-fence", base + "\n> - item\n>   ```\n>   code\n> §99999 live\n>   ```\n", ["list inside blockquote is unsupported"]);
+});
+
+test("unsupported nested quote lists fail closed before spans and inside outer lists", () => {
+  runProbe("bq-list-after-span", base + "\nparagraph `\n> - item\n>   ```\n> §99999 live\n>   ```\n", ["list inside blockquote is unsupported"]);
+  runProbe("bq-list-inside-item", base + "\n-\titem\n    > - nested\n    >   ```\n    > §99999 live\n    >   ```\n", ["list inside blockquote is unsupported"]);
+});
+
+test("comments in blockquotes fail closed when ownership is unsupported", () => {
+  runProbe("bq-comment-escape", base + "\n> <!--\n§99999 live\n-->\n", ["comment inside blockquote is unsupported"]);
+  runProbe("bq-comment-contained", base + "\n> <!--\n> §99999 example\n> -->\n", ["comment inside blockquote is unsupported"]);
+  runProbe("comment-outside-quote", base + "\n<!--\n§99999 example\n-->\n", false);
+});
+
+test("same-line list quote list nesting is rejected", () => {
+  runProbe("same-line-nested-list", base + "\n- > - item\n  >   ```\n  >   code\n  > §99999 live\n  >   ```\n", ["list inside blockquote is unsupported"]);
+  runProbe("same-line-list-quote", base + "\n- > item\n  > ```\n  > §99999 masked\n  > ```\n", false);
+});
+
+// ── Round 14 (F1: list-owned comment laundry; F2: literal <!-- is not
+// an opener inside inline code / fence info) ────────────────────────────
+
+test("r14-F1: comment opened in a list dies at the list boundary — refs below are live", () => {
+  // The audit's laundry pattern: a comment opened inside a list item
+  // must NOT mask top-level prose after the list ends.
+  runProbe("r14-list-owned-laundry", base + "\n- <!--\n§99999 live\n-->\n", ["§99999"]);
+  // Dedent back to the item's OWN content column keeps the comment
+  // owned: the ref stays masked.
+  runProbe("r14-list-owned-same-col", base + "\n- item\n  <!--\n  §99999 masked\n  -->\n", false);
+  // Nested item: the comment belongs to the DEEPER item; a line at the
+  // outer item's column ends the inner list -> comment dies, ref live.
+  runProbe("r14-nested-pop", base + "\n- a\n  - b <!--\n  §99999 live\n  -->\n", ["§99999"]);
+  // Comment still inside the nested item: masked.
+  runProbe("r14-nested-still-in", base + "\n- a\n  - b <!--\n    §99999 masked\n    -->\n", false);
+  // Comment closing BEFORE the list ends: nothing exposed.
+  runProbe("r14-comment-closes-in-list", base + "\n- b <!-- §99999 masked -->\n", false);
+  // Top-level comment unchanged (mask everything to -->).
+  runProbe("r14-toplevel-still-masks", base + "\n<!--\n§99999 masked\n-->\npara\n", false);
+});
+
+test("r14-F2: literal <!-- in code spans and fence info is not a comment opener", () => {
+  runProbe("r14-bq-code-span", base + "\n> use `<!--` to comment\n", false);
+  runProbe("r14-bq-fence-info", base + "\n> ```html <!-- x\n> content §99999 masked\n> ```\n", false);
+  runProbe("r14-bq-double-backtick", base + "\n> ``<!--`` not open\n", false);
+  runProbe("r14-bq-escaped-backtick", base + "\n> \\`unclosed <!-- real opener\n> §99999 example\n> -->\n", ["comment inside blockquote is unsupported"]);
+  runProbe("r14-bq-after-close-span", base + "\n> `x` then <!-- tail\n> §99999 example\n> -->\n", ["comment inside blockquote is unsupported"]);
+  runProbe("r14-bq-tilde-fence-info", base + "\n> ~~~ <!-- info\n> content\n> ~~~\n", false);
+});
+
+// ── Round 15 (F1: fence opener in a same-line list chain launders via
+// fence-info `<!--`; F2: same-line list chains `- - <!--` and TAB-indented
+// nested `\t- <!--` were untracked so their owned comment hid live refs;
+// F3: the pending-span closer masked everything BEFORE the closer,
+// laundering a §ref sitting before the closing backtick run) ───────────
+
+test("r15-F1: fence in a same-line list chain fails closed (container-model crossing)", () => {
+  // "- > ~~~ <!-- info" opens a fence the main state machine never
+  // models while processText reads the fence info's `<!--` as a phantom
+  // comment opener — the two views must not diverge: fail closed.
+  runProbe("r15-chain-fence-quote", base + "\n- > ~~~ <!-- info\n  §99999 live\n  -->\n", ["fence inside a same-line list chain"]);
+  runProbe("r15-chain-fence-backtick", base + "\n- ``` <!-- info\n  §99999 live\n  -->\n", ["fence inside a same-line list chain"]);
+  runProbe("r15-chain-fence-tilde", base + "\n- ~~ ~~~ nope\n", false); // not a fence chain: unaffected
+});
+
+test("r15-F2: same-line list chains and TAB-indented nesting are tracked for comment ownership", () => {
+  // "- - <!--" — comment owned by the SAME-LINE nested item; a dedent to
+  // column 0 ends both lists, the comment dies, and the ref is live.
+  runProbe("r15-same-line-chain-laundry", base + "\n- - <!--\n§99999 live\n-->\n", ["§99999"]);
+  // TAB-indented nested item: the tab was invisible to the old
+  // space-only list matcher, so the comment outlived its owner.
+  runProbe("r15-tab-nested-laundry", base + "\n- a\n\t- <!--\n§99999 live\n-->\n", ["§99999"]);
+  // CONTROL (legit ownership): ref inside the item's content column,
+  // dedent AFTER the closer — the comment is properly owned; masked.
+  runProbe("r15-tab-nested-owned", base + "\n- x\n  <!--\n\t§99999 masked\n  -->\n", false);
+  // Same-line chain where the comment stays inside the chain's column.
+  runProbe("r15-chain-still-owned", base + "\n- - <!--\n    §99999 masked\n    -->\n", false);
+});
+
+test("r15-F3: a §ref before the pending-span closing delimiter stays live", () => {
+  // "paragraph `\n§99999 `" — the closer pairs the span, but the TEXT
+  // BEFORE the closer is span content (norm text): the ref must fire.
+  runProbe("r15-span-closer-laundry", base + "\nparagraph `\n§99999 `\n", ["§99999"]);
+  // CONTROL: a ref purely INSIDE the span content (between opener and
+  // closer, not before a closer) was always live — still live.
+  runProbe("r15-span-content-live", base + "\nstart `\n§99999\nend ` more\n", ["§99999"]);
+  // CONTROL: closed same-line span — its content is live text (spans
+  // are norm text): a ref inside a closed span is reported, not masked.
+  runProbe("r15-closed-span-still-live", base + "\na `\u00a799999` b\n", ["§99999"]);
+});
+
+test("r15c2-F1: a §ref on the span opener line after the opener stays live", () => {
+  // "paragraph ` §99999\nend `" — the opener-line remainder is span
+  // content (norm text); the old code discarded it: laundering.
+  runProbe("r15c2-span-opener-line-laundry", base + "\nparagraph ` §99999\nend `\n", ["§99999"]);
+  // CONTROL: opener-line remainder with no ref and a later closer: fine.
+  runProbe("r15c2-span-opener-line-clean", base + "\nparagraph ` x\nend `\n", false);
+  // EDGE: opener run at column 0 — the copied remainder must not become
+  // a phantom fence; the ref after it is live (never masked).
+  runProbe("r15c2-span-col0-no-phantom-fence", base + "\n``~~~\n§99999\n~~~\n", ["§99999"]);
+});
+
+test("r15c2-F2: a list chain past the tracked depth fails closed (never a silent stop)", () => {
+  // 9-marker chain: comment owned by the 9th item; the old 8-cap lost
+  // that item and a dedent to column 16 laundered the ref.
+  runProbe("r15c2-nine-chain-laundry", base + "\n- - - - - - - - - <!--\n                §99999\n                -->\n", ["§99999"]);
+  // BOUNDARY at the cap: 8-marker chain still models correctly (masked).
+  runProbe("r15c2-eight-chain-owned", base + "\n- - - - - - - - <!--\n                §99999\n                -->\n", false);
+  // Past the hard model depth (16): fail closed with the guard issue.
+  runProbe("r15c2-twenty-chain-guard", base + "\n" + "- ".repeat(20) + "<!--\n§99999\n-->\n", ["list chain deeper"]);
+});
+
+test("r15c2-F3: no candidate-expansion cap — 33-marker fence chain fails closed", () => {
+  // 33 same-line markers then a fence whose info string carries "<!--":
+  // past-cap candidates used to skip the fence guard entirely.
+  const chain = "- ".repeat(33) + "~~~ <!-- info";
+  runProbe("r15c2-long-chain-fence", base + `\n${chain}\n${" ".repeat(66)}~~~\n${" ".repeat(66)}§99999\n${" ".repeat(66)}-->\n`, ["fence inside a same-line list chain"]);
+});
+
+test("r15c3-F1: a multiline-span opener cannot JOIN text into a fake external path", () => {
+  // "docs/`a §99999" + "end `" — deleting the opener run used to
+  // reconstruct "docs/a §99999", fabricating an external adjacency.
+  runProbe("r15c3-span-join-extpath", base + "\ndocs/`a \u00a799999\nend `\n", ["\u00a799999"]);
+  // CONTROL: a genuine external chain (no backticks) stays exempt.
+  runProbe("r15c3-plain-extchain", base + "\nsee docs/audits/audit-x.md \u00a74.2 detail\n", false);
+});
+
+test("r15c3-F2: a docs/ path inside an inline code span gets no external exemption", () => {
+  // Backtick is now a left boundary of the extPrefix grammar: a path in
+  // span content is literal text, never a prose chain (fail closed).
+  runProbe("r15c3-span-extpath", base + "\n`docs/a \u00a799999`\n", ["\u00a799999"]);
+  runProbe("r15c3-span-extpath-multiline", base + "\n`docs/a \u00a799999\nend `\n", ["\u00a799999"]);
+  // CONTROL: glued non-path boundary (paren) keeps prior semantics.
+  runProbe("r15c3-paren-boundary", base + "\n(docs/a.md \u00a74.2)\n", false);
+});
+
+// ---- r15c4 (audit cycle-1 TESTS-MISSING battery): span-range boundaries,
+// multiline-span closer edges, comment ownership across dedents/siblings,
+// and degenerate inputs. All probes assert the OBSERVED fail-closed/exempt
+// behavior of the r15c3 range model; external §98.99 is unresolvable
+// locally, so exemption failures are visible.
+
+test("r15c4-T1: span-range boundary denial on external chains", () => {
+  // Span ends GLUED to the path start: backtick is a left boundary and
+  // the path start sits inside… denial either way, ref must fire.
+  runProbe("r15c4-span-glued-pathstart", base + "\n`x`docs/a \u00a798.99 y\n", ["\u00a798.99"]);
+  // Ref directly after the opener (inside span content): fires.
+  runProbe("r15c4-ref-at-opener", base + "\ndocs/a `x\u00a798.99 y\n", ["\u00a798.99"]);
+  // CONTROL: closed span EARLIER on the line, genuine chain after —
+  // ranges do not overlap the chain region: exemption survives.
+  runProbe("r15c4-span-then-genuine-chain", base + "\nrun `ls` then docs/audits/audit-x.md \u00a798.99 tail\n", false);
+  // CONTROL: unrelated code span AFTER a genuine chain: still exempt.
+  runProbe("r15c4-genuine-chain-then-span", base + "\nsee docs/audits/audit-x.md \u00a798.99 tail `code`\n", false);
+  // Path wholly inside a span: no exemption.
+  runProbe("r15c4-path-wholly-span", base + "\nsee `docs/audits/audit-x.md` \u00a798.99 tail\n", ["\u00a798.99"]);
+});
+
+test("r15c4-T2: multiline-span closer lines — content before/after a mid-line closer", () => {
+  // Pending span, line with " ` more ` ": the first run CLOSES the span;
+  // text after the closer is live prose until the next opener; a ref in
+  // that region fires. Content BEFORE the closer (span text) also lives.
+  runProbe("r15c4-closer-mid-line", base + "\nopener `\ndocs/audits/audit-x.md ` more ` \u00a798.99\nend `\n", ["\u00a798.99"]);
+  runProbe("r15c4-closer-mid-line2", base + "\nopener `\na ` b ` docs/audits/audit-x.md \u00a798.99\nend `\n", ["\u00a798.99"]);
+  // CONTROL: no ref anywhere on the closer edges: clean.
+  runProbe("r15c4-closer-edges-clean", base + "\nopener `\ncontent ` more ` rest\nend `\n", false);
+  // Longer opener run (```): a 2-run on the content line is literal
+  // (run-length pairing); the span closes only at "end ```" — the
+  // docs path before it gets no exemption.
+  runProbe("r15c4-fencelike-closer", base + "\nopener ```\ndocs/audits/audit-x.md `` \u00a798.99 tail\nend ```\n", ["\u00a798.99"]);
+  // Closer-line text before a never-matching "-->" stays live.
+  runProbe("r15c4-span-closer-dangling-arrow", base + "\nopener `\ndocs/audits/audit-x.md\n \u00a798.99 -->\nend `\n", ["\u00a798.99"]);
+});
+
+test("r15c4-T3: comment ownership across list dedents and siblings", () => {
+  // CONTROL: comment owned by the 2-deep item, dedent INSIDE the comment
+  // (content indented under the item): stays masked.
+  runProbe("r15c4-comment-dedent-under-item", base + "\n  - x\n    <!--\n    masked \u00a798.99\n    -->\n", false);
+  // CONTROL: sibling item after a closed owned comment: live ref fires.
+  runProbe("r15c4-sibling-after-comment", base + "\n- <!--\n  masked \u00a798.99\n  -->\n- \u00a798.99 live\n", ["\u00a798.99"]);
+  // Deep chain dedented past the owner: comment dies, ref exposed.
+  runProbe("r15c4-chain-dedent-kills-comment", base + "\n- - <!--\n  \u00a798.99\n  -->\n", ["\u00a798.99"]);
+});
+
+test("r15c4-T4: degenerate inputs never crash and stay fail-closed", () => {
+  // Empty doc and fence-only doc: the checker exits nonzero on their own
+  // anchors/ledger failures (or passes with zero refs) — never a crash;
+  // assert via the fragment shared by both paths.
+  runProbe("r15c4-fence-only-open", base + "\n```\n", ["unclosed code fence"]);
+  runProbe("r15c4-tilde-only-open", base + "\n~~~\n", ["unclosed code fence"]);
+  // 50-run unclosed: ALSO the fence-guard route (run>=3 fences).
+  runProbe("r15c4-run50-unclosed", base + "\n" + "`".repeat(50) + " \u00a798.99\n", ["unclosed code fence"]);
+  // 50-run + same-line 49-run: a backtick FENCE opener may not carry
+  // backticks in its info string, so the 50-run is not a fence; the run
+  // pairing leaves the whole line inline prose. "docs/audits/audit-x.md
+  // §98.99" then sits in PROSE with a genuine docs/ path before it —
+  // exactly the external-chain form that is exempt by design (the
+  // checker cannot resolve another document's anchors). Literal
+  // backtick noise neither launders the ref (the chain text is real)
+  // nor breaks the exemption; a span range never covers this ref.
+  runProbe("r15c4-run50-mismatch-close", base + "\n" + "`".repeat(50) + " docs/audits/audit-x.md \u00a798.99 " + "`".repeat(49) + "\n", false);
+  // CONTROL: plain genuine chain next to run probes stays exempt.
+  runProbe("r15c4-run-clean-control", base + "\nsee docs/audits/audit-x.md \u00a798.99 tail\n", false);
 });

@@ -116,6 +116,12 @@ const stripComments = (t) => t.replace(/<!--[\s\S]*?(?:-->|$)/g, " ");
 //   code blocks (4+ spaces / tab right after a blank line) are masked
 //   to the end of the indented run (r7-F6, documented exclusion).
 const scanModel = (text) => {
+  // r15c3-F2 (audit HIGH): per-line SPAN-CONTENT ranges in MASKED
+  // coordinates (parallel to outLines). C9 refuses the docs/ external
+  // exemption for a ref whose "§" or path start lies inside a span —
+  // span content is literal text, never a prose chain. Ranges include
+  // the delimiter runs. null = the line carries no span content.
+  const spanRanges = [];
   const issues = [];
   // Round-7 F5: stated policy is refuse ANY CR — lone OR part of CRLF.
   // The line model is \n-only; CRLF would let \r ride along inside
@@ -130,10 +136,24 @@ const scanModel = (text) => {
   // harmless. Lone \r stays fail-closed (whole-line model breaks).
   const lines = text.split("\n");
   const outLines = [];
-  let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false;
+  // r15c3-F2: parallel per-line span-content ranges (masked coords).
+  // Set by the loop before each pushLine via this line's collector.
+  // curShift: the r15c2-F1 >=4-column pad injected before an opener
+  // hole (shifts masked coords of everything after it by pad-1);
+  // curCmtPad: the r12-F3 comment-open pad (shifts by +3 when active).
+  let curRanges = [];
+  let curShift = 0;
+  let curCmtPad = false;
+  const pushLine = (out) => { outLines.push(out); spanRanges.push(curRanges); curRanges = []; curShift = 0; curCmtPad = false; };
+  let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1;
   let spanRun = 0; // r6-F2: open multi-line inline span (required closer run)
   const findRun = (str, from, n) => {
     for (let j = from; j < str.length; j++) {
+      // r8-F2: a backslash escapes the next char (CommonMark), so an
+      // ESCAPED backtick run can never close a span. Without this the
+      // sequence "\`escaped\` then <!--" closed a pending span on the
+      // escaped run and laundered the following lines under a comment.
+      if (str[j] === "\\") { j++; continue; }
       if (str[j] === "`") {
         let m = 0;
         while (str[j + m] === "`") m++;
@@ -143,7 +163,12 @@ const scanModel = (text) => {
     }
     return -1;
   };
-  const processText = (ln, st, openSpan) => {
+  const processText = (ln, st, openSpan, lineBase = 0, collect = false) => {
+    // r15c3-F2 (audit HIGH): when collect, span-content ranges (in
+    // MASKED coordinates: lineBase + local index) are pushed to
+    // lineRanges. Closed spans cover delimiters through content; an
+    // opener run of a multi-line span covers through the line end
+    // (its remainder is span content).
     let res = "", i = 0;
     while (i < ln.length) {
       if (ln[i] === "\\" && i + 1 < ln.length) { res += ln[i] + ln[i + 1]; i += 2; continue; }
@@ -151,6 +176,13 @@ const scanModel = (text) => {
         let n = 0;
         while (ln[i + n] === "`") n++;
         const close = findRun(ln, i + n, n);
+        // r15c3-F2: ranges in MASKED coordinates. Input column ==
+        // output column for every processText branch (all copy or mask
+        // 1:1); the opener-run pad shifts by <=4 and the end bound
+        // (ln.length) still covers any ref in the remainder.
+        if (collect) {
+          if (close !== -1) curRanges.push([lineBase + i, lineBase + close + n]);
+        }
         // r5-F1: an UNCLOSED backtick run MID-LINE is literal text
         // (CommonMark) — the scan CONTINUES past it; a `<!--` later on
         // the line is still a comment opener.
@@ -161,7 +193,42 @@ const scanModel = (text) => {
           // fence/comment material; §refs inside them stay LIVE (spans
           // are norm text). The remainder of the opener line is span
           // content too (copied; `<!--` inside span content is literal).
-          if (openSpan) { st.spanRun = n; i = ln.length; break; }
+          if (openSpan) {
+            // r15c2-F1 (audit HIGH): the remainder of the OPENER line is
+            // span content too — norm text whose §refs stay live. It is
+            // copied verbatim (never rescanned, so a `<!--` in it stays
+            // literal; it sits mid-line so it can never form a heading).
+            // If the opener run sits at column 0 the remainder would land
+            // at OUTPUT column 0 and could form a phantom fence/heading
+            // ("``~~~" -> "~~~" masking following lines); pad 4 columns so
+            // the span content can never start a block construct, while
+            // §refs (unanchored regex) stay fully visible.
+            st.spanRun = n;
+            // r15c3-F2: the copied remainder (hole included) is span
+            // content. All processText branches are 1:1, so the input
+            // column of the opener == its output column before the
+            // r15c2-F1 pad is injected; masked coords of the copied
+            // remainder shift by the injected pad only.
+            const pad = Math.max(0, 4 - res.length);
+            if (collect) curRanges.push([lineBase + i + pad, lineBase + ln.length + pad]);
+            // The delimiter run becomes a BACKTICK HOLE (r15c3-F1/F2):
+            // deleting it JOINED text across it ("docs/`a §ref" ->
+            // "docs/a §ref" fabricated an external-path adjacency), and
+            // a SPACE hole at column 0 re-created the prose boundary a
+            // glued "`docs/…" never had. A backtick is not a path
+            // character under the extPrefix grammar and IS a left
+            // boundary, so span content can never satisfy the external
+            // exemption; it is also inert for every other downstream
+            // consumer of the masked text (section map, ledger rows).
+            // Pad BEFORE the hole so it sits at column >= 4: the copied
+            // remainder can never start a phantom fence/heading.
+            if (res.length < 4) res += " ".repeat(4 - res.length);
+            // r15c3-F2: the copied remainder (incl. the hole) is span
+            // content. Masked start = input col + injected pad (the pad
+            // shifts everything after it); end = end of the line.
+            if (collect) curRanges.push([lineBase + i + Math.max(0, 4 - res.length), lineBase + ln.length + 1]);
+            res += "`".repeat(n) + ln.slice(i + n); i = ln.length; break;
+          }
           res += "`".repeat(n); i += n; continue;
         }
         res += ln.slice(i, close + n); i = close + n; continue;
@@ -175,23 +242,87 @@ const scanModel = (text) => {
     }
     return res;
   };
-  // r6-F3: fences open THROUGH a blockquote prefix (> ```): a line is
-  // tested plain first, then with its "> " prefix(es) stripped (CommonMark
-  // strips one optional space). The closer must carry the same shape, and
-  // the r5-F3 indent rule holds (closer indent <= opener indent).
+  // r14-F2 (audit MEDIUM): CommonMark makes inline code spans and fence
+  // info strings LITERAL text — "`<!--`" never opens a comment and a
+  // fence opener's info string ("> ```html <!-- x") merely CONTAINS the
+  // characters. The blockquote comment check must test live text:
+  // mask closed spans (delimiters included), drop a fence line's info
+  // string, and treat a line inside a pending multi-line span (r6-F2)
+  // as span content. An UNCLOSED backtick run is literal (CommonMark) —
+  // scanning continues past it so a "<!--" later on the line is still
+  // detected (same rule as processText r5-F1).
+  const stripLiteral = (txt, pending) => {
+    if (pending > 0) {
+      const close = findRun(txt, 0, pending);
+      if (close === -1) return ""; // whole line is pending-span content
+      txt = " ".repeat(close + pending) + txt.slice(close + pending);
+    }
+    // Fence opener at line start (0-3 space indent): the marker and its
+    // info string are literal. A backtick fence carrying a backtick in
+    // its info is NOT a fence (CommonMark) — fall through to inline scan.
+    const fi = txt.match(/^( {0,3})(`{3,}|~{3,})/);
+    if (fi && !(fi[2][0] === "`" && txt.slice(fi[0].length).includes("`"))) {
+      return fi[1] + " ".repeat(txt.length - fi[1].length);
+    }
+    let res = "", i = 0;
+    while (i < txt.length) {
+      if (txt[i] === "\\" && i + 1 < txt.length) { res += txt[i] + txt[i + 1]; i += 2; continue; }
+      if (txt[i] === "`") {
+        let n = 0; while (txt[i + n] === "`") n++;
+        const close = findRun(txt, i + n, n);
+        if (close === -1) { res += "`".repeat(n); i += n; continue; } // literal run
+        res += " ".repeat(close + n - i); i = close + n; continue;    // mask whole span
+      }
+      res += txt[i]; i++;
+    }
+    return res;
+  };
+  // Blockquote markers may each be preceded by up to three spaces relative
+  // to their container. Return the remaining text and the nesting depth.
+  const quotePrefix = (ln) => {
+    let rest = ln, depth = 0, m;
+    while ((m = rest.match(/^ {0,3}> ?/))) {
+      rest = rest.slice(m[0].length);
+      depth++;
+    }
+    return { rest, depth };
+  };
+  // Fences may open through blockquote prefixes; closer indentation is
+  // bounded by three spaces relative to the innermost container.
   const fenceMatch = (ln, expectBq) => {
-    let rest = ln, indent = 0, bq = false;
+    let rest = ln, indent = 0, bq = false, depth = 0;
     const lead = rest.match(/^( {0,3})/); if (lead) { indent = lead[1].length; rest = rest.slice(indent); }
+    const absIndent = indent; // r10-F2: line column BEFORE any "> " strip (list-tagging)
     if (expectBq) {
-      const bp = rest.match(/^(?:>[ ]?)+/);
-      if (!bp) return null;
-      bq = true; rest = rest.slice(bp[0].length);
+      const bp = quotePrefix(ln);
+      if (!bp.depth) return null;
+      bq = true; rest = bp.rest;
+      depth = bp.depth;
       const lead2 = rest.match(/^( {0,3})/); if (lead2) { indent = lead2[1].length; rest = rest.slice(lead2[1].length); }
     }
     const m = rest.match(/^(`{3,}|~{3,})(.*)$/);
     if (!m) return null;
     if (m[1][0] === "`" && m[2].includes("`")) return null;
-    return { marker: m[1], indent, bq };
+    return { marker: m[1], indent, absIndent, bq, depth };
+  };
+  // r11-F1/r12-F1: consume container prefix whitespace exactly up to
+  // column `col` (tab stops). A tab that CROSSES the column is consumed
+  // PARTIALLY (CommonMark container-prefix tab semantics: " \tx" keeps
+  // living inside a col-2 fence); the columns it overshot reappear as
+  // virtual spaces at the head of the remainder. Only a non-whitespace
+  // char before col fails (a true dedent out of the container).
+  const consumeCol = (ln, col) => {
+    if (col <= 0) return ln;
+    let w = 0, j = 0;
+    while (j < ln.length && w < col) {
+      const ch = ln[j];
+      if (ch === " ") { w++; j++; continue; }
+      if (ch !== "\t") return null;
+      const w2 = ((w >> 2) + 1) << 2;
+      if (w2 > col) return " ".repeat(w2 - col) + ln.slice(j + 1); // partial tab
+      w = w2; j++;
+    }
+    return w === col ? ln.slice(j) : null;
   };
   // r6-F2 scope: CommonMark pairs inline code WITHIN a block — a
   // pending span dies at a blank line (paragraph end) and a FENCE line
@@ -200,63 +331,277 @@ const scanModel = (text) => {
   // a pending span: their inline code is scoped to their own line/cell.
   const canOpenSpan = (ln) => !/^(?: {0,3}(?:#{1,6} |\||>|~~~|```))/.test(ln);
   let prevBlank = true; // r7-F6: start-of-file behaves like a blank line
-  let codeIndent = -1;  // r7-F6: active indented-code block (indent width)
+  let codeIndent = -1;  // r7-F6: active indented-code block (opener indent)
+  let codeFloor = 4;    // r8-F1: continuation threshold of the active indented-code block
+  let listStack = [];   // r8-F3: content columns of currently-open list items (innermost last)
+  let commentListDepth = -1; // r14-F1: open-list depth when inComment opened (-1 = top-level)
+  // r8-F1: CommonMark tab stops (4 columns). " \t" REACHES column 4
+  // (indented-code territory); a bare tab advances to the next stop.
+  // The old approximation (leading spaces only, bare tab = 4) treated
+  // " \t§ref" as column-1 content — a live-looking line that renders
+  // as CODE.
   const indentWidth = (ln) => {
-    const m = ln.match(/^ +/); if (m) return m[0].length;
-    const t = ln.match(/^\t/); return t ? 4 : 0;
+    let w = 0;
+    for (let j = 0; j < ln.length; j++) {
+      const ch = ln[j];
+      if (ch === " ") w++;
+      else if (ch === "\t") w += 4 - (w % 4);
+      else break;
+    }
+    return w;
+  };
+  // r8-F3: track open-list content indents so a blank-line+indented
+  // paragraph CONTINUATION inside a list is no longer mistaken for an
+  // indented code block (CommonMark: "- item\n\n    text" is a live
+  // paragraph, not code; code inside the item needs item-column + 4).
+  // r15-F2b (audit HIGH): the marker lead may contain TABS — the old
+  // " {0,17}" space-only regex missed "\t- item" entirely, so the nested
+  // item was never tracked and its comment was owned by the OUTER item,
+  // keeping §refs masked after the dedent that left the inner item.
+  // Consume a container-lead of spaces/tabs up to an absolute column,
+  // honoring tab stops; null when the lead exceeds it.
+  const leadUpTo = (txt, base, max) => {
+    let w = 0, j = 0;
+    while (j < txt.length && w < max) {
+      const ch = txt[j];
+      if (ch === " ") { w++; j++; continue; }
+      if (ch !== "\t") break;
+      const stop = (((base + w) >> 2) + 1) << 2; // absolute tab stop
+      if (stop > base + max) return null;
+      w = stop - base; j++;
+    }
+    return { col: base + w, rest: txt.slice(j) };
+  };
+  const trackList = (ln) => {
+    const w = indentWidth(ln);
+    while (listStack.length && listStack[listStack.length - 1] > w) listStack.pop();
+    // r15-F2a (audit HIGH): a line may open a CHAIN of list containers on
+    // ONE line ("- - item" = outer item at content column 2, inner item
+    // at 4). Tracking only the outer marker let a comment opened by the
+    // innermost item be owned at the wrong depth, so its §refs stayed
+    // masked after the dedent that had actually left the inner item.
+    // The chain walks every same-line marker (each nested lead bounded
+    // by the 3-space container rule).
+    let rest = ln;
+    let base = 0; // column where `rest` starts (tab stops respected)
+    // r15c2-F2 (audit HIGH): the chain cap must FAIL CLOSED. With the
+    // old hard cap of 8, a 9-marker chain ("- - - - - - - - - <!--")
+    // tracked only 8 items, so the comment was owned at depth 8 and a
+    // dedent to column 16 (outside the 9th item, column 18) never popped
+    // it — laundering every line after. Now: hitting the cap with a real
+    // marker still pending is a fail-closed issue, never a silent stop.
+    for (let d = 0; ; d++) {
+      if (d >= 16) {
+        issues.push("list chain deeper than C9's container model tracks is unsupported");
+        return;
+      }
+      const L = leadUpTo(rest, base, d === 0 ? 17 : 3);
+      if (L === null) return;
+      const m = L.rest.match(/^([-+*]|[0-9]{1,9}[.)])([ \t]+)(?=\S)/);
+      if (!m) return;
+      // r9-F1: marker padding advances by TAB STOPS (CommonMark tab stop
+      // = 4 columns), not +4 per tab char: "-\tx" has content column 4.
+      let col = L.col + m[1].length;
+      for (const ch of m[2]) col = ch === "\t" ? (((col >> 2) + 1) << 2) : col + 1;
+      // r9-F2: padding whose columns exceed marker-start + 4 means the
+      // item's FIRST block is an indented code block; the content column
+      // drops to markerEnd + 1 (CommonMark §5.2). "-     x" -> column 2:
+      // a 6-column line continues the item's code (>= 2+4, masked), a
+      // 5-column line starts a live paragraph there.
+      if (col > L.col + m[1].length + 4) col = L.col + m[1].length + 1;
+      listStack.push(col);
+      rest = L.rest.slice(m[0].length);
+      base = col;
+    }
   };
   for (const ln of lines) {
-    const isBlank = !ln.trim();
+    // r8-F4: CommonMark blank line = spaces/tabs ONLY. JS trim() also
+    // eats NBSP, form-feed, U+2028 etc., which killed pending spans and
+    // indented-code runs on lines that are ordinary paragraph content.
+    const isBlank = !/[^ \t]/.test(ln);
     // r7-F6: inside an indented code block — blank lines and lines at
-    // >= the opener's indent keep the block; anything else ends it and
-    // is processed normally from here.
+    // >= the continuation floor keep the block; anything else ends it
+    // and is processed normally from here. r8-F1: the floor is 4
+    // COLUMNS at top level (a 6-space opener does NOT raise it — a
+    // 4-space line continues the same block, CommonMark), and
+    // item-column + 4 for code opened inside a list item.
     if (codeIndent >= 0) {
-      if (isBlank) { outLines.push(" ".repeat(ln.length)); prevBlank = true; continue; }
-      if (indentWidth(ln) >= codeIndent) { outLines.push(" ".repeat(ln.length)); prevBlank = false; continue; }
+      if (isBlank) { pushLine(" ".repeat(ln.length)); prevBlank = true; continue; }
+      if (indentWidth(ln) >= codeFloor) { pushLine(" ".repeat(ln.length)); prevBlank = false; continue; }
       codeIndent = -1;
     }
     if (inFence) {
-      const cm = !fenceBq && ln.match(/^( {0,3})(`{3,}|~{3,})[ \t]*$/);
-      const cb = fenceBq && ln.match(/^( {0,3})(?:>[ ]?)+( {0,3})(`{3,}|~{3,})[ \t]*$/);
-      const marker = cm ? cm[2] : cb ? cb[3] : null;
-      const mIndent = cm ? cm[1].length : cb ? cb[2].length : 99;
-      // r5-F3: char match, run >= opener, closer indent <= opener indent.
+      // r11-F2: a list-owned fence is tested CONTAINER-relatively: the
+      // owning item's column prefix (tab stops included) is consumed
+      // BEFORE the marker regexes — "-\tx\n\t```" closes at a tab line
+      // reaching column 4. A line that cannot consume the column is a
+      // dedent out of the item (the r9-F3 death, now exact: tabs that
+      // OVERSHOOT the column are not consumable). Blank lines never end
+      // list items and keep the fence.
+      let src = ln;
+      if (fenceListCol >= 0) {
+        const s = consumeCol(ln, fenceListCol);
+        if (s === null) {
+          if (isBlank) { pushLine(" ".repeat(ln.length)); prevBlank = true; continue; }
+          inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false; fenceListCol = -1;
+        } else src = s;
+      }
+      if (!inFence) { /* fence died on the dedent above: fall through, line is LIVE */ }
+      else {
+      const cm = !fenceBq && src.match(/^( {0,3})(`{3,}|~{3,})[ \t]*$/);
+      const bp = fenceBq ? quotePrefix(src) : null;
+      const cb = bp && bp.depth ? bp.rest.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/) : null;
+      const marker = cm ? cm[2] : cb ? cb[1] : null;
+      // r5-F3 → r13-F2: char match and run >= opener; the closer indent
+      // is bounded by the regex itself: CommonMark allows ANY closer at
+      // indent <= 3 (the old "closer indent <= opener indent" rule left
+      // " ```\nx\n   ```" wrongly OPEN). With no backtracking past the
+      // {0,3} lead, a 4+ space indent NEVER matches — such a line is a
+      // new indented-code block, not a closer, so no separate indent
+      // comparison is needed.
       // r7-F3: EVERY close path resets the full fence state (not just the
       // inFence flag) so a later open cannot inherit stale opener shape.
-      if (marker && marker[0] === fenceChar && marker.length >= fenceLen && mIndent <= fenceIndent) {
-        inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false;
-        outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      // r8-F5: a blockquote fence closes only at ITS OWN container depth
+      // — "> > ```" inside a depth-1 blockquote fence is FENCE CONTENT
+      // (would otherwise over-close and expose/launder later lines).
+      const cDepth = bp ? bp.depth : 0;
+      if (marker && marker[0] === fenceChar && marker.length >= fenceLen && (!fenceBq || cDepth === fenceBqDepth)) {
+        inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false; fenceListCol = -1;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
       }
-      // r7-F3: a blockquote fence cannot outlive its blockquote — a blank
-      // line or a line WITHOUT the ">" prefix ends both. The line that
-      // ended the blockquote is LIVE and falls through for normal
-      // processing (it was never fence content).
-      if (fenceBq && (isBlank || !/^( {0,3})(?:>[ ]?)/.test(ln))) {
-        inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false;
-        if (isBlank) { outLines.push(" ".repeat(ln.length)); prevBlank = true; continue; }
+      // r7-F3: a blockquote fence cannot outlive its blockquote — a line
+      // WITHOUT the ">" prefix ends both. The line that ended the
+      // blockquote is LIVE and falls through for normal processing (it
+      // was never fence content).
+      // r11-F2: tested on src (the owning item's column prefix already
+      // consumed). r9-F3 death (dedent below the item column) is handled
+      // by the consumeCol check above — exact for tab stops.
+      // r13-F1 (HIGH): FULL depth tracking, not just depth 0 — the rule
+      // applies to EVERY shallower line: a fence opened at depth 2
+      // ("> > ```") dies at the first depth-1 line ("> x"), which is the
+      // outer blockquote's content — LIVE prose whose §refs must be
+      // flagged, not masked as fence content. An unmarked blank line has
+      // depth zero and ends the quote; a marked blank retains its depth.
+      if (fenceBq) {
+        if (bp.depth < fenceBqDepth) {
+          inFence = false; fenceChar = ""; fenceLen = 0; fenceIndent = 0; fenceBq = false; fenceListCol = -1;
+          // fall through: the shallower line is LIVE content.
+        } else {
+          pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+        }
       } else {
-        outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      }
       }
     }
     if (inComment) {
+      // r14-F1 (audit HIGH): a comment opened while list items were open is
+      // OWNED by that container — a dedent line below the deepest item's
+      // column ends the list, and the comment dies with it: the line is
+      // LIVE content, never masked under the dead comment (the laundry the
+      // audit found: "- <!--\n§ref outside the list\n-->"). Conservative:
+      // blank lines never pop items (r8 trackList rule), so ambiguity only
+      // ever EXPOSES refs (flag) — hiding can never result from this rule.
+      if (commentListDepth > 0 && !isBlank) {
+        const wC = indentWidth(ln);
+        while (listStack.length && listStack[listStack.length - 1] > wC) listStack.pop();
+        if (listStack.length < commentListDepth) { inComment = false; commentListDepth = -1; }
+      }
+      if (inComment) {
       const c = ln.indexOf("-->");
-      if (c === -1) { outLines.push(" ".repeat(ln.length)); prevBlank = isBlank; continue; }
+      if (c === -1) { pushLine(" ".repeat(ln.length)); prevBlank = isBlank; continue; }
       inComment = false;
       const st = {};
-      let out = processText(ln.slice(c + 3), st, canOpenSpan(ln));
-      if (st.spanRun) { spanRun = st.spanRun; out = out.replace(/`+/g, (m) => " ".repeat(m.length)); }
-      outLines.push(" ".repeat(c + 3) + out);
+      curRanges = [];
+      let out = processText(ln.slice(c + 3), st, canOpenSpan(ln), c + 3, true);
+      // r15c3-F1 (audit HIGH): NO backtick-to-space replace — same
+      // laundering as the main path: spaces at the opener hole re-join
+      // text across the delimiter and fabricate external adjacency.
+      if (st.spanRun) spanRun = st.spanRun;
+      pushLine(" ".repeat(c + 3) + out);
       if (st.inComment) inComment = true;
+      if (st.inComment) commentListDepth = listStack.length; // r14-F1 re-open inherits HERE
       prevBlank = isBlank;
       continue;
+      }
     }
+    // Check unsupported quote/list nesting before pending-span early exits,
+    // and relative to each active outer list container as well as the root.
+    const candidates = [ln];
+    for (const col of listStack) {
+      const relative = consumeCol(ln, col);
+      if (relative !== null) candidates.push(relative);
+    }
+    // A list marker can introduce another container on the same line.
+    // Inspect the marker's content too, not only previously tracked items.
+    // r15c2-F3 (audit HIGH): NO expansion cap — the old "i < 32" limit
+    // was bypassed by 33 same-line markers ("-. -. -... ~~~ <!-- info"):
+    // candidates past 32 were never checked, the fence guard skipped the
+    // line, and the info-string "<!--" opened a laundering phantom
+    // comment. Each pushed inner view strictly shortens the string (a
+    // marker consumes >= 2 chars), so the queue is bounded by the line
+    // length — full expansion is linear and safe.
+    for (let i = 0; i < candidates.length; i++) {
+      const marker = candidates[i].match(/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/);
+      if (marker) {
+        const inner = candidates[i].slice(marker[0].length);
+        // r15-F1 (audit HIGH): a fence opener on the SAME line as a list
+        // marker (chain "- > ~~~ <!-- info" or "- ~~~ <!--") opens a
+        // fence the main state machine never models (fences do not open
+        // through a same-line container chain), while processText reads
+        // the fence INFO STRING's "<!--" as a comment opener — the two
+        // views disagree and the phantom comment launders every following
+        // line (probe: "- > ~~~ <!-- info\n  §ref\n  -->" reported OK).
+        // This ownership-crossing form fails closed like its sibling
+        // quote/list nesting rules above.
+        if (quotePrefix(inner).rest.match(/^ {0,3}(?:`{3,}|~{3,})/)) {
+          issues.push("fence inside a same-line list chain is unsupported by C9's container model");
+        }
+        candidates.push(inner);
+      }
+    }
+    if (candidates.some((candidate) => {
+      const quote = quotePrefix(candidate);
+      return quote.depth && /^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)/.test(quote.rest);
+    })) issues.push("list inside blockquote is unsupported by C9's container model");
+    // Comment ownership across blockquote boundaries is not modeled.
+    // Reject a possible opener rather than hiding prose after quote exit.
+    // r14-F2: test LIVE text only — inline code spans, fence info
+    // strings, and pending-span content are literal and never open a
+    // comment ("> `<!--`" and "> ```html <!-- x" must NOT fail closed).
+    if (candidates.some((candidate) => {
+      const quote = quotePrefix(candidate);
+      return quote.depth && stripLiteral(quote.rest, spanRun).includes("<!--");
+    })) issues.push("comment inside blockquote is unsupported by C9's container model");
     // Fence open is checked BEFORE the pending-span branch: a fence line
     // interrupts the paragraph, so the opener run was literal (CommonMark).
-    const fm = fenceMatch(ln, false) ?? fenceMatch(ln, true);
+    // r11-F1: try plain match first (the common path — NO listStack
+    // mutation for ordinary lines). Only on a match does the fence line
+    // close deeper items (CommonMark) and get tagged with the innermost
+    // open item column (its owner, -1 at top level; r10-F1). If a plain
+    // match fails, the fence may sit at an open item's content column —
+    // consume that column as a container prefix (tab stops included) and
+    // retest; items deeper than the line's own column are popped first
+    // (r11-F1's pop must NEVER run for non-fence lines — that killed the
+    // list-continuation exemption).
+    let fm = fenceMatch(ln, false) ?? fenceMatch(ln, true);
     if (fm) {
+      const wFence = indentWidth(ln);
+      while (listStack.length && listStack[listStack.length - 1] > wFence) listStack.pop();
       spanRun = 0;
-      inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq;
-      outLines.push(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      fenceListCol = listStack.length ? listStack[listStack.length - 1] : -1;
+      inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq; fenceBqDepth = fm.depth || 0;
+      pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+    }
+    if (listStack.length && !isBlank) {
+      const s = consumeCol(ln, listStack[listStack.length - 1]);
+      fm = s !== null ? (fenceMatch(s, false) ?? fenceMatch(s, true)) : null;
+      if (fm) {
+        spanRun = 0;
+        fenceListCol = listStack[listStack.length - 1];
+        inFence = true; fenceChar = fm.marker[0]; fenceLen = fm.marker.length; fenceIndent = fm.indent; fenceBq = fm.bq; fenceBqDepth = fm.depth || 0;
+        pushLine(ln.replace(/./g, " ")); prevBlank = isBlank; continue;
+      }
     }
     if (spanRun > 0) {
       // r6-F2: pending multi-line span (paragraph scope). r7-F2: a blank
@@ -276,41 +621,69 @@ const scanModel = (text) => {
         // Content line: copied (§refs inside stay LIVE) but NEVER heading/
         // fence/comment material — leading space kills a phantom heading.
         const c = findRun(ln, 0, spanRun);
-        if (c === -1) { outLines.push(" " + ln); prevBlank = false; continue; }
+        if (c === -1) { curRanges = [[0, ln.length + 1]]; pushLine(" " + ln); prevBlank = false; continue; }
         let runLen = 0; while (ln[c + runLen] === "`") runLen++;
         spanRun = 0;
         const st = {};
-        outLines.push(" " + " ".repeat(c + runLen) + processText(ln.slice(c + runLen), st, canOpenSpan(ln)));
+        // r15-F3 (audit HIGH): text BEFORE the closing run is span
+        // CONTENT — norm text whose §refs stay live (the old code masked
+        // everything through the closer, laundering "paragraph `\n
+        // §99999 `" into nothing). Only the delimiter run itself is
+        // masked; the prefix is span content and copied verbatim (it
+        // never reaches processText, so a `<!--` inside stays literal).
+        curRanges = [[0, c + runLen + 1]];
+        pushLine(" " + ln.slice(0, c) + " ".repeat(runLen) + processText(ln.slice(c + runLen), st, canOpenSpan(ln), c + runLen + 1, true));
         if (st.inComment) inComment = true;
+        if (st.inComment) commentListDepth = listStack.length; // r14-F1
         if (st.spanRun) spanRun = st.spanRun;
         prevBlank = false;
         continue;
       }
     }
-    // r7-F6: indented code block START — 4+ spaces (or a tab) directly
+    // r7-F6: indented code block START — 4+ columns (tab stops) directly
     // after a blank line (outside fences/comments/pending spans, which
-    // are all handled above). Documented exclusion: content is code,
-    // masked to the end of the indented run.
+    // are all handled above). r8-F3: a line whose indent is claimed by an
+    // open list item (< item-content-column + 4) is that item's
+    // CONTINUATION PARAGRAPH (live prose, §refs visible), not code — the
+    // old rule masked list continuations ("  - item\n\n    §9" hid a real
+    // ref). Documented exclusion: true code content is masked to the end
+    // of the indented run.
     if (prevBlank && indentWidth(ln) >= 4) {
-      codeIndent = indentWidth(ln);
-      outLines.push(" ".repeat(ln.length)); prevBlank = false; continue;
+      const w = indentWidth(ln);
+      const cont = listStack.length ? listStack[listStack.length - 1] : -1;
+      if (cont < 0 || w >= cont + 4) {
+        codeIndent = w;
+        // r8-F1: continuation floor — code opened at top level keeps
+        // running on any 4-column line; code inside a list item needs
+        // item-content + 4.
+        codeFloor = cont >= 0 && w >= cont + 4 ? cont + 4 : 4;
+        pushLine(" ".repeat(ln.length)); prevBlank = false; continue;
+      }
     }
+    if (!isBlank) trackList(ln); // blank lines preserve list continuation
     const st = {};
-    let out = processText(ln, st, canOpenSpan(ln));
+    curRanges = [];
+    let out = processText(ln, st, canOpenSpan(ln), 0, true);
     if (st.spanRun) {
-      // r6-F2: the opener run is masked once the span pairs (closer emits
-      // as spaces too) — backtick runs vanish from live text.
+      // r6-F2: an unclosed run opens a multi-line span. r15c3 (audit
+      // HIGH): NO blanket backtick-to-space replace here anymore — the
+      // processText hole (a backtick, see r15c3-F1/F2) is the mask for
+      // the opener run, and replacing backticks with spaces re-created
+      // a prose left-boundary at "docs/", laundering span-contained
+      // external paths into C9's exemption. Backticks elsewhere in
+      // live text are inert for every downstream consumer (the
+      // section-map/heading/fence regexes never match mid-line runs).
       spanRun = st.spanRun;
-      out = out.replace(/`+/g, (m) => " ".repeat(m.length));
     }
-    outLines.push(out);
+    pushLine(out);
     if (st.inComment) inComment = true;
+    if (st.inComment) commentListDepth = listStack.length; // r14-F1: tag open depth at re-open
     prevBlank = isBlank;
   }
   if (inComment) issues.push("unclosed <!-- masks the rest of the document from C9");
   if (inFence) issues.push("unclosed code fence masks the rest of the document from C9");
   if (spanRun > 0) issues.push("unclosed multi-line inline span masks heading/fence structure from C9");
-  return { masked: outLines.join("\n").replace(/[\u2028\u2029]/g, " "), issues };
+  return { masked: outLines.join("\n").replace(/[\u2028\u2029]/g, " "), issues, spanRanges };
 };
 
 
@@ -593,9 +966,35 @@ const ledgerEnd = sScan.slice(0, iSec2).split("\n").length;
 // then zero or more chain links "§n/ " "§n, " "§n&", then the ref. The
 // findings-record form "anchor":"§… is exempt ONLY on lines that also
 // carry "doc":"docs/…" (the record that the anchor belongs to).
-const extPrefix = (before, line) =>
-  // Unicode-aware left boundary (r4-F5): édocs/a is one word, not a path.
-  /(?<![\p{L}\p{N}\p{M}\p{Pc}/.~-])docs\/(?=[^\s§|]*[A-Za-z0-9])[\w.~\-–—…#()\/]{1,60}(?:[ ]?§[0-9]+(?:\.[0-9]+)*[a-z]?(?:[ ]?[\/&][ ]?|, ))*[ ]?$/u.test(before)
+// r15c3-F2 (audit HIGH, range-based denial): span content is literal
+// text — never a prose chain. A ref whose "§", or whose chain path,
+// overlaps a span-content range (scanModel.spanRanges, masked coords)
+// gets NO exemption: masked span delimiters (holes/pads/closers) can
+// otherwise reconstitute adjacency that never existed in the source.
+// Denial region: any span range from the chain path start through the
+// ref (a laundered middle "docs/a `x` §99" already fails the adjacency
+// grammar — the range check closes the path-start/ref-column holes the
+// blanket backtick guard used to cover without breaking genuine chains
+// that legitimately carry code spans elsewhere on the line).
+const extChainRe = /(?<![\p{L}\p{N}\p{M}\p{Pc}/.~\-`])docs\/(?=[^\s§|]*[A-Za-z0-9])[\w.~\-–—…#()\/]{1,60}(?:[ ]?§[0-9]+(?:\.[0-9]+)*[a-z]?(?:[ ]?[\/&][ ]?|, ))*[ ]?$/u;
+const extRecRe = /"doc"\s*:\s*"docs\/[A-Za-z0-9/._\u2026-]+"\s*,\s*"anchor"\s*:\s*"$/;
+const extPrefix = (before, line, ranges, refCol) => {
+  const inSpan = (col) => {
+    for (const [a, b] of ranges || []) if (col >= a && col < b) return true;
+    return false;
+  };
+  // The ref itself inside span content: never a prose-chain ref.
+  if (inSpan(refCol)) return false;
+  const m = extChainRe.exec(before);
+  if (m) {
+    const pathStart = before.length - m[0].length;
+    // Deny if ANY span range lies within (or spans across) the chain
+    // region from the path start to the ref.
+    for (const [a, b] of ranges || []) {
+      if (b > pathStart && a <= refCol) return false;
+    }
+    return true;
+  }
   // Findings records (r4-F6): the SAME record must bind a non-empty
   // "doc":"docs/…" directly before its own "anchor":" — two unrelated
   // objects on one line pair no more than the empty path doc:"docs/".
@@ -610,8 +1009,13 @@ const extPrefix = (before, line) =>
   // / . - _ + the document's "…" truncation marker): spaces, '?', '#'
   // query/fragment syntax are NOT path characters — a loose value is
   // rejected and the anchor is scanned as a plain ref (fail-closed).
-  || (/"doc"\s*:\s*"docs\/[A-Za-z0-9/._\u2026-]+"\s*,\s*"anchor"\s*:\s*"$/.test(before)
-      && (line.match(/"doc"\s*:/g) || []).length === 1);
+  // r15c3-F2: any span content at all on a record line makes it
+  // ambiguous for line-level scanning — records are plain JSON, so any
+  // range on the line is refused (fail-closed).
+  return extRecRe.test(before)
+    && (line.match(/"doc"\s*:/g) || []).length === 1
+    && !(ranges || []).length;
+};
 // Strict ref token (r3-F3): § + digits/dots/optional letter suffix, junk
 // after (any letter incl. Unicode, digit, dot) is a malformed token.
 const refGrammar = /^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))*[a-z]?$/;
@@ -627,7 +1031,7 @@ for (let i = 0; i < lines2.length; i++) {
     if (headingSet.has(ref)) continue;
     const pm = ref.match(/^0\.([1-9][0-9]?)$/);
     if (pm && principleIds.has(Number(pm[1]))) continue; // §0 principle n
-    if (extPrefix(line.slice(0, m.index), line)) continue; // true external anchor chain
+    if (extPrefix(line.slice(0, m.index), line, scan9.spanRanges[i], m.index)) continue; // true external anchor chain
     dangling.push(`line ${i + 1}: §${ref}`);
   }
 }
