@@ -1,0 +1,89 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c16; cat package.json | head -80; git status --short; ls node_modules/{comm…
+  ✓ { "name": "tre-coding-agent", "version": "0.4.9", "private": true, "type": "module", "bin": { "tre.": "dist/src/cli/main.js", "coding-agent": "dist/src/cli/main.js", "tre.-episode": "dist/src/host/ac…
+
+→ bash {"command":"cat scripts/contract-check.mjs | grep -n -E 'atBlockStart|trackList|span|inComment|processText|lineBase'","…
+
+→ bash {"command":"which cmark commonmark pandoc markdown-it; python3 -c 'import importlib.util; print([(x,bool(importlib.util…
+  ✓ 105:// string. Inline code spans are run-LENGTH-AWARE (a span opened by N 112:// A pending multi-line span is INTERRUPTED by a heading (r7-F2): the 121: // exemption for a ref whose "§" or path start…
+  ✓ [('commonmark', False), ('markdown_it', False), ('mistune', False)] docs/audits/probes-r21-c15/run.cjs docs/audits/probes-r21-c15/firstinline.md docs/audits/probes-r21-c15/degenerate.md docs/audits/p…
+
+→ bash {"command":"cat docs/audits/probes-r21-c15/run.cjs | head -100; sed -n '590,650p;974,1070p' scripts/contract-check.mjs;…
+  ✓ const fs=require('fs'),cp=require('child_process'); const cm=require('../../../.scratch-r20/ref/node_modules/commonmark'); const md=require('../../../.scratch-r20/ref/node_modules/markdown-it')('comm…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c16/run.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'); const…
+  ✗ exit code 1 [stderr] node:internal/modules/cjs/loader:1210 throw err; ^ Error: Cannot find module '../../../.scratch-r20/ref/node_modules/commonmark' Require stack: - /Users/xilcilus/projects/Tre.-co…
+
+→ bash {"command":"find /Users/xilcilus/projects /Users/xilcilus/.tre -type d \\( -name commonmark -o -name markdown-it \\) -p…
+  ✓ /Users/xilcilus/projects/.ref-r21/node_modules/markdown-it /Users/xilcilus/projects/.ref-r21/node_modules/commonmark run.cjs
+
+→ bash {"command":"sed -i '' 's@../../../.scratch-r20/ref/node_modules/@/Users/xilcilus/projects/.ref-r21/node_modules/@g' doc…
+  ✓ closed1 exit=1 ref=true cm=false mi=false contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "…
+
+→ bash {"command":"node - <<'EOF'\nconst cm=require('/Users/xilcilus/projects/.ref-r21/node_modules/commonmark');for(const s o…
+  ✓ --- <p>a `</p> <ul> <li>item <!-- </li> </ul> <p>§99999 --&gt; `</p> --- <ul> <li>a `</li> <li>b <!-- §99999 --> </li> </ul> <p>`</p> --- <p>a `</p> <ul> <li>item <!-- §99999 --> `</li> </ul> --- <p>…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c16/search.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'),cm=…
+  ✓ HIGH "- a `\n - x\n <!--\n §99999\n -->\n`\n" HIGH "- a `\n1. x\n <!--\n §99999\n -->\n`\n" HIGH "- a `\n 1. x\n <!--\n §99999\n -->\n`\n" HIGH "- a `\n2. x\n <!--\n §99999\n -->\n`\n" HIGH "- a `\n …
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nbase=Path('docs/11-orchestrator-schema.md').read_text()\nfor n,…
+  ✓ high exit=0 highordered exit=0 closed1 exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref wi…
+## 1. HIGH — dedented list interruption leaves comment owned by the wrong item
+
+Append to the valid base document:
+
+```markdown
+- a `
+ - x
+    <!--
+  §99999
+    -->
+`
+```
+
+**Expected:** Both commonmark.js and markdown-it render `§99999` visibly in a paragraph outside the list. The ` - x` line starts a sibling item; the comment ends when the reference dedents out of that item.
+
+**Actual repro:**
+
+```text
+node scripts/contract-check.mjs docs/audits/probes-r21-c16/high.md
+exit 0; stderr empty
+```
+
+The checker silently exempts the visible reference.
+
+The ordered-list variant also reproduces:
+
+```markdown
+- a `
+1. x
+    <!--
+  §99999
+    -->
+`
+```
+
+```text
+node scripts/contract-check.mjs docs/audits/probes-r21-c16/highordered.md
+exit 0; stderr empty
+```
+
+Both renderers show the reference outside the lists.
+
+**Cause and minimal fix:** The pending-span dry-run guard rejects markers whose indentation is below `topCol`, although such a marker can interrupt the paragraph by closing the current item and starting a sibling or outer list. Merely comparing stack lengths is also insufficient for an item replacement at equal depth. Recognize valid dedented list interruptions, and have `trackList` report an item transition explicitly rather than inferring it only from stack growth. Commit the resulting stack before processing subsequent comment ownership.
+
+## Battery and targeted verification
+
+- **Q1 — Prefix/block start:** PASS for the tested cases `> <!--` (documented unsupported refusal), nested `- a / - b / - <!--`, tab after a marker, root marker at three spaces, and marker at four spaces. No new incorrect exemption found in these cases.
+- **Q2 — Continuation column and after-closer:** `1. item` followed by `<!-- a --> b <!-- c` reported the reference. This is the accepted rule that text after a closer is scanned as prose, not a new block start. `> <!--` was refused as unsupported; the nested-list comment was exempted.
+- **Q3 — Marker and comment on one line:** Tested `- x <!--` and `-     x <!--`. The first reported the reference; the latter reported the reference as live code content under the pinned convention. Inline unclosed openers are already accepted behavior and are not re-reported.
+- **Q4 — Degenerate comments:** `<!--> x <!--` followed by `§99999` was reported, exit 1. This is the accepted degenerate-comment convention.
+- **Q5 — Span/comment interaction:** PASS for ``a `<!--` b``, ``a ` <!-- ` b``, ``a ``<!--`` b``, an unclosed span containing `<!--`, and a span interrupted by a block comment. The first four reported the reference; the block comment hid it.
+- **Q6 — Setext/frontmatter/fences and EOF:** Tested setext after a comment, YAML-like delimiters, a fence interrupting a pending span, and an unclosed comment inside a new item. The unclosed-comment case exited 1 with `unclosed <!-- masks the rest of the document from C9`. The fenced reference was exempt under the pinned code-block convention. No missed EOF state was established.
+- **Q7 — Dry-run guard:** The two cycle-15 regressions are closed: `closed1.md` and `closed2.md` each exited 1 with stderr citing `§99999`. A genuinely hidden reference in `hidden.md` exited 0. At `topCol` and `topCol+3`, hidden references were exempt; at `topCol+4`, the visible reference was reported. Also tested start-2 markers, deep nested items, sibling items, ordered chains, trailing comment text, a tab-padded marker, and reopening a span after a comment. The dedented interruption defect is finding 1.
+- **Both gates on one line:** For `a \`` followed by `- <!--`, the comment-opener gate is evaluated before the list dry run. With the reference dedented to the root, the checker reported it, exit 1; both renderers show it outside the list.
+
+All executed fixtures and probe scripts are under `docs/audits/probes-r21-c16/`.

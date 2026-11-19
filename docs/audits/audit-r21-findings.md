@@ -195,7 +195,33 @@ refusal — see audit-r21-c15-refused.txt/err and the cycle-7 provider note)
   (.scratch-r20/ref absent); the two findings were independently
   re-verified after this session reinstalled commonmark + markdown-it.
 
-## Final summary (cycles 1–15 complete)
+## Cycle 16 (audit-r21-c16.txt; gpt-6.1-terra — fresh round at f4c10c4)
+- c15-F1/F2 fix CONFIRMED CLOSED (both c15 repros exit 1 citing the
+  ref; genuinely-hidden variant exit 0; guard boundaries topCol/+3
+  exempt-correct, +4 reports the visible ref; start2, deep nest,
+  siblings, ordered chains, tab marker, span-reopen-after-comment all
+  PASS) and the full 7-question battery PASS.
+- F1 HIGH CLAIM ("dedented list interruption leaves comment owned by
+  the wrong item", e.g. "- a `\n - x\n    <!--\n  §99999\n    -->\n`"):
+  REJECTED — FALSE POSITIVE (6th this arc). The claim "both renderers
+  show the ref" is wrong at the byte level: commonmark.js AND
+  markdown-it emit a DANGLING unclosed "<!--" immediately before the
+  paragraph containing the ref (the comment opens inside the item and
+  the dedent closes the item but not the comment), so in the rendered
+  document the ref is inside an unterminated HTML comment — hidden in
+  a browser. Checker exit 0 matches browser truth AND the pinned
+  visibility convention (e). The auditor's harness classified visible
+  via an AST Text-node walk (paragraph text ⇒ visible), which ignores
+  the dangling-opener state the arc pins as hidden — same class as
+  c5-F1.
+- Post-adjudication hardening sweep: 17,496 inputs (pending-span ×
+  list-marker × comment/ref indentation grid, 4 prefixes × 6 markers,
+  im×ci×ri 0..8) judged against commonmark.js + markdown-it with
+  browser-visibility (strip complete comments, truncate at dangling
+  opener): **0 unflagged browser-visible refs** under the new guard.
+- Cycle 16 verdict: PASS (no confirmed findings). r21 stays CLOSED.
+
+## Final summary (cycles 1–16 complete)
 - Confirmed laundering (HIGH) defects found & fixed: 4 — the
   pre-loop inline unclosed `<!--` (commit 6cb7ea0, plus r20 test
   strengthening), cycle-1 F2 (ordered-marker start≠1 laundering,
@@ -208,7 +234,10 @@ refusal — see audit-r21-c15-refused.txt/err and the cycle-7 provider note)
   fixed in 8597c87 and CONFIRMED CLOSED by cycle 15.
 - Cycles 9, 10, 11, 12, 13: clean PASS (differential against
   commonmark.js + markdown-it). Cycle 15 also PASSed the c14-fix
-  confirmation and the standard battery.
+  confirmation and the standard battery (but found+fixed F1/F2).
+  Cycle 16 (gpt-6.1-terra, fresh round at the fixed HEAD) PASSed:
+  c15-fix confirmation, guard boundaries, and the full battery — its
+  single HIGH claim was a false positive (see c16 entry).
 - Rejected findings (all overstrict-only, fail-closed direction):
   c1-F2 / c2-F1 / c7-F1 (code-block/code-span content visibility —
   pinned convention: rendered `<pre><code>`/`<code>` content is
@@ -222,7 +251,9 @@ refusal — see audit-r21-c15-refused.txt/err and the cycle-7 provider note)
 - Test gate: `npx tsc && node --test dist/test/contract-check.test.js`
   112/112 pass (the .ts file is run compiled — `npx vitest` does not
   apply here).
-- Arc status: CLOSED at cycle 15. Two independent HIGH laundering
-  classes were found AND closed inside the loop (c1, c15); the last
-  confirming round (c15) found no remaining laundering outside the
-  fixed class; cycles 9–13 ran clean back-to-back.
+- Arc status: CLOSED at cycle 16. Two independent HIGH laundering
+  classes were found AND closed inside the loop (c1, c15); the final
+  confirming round (c16, on Terra) found no remaining laundering —
+  its one HIGH claim was disproven at byte level and a 17,496-input
+  browser-visibility sweep confirmed 0 misses; cycles 9–13 and 16 ran
+  clean back-to-back.
