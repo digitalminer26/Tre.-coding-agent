@@ -1273,6 +1273,21 @@ test("r21-F1 inline unclosed <!-- never launders following lines (same-line repr
   runProbe("r21-f1-indent4", base + "\n\n\u00a799999 para\n\n    <!-- inline\n    tail \u00a799998\n", ["\u00a799999"]);
   // Tab-indented opener: same story (never a block-start).
   runProbe("r21-f1-tab", base + "\n\n\u00a799999 para\n\n\t<!-- inline\n\ttail \u00a799998\n", ["\u00a799999"]);
+  // r21-F2 (audit c1 HIGH): an ordered marker with start ≠ 1 cannot
+  // interrupt an open paragraph (§4.2) — the whole "2. <!--" line is
+  // LAZY PARAGRAPH TEXT, so its inline "<!--" is literal text and the
+  // ref below stays LIVE even though the prefix "looks" like a chain
+  // of block containers.
+  runProbe("r21-f2-ord2-launder", base + "\nparagraph\n2. <!--\n\n   \u00a799999 live\n   -->\n", ["\u00a799999"]);
+  // start=1 DOES interrupt: real list, real block comment -> masked.
+  runProbe("r21-f2-ord1-mask", base + "\nparagraph\n1. <!--\n   \u00a799999 masked\n   -->\n", false);
+  // no paragraph open (heading before) -> the ordered list starts and
+  // the comment is a block: masked.
+  runProbe("r21-f2-ord2-head-mask", base + "\n# \u00a7999 heading\n2. <!--\n   \u00a799999 masked\n   -->\n", ["\u00a7999"]);
+  // lazy continuation inside an item: "2." never interrupts the item's
+  // paragraph -> inline, ref live.
+  runProbe("r21-f2-lazy2-live", base + "\n- x\n  para\n  2. <!--\n  \u00a799999 live\n", ["\u00a799999"]);
+
   // CONTROLS (must stay MASKED — block-start openers):
   // root line-leading unclosed opener: masks, EOF fail-closed.
   const eof = base + "\n<!--\n\u00a799999 masked\n";

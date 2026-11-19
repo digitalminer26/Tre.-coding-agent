@@ -1,0 +1,82 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c1; cat scripts/contract-check.mjs","timeout":120000}
+  ✓ [truncated: showing last 855 of 1413 lines (51174 of 85011 bytes); full output saved to /var/folders/8l/93gb73md5wz7jfm22_f85w_40000gn/T/coding-agent/bash-07bdf73f-9d48-461e-b5ac-6953c3e95ce1.log] //…
+
+→ bash {"command":"sed -n '200,390p' scripts/contract-check.mjs | grep -A100 -B10 'atBlockStart' ; cat package.json | grep -E …
+  ✗ exit code 1 // r21-F1 (audit HIGH): test whether index i (a "<!--" occurrence) sits // at a CommonMark type-2 HTML-BLOCK start: the prefix must consist of // nothing but same-line container openings …
+
+→ bash {"command":"node -e \"for(const m of ['commonmark','markdown-it'])try{console.log(m,require.resolve(m))}catch{}\"; whic…
+  ✓ res += "`".repeat(n) + ln.slice(i + n); i = ln.length; break; } res += "`".repeat(n); i += n; continue; } res += ln.slice(i, close + n); i = close + n; continue; } if (ln.startsWith("<!--", i)) { // …
+
+→ bash {"command":"cat > docs/audits/probes-r21-c1/run.py <<'PY'\nfrom pathlib import Path\nimport subprocess\nbase=Path('docs…
+  ✓ code 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar,…
+
+→ bash {"command":"python3 - <<'PY'\nfor x in ['commonmark','markdown_it','mistune','markdown']:\n try:\n m=__import__(x);prin…
+  ✓ /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/markdown-it/package.json /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/commonmark/package.json
+
+→ bash {"command":"node <<'JS'\nconst cm=require('./.scratch-r20/ref/node_modules/commonmark');const md=require('./.scratch-r2…
+  ✓ ordinterrupt "\nparagraph\n2. <!--\n §99999\n -->\n" <p>paragraph 2. <!-- §99999 --></p> <p>paragraph 2. &lt;!-- §99999 --&gt;</p> closer "\n - item\n <!-- a --> b <!-- c\n §99999\n -->\n" <ul> <li>i…
+
+→ bash {"command":"node <<'JS'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark'); const m=require('./.scratch-r20…
+  ✓ "paragraph\n2. <!--\n §99999\n -->\n" CM <p>paragraph 2. <!-- §99999 --></p> MI <p>paragraph 2. <!-- §99999 --></p> "x <!-- a\n§99999\n-->\n" CM <p>x <!-- a §99999 --></p> MI <p>x <!-- a §99999 --></…
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nb=Path('docs/11-orchestrator-schema.md').read_text();p=Path('do…
+  ✓ ---ordlaunder exit=0 ---inlineblank exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with …
+## Findings
+
+1. **HIGH — Ordered marker rejected by CommonMark still opens comment state**
+
+   Appended after the valid base document:
+
+   ```markdown
+   paragraph
+   2. <!--
+
+      §99999
+      -->
+   ```
+
+   **Expected:** Both commonmark.js and markdown-it render `2. <!--` as paragraph text: an ordered list starting at 2 cannot interrupt a paragraph. The blank line ends that paragraph, and `§99999` is visible in a subsequent paragraph.
+
+   **Actual:**
+
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c1/ordlaunder.md
+   exit 0
+   stderr: empty
+   ```
+
+   The checker launders the visible ref. `trackList` correctly refuses the interrupting marker, but `atBlockStart` independently accepts the same marker as a container prefix.
+
+   **Minimal fix:** Make `atBlockStart` use the actual accepted container context, including the paragraph-interruption rule, rather than recognizing list-marker syntax independently. Fail closed if container recognition is uncertain.
+
+2. **LOW — Inline code span ref is reported despite the requested span-masking contract**
+
+   ```markdown
+   hello `§99999` world
+   ```
+
+   **Expected:** Under the requested C9 rule that code spans are masked, the ref is inside a code span and should not be reported. Both reference parsers render it as `<code>§99999</code>`.
+
+   **Actual:**
+
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c1/spanmasked.md
+   exit 1
+   stderr: ... FAIL C9 ... line 6003: §99999
+   ```
+
+   The checker intentionally copies closed span contents into the scanned output.
+
+   **Minimal fix:** Mask closed code-span contents in the C9 input while preserving offsets; apply the same policy to correctly paired multiline spans. This differs from the checker’s current documented policy that span text is normative.
+
+## Other requested areas
+
+- **PASS: same-line comment and span gate.** Tried `<!--> x <!--`, `<!---> <!--`, `a \`<!--\` b`, `a \` <!-- \` b`, `a \`\`<!--\`\` b`, and an unclosed backtick containing `<!--` followed by a blank line and a ref. Each visible ref was reported. The degenerate-comment probe exited 1 with `line 6004: §99999`.
+- **PASS: list/comment ownership in the tested cases.** Tried nested three-item chains, `1. item` followed by an item-indented comment, tab-padded item content, `- x <!--`, and `-     x <!--`. The nested and ordered block comments were masked; the two inline/code-content cases reported the later live ref.
+- **PASS: after-closer example.** `  - item` followed by `    <!-- a --> b <!-- c` and an indented ref exited 1, reporting the ref. Both reference parsers treat the second opener as inline paragraph material, **not** a new block start. Likewise, `> <!--` fails closed as unsupported rather than laundering.
+- **PASS: tested block-state boundaries.** Tried setext heading, `---` frontmatter-like text, fenced content with an opener in its info string, an unclosed root comment, and inline comment text followed by a blank line. The unclosed root comment exited 1 with `unclosed <!-- masks the rest of the document from C9`; no EOF escape was observed in these inputs.
+- **Not a pass for ordered-list inverse:** the start-number-2 paragraph interruption is finding 1. The blockquote-item inverse fails closed as unsupported; tab-indented item content was also tested.

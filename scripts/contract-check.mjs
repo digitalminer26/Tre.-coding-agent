@@ -317,6 +317,18 @@ const scanModel = (text) => {
       // the marker gap is always "<". A tab expands to the next stop.
       const m = ln.slice(k, i).match(/^([-+*]|[0-9]{1,9}[.)])([ \t]+)/);
       if (!m) return false;
+      // r21-F2 (audit c1 HIGH): the prefix markers must be markers the
+      // CONTAINER MODEL actually accepts. CommonMark §4.2: an ordered
+      // marker with start ≠ 1 cannot interrupt an open paragraph, so
+      // "paragraph\n2. <!--" makes the whole line LAZY PARAGRAPH TEXT
+      // (commonmark.js + markdown-it: §99999 below renders visible) —
+      // yet this loop accepted the marker and opened masking. Apply the
+      // same interruption rule trackList uses (r16-F3): refuse an
+      // ordered start ≠ 1 as the FIRST prefix marker while a paragraph
+      // is open. Inner markers face a fresh container context (no open
+      // paragraph), so the rule is level-0 only — matching trackList,
+      // which likewise refuses only at its first push.
+      if (j === 0 && paraOpen && m[1][0] >= "0" && m[1][0] <= "9" && Number(m[1].slice(0, -1)) !== 1) return false;
       let cols = 0;
       for (const ch of m[2]) cols = ch === "\t" ? cols + (4 - (cols % 4)) : cols + 1;
       if (cols > 4) return false; // ≥5 cols after marker: content is indented code
