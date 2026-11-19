@@ -1,0 +1,127 @@
+
+→ bash {"command":"if [ -f ~/.tre/tokenomics.json ]; then python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true;…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ subtask {"action":"create","items":["Inspect checker and available CommonMark reference","Execute targeted probes and validate …
+  ✓ created 3 subtask(s): 1. Inspect checker and available CommonMark reference (queued) 2. Execute targeted probes and validate discrepancies (queued) 3. Report findings and coverage (queued) progress: …
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"in-progress"}
+  ✓ 1. Inspect checker and available CommonMark reference → in-progress 1. Inspect checker and available CommonMark reference (in-progress) 2. Execute targeted probes and validate discrepancies (queued) …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c10; rg -n 'atBlockStart|inComment|trackList|processText|fence|span' script…
+  ✓ { "name": "tre-coding-agent", "version": "0.4.9", "private": true, "type": "module", "bin": { "tre.": "dist/src/cli/main.js", "coding-agent": "dist/src/cli/main.js", "tre.-episode": "dist/src/host/ac…
+
+→ bash {"command":"node -e \"for (const x of ['commonmark','markdown-it']) try {console.log(x,require.resolve(x))} catch(e){co…
+  ✓ commonmark missing markdown-it missing [('commonmark', False), ('markdown_it', False), ('mistune', False)] base:0
+
+→ bash {"command":"find /Users/xilcilus/projects /Users/xilcilus/.tre -path '*/node_modules/commonmark/package.json' -o -path …
+  ✓ /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/markdown-it/package.json /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/commonmark/package.json
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Inspect checker and available CommonMark reference → done 1. Inspect checker and available CommonMark reference (done) 2. Execute targeted probes and validate discrepancies (queued) 3. Report find…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"in-progress"}
+  ✓ 2. Execute targeted probes and validate discrepancies → in-progress 1. Inspect checker and available CommonMark reference (done) 2. Execute targeted probes and validate discrepancies (in-progress) 3.…
+
+→ bash {"command":"node docs/audits/probes-r21-c10/run.cjs","timeout":120000}
+  ✓ quote exit=1 err=inciple ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar, fences/comments/spans modeled) — comment inside blockquote …
+
+→ bash {"command":"node docs/audits/probes-r21-c10/fuzz.cjs","timeout":120000}
+  ✓ (no output)
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nb=Path('docs/11-orchestrator-schema.md').read_text()\ncases={'s…
+  ✓ === same-line contract-check: PASS C9 §0 Purpose and §1 Schema anchors exist (the C9 scan depends on them) contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Execute targeted probes and validate discrepancies → done 1. Inspect checker and available CommonMark reference (done) 2. Execute targeted probes and validate discrepancies (done) 3. Report findin…
+
+→ subtask {"action":"mark","items":[],"id":3,"status":"done"}
+  ✓ 3. Report findings and coverage → done 1. Inspect checker and available CommonMark reference (done) 2. Execute targeted probes and validate discrepancies (done) 3. Report findings and coverage (done)…
+## Findings
+
+1. **LOW — Tabs in list indentation prevent a real comment block from being masked**
+
+   Appended fixture (`tabcontent.md`; `→` denotes one literal tab):
+
+   ```text
+   - item
+     →<!--
+     →§99999
+     →-->
+
+   end
+   ```
+
+   Both commonmark.js and markdown-it render the three tabbed lines as a type-2 HTML block inside the list item; `§99999` is inside the comment and should be exempt.
+
+   Executed:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c10/tabcontent.md
+   exit 1
+   stderr: ... line 6005: §99999
+   ```
+
+   `atBlockStart` consumes only literal spaces in its leading-prefix loop, so it rejects the tab even though, after consuming the item’s content column, the comment begins within the permitted indentation.
+
+   **Minimal fix:** consume the existing list-container prefix by visual column using tab stops and partial-tab semantics, then test the remaining indentation relative to that container.
+
+2. **LOW — Indented code beginning on a list-marker line is scanned as prose**
+
+   Appended fixture (`listcode.md`):
+
+   ```markdown
+   -     x <!--
+         §99999
+         end
+
+   end
+   ```
+
+   Both reference renderers put `x <!--`, `§99999`, and `end` in an indented code block inside the item. Under the checker’s code-block masking policy, the ref is exempt.
+
+   Executed:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c10/listcode.md
+   exit 1
+   stderr: ... line 6004: §99999
+   ```
+
+   `trackList` correctly reduces the item content column to 2 for five spaces after the marker, but the indented-code start check runs **before** `trackList` and does not recognize code beginning on that marker line.
+
+   **Minimal fix:** recognize the marker-padding-over-four case when processing the marker line, and enter list-owned indented-code state with the item content column plus four as its continuation floor.
+
+3. **LOW — Text after a closed type-2 block opener on the same line is scanned**
+
+   Appended fixture (`same-line.md`):
+
+   ```markdown
+   <!-- hidden --> §99999
+
+   end
+   ```
+
+   Both reference renderers emit the entire first line as a type-2 HTML block. The ref is in raw HTML-block content, not a rendered paragraph; the checker’s HTML-block policy exempts it.
+
+   Executed:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c10/same-line.md
+   exit 1
+   stderr: ... line 6003: §99999
+   ```
+
+   The closed-comment branch masks only through `-->` and resumes scanning the line, even when the opener started a type-2 block.
+
+   **Minimal fix:** distinguish block-start comments from inline comments before handling a same-line closer; for a type-2 block, mask the entire opener line.
+
+## Coverage and audit questions
+
+- **PASS: prefix and ownership safety**, for the tested quote, nested-list, tab-marker, ordered-list and list-column inputs: `quote`, `nested`, `tabmarker`, `ordered`, `ordered2`, `quoteitem`, `startcol4`, `startcol8`. Quote/list combinations that the model does not support fail closed. The separate tab false positive is finding 1.
+- **After-closer premise:** `aftercloselist` used a list item at content column 4 with `<!-- a --> b <!-- c`. Both renderers end the type-2 block on that line; the next line’s `§99999` is visible, and the checker flags it. The second opener is not a new block start on the same line. This is not a HIGH exemption error.
+- **Marker-line interaction:** `marker` correctly flags the visible ref after `- x <!--`; the excess-padding variant exposes the LOW code-block mismatch in finding 2.
+- **Degenerate comment:** `degenerate` (`<!--> x <!--` followed by `§99999`) exits 1 and reports the ref, as requested.
+- **PASS: spans, fences and boundaries**, tested with `span1`–`span5`, `fence1`–`fence5`, `setext`, `yaml`, `unclosed`, and `eofdedent`. The unclosed block comment fails closed at EOF. CRLF is explicitly refused (`crlf`, exit 1).
+- **PASS: HTML and inline constructs**, tested with `pi`, `cdata`, `html6`, `html7`, `html7para`, `link`, `image`, `autolink`, `escape`, and `escape2`; no additional mismatch found.
+- A 350-input randomized prefix/list/comment probe found no additional case where both reference renderers showed the ref and the checker exited cleanly.

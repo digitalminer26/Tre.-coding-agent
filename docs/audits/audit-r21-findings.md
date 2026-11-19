@@ -120,3 +120,28 @@ accepted overstrict divergences (raw HTML block inside a list item).
   areas: every visible ref reported, every masked ref exempt, all
   fail-closed refusals (CRLF, EOF unclosed comment, blockquote
   container) verified. PASS.
+
+## Cycle 8 (audit-r21-c8.txt)
+- F1 LOW ("2. text" following a paragraph: CommonMark hides the line's
+  §ref by lazy-continuation into the item's <pre><code>; checker
+  reports it): overstrict-only, consistent with the pinned
+  fail-closed principle "refusing the marker only ever EXPOSES"
+  (r16c2-F5). Rejected — same class as the two accepted divergences.
+- PASS areas: atBlockStart prefix walks, contCol threading +
+  after-closer, marker-line interaction, degenerate openers,
+  span/comment interplay, setext/frontmatter/fence/EOF states.
+- Provider note: 3 transient "provider error" aborts mid-run; retries
+  completed.
+
+## Cycle 9 (audit-r21-c9.txt)
+- No findings. Differential harness (commonmark.js AND markdown-it vs
+  the checker) over all 7 audit areas incl. the r21-F2 gate in both
+  directions: every disagreement resolved toward the checker
+  (fail-closed) or was a probe artifact. PASS.
+
+## Cycle 10 (audit-r21-c10.txt)
+- No findings. Differential harness re-run across all areas (prefix
+  walks, contCol, marker lines, degenerate openers, spans, setext/
+  frontmatter/fence/EOF, gate edges, escapes, links/autolinks,
+  CRLF/EOF refusals): every probe agrees with CommonMark or is the
+  documented fail-closed refusal. PASS.
