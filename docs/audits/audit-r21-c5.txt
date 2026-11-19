@@ -1,0 +1,65 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true\nmkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c5; grep -nE 'atBlockStart|processText|trackList|inComment|lineBase' script…
+  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 284: // probe L8_after_closer/H1). The old code set s…
+
+→ bash {"command":"cat package.json | head -80; sed -n '295,450p' scripts/contract-check.mjs; sed -n '590,650p' scripts/contra…
+  ✓ { "name": "tre-coding-agent", "version": "0.4.9", "private": true, "type": "module", "bin": { "tre.": "dist/src/cli/main.js", "coding-agent": "dist/src/cli/main.js", "tre.-episode": "dist/src/host/ac…
+
+→ bash {"command":"node -e \"for(const p of ['commonmark','markdown-it'])try{console.log(p,require.resolve(p))}catch{}\"; whic…
+  ✓ audit-r21-c5.txt audit-r21-findings.md audit-r21-prompt.txt p7-probes probes-r21-c1 probes-r21-c2 probes-r21-c3 probes-r21-c4 probes-r21-c5 w13-refusal-audit.md [stderr] Traceback (most recent call l…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c5/run.cjs <<'EOF'\nconst fs=require('fs'), cp=require('child_process'); const…
+  ✓ quote 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar…
+
+→ bash {"command":"find /Users/xilcilus/projects /Users/xilcilus/.tre -path '*/node_modules/commonmark/package.json' -o -path …
+  ✓ /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/markdown-it/package.json /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/commonmark/package.json exit…
+
+→ bash {"command":"node - <<'EOF'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark');const md=require('./.scratch-…
+  ✓ tabnested "- **Audit order (suggested):** G1 amendment (§14.10.1 `scopeRefs`) →\n G2 (§14.11, supplies the digest ruling G1 deferred) → G3 (§14.12, consumes\n G1+G2 states) → G4 (§14.13, independent)…
+
+→ bash {"command":"cat docs/audits/audit-r21-findings.md | tail -100; node - <<'EOF'\nconst c=require('./.scratch-r20/ref/node…
+  ✓ # r21 audit findings log (auditor: gpt-6.1-terra, target: scripts/contract-check.mjs) Baseline: r21-F1 (inline unclosed <!-- never opens masking) + r21-F2 (ordered start!=1 cannot interrupt a paragra…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c5/more.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process');let b=…
+  ✓ t1 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar, f…
+## 1. LOW — Tab before a nested-list marker exposes a hidden ref
+
+Append this block after the valid base document. The indentation on the last three lines begins with a **tab**, not spaces:
+
+```markdown
+- a
+	- <!--
+	  §99999
+	  -->
+```
+
+**Expected:** Both commonmark.js and markdown-it, with HTML enabled, parse the nested item as containing a type-2 HTML comment block. The ref is hidden.
+
+**Actual:**
+
+```text
+$ node scripts/contract-check.mjs docs/audits/probes-r21-c5/t1.md
+exit 1
+stderr: … line 6005: §99999
+```
+
+**Minimal fix:** Make the block-start/container-prefix walk consume tabs using absolute tab stops, including a tab that supplies indentation before a nested list marker. Preserve the same column accounting used by list tracking.
+
+## Targeted results
+
+- **PASS: Block-start prefixes and marker lines**, apart from finding 1. Tried `> <!--`, `> - <!--`, three nested list markers, `- x <!--`, `-     x <!--`, `- a` followed by `  -\t<!--`, and nested inline text before `<!--`. Blockquote cases fail closed as unsupported rather than silently laundering refs.
+- **PASS: After-closer and ordered-list cases.** Tried a content-column-4 item with `<!-- a --> b <!-- c`, `1. item` followed by an item-indented comment, `> <!--`, an ordered marker starting at 2 after a paragraph, and a nested list comment. The second opener after same-line text is not a new block start; its following ref was reported.
+- **PASS: Degenerate comments and spans.** Tried `<!--> x <!--`, ``a `<!--` b``, ``a ` <!-- ` b``, ``a ``<!--`` b``, an unclosed backtick before `<!--`, and a span candidate interrupted by a blank line. The degenerate-comment probe reported `§99999`.
+- **PASS: Fences and EOF.** Tried tilde fences with info strings, five-backtick fences containing shorter runs, a longer tilde closer, a backtick info string containing `<!--`, a comment opener inside a fence, and an unclosed block comment at EOF. The unclosed comment produced the explicit EOF diagnostic.
+- **PASS: Other openers and escapes.** Tried CDATA, processing instructions, `<script>`, `<div>`, a custom tag, escaped comment openers, link and image destinations containing the opener, and an autolink-like input.
+- **PASS: Setext and line endings.** Tried root and list-item setext headings followed by comments, frontmatter-like delimiters, TODO text followed by a comment, an EOF-unclosed comment, and CRLF. CRLF is explicitly refused.
+I did not see a provider error in the audit. The checker reported the expected diagnostic for the finding:
+
+```text
+line 6005: §99999
+```
+
+A separate tool call was blocked because it attempted to access `~/.tre/tokenomics.json`; that was a sandbox access error, not a provider error.

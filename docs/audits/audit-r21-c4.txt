@@ -1,0 +1,53 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c4; grep -E 'commonmark|markdown-it' package.json || true; grep -nE 'atBloc…
+  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 284: // probe L8_after_closer/H1). The old code set s…
+
+→ bash {"command":"node -e \"for (const x of ['commonmark','markdown-it']) try { console.log(x,require.resolve(x)) } catch {}\…
+  ✓ const trackList = (ln) => { const w = indentWidth(ln); const saved = listStack.slice(); // r16c2-F5: see refusal-restore below while (listStack.length && listStack[listStack.length - 1] > w) listStac…
+
+→ bash {"command":"command -v cmark || true; python3 -c 'import mistune; print(mistune.__version__)' 2>/dev/null || true; find…
+  ✓ ./.scratch-r20/ref/node_modules/.bin/markdown-it ./.scratch-r20/ref/node_modules/.bin/commonmark ./.scratch-r20/ref/node_modules/markdown-it ./.scratch-r20/ref/node_modules/markdown-it/LICENSE ./.scr…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c4/run.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'); const …
+  ✗ exit code 1 [stderr] node:internal/modules/cjs/loader:1210 throw err; ^ Error: Cannot find module '../../../../.scratch-r20/ref/node_modules/commonmark' Require stack: - /Users/xilcilus/projects/Tre.…
+
+→ bash {"command":"sed -i '' 's@../../../../.scratch@../../../.scratch@' docs/audits/probes-r21-c4/run.cjs; node docs/audits/p…
+  ✓ quote exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token gr…
+
+→ bash {"command":"node - <<'EOF'\nconst fs=require('fs'),cp=require('child_process');const base=fs.readFileSync('docs/11-orch…
+  ✓ same 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar,…
+## 1. LOW — Ref after a same-line type-2 HTML-block closer is flagged
+
+**Fixture:** `docs/audits/probes-r21-c4/same.md`, consisting of the valid base document followed by:
+
+```markdown
+<!-- ok --> §99999
+
+end
+```
+
+**Expected:** CommonMark parses the entire first line as a type-2 raw HTML block. Under C9’s stated raw-HTML-block masking model, the ref is masked.
+
+**Actual:**
+
+```text
+$ node scripts/contract-check.mjs docs/audits/probes-r21-c4/same.md
+exit 1
+contract-check: FAIL C9 every body §ref resolves ... — line 6003: §99999
+```
+
+The checker masks only through `-->` and scans the rest of the line as prose. This is overstrict, not laundering. The implementation explicitly describes this behavior in the closed-comment branch.
+
+**Minimal fix:** When a closed comment starts a type-2 HTML block, mask the remainder of that physical line as part of the HTML block. Preserve the current continuation scan for inline comments.
+
+## Other areas tested
+
+- **PASS: block-start gate and list tracking against laundering.** Tried `quote`, `nested`, `tab`, `marker`, `wide`, `ordered`, `bqord`, `bqtab`, `bqbad`, `nestedord`, `blocklazy`, `tabmarker`, and `marker2` fixtures. Blockquote cases with comments or lists were refused as unsupported rather than accepted silently.
+- **PASS: degenerate opener and span interaction.** Tried `degenerate` (`<!--> x <!--`), `span`, `spanpad`, `span2`, and `unclosed`. The live `§99999` was reported in each.
+- **PASS: fences and state termination.** Tried `tilde`, `fence`, `fence2`, `setext`, `setext2`, and `comment_eof`. The unclosed-comment EOF case failed closed. The longer-fence case reported the live ref and also flagged the subsequently unclosed fence.
+- **PASS: other opener contexts.** Tried `cdata`, `pi`, `link`, `escape`, `esc2`, `autolink`, `raw`, and `inlineclosed`. No silent laundering found in these inputs.
+- **PASS, qualified: after-closer list case.** `listafter` used `  - <!-- a --> b <!-- c` at content column 4. CommonMark renders the following `§99999` visibly; the checker reports it. This does not establish the question’s proposed premise that the second opener starts a new block.
+- **PASS, qualified: CRLF.** `crlf` was rejected explicitly for containing carriage returns; it was not silently accepted or laundered.
