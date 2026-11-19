@@ -1,0 +1,79 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+
+→ bash {"command":"cat package.json | grep -E 'commonmark|markdown-it' ; ls node_modules | grep -E 'commonmark|markdown-it' ||…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+  ✓ ?? docs/audits/audit-r21-c2-prompt.txt ?? docs/audits/audit-r21-c2.err ?? docs/audits/audit-r21-c3-prompt.txt ?? docs/audits/audit-r21-c3.err ?? docs/audits/audit-r21-c4-prompt.txt ?? docs/audits/aud…
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c6; cat scripts/contract-check.mjs","timeout":120000}
+  ✓ [truncated: showing last 855 of 1425 lines (51174 of 85903 bytes); full output saved to /var/folders/8l/93gb73md5wz7jfm22_f85w_40000gn/T/coding-agent/bash-dbb76c4f-c74e-45cb-a67a-4ed1c1b11c94.log] //…
+
+→ bash {"command":"sed -n '190,400p' scripts/contract-check.mjs | grep -A100 -B10 'atBlockStart'","timeout":120000}
+  ✓ // r21-F1 (audit HIGH): test whether index i (a "<!--" occurrence) sits // at a CommonMark type-2 HTML-BLOCK start: the prefix must consist of // nothing but same-line container openings — a ≤3-space…
+
+→ bash {"command":"which cmark || true; python3 -c 'import mistune;print(mistune.__version__)' || true; ls node_modules 2>/dev…
+  ✓ @alcalzone @types ansi-escapes ansi-regex ansi-styles auto-bind chalk cli-boxes cli-cursor cli-truncate // shifts everything after it); end = end of the line. if (collect) curRanges.push([lineBase + …
+
+→ bash {"command":"cat > docs/audits/probes-r21-c6/run.py <<'PY'\nimport subprocess,pathlib\np=pathlib.Path('docs/audits/probe…
+  ✓ deg 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar, …
+
+→ bash {"command":"find /Users/xilcilus/projects -maxdepth 5 \\( -name commonmark -o -name markdown-it \\) -type d 2>/dev/null…
+  ✓ /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/markdown-it /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/commonmark ?? docs/audits/audit-r21-c5.er…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c6/fuzz.cjs <<'JS'\nconst fs=require('fs'),cp=require('child_process');const C…
+  ✓ HIGH "- [<!-- §99999 -->](url)\n" "<ul>\n<li>\n<pre><code>[&lt;!-- §99999 --&gt;](url)\n</code></pre>\n</li>\n</ul>\n" HIGH "- ![<!-- §99999 -->](url)\n" "<ul>\n<li>\n<pre><code>![&lt;!-- §99999 --&g…
+
+→ bash {"command":"node - <<'JS'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark');let p=new c.Parser(),r=new c.H…
+  ✓ "[x](<!-- §99999 -->)" <p><a href="!--%20%C2%A799999%20--">x</a></p> "![<!-- §99999 -->](x)" <p><img src="x" alt="<!-- §99999 -->" /></p> "foo <!-- §99999 --> bar" <p>foo <!-- §99999 --> bar</p> "<!-…
+
+→ bash {"command":"python3 - <<'PY'\nimport pathlib,subprocess\np=pathlib.Path('docs/audits/probes-r21-c6'); base=pathlib.Path…
+  ✓ inline_multiline 1 §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar, fences/comments/spans modeled) — line 6004: §99999 inline_x 1 §1 only, external chains docs/N §ref wi…
+
+→ bash {"command":"node - <<'JS'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark');const m=require('./.scratch-r2…
+  ✓ "text <!--\n§99999\n-->\n" "<p>text <!--\n§99999\n--></p>\n" "<p>text <!--\n§99999\n--></p>\n" "- item\n\t<!--\n\t§99999\n\t-->\n" "<ul>\n<li>item\n <!--\n §99999\n -->\n</li>\n</ul>\n" "<ul>\n<li>it…
+1. **LOW — A multiline inline HTML comment is flagged instead of masked**
+
+   Append to the valid base fixture:
+
+   ```markdown
+   text <!--
+   §99999
+   -->
+   ```
+
+   **Expected:** Both `commonmark.js` and `markdown-it` render a paragraph containing `text <!--\n§99999\n-->`. The ref is inside the rendered HTML comment and is not visible.
+
+   **Actual:**
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c6/inline_multiline.md
+   exit 1
+   stderr: … line 6004: §99999
+   ```
+
+   **Minimal fix:** Model a *closed multiline inline comment* separately from a type-2 HTML block: mask through its matching closer without treating an unmatched inline opener as a block comment. Preserve paragraph/container boundaries.
+
+2. **LOW — A tab at a list-item continuation prevents recognition of a block comment**
+
+   ```markdown
+   - item
+   	<!--
+   	§99999
+   	-->
+   ```
+
+   The three continuation lines begin with a literal tab.
+
+   **Expected:** Both reference parsers render the `§99999` inside an HTML comment in the list item. It is not visible.
+
+   **Actual:**
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c6/tabinside.md
+   exit 1
+   stderr: … line 6005: §99999
+   ```
+
+   **Minimal fix:** In `atBlockStart`, consume the list-item prefix using tab-stop-aware columns, then apply the ≤3-column test relative to the item content column. Do not treat every tab in the prefix as a non-block character.
+
+**PASS — Remaining requested areas, within the executed probes:** nested list chain; ordered `1.` continuation and paragraph followed by `2.`; blockquote and blockquote-list openers (the latter are explicitly refused); `- x <!--` and `-     x <!--`; degenerate `<!--> x <!--`; single, padded, double, and unclosed backtick spans; tilde fences with info strings and shorter interior fences; setext; escaped opener; CDATA and processing instructions; blank-line and unclosed-comment EOF; CRLF (explicitly refused). These probes found no laundering beyond the exclusions in the request.
+
+**After-closer case:** `    - item` followed by `      <!-- a --> b <!-- c` reports the following ref. The second opener follows same-line text and is inline, not a new block start; this probe does not establish a block-start mismatch.

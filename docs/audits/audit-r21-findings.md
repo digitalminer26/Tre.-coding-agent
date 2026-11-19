@@ -51,3 +51,21 @@ accepted overstrict divergences (raw HTML block inside a list item).
   The checker flagging it is CORRECT behavior, not a defect. Rejected.
 - PASS areas: block-start prefixes, after-closer/ordered, degenerate +
   spans, fences/EOF, CDATA/PI/autolinks/escapes, setext/CRLF.
+
+## Cycle 6 (audit-r21-c6.txt)
+- F1 LOW (`text <!--\n§99999\n-->` closed multiline INLINE comment
+  flagged): overstrict-only, and the uniform r21-F1 rule (an inline,
+  non-block-start `<!--` NEVER enters comment state) is the
+  deliberate post-HIGH design — a masking expansion in exactly the
+  direction the r21 hardening just closed is unjustified under the
+  safety contract (masking errors launder; flag errors fail closed).
+  Rejected.
+- F2 LOW (`- item\n\t<!--\n\t§99999\n\t-->` tab-continuation block
+  comment flagged): verified via commonmark.js — the tab version IS a
+  block comment (browser-hidden), checker flags = overstrict-only.
+  atBlockStart refuses every tab in the prefix (documented choice:
+  fail-closed toward flagging; tab-stop expansion in container
+  contexts is exactly where laundering bugs breed). Same class as the
+  accepted blockquote refusal. Rejected.
+- PASS areas: nested chains, ordered continuation, degenerate+spans,
+  fences, escapes/CDATA/PI/autolinks, EOF, CRLF refusal, after-closer.
