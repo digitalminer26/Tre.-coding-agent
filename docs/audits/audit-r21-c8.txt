@@ -1,0 +1,110 @@
+
+→ bash {"command":"if [ -f ~/.tre/tokenomics.json ]; then python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true;…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ subtask {"action":"create","items":["Inspect checker and available CommonMark oracle","Execute targeted fixture matrix and inve…
+  ✓ created 3 subtask(s): 1. Inspect checker and available CommonMark oracle (queued) 2. Execute targeted fixture matrix and investigate discrepancies (queued) 3. Report executed findings and coverage (q…
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c8; git status --short; cat package.json | head -80; ls node_modules/{commo…
+  ✗ exit code 127 ?? docs/audits/audit-r21-c8-prompt.txt ?? docs/audits/audit-r21-c8.err ?? docs/audits/audit-r21-c8.txt ?? docs/audits/probes-r21-c8/ { "name": "tre-coding-agent", "version": "0.4.9", "p…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"in-progress"}
+  ✓ 1. Inspect checker and available CommonMark oracle → in-progress 1. Inspect checker and available CommonMark oracle (in-progress) 2. Execute targeted fixture matrix and investigate discrepancies (que…
+
+→ bash {"command":"grep -nE 'atBlockStart|processText|trackList|inComment' scripts/contract-check.mjs; which cmark commonmark …
+  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 284: // probe L8_after_closer/H1). The old code set s…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Inspect checker and available CommonMark oracle → done 1. Inspect checker and available CommonMark oracle (done) 2. Execute targeted fixture matrix and investigate discrepancies (queued) 3. Report…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"in-progress"}
+  ✓ 2. Execute targeted fixture matrix and investigate discrepancies → in-progress 1. Inspect checker and available CommonMark oracle (done) 2. Execute targeted fixture matrix and investigate discrepanci…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c8/run.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'), cm=req…
+  ✓ quote exit 1 visible false ref false "contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with \"doc…
+
+→ bash {"command":"for n in quotepara nestedpara tabs inline crlf; do echo \"=== $n\"; node scripts/contract-check.mjs docs/au…
+  ✓ === quotepara contract-check: PASS C1 §14.11 has exactly one status line contract-check: PASS C1 §14.12 has exactly one status line contract-check: PASS C1 §14.13 has exactly one status line contract…
+
+→ bash {"command":"node - <<'EOF'\nconst fs=require('fs'),cp=require('child_process'),cm=require('./.scratch-r20/ref/node_modu…
+  ✓ simple 1 "contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with \"doc\" pairing, strict token gra…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Execute targeted fixture matrix and investigate discrepancies → done 1. Inspect checker and available CommonMark oracle (done) 2. Execute targeted fixture matrix and investigate discrepancies (don…
+
+→ subtask {"action":"mark","items":[],"id":3,"status":"done"}
+  ✓ 3. Report executed findings and coverage → done 1. Inspect checker and available CommonMark oracle (done) 2. Execute targeted fixture matrix and investigate discrepancies (done) 3. Report executed fi…
+## Findings
+
+1. **HIGH — Nested ordered marker is not tracked, so a comment survives beyond its list item.**
+
+   Appended to the valid base document:
+
+   ```markdown
+   - a
+     - 2. <!--
+       §99999
+       -->
+   ```
+
+   CommonMark opens an outer list, a nested bullet item, and an ordered item starting at 2. The comment belongs to that ordered item. The `§99999` line is dedented outside the ordered item, so it renders as visible text in the enclosing bullet item.
+
+   Executed repro:
+
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c8/nested1.md
+   exit 0
+   stderr: <empty>
+   ```
+
+   `commonmark.js` renders the relevant portion as:
+
+   ```html
+   <li>
+   <ol start="2">
+   <li>
+   <!--
+   </li>
+   </ol>
+   §99999
+   --&gt;</li>
+   ```
+
+   **Cause and minimal fix:** `trackList` applies the `paraOpen` / ordered-start-not-1 interruption rule to *every* marker in a same-line chain. Here it refuses the inner `2.` even though the preceding `- ` opened a fresh item context. `atBlockStart` accepts that inner marker, but the comment is owned by the shallower tracked list. Apply the interruption restriction only where an existing paragraph is actually being interrupted, and keep list tracking and block-start recognition consistent. Add a regression covering the dedent.
+
+2. **LOW — Tab-indented list comment is reported as a live ref.**
+
+   Appended fixture, with each `→` representing one literal tab byte:
+
+   ```text
+   - x
+   →<!--
+   →§99999
+   →-->
+   ```
+
+   CommonMark expands the tab to column 4 and renders the three lines as a comment block inside the list item; the ref is hidden.
+
+   Executed repro:
+
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c8/tabs.md
+   exit 1
+   stderr: contract-check: FAIL C9 ... — line 6005: §99999
+   ```
+
+   **Minimal fix:** Have the block-start prefix scan consume tabs using absolute CommonMark tab stops and the active list content column, rather than accepting only literal spaces in its indentation loop. Retain the existing container-boundary checks.
+
+## Requested gate and interaction checks
+
+- **Q1 — Container prefixes:** The nested ordered-list chain above demonstrates a masking error, although the immediate cause is inconsistent list ownership rather than the prefix loop alone. The ordinary three-level nested-list and tab-after-marker fixtures passed. Blockquote comment fixtures failed closed with the checker’s explicit unsupported-container diagnostic.
+- **Q2 — After a closer:** `closer.md` (`- a` followed by `    <!-- a --> b <!-- c`) reports `§99999`; CommonMark renders it visible. The second opener follows text on the same line, so it is not a new block start; this repro is not a HIGH or an overstrict finding. I did not construct a case where the second opener on that same line is a block start. The ordered-list fixture `1. item` / `  <!--` passed; `> <!--` failed closed as unsupported.
+- **Q3 — Marker plus content:** `inline.md` (`- x <!--`) reported the ref; `spaced.md` (`-     x <!--`) reported it inside rendered code. The latter is overstrict, but not the requested comment-state masking mismatch.
+- **Q4 — Degenerate opener:** `<!--> x <!--` followed by `§99999` was reported, as required.
+- **Q5 — Spans:** The three closed-span variants and the unclosed-backtick-plus-blank-line fixture reported the visible ref.
+- **Q6 — EOF and block interactions:** The unclosed block-comment EOF fixture exited 1 with an unclosed-comment issue. Setext and frontmatter-shaped fixtures with closed comments passed. This does not establish that every EOF state is safe.
+- **Q7 — Additional gate edges:** The blockquote-list case failed closed; the non-1 ordered-marker/paragraph case passed; the tab-indented continuation produced finding 2. CRLF was explicitly refused by the checker rather than silently accepted.
+
+**PASS: fence, raw-block, and inline-opener sample coverage** — no additional mismatch found in the executed tilde-info fence, longer-backtick fence, fence-after-blank-span, CDATA, processing-instruction, type-6 `<div>`, type-7 `<foo>`, link, image, autolink-shaped, escaped-opener, and double-backslash fixtures. This is sample coverage, not an exhaustive proof.
+
+All fixture and probe files were written under `docs/audits/probes-r21-c8/`; tracked checker, test, and documentation sources were not edited.

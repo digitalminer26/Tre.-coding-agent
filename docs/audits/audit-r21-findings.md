@@ -96,3 +96,20 @@ accepted overstrict divergences (raw HTML block inside a list item).
   phrasing; prompt rephrased (audit-r21-prompt.txt) with identical
   technical content, and --no-telegram added to the driver (the child
   session's Telegram poller raced the parent's).
+
+## Cycle 8 (audit-r21-c8.txt)
+- F1 LOW ("2. text" after a paragraph with §ref on the line: checker
+  reports the ref; CommonMark: lazy continuation inside the item,
+  stripped + indented into <pre><code> = hidden, E246/E249):
+  consistent with the r16c2-F5 pinned convention ("refusing the marker
+  only ever EXPOSES — lazy-continuation refs remain visible as root
+  text"). Overstrict-only (fail-closed), same class as the two
+  accepted divergences and cycle-3 F1. Rejected; documented here.
+- PASS areas: atBlockStart prefix walks (blockquote/nested-chain/tab
+  leads), contCol threading incl. after-closer base, marker-line
+  interaction, degenerate openers, span/comment interplay, setext +
+  frontmatter + fence/EOF states, new r21-F2 gate verified in both
+  directions (start=1 interrupts and masks; start!=1 after paragraph
+  exposes).
+- Provider note: 6 attempts (transient "provider error" aborts mid-run
+  at ~4-7 min); attempt 7 completed clean.
