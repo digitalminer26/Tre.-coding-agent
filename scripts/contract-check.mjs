@@ -345,7 +345,23 @@ const scanModel = (text) => {
         res += ln.slice(i, close + n); i = close + n; continue;
       }
       if (ln.startsWith("<!--", i)) {
-        const c = ln.indexOf("-->", i + 4);
+        // r20-F1 (fuzz, 42 laundries): the comment grammar's DEGENERATE
+        // forms "<!-->" and "<!--->" are COMPLETE comments whose closer
+        // OVERLAPS the opener — "<!-->" contains "-->" at offset 2 (and
+        // "<!--->" at 3). The old search from i+4 could never find them,
+        // so "<!-->" opened a phantom comment masking the whole rest of
+        // the document (fuzz: "<!-->\n§999" — the renderer shows §999 as
+        // visible prose). Searching from i+2 is spec-exact: the
+        // non-greedy first match "-->" from i+2 exists iff the input is
+        // the degenerate complete comment at i (offset 2 <=> "<!-->",
+        // offset 3 <=> "<!--->"); every other input's first possible
+        // closer is at >= i+4, so the general open/close path is
+        // bit-for-bit unchanged. A closed comment masks its characters
+        // 1:1 and the scan CONTINUES — the remainder of the line stays
+        // live (same-line refs are exposed: the type-2-block reading of
+        // a line-leading comment would hide them, and exposing is the
+        // safe direction, consistent with closed comments since r5).
+        const c = ln.indexOf("-->", i + 2);
         if (c !== -1) { res += " ".repeat(c + 3 - i); i = c + 3; continue; }
         st.inComment = true; res += " ".repeat(ln.length - i); i = ln.length; break;
       }
@@ -739,9 +755,18 @@ const scanModel = (text) => {
     // r14-F2: test LIVE text only — inline code spans, fence info
     // strings, and pending-span content are literal and never open a
     // comment ("> `<!--`" and "> ```html <!-- x" must NOT fail closed).
+    // r20-F2 (precision): a comment that CLOSES ON ITS OWN LINE owns no
+    // container state, so quote-exit laundering is impossible and the
+    // line must not fail closed ("> <!-->", "> <!-- x --> §ref"). Erase
+    // every COMPLETE comment production ("> " and "-> " are the r20-F1
+    // degenerate forms; "[\s\S]*?-->" is the general non-greedy close —
+    // leftmost-shortest matching reproduces the §6 CommonMark comment
+    // grammar on a single line, probe-verified) and refuse only if a
+    // POSSIBLY-OPEN "<!--" survives ("> <!-- x" still crosses the quote
+    // boundary and must fail closed).
     if (candidates.some((candidate) => {
       const quote = quotePrefix(candidate);
-      return quote.depth && stripLiteral(quote.rest, spanRun).includes("<!--");
+      return quote.depth && stripLiteral(quote.rest, spanRun).replace(/<!--(?:>|->|[\s\S]*?-->)/g, " ").includes("<!--");
     })) issues.push("comment inside blockquote is unsupported by C9's container model");
     // Fence open is checked BEFORE the pending-span branch: a fence line
     // interrupts the paragraph, so the opener run was literal (CommonMark).

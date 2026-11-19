@@ -1202,3 +1202,58 @@ test("r19-F4 type-6 block interrupt clears a pending code span", () => {
   // <div> block), so the ref after the span-closing run must fire.
   runProbe("r19-f4-div-span-interrupt", base + "\npara `\n<div>\nraw\n\n` <!--\n\u00a7999 visible\n-->\n", ["\u00a7999"]);
 });
+
+// ── r20 fuzz: degenerate complete comments "<!-->" / "<!--->" ──
+// CommonMark §6: the comment grammar is "<!-->|<!--->|<!--[\s\S]*?-->".
+// The two degenerate forms are COMPLETE comments whose closer OVERLAPS
+// the opener; the old processText search for "-->" started after the
+// opener and never saw them, so "<!-->" opened a phantom comment that
+// masked the rest of the document — 42 fuzz laundries (probe-vs-impl
+// fuzz, commonmark.js AST as ground truth).
+
+test("r20-F1 degenerate <!--> does not mask following prose", () => {
+  runProbe("r20-f1-deg-open", base + "\n<!-->\n\u00a7999 visible\n", ["\u00a7999"]);
+  runProbe("r20-f1-deg2-open", base + "\n<!--->\n\u00a7999 visible\n", ["\u00a7999"]);
+  runProbe("r20-f1-deg-para", base + "\npara\n\n<!-->\n\n\u00a7999 after\n", ["\u00a7999"]);
+  runProbe("r20-f1-deg-heading", base + "\n<!-->\n# \u00a7999 heading\n", ["\u00a7999"]);
+  runProbe("r20-f1-two-deg", base + "\n<!--><!--->\n\u00a7999 live\n\nz\n", ["\u00a7999"]);
+});
+
+test("r20-F1b three-dash <!--- is NOT a degenerate comment (still masks)", () => {
+  runProbe("r20-f1b-triple-dash", base + "\n<!---\n\u00a7999 masked\n-->\n", false);
+  // Four dashes "<!---->" IS a complete comment (closer = last three).
+  runProbe("r20-f1b-four-dash", base + "\n<!---->\n\u00a7999 live\n\ny\n", ["\u00a7999"]);
+});
+
+test("r20-F1c a complete line-leading comment overflags its own line (safe direction)", () => {
+  // "<!--> \u00a7999 x" is a type-2 HTML block for CommonMark (\u00a7999 invisible);
+  // the masker closes the comment inline and EXPOSES the ref. Over-flagging
+  // (never hiding) is the documented conservative direction.
+  runProbe("r20-f1c-same-line", base + "\n<!--> \u00a7999 x\n", ["\u00a7999"]);
+});
+
+test("r20-F1d a real comment opened AFTER a degenerate one still masks (EOF fail-closed)", () => {
+  const doc = base + "\n<!--> t\n<!-- \u00a7999 open\nmore\n";
+  const f = path.join(tmp, "r20-f1d-deg-then-open.md");
+  fs.writeFileSync(f, doc);
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes("unclosed"), r.stderr);
+  assert.ok(!/line \d+.*\u00a7999/.test(r.stderr.replace(/resolves[^\n]*/g, "")), "masked ref must not be cited live:\n" + r.stderr);
+});
+
+test("r20-F2 blockquote guard: complete comments no longer refuse, open comments still do", () => {
+  // Complete (degenerate or closed) comments own no cross-boundary state:
+  // the doc must process and flag the LIVE ref after the quote — without
+  // the "unsupported by C9's container model" refusal.
+  for (const [name, opener] of [["deg", "<!-->"], ["deg2", "<!--->"], ["full", "<!-- x -->"]] as const) {
+    const f = path.join(tmp, `r20-f2-${name}.md`);
+    fs.writeFileSync(f, base + `\n> ${opener}\n> text\n\n\u00a7999 live\n`);
+    const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+    assert.equal(r.status, 1, name);
+    assert.ok(!r.stderr.includes("unsupported"), `${name}: refused: ${r.stderr}`);
+    assert.ok(/line \d+.*\u00a7999/.test(r.stderr) || r.stderr.includes("\u00a7999"), `${name}: live ref not cited: ${r.stderr}`);
+  }
+  // A POSSIBLY-OPEN comment inside a quote still fails closed.
+  runProbe("r20-f2-open", base + "\n> <!-- x\n> y\n\n\u00a7999 live\n", ["unsupported"]);
+});

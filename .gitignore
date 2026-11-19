@@ -138,3 +138,7 @@ reference/tmp*/
 tmp_aud*/
 __pycache__/
 *.pyc
+
+# Round-20 contract-check fuzz harness (fuzz.mjs + commonmark/markdown-it ref installs)
+# — findings pinned as r20-F1/F2 regression tests; the fuzzer is scratch.
+.scratch-r*/
