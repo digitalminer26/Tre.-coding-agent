@@ -1323,3 +1323,32 @@ test("r20-F2 blockquote guard: complete comments no longer refuse, open comments
   // A POSSIBLY-OPEN comment inside a quote still fails closed.
   runProbe("r20-f2-open", base + "\n> <!-- x\n> y\n\n\u00a7999 live\n", ["unsupported"]);
 });
+
+// r21c14-F1: a type-2 comment-block opener INTERRUPTS the paragraph that
+// owns a pending multi-line span (CommonMark §4.6; commonmark.js and
+// markdown-it agree: "a `\n<!--\nREF\n`\n-->" hides REF inside the
+// comment). The old span branch swallowed the opener as span content and
+// flagged the hidden ref (overstrict). Quote-prefixed openers stay the
+// accepted fail-closed report (round-20 convention f).
+test("r21c14-F1 comment opener interrupts a pending span", () => {
+  // The fixed case: opener line interrupts, ref hides in the comment.
+  runProbe("r21c14-interrupt-mask", base + "\na `\n<!--\n\u00a799999\n`\n-->\n", false);
+  // Same-line open+close around the ref (span still pending on the
+  // opener line): the comment is complete, the ref is hidden.
+  runProbe("r21c14-sameline-close", base + "\nb `\n<!-- \u00a799999 ` -->\n", false);
+  // Interrupting opener that never closes: fails closed at EOF and the
+  // hidden ref is NOT cited as live.
+  const f = path.join(tmp, "r21c14-unclosed.md");
+  fs.writeFileSync(f, base + "\nc `\n<!--\n\u00a799999\n");
+  const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
+  assert.equal(r.status, 1, "unclosed interrupting comment must fail closed");
+  assert.ok(r.stderr.includes("unclosed"), r.stderr);
+  assert.ok(!/\u2014 line \d+: \u00a799999/.test(r.stderr), "hidden ref must not be cited live:\n" + r.stderr);
+  // Quote-prefixed opener under a pending span: FAIL-CLOSED report
+  // pinned by round-20 convention (f) — overstrict, renderer-hidden.
+  runProbe("r21c14-quote-failclosed", base + "\ne `\n> <!--\n\u00a799999\n`\n> -->\n", ["\u00a799999"]);
+  // Control: pending span + interrupting opener + a closer eventually
+  // arriving: the comment owns the tail, everything is masked, exit 0
+  // (both renderers hide the whole comment region the same way).
+  runProbe("r21c14-span-still-pairs", base + "\n`two runs\n<!-- fake\nend`\n-->\n", false);
+});

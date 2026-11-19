@@ -1,0 +1,73 @@
+
+→ subtask {"action":"create","items":["Inspect checker and reference tooling","Execute differential and targeted probes","Report …
+  ✓ created 3 subtask(s): 1. Inspect checker and reference tooling (queued) 2. Execute differential and targeted probes (queued) 3. Report verified findings and area coverage (queued) progress: 0/3
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c14; git status --short; ls .scratch-r20/ref/node_modules/{commonmark,markd…
+  ✓ ?? docs/audits/audit-r21-c11-prompt.txt ?? docs/audits/audit-r21-c11.err ?? docs/audits/audit-r21-c11.txt ?? docs/audits/audit-r21-c12-prompt.txt ?? docs/audits/audit-r21-c12.err ?? docs/audits/audit…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Inspect checker and reference tooling → done 1. Inspect checker and reference tooling (done) 2. Execute differential and targeted probes (queued) 3. Report verified findings and area coverage (que…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"in-progress"}
+  ✓ 2. Execute differential and targeted probes → in-progress 1. Inspect checker and reference tooling (done) 2. Execute differential and targeted probes (in-progress) 3. Report verified findings and are…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c14/harness.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'),pa…
+  ✓ q1 {"cm":["html_block"],"md":["html_block"],"visible":false,"flagged":true,"exit":1,"err":["contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger r…
+
+→ bash {"command":"node scripts/contract-check.mjs docs/audits/probes-r21-c14/s5.md >/dev/null 2>docs/audits/probes-r21-c14/s5…
+  ✓ exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar,…
+
+→ bash {"command":"python3 - <<'PY'\np='docs/audits/probes-r21-c14/s5.md';s=open(p).read();open('docs/audits/probes-r21-c14/co…
+  ✓ exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token grammar,…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Execute differential and targeted probes → done 1. Inspect checker and reference tooling (done) 2. Execute differential and targeted probes (done) 3. Report verified findings and area coverage (qu…
+
+→ subtask {"action":"mark","items":[],"id":3,"status":"done"}
+  ✓ 3. Report verified findings and area coverage → done 1. Inspect checker and reference tooling (done) 2. Execute differential and targeted probes (done) 3. Report verified findings and area coverage (…
+## 1. LOW — Pending code span prevents a type-2 comment block from opening
+
+**Repro**, appended after the valid base document:
+
+```markdown
+a `
+<!--
+§99999
+`
+-->
+```
+
+**Expected:** Both commonmark.js and markdown-it render the paragraph as `<p>a `</p>`, followed by an HTML comment block containing `§99999`. The comment block interrupts the paragraph, so its opener must terminate the pending inline-span state. The ref is exempt.
+
+**Actual:**
+
+```text
+$ node scripts/contract-check.mjs docs/audits/probes-r21-c14/comment-interrupt.md
+exit 1
+... line 6005: §99999
+```
+
+Both renderers were run on the full fixture; their output ends with:
+
+```html
+<p>a `</p>
+<!--
+§99999
+`
+-->
+```
+
+**Minimal fix:** Before treating a line as pending-span content, recognize a valid type-2 comment-block opener in its container context, clear `spanRun`, and process the comment normally. Preserve the existing fail-closed rules for unsupported containers.
+
+## Tested areas
+
+The differential harness rendered each **full base-plus-probe document** with both reference libraries and ran the checker. Probe files are under `docs/audits/probes-r21-c14/`.
+
+- **PASS: prefix and container gate**, no new safety finding in `q1`–`q6`, `l2`–`l5`: nested lists, four blockquotes, marker-plus-inline-comment, five spaces after a marker, tab after marker, ordered list, non-1 ordered interruption, and blockquote inside a list. The blockquote cases hit the accepted unsupported-container refusal.
+- **PASS: inline opener and span interactions**, other than finding 1, in `a1`–`a5`: degenerate `<!--> x <!--`, ordinary and padded code spans, double-backtick spans, and an unmatched backtick before an inline opener. `a1` reported `§99999` as expected.
+- **PASS: block-state and boundary cases**, other than finding 1, in `s1`–`s4`, `s6`–`s11`: setext heading, frontmatter-shaped text, fence inside comment, comment inside fence, setext under a list, leading and multiple closers, indented code followed by a fence, unclosed comment at EOF, and CRLF. EOF and CRLF were refused; the fenced-code result follows the pinned convention.
+
+For question 2, the tested after-closer list case `l1` rendered the second opener inline and the checker reported the ref. I did **not** construct a case where a second opener after same-line prose is a new block start; the tested rendering does not support that premise. The ordered-list comment was masked, and `> <!--` was refused as unsupported.

@@ -986,6 +986,29 @@ const scanModel = (text) => {
       if (isBlank) {
         spanRun = 0;
       } else {
+        // r21c14-F1 (audit LOW, cycle 14): a type-2 comment block opener
+        // INTERRUPTS the paragraph that owns a pending span (CommonMark
+        // §4.6; commonmark.js + markdown-it agree): "a `\n<!--\nREF\n`\n-->"
+        // renders REF INSIDE the comment — the old branch swallowed the
+        // opener as span content and flagged the hidden ref (overstrict).
+        // Test the SAME predicate the root path uses (atBlockStart with
+        // the innermost open item column; the ordered-marker/paraOpen rule
+        // inside it applies since a span line keeps a paragraph open).
+        // Blockquote prefixes are excluded: "> <!--" stays the accepted
+        // fail-closed context (round-20 convention) — falling through a
+        // quote line could open a root comment and launder post-quote
+        // lines. On a hit drop the span and fall through: processText
+        // models the opener with its proven same-line-closer/degenerate
+        // rules and r14 comment ownership.
+        let spanBlockHit = false;
+        if (ln.includes("<!--") && !quotePrefix(ln).depth) {
+          const iC = ln.indexOf("<!--");
+          if (atBlockStart(ln, iC, listStack.length ? listStack[listStack.length - 1] : 0)) {
+            spanRun = 0;
+            spanBlockHit = true;
+          }
+        }
+        if (!spanBlockHit) {
         // Content line: copied (§refs inside stay LIVE) but NEVER heading/
         // fence/comment material — leading space kills a phantom heading.
         const c = findRun(ln, 0, spanRun);
@@ -1007,6 +1030,9 @@ const scanModel = (text) => {
         prevBlank = false;
         paraOpen = true; // span content is paragraph text (r15-F3)
         continue;
+        }
+        // spanBlockHit: fall through to the normal line path — processText
+        // models the comment opener with its proven rules (r21c14-F1).
       }
     }
     // r7-F6: indented code block START — 4+ columns (tab stops) directly

@@ -1,0 +1,71 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ subtask {"action":"create","items":["Inspect checker and build differential probes","Run adversarial reproductions and report r…
+  ✓ created 2 subtask(s): 1. Inspect checker and build differential probes (queued) 2. Run adversarial reproductions and report results (queued) progress: 0/2
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c12; git status --short; ls .scratch-r20/ref/node_modules/{commonmark,markd…
+  ✓ ?? docs/audits/audit-r21-c11-prompt.txt ?? docs/audits/audit-r21-c11.err ?? docs/audits/audit-r21-c11.txt ?? docs/audits/audit-r21-c12-prompt.txt ?? docs/audits/audit-r21-c12.err ?? docs/audits/audit…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"in-progress"}
+  ✓ 1. Inspect checker and build differential probes → in-progress 1. Inspect checker and build differential probes (in-progress) 2. Run adversarial reproductions and report results (queued) progress: 0/2
+
+→ bash {"command":"cat > docs/audits/probes-r21-c12/run.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'); const…
+  ✓ q1 cm 1 mi 1 flag 1 exit 1 ["contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with \"doc\" pairin…
+
+→ bash {"command":"python3 - <<'PY'\np='docs/audits/probes-r21-c12/run.cjs'\ns=open(p).read().replace(\"let ca=a.includes('§99…
+  ✓ q1 cm 0 mi 0 flag 1 exit 1 ["contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with \"doc\" pairin…
+
+→ bash {"command":"node scripts/contract-check.mjs docs/audits/probes-r21-c12/q29.md 2>&1 | tail -4; node - <<'EOF'\nconst fs=…
+  ✓ contract-check: PASS C8 pin survives in §14.12: "IN THE SAME revision; a bump that does n…" contract-check: PASS C9 §0 Purpose and §1 Schema anchors exist (the C9 scan depends on them) contract-check…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Inspect checker and build differential probes → done 1. Inspect checker and build differential probes (done) 2. Run adversarial reproductions and report results (queued) progress: 1/2
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"in-progress"}
+  ✓ 2. Run adversarial reproductions and report results → in-progress 1. Inspect checker and build differential probes (done) 2. Run adversarial reproductions and report results (in-progress) progress: 1…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c12/fuzz.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'),cm=re…
+  ✓ HIT 1 " <!--\n §99991\n-->\n" HIT 2 " <!--\n §99991\n-->\n" HIT 3 " <!--\n §99991\n-->\n" HIT 4 "- a\n\n <!--\n §99991\n-->\n" HIT 5 "- a\n\n <!--\n §99991\n-->\n" HIT 6 "- a\n\n <!--\n §99991\n-->\n…
+
+→ bash {"command":"sed -i '' \"s/\\['text','code','code_block'\\]/['text']/; s/if(num>=8)/if(num>=12)/\" docs/audits/probes-r2…
+  ✓ (no output)
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Run adversarial reproductions and report results → done 1. Inspect checker and build differential probes (done) 2. Run adversarial reproductions and report results (done) progress: 2/2
+## Findings
+
+No new findings established. The differential probes did not identify a visible prose reference that the checker silently exempted. They also did not establish an overstrict case outside the conventions and refusals excluded by the audit rules.
+
+## Audit questions
+
+1. **Block-start prefix loop — PASS for the inputs tried.** Tested nested list chains of three and five levels, nested lists inside a blockquote, an ordered marker inside a blockquote, and a tab after a list marker (`q1`, `q2`, `q5`, `q6`, `q23`). No clean checker exit exempted a visible prose ref. Blockquote/container combinations that the checker does not model were rejected as unsupported.
+
+2. **Content-column threading and after-closer calls — no mismatch established.** The premise that the second opener in `<!-- a --> b <!-- c` can start a new HTML block on that same line did not hold in the executed list-item repro: both renderers ended the HTML block at the first closer and rendered the following-line ref as prose. The checker reported it:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c12/q8.md
+   exit 1; stderr excerpt: line 6005: §99991
+   ```
+
+   Also tested an ordered-list continuation (`q9`, masked by both renderers and checker) and `> <!--` (`q10`, rejected as unsupported, an accepted refusal). **Fewer than five inputs were tried for this specific area.**
+
+3. **List tracking before text processing — no mismatch established.** `- x <!--` followed by a ref and closer is an inline comment spanning lines in both renderers; the checker reports the ref. `-     x <!--` left the ref visible and the checker reported it. The first is an overstrict result, but it falls within the accepted raw-HTML-inside-list-item refusals. **Only two targeted inputs were tried; not claiming PASS.**
+
+4. **Degenerate comment followed by an opener — targeted case passes.** Both renderers show the ref in `<!--> x <!--\n§99991\n`; the checker reports it:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c12/q11.md
+   exit 1; stderr excerpt: line 6004: §99991
+   ```
+
+   **Fewer than five targeted inputs were tried; not claiming an area-wide PASS.**
+
+5. **Span/comment interplay — PASS for the inputs tried.** Tested closed single-backtick, space-padded, and double-backtick spans; an unclosed mid-line run containing an opener; and a multiline span resumed across a comment-looking line (`q12`–`q15`, `q26`). No silent exemption of visible prose was found.
+
+6. **Headings, frontmatter-like text, fences, and EOF — PASS for the inputs tried.** Tested setext, YAML-like delimiters, fence inside comment, comment inside fence, setext inside a list, indented code interrupted by a fence, and an unclosed list-item comment (`q16`–`q20`, `q27`, `q28`). The EOF case failed closed with `unclosed <!-- masks the rest of the document from C9`.
+
+7. **New gate edge cases — PASS for the inputs tried.** Tested nested-list block starts, blockquote items, a non-1 ordered marker after a paragraph, tab-indented list content, and CRLF limited to the probe (`q1`, `q2`, `q23`–`q25`, `q29`). CRLF was explicitly rejected under the checker’s LF-only byte contract; the blockquote case was rejected as unsupported. No new silent visible-prose exemption was established.
+
+The differential harness rendered the **full base plus probe** with both `commonmark` and `markdown-it`. An additional generated sweep found apparent clean exits involving **indented code**, but these are excluded by the pinned code-content convention and are not reported as findings.

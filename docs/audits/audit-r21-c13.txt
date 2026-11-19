@@ -1,0 +1,73 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ subtask {"action":"create","items":["Inspect checker and prepare differential harness","Execute adversarial probes and validate…
+  ✗ Tool call arguments may be truncated: the response hit the output token limit, so they may be incomplete. Do not rely on them — re-issue the tool call with complete arguments.
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c13; ls .scratch-r20/ref/node_modules/{commonmark,markdown-it} >/dev/null; …
+  ✗ exit code 127 ?? docs/audits/audit-r21-c11-prompt.txt ?? docs/audits/audit-r21-c11.err ?? docs/audits/audit-r21-c11.txt ?? docs/audits/audit-r21-c12-prompt.txt ?? docs/audits/audit-r21-c12.err ?? doc…
+
+→ bash {"command":"grep -nE 'atBlockStart|inComment|trackList|processText' scripts/contract-check.mjs; ls .scratch-r20/ref/nod…
+  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 284: // probe L8_after_closer/H1). The old code set s…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c13/harness.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process');co…
+  ✓ 0 "- x <!--\n§99999\n-->\n" render false true exit 1 stderr "contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c13/fuzz.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'),cm=re…
+  ✓ (no output)
+
+→ bash {"command":"cat > docs/audits/probes-r21-c13/more.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process');let b…
+  ✓ 0 "-->\n§99999\n" 1 "iple ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with \"doc\" pairing, strict token grammar, fences/comments/spans modeled) — line 6004: §99999\ncont…
+
+→ bash {"command":"sed -i '' 's/markdown-it'\\'')()/markdown-it'\\'')({html:true})/' docs/audits/probes-r21-c13/harness.cjs do…
+  ✓ 0 "- x <!--\n§99999\n-->\n" render false false exit 1 stderr "contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chain…
+## Findings
+
+None established by the executed probes.
+
+## Coverage and results
+
+All fixtures were made by appending the probe to `docs/11-orchestrator-schema.md`. The differential harness rendered the **full document** with both `commonmark` and `markdown-it` with HTML enabled. Probe files and harnesses are under `docs/audits/probes-r21-c13/`.
+
+1. **PASS: prefix and container checks.** Tried nested list chains at depths three and four, a blockquote comment, a blockquote containing a list, `-\t<!--`, list continuation at columns 4 and 8, and mixed list-marker prefixes. The blockquote cases failed closed with the documented unsupported-container diagnostic. The differential prefix sweep found no visible ref accepted cleanly. For example:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c13/c2.md
+   exit 0; stderr empty
+   ```
+
+   Both renderers hid the ref in the third-level list comment.
+
+2. **PASS: continuation-column and after-closer cases.** Tried `1. item` followed by a comment at column 2; a list item followed by `<!-- a --> b <!-- c`; comments at columns 4 and 8; and a blockquote list item. In the after-closer example, both renderers made the ref visible and the checker reported it:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c13/c10.md
+   exit 1; stderr: ... line 6005: §99999
+   ```
+
+   I did **not** construct the requested case where the second opener after `<!-- a --> b` is itself a block start: the earlier closer and `b` already occupy that line. Thus this probe establishes neither an overstrict finding nor a HIGH exemption error.
+
+3. **PASS: list tracking on marker lines.** Tried `- x <!--`, `-     x <!--`, `-\t<!--`, `- - - - <!--`, and a third-level `- <!--`. The `- x <!--` case was reported; its multiline inline-comment treatment falls under the expressly excluded r21-F1 convention. The spaced-content case was also reported and both renderers showed the ref. The nested block-comment cases were accepted.
+
+4. **PASS: degenerate comments and following openers.** Tested `<!--> x <!--`, plus ordinary same-line closers, multiple closers, a leading `-->`, and an inline opener following a backticked comment. For the requested degenerate case:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c13/c5.md
+   exit 1; stderr: ... line 6004: §99999
+   ```
+
+   Both renderers showed the ref.
+
+5. **PASS: span/comment interplay.** Tried ``a `<!--` b``, ``a ` <!-- ` b``, ``a ``<!--`` b``, an unmatched backtick before an inline opener, a multiline span containing a comment opener, and a span interrupted by a fence. The first four visible-ref cases were reported. The fence case follows the pinned fence-content convention.
+
+6. **PASS: EOF and block-state probes.** Tried setext headings, a YAML-like delimiter sequence, TODO text, a fence inside a comment, a comment inside a fence, an item ending at EOF inside a comment, CRLF in the probe, and indented code followed by a fence. The unclosed list-item comment was rejected:
+
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c13/m12.md
+   exit 1; stderr: ... unclosed <!-- masks the rest of the document from C9
+   ```
+
+   The CRLF probe was rejected by the checker’s explicit LF-only byte contract. No missed unclosed-comment EOF state was established.
+
+7. **PASS: new gate edge cases.** Tried root and list-relative indentation at columns 0, 3, 4, and 8; `2. <!--` after a paragraph; a blockquote list item; and tab-indented list content. The ordered-marker and blockquote results are subject to the conventions/refusals expressly excluded from findings. No new unsafe exemption was established.

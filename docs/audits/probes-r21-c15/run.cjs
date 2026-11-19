@@ -1,0 +1,27 @@
+const fs=require('fs'),cp=require('child_process'); const cm=require('../../../.scratch-r20/ref/node_modules/commonmark'); const md=require('../../../.scratch-r20/ref/node_modules/markdown-it')('commonmark'); const base=fs.readFileSync('docs/11-orchestrator-schema.md','utf8');
+const cases={
+closed:'a `\n<!--\n§99999\n`\n-->\n',
+list1:'- a `\n  <!--\n  §99999\n  `\n  -->\n',
+listdeep:'- a\n  - b `\n    - <!--\n      §99999\n      `\n      -->\n',
+listbetween:'a `\n- item\n  <!--\n  §99999\n  `\n  -->\n',
+ordered:'a `\n2. <!--\n§99999\n`\n-->\n',
+closer:'a `\n<!-- x --> <!--\n§99999\n`\n-->\n',
+reopenspan:'a `\n<!-- x --> `\n§99999\n`\n',
+spaninside:'a `\n<!--\n`\n-->\n§99999\n`\n',
+multi:'a `\n<!--> <!--\n§99999\n`\n-->\n',
+indent:'- a `\n      <!--\n      §99999\n      `\n      -->\n',
+tab:'- a `\n\t<!--\n\t§99999\n\t`\n\t-->\n',
+quote:'> <!--\n> §99999\n> -->\n',
+nested:'- a\n  - b\n    - <!--\n      §99999\n      -->\n',
+marker:'- x <!--\n  §99999\n  -->\n',
+marker2:'-     x <!--\n      §99999\n      -->\n',
+degenerate:'<!--> x <!--\n§99999\n-->\n',
+span1:'a `<!--` b\n§99999\n',span2:'a ` <!-- ` b\n§99999\n',span3:'a ``<!--`` b\n§99999\n',span4:'a ` foo <!--\n§99999\n`\n',
+setext:'a `\n<!--\n§99999\n-->\nheading\n===\n',
+fence:'a `\n```\n§99999\n```\n',
+yaml:'---\nTODO\n---\na `\n<!--\n§99999\n-->\n',
+list4:'  - a `\n    <!--\n    §99999\n    `\n    -->\n',
+list8:'      - a `\n        <!--\n        §99999\n        `\n        -->\n',
+quoteitem:'- a `\n  > <!--\n  > §99999\n  > -->\n  `\n',
+};
+for(const [name,s] of Object.entries(cases)){let f=`docs/audits/probes-r21-c15/${name}.md`;fs.writeFileSync(f,base+'\n\n'+s);let r=cp.spawnSync('node',['scripts/contract-check.mjs',f],{encoding:'utf8'});let html=new cm.HtmlRenderer().render(new cm.Parser().parse(s)); let mh=md.render(s); let visible=h=>h.replace(/<!--[\s\S]*?-->/g,'').includes('§99999');console.log(name, 'exit='+r.status,'ref='+r.stderr.includes('99999'),'cm='+visible(html),'mi='+visible(mh),r.stderr.split('\n').filter(x=>/99999|unclosed|unsupported/.test(x)).join(' | '));}

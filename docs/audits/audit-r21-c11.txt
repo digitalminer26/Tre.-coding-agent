@@ -1,0 +1,71 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c11; sed -n '1,260p' scripts/contract-check.mjs","timeout":120000}
+  ✓ #!/usr/bin/env node // contract-check.mjs — deterministic consistency gate for the G2–G5 contract // (docs/11-orchestrator-schema.md). Built after the v31 audit (option D of the // 2026-11-18 assessm…
+
+→ subtask {"action":"create","items":["Probe comment, container, span, and fence interactions against both renderers","Verify and…
+  ✓ created 2 subtask(s): 1. Probe comment, container, span, and fence interactions against both renderers (queued) 2. Verify and report executed discrepancies (queued) progress: 0/2
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"in-progress"}
+  ✓ 1. Probe comment, container, span, and fence interactions against both renderers → in-progress 1. Probe comment, container, span, and fence interactions against both renderers (in-progress) 2. Verify…
+
+→ bash {"command":"ls .scratch-r20/ref/node_modules/{commonmark,markdown-it} >/dev/null; grep -nE 'atBlockStart|trackList|inCo…
+  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 284: // probe L8_after_closer/H1). The old code set s…
+
+→ bash {"command":"sed -n '280,338p;590,660p;750,790p;1015,1065p' scripts/contract-check.mjs","timeout":120000}
+  ✓ // three SPACE characters before it (CommonMark §4.6: a type-2 opener // interrupts a paragraph at ≤3 indent; 4+/tab indents are paragraph // continuation — ref probe K3_lead4_after_blank/H7_tab_lead…
+
+→ bash {"command":"cat > docs/audits/probes-r21-c11/harness.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process');\n…
+  ✓ q1 "> - a\n> - b\n> - <!--\n> §99999\n> -->" renderVisible false exit 1 stderr "contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 on…
+
+→ bash {"command":"node - <<'EOF'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark'),m=require('./.scratch-r20/ref…
+  ✓ "- x <!--\n §99999\n -->" <ul> <li>x <!-- §99999 --></li> </ul> <ul> <li>x <!-- §99999 --></li> </ul> "<!--> x <!--\n§99999\n-->" <!--> x <!-- <p>§99999 --&gt;</p> <!--> x <!-- <p>§99999 --&gt;</p> "…
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nb=Path('docs/11-orchestrator-schema.md').read_bytes(); d=Path('…
+  ✓ eof exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token gram…
+
+→ bash {"command":"node - <<'EOF'\nconst fs=require('fs'),c=require('./.scratch-r20/ref/node_modules/commonmark'),m=require('.…
+  ✓ multi "<p>a `z</p>\n<pre><code>§99999\n</code></pre>\n<p>`</p>\n" "<p>a `z</p>\n<pre><code>§99999\n</code></pre>\n<p>`</p>\n" codefence "<pre><code>code\n</code></pre>\n<pre><code>§99999\n</code></pr…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Probe comment, container, span, and fence interactions against both renderers → done 1. Probe comment, container, span, and fence interactions against both renderers (done) 2. Verify and report ex…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Verify and report executed discrepancies → done 1. Probe comment, container, span, and fence interactions against both renderers (done) 2. Verify and report executed discrepancies (done) progress:…
+## Findings
+
+No new findings established. The differential harness required both `commonmark` and `markdown-it` and rendered the **full base document plus each probe**. Its initial string-based HTML-comment removal produced false positives for inline comments; inspection of the renderers’ actual HTML did not establish a reportable discrepancy from those cases. Accepted conventions and unsupported-container refusals were excluded.
+
+## Audit questions
+
+1. **PASS: block-start prefix and container checks.** Tried nested list items, a four-level mixed ordered/unordered chain, blockquotes, blockquote/list combinations, and tab-padded markers. The nested-list comment in `q2.md` was masked (exit 0); the blockquote cases were refused as unsupported. I did not establish a non-block position that silently opens masking.
+
+2. **PASS: continuation column and after-closer behavior.** The proposed second opener is **not** a new block start: in both renderers, `<!-- a --> b <!-- c` is one HTML-block line, and the block ends on that line because it contains `-->`. The following ref is visible. The checker reports it:
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c11/q12.md
+   exit 1: ... line 6005: §99999
+   ```
+   `1. item` followed by an indented comment was masked (`q13.md`, exit 0). `> <!--` was refused as unsupported, an accepted fail-closed case.
+
+3. **PASS: marker line with content before the opener.** `- x <!--` followed by an indented ref is an inline HTML comment in both renderers; the checker flagged the ref (`q5.md`, exit 1), consistent with the accepted inline-opener convention. For `-     x <!--`, the first line is item-first indented code and the next ref is visible; the checker flagged it (`q6.md`, exit 1). No mismatch established.
+
+4. **PASS: degenerate closer followed by inline opener.** Both renderers put the ref after `<!--> x <!--` in a visible paragraph. The checker reported it:
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c11/q7.md
+   exit 1: ... line 6004: §99999
+   ```
+
+5. **PASS: span/comment interactions.** The checker flagged the ref for each of backticked `<!--`, space-padded `` ` <!-- ` ``, double-backtick `` ``<!--`` ``, and an unclosed run containing `<!--` (`q8`–`q11`, all exit 1). Also tested a multiline span interrupted by a fence (`multi.md`, exit 0; both renderers place the ref in the fence).
+
+6. **PASS: comment EOF and fence interactions.** Tested setext inside a list, frontmatter-like delimiters, fence inside a comment, comment inside a fence, and an EOF inside a list-owned comment. The EOF case failed closed:
+   ```text
+   node scripts/contract-check.mjs docs/audits/probes-r21-c11/eof.md
+   exit 1: ... unclosed <!-- masks the rest of the document from C9
+   ```
+   Probe-only CRLF also failed closed with the explicit carriage-return diagnostic.
+
+7. **PASS: gate edge cases tested.** Covered root/list indentation, ordered start `2` after a paragraph (`q14.md`, ref flagged), tab-padded list content (`q3.md`, exit 0), and blockquote/list nesting (`q1.md`, unsupported-container refusal). Also tested multiple closers, a leading `-->` without an opener, and indented code interrupted by a fence. A direct ref appended at the base boundary was flagged (`baseboundary.md`, exit 1).
+
+The fixtures and harness are under `docs/audits/probes-r21-c11/`.
