@@ -145,3 +145,23 @@ accepted overstrict divergences (raw HTML block inside a list item).
   frontmatter/fence/EOF, gate edges, escapes, links/autolinks,
   CRLF/EOF refusals): every probe agrees with CommonMark or is the
   documented fail-closed refusal. PASS.
+
+## Final summary (cycles 1–10 complete)
+- Confirmed defects found & fixed in the loop: 1 — cycle 1 F2
+  (ordered-marker start≠1 laundering, fixed in ffc4779 with 4
+  regression tests). The pre-loop HIGH (inline unclosed `<!--`,
+  commit 6cb7ea0) and the r20 test strengthening stand.
+- Cycles 4, 5, 9, 10: clean PASS (9 and 10 differential against
+  commonmark.js + markdown-it).
+- Rejected findings (all overstrict-only, fail-closed direction):
+  c1-F2 / c2-F1 / c7-F1 (code-block/code-span content visibility —
+  pinned convention: rendered `<pre><code>`/`<code>` content is
+  VISIBLE and reported), c3-F1 (blockquote comment unsupported =
+  loud refusal), c6-F1/F2 (inline `<!--` never enters comment state;
+  tab-prefix refusals documented), c8-F1 (lazy-continuation exposes).
+- Accepted divergences (documented, intentional): raw-HTML-block-in-
+  list-item refusals (2), plus the overstrict classes above. Zero
+  laundering (HIGH) findings after the start-of-round fixes.
+- Test gate: `tsc && node --test dist/test/contract-check.test.js`
+  110/110 pass (the .ts file is run compiled — `npx vitest` does not
+  apply here).
