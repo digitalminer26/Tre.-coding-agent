@@ -274,7 +274,56 @@ const scanModel = (text) => {
     if (m && /^[ \t]*$/.test(body.slice(m[0].length))) return { type: 7, needle: null };
     return null;
   };
-  const processText = (ln, st, openSpan, lineBase = 0, collect = false) => {
+  // r21-F1 (audit HIGH): blockOK — whether this call may transition the
+  // document into multiline-comment state. An unclosed "<!--" opens a
+  // type-2 HTML comment ONLY as a block-start: at line lead with at most
+  // three SPACE characters before it (CommonMark §4.6: a type-2 opener
+  // interrupts a paragraph at ≤3 indent; 4+/tab indents are paragraph
+  // continuation — ref probe K3_lead4_after_blank/H7_tab_lead — and a
+  // "<!--" after a comment closer on the same line is inline content,
+  // probe L8_after_closer/H1). The old code set st.inComment for an
+  // unclosed "<!--" ANYWHERE on ANY line, laundering everything after
+  // e.g. "<!-- a --> <!-- x" under a phantom comment. When the opener is
+  // NOT at a block-start its characters mask 1:1 and the scan CONTINUES
+  // (the remainder of the line stays live). The two after-delimiter
+  // call sites (text following "-->" / following a pending-span closer)
+  // pass blockOK=false: their line can no longer be a block-start line.
+  // r21-F1 (audit HIGH): test whether index i (a "<!--" occurrence) sits
+  // at a CommonMark type-2 HTML-BLOCK start: the prefix must consist of
+  // nothing but same-line container openings — a ≤3-space lead, ">"
+  // quote markers (each with ≤3 spaces before it), and list markers
+  // (each followed by ≥1 space/tab and, as trackList requires, with its
+  // content within 4 columns). Anything else in the prefix (a word, a
+  // backtick run, a tab or 4+ space indent at root, ≥4 spaces after a
+  // marker) means the "<!--" is INLINE paragraph text (or code content),
+  // which per both reference implementations never opens a comment block
+  // (probes L4/L5/L7/L8 vs L6/L9).
+  const atBlockStart = (ln, i, base = 0) => {
+    // `base` is the ABSOLUTE content column of the innermost open list
+    // item (0 at root): CommonMark's ≤3-space rule applies AFTER the
+    // container prefix, so a line-leading "<!--" under an item whose
+    // content column is 4 is a type-2 block inside that item (probe D:
+    // "  - x\n    <!--" -> html_block), while 4+ columns past the item
+    // column is continuation text (probe C: "  - b <!--" at column 8
+    // under content 4 -> html_inline, visible).
+    let j = 0;
+    for (;;) {
+      let k = j;
+      while (k < i && ln[k] === " ") k++;
+      if (k - j > (j === 0 ? base + 3 : 3)) return false; // indented past container + 3: not block-start
+      if (k === i) return true;    // prefix exactly consumed at the "<!--"
+      if (ln[k] === ">") { j = k + 1; continue; }
+      // The lookahead (?=\S) is implicit: at "<!--" the character after
+      // the marker gap is always "<". A tab expands to the next stop.
+      const m = ln.slice(k, i).match(/^([-+*]|[0-9]{1,9}[.)])([ \t]+)/);
+      if (!m) return false;
+      let cols = 0;
+      for (const ch of m[2]) cols = ch === "\t" ? cols + (4 - (cols % 4)) : cols + 1;
+      if (cols > 4) return false; // ≥5 cols after marker: content is indented code
+      j = k + m[0].length;
+    }
+  };
+  const processText = (ln, st, openSpan, lineBase = 0, collect = false, blockOK = true, contCol = 0) => {
     // r15c3-F2 (audit HIGH): when collect, span-content ranges (in
     // MASKED coordinates: lineBase + local index) are pushed to
     // lineRanges. Closed spans cover delimiters through content; an
@@ -363,7 +412,23 @@ const scanModel = (text) => {
         // safe direction, consistent with closed comments since r5).
         const c = ln.indexOf("-->", i + 2);
         if (c !== -1) { res += " ".repeat(c + 3 - i); i = c + 3; continue; }
-        st.inComment = true; res += " ".repeat(ln.length - i); i = ln.length; break;
+        // r21-F1 (audit HIGH): an UNCLOSED "<!--" enters multiline
+        // comment state ONLY at a type-2 HTML-block start (CommonMark
+        // §4.6: "<!--" at the block-start of the line — at most three
+        // leading spaces, or directly after same-line container markers
+        // ">"/list markers — where a type-2 block may interrupt). An
+        // INLINE unclosed opener is literal paragraph text: both
+        // reference implementations (commonmark.js + markdown-it,
+        // probes A/C/D/H1/H5/H8/H9/H10/H11/K3/L5/L7/L8) render
+        // everything after it as visible prose, while the old
+        // unconditional st.inComment laundered the rest of the
+        // document under a phantom comment ("para <!-- x\n\n§ref" —
+        // the §ref vanished). Not-a-block-start: the four opener
+        // characters mask 1:1 and the scan CONTINUES (the remainder of
+        // the line and every following line stay live — expose is the
+        // safe direction, same rule as the closed-comment branch).
+        if (blockOK && atBlockStart(ln, i, contCol)) { st.inComment = true; res += " ".repeat(ln.length - i); i = ln.length; break; }
+        res += " ".repeat(4); i += 4; continue;
       }
       res += ln[i]; i++;
     }
@@ -695,7 +760,7 @@ const scanModel = (text) => {
       inComment = false;
       const st = {};
       curRanges = [];
-      let out = processText(ln.slice(c + 3), st, canOpenSpan(ln), c + 3, true);
+      let out = processText(ln.slice(c + 3), st, canOpenSpan(ln), c + 3, true, false); // r21-F1: after a comment closer, block-start is impossible
       // r15c3-F1 (audit HIGH): NO backtick-to-space replace — same
       // laundering as the main path: spaces at the opener hole re-join
       // text across the delimiter and fabricate external adjacency.
@@ -923,7 +988,7 @@ const scanModel = (text) => {
         // masked; the prefix is span content and copied verbatim (it
         // never reaches processText, so a `<!--` inside stays literal).
         curRanges = [[0, c + runLen + 1]];
-        pushLine(" " + ln.slice(0, c) + " ".repeat(runLen) + processText(ln.slice(c + runLen), st, canOpenSpan(ln), c + runLen + 1, true));
+        pushLine(" " + ln.slice(0, c) + " ".repeat(runLen) + processText(ln.slice(c + runLen), st, canOpenSpan(ln), c + runLen + 1, true, false)); // r21-F1: span content is paragraph text — no block-start after the closer
         if (st.inComment) inComment = true;
         if (st.inComment) commentListDepth = listStack.length; // r14-F1
         if (st.spanRun) spanRun = st.spanRun;
@@ -955,7 +1020,7 @@ const scanModel = (text) => {
     if (!isBlank) trackList(ln); // blank lines preserve list continuation
     const st = {};
     curRanges = [];
-    let out = processText(ln, st, canOpenSpan(ln), 0, true);
+    let out = processText(ln, st, canOpenSpan(ln), 0, true, true, listStack.length ? listStack[listStack.length - 1] : 0);
     if (st.spanRun) {
       // r6-F2: an unclosed run opens a multi-line span. r15c3 (audit
       // HIGH): NO blanket backtick-to-space replace here anymore — the

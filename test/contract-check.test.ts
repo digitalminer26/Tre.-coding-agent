@@ -608,17 +608,22 @@ test("R8-D1 blockquote fence closes only at its own depth", () => {
 // operate inside code spans: "`a \`" CLOSES the span at the escaped
 // backtick. The old rule (an escaped backtick cannot close a span) let
 // "`a \` <!--" stay open and hide every following line under a phantom
-// unclosed span; it is REVERSED: the escaped run closes the span, the
-// "<!--" after it opens a REAL comment, and the ref inside the comment
-// is masked (exit 0, ref never reported).
-test("R8-FB escaped ticks close a span (CommonMark §6.1); ref lands in a real comment", () => {
+// unclosed span; it is REVERSED: the escaped run closes the span.
+// r21-F1 (audit HIGH, SECOND reversal): the "<!--" after the closed
+// span is INLINE paragraph text — not at a type-2 block start — so it
+// NEVER opens a multiline comment (both reference implementations
+// render it as html_inline literal text; commonmark.js shows
+// paragraph[text, code, text, html_inline]). The old expectation
+// ("ref lands in a real comment", masked) laundered live refs and is
+// REVERSED: the ref below is live and must be reported.
+test("R8-FB escaped ticks close a span (CommonMark §6.1); inline unclosed <!-- never hides following lines", () => {
   const doc = base + "\npara `a \\` <!--\n\u00a7999 in comment\n--> `\n";
   const f = path.join(tmp, "r16-fb-escape.md");
   fs.writeFileSync(f, doc);
   const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
-  assert.equal(r.status, 0, `expected masked fixture: ${r.stderr}`);
-  assert.ok(!r.stderr.includes("\u00a7999"), "F2: §999 inside the comment must stay masked");
-  assert.ok(!r.stderr.includes("unclosed"), "F2: no phantom unclosed-span issue may remain");
+  assert.equal(r.status, 1, "r21: §999 after an INLINE unclosed opener must be reported as unresolved");
+  assert.ok(r.stderr.includes("\u00a7999"), "r21-F1: §999 must stay LIVE (inline unclosed <!-- is literal text)");
+  assert.ok(!r.stderr.includes("unclosed"), "r21: no phantom unclosed-span issue may remain");
 });
 
 // E1/E2: NBSP and form-feed are NOT blank lines (CommonMark: blank =
@@ -828,8 +833,13 @@ test("r14-F1: comment opened in a list dies at the list boundary — refs below 
   // Nested item: the comment belongs to the DEEPER item; a line at the
   // outer item's column ends the inner list -> comment dies, ref live.
   runProbe("r14-nested-pop", base + "\n- a\n  - b <!--\n  §99999 live\n  -->\n", ["§99999"]);
-  // Comment still inside the nested item: masked.
-  runProbe("r14-nested-still-in", base + "\n- a\n  - b <!--\n    §99999 masked\n    -->\n", false);
+  // r21-F1 (audit HIGH) REVERSAL of the old "still-in masked" control:
+  // "- b <!--" sits at column 8 — 4 past the inner item's content
+  // column 4 — so it is INLINE text of the item's paragraph (both
+  // commonmark.js and markdown-it render "b <!--\n§99999\n-->" as
+  // html_inline inside the paragraph, ref visible). An inline unclosed
+  // opener never opens a multiline comment: the ref is LIVE.
+  runProbe("r14-nested-still-in", base + "\n- a\n  - b <!--\n    §99999 masked\n    -->\n", ["§99999"]);
   // Comment closing BEFORE the list ends: nothing exposed.
   runProbe("r14-comment-closes-in-list", base + "\n- b <!-- §99999 masked -->\n", false);
   // Top-level comment unchanged (mask everything to -->).
@@ -1239,7 +1249,48 @@ test("r20-F1d a real comment opened AFTER a degenerate one still masks (EOF fail
   const r = spawnSync(process.execPath, [SCRIPT, f], { encoding: "utf8" });
   assert.equal(r.status, 1);
   assert.ok(r.stderr.includes("unclosed"), r.stderr);
-  assert.ok(!/line \d+.*\u00a7999/.test(r.stderr.replace(/resolves[^\n]*/g, "")), "masked ref must not be cited live:\n" + r.stderr);
+  // r21 (audit MEDIUM): the OLD assertion stripped "resolves…" from the
+  // C9 FAIL line — the exact place a leaked citation appears — making it
+  // unable to ever fire. Assert DIRECTLY that the masked ref is never
+  // cited: a leak would append "\u2014 line N: \u00a7999" to the C9 line.
+  assert.ok(!/\u2014 line \d+: \u00a7999/.test(r.stderr), "masked ref must not be cited live:\n" + r.stderr);
+});
+
+// r21-F1 (audit HIGH) battery: an INLINE unclosed "<!--" is literal
+// paragraph text — it must NEVER enter multiline comment state. The
+// laundering repro the auditor filed: "para <!-- x\n\n\u00a7ref" used to
+// vanish the ref under a phantom comment; both reference implementations
+// (commonmark.js and markdown-it) render everything after it visible.
+test("r21-F1 inline unclosed <!-- never launders following lines (same-line repro)", () => {
+  // THE repro: ref on the SAME line, after the inline opener.
+  runProbe("r21-f1-sameline", base + "\npara <!-- \u00a799999 tail\n", ["\u00a799999"]);
+  // THE audit repro: ref on a later line after an inline opener + blank.
+  runProbe("r21-f1-nextline", base + "\npara x <!--\n\n\u00a799999 after\n", ["\u00a799999"]);
+  // A SECOND opener after a same-line closer is inline too (the closer
+  // consumed the block-start position — probe L8/H1).
+  runProbe("r21-f1-reopen-after-closer", base + "\n<!-- a --> b <!-- c\n\u00a799999 live\n", ["\u00a799999"]);
+  // 4-space indent at root: indented-code position, never a type-2 block.
+  runProbe("r21-f1-indent4", base + "\n\n\u00a799999 para\n\n    <!-- inline\n    tail \u00a799998\n", ["\u00a799999"]);
+  // Tab-indented opener: same story (never a block-start).
+  runProbe("r21-f1-tab", base + "\n\n\u00a799999 para\n\n\t<!-- inline\n\ttail \u00a799998\n", ["\u00a799999"]);
+  // CONTROLS (must stay MASKED — block-start openers):
+  // root line-leading unclosed opener: masks, EOF fail-closed.
+  const eof = base + "\n<!--\n\u00a799999 masked\n";
+  const fe = path.join(tmp, "r21-f1-eof-mask.md");
+  fs.writeFileSync(fe, eof);
+  const re = spawnSync(process.execPath, [SCRIPT, fe], { encoding: "utf8" });
+  assert.equal(re.status, 1, "unclosed block comment must fail closed");
+  assert.ok(re.stderr.includes("unclosed"), re.stderr);
+  assert.ok(!/\u2014 line \d+: \u00a799999/.test(re.stderr), "masked ref must not be cited live:\n" + re.stderr);
+  // block comment fully closed: masked, exit 0.
+  runProbe("r21-f1-closed-mask", base + "\n<!--\n\u00a799999 masked\n-->\n", false);
+  // lead-3 root opener is still a type-2 block: masks.
+  runProbe("r21-f1-lead3-mask", base + "\n   <!--\n   \u00a799999 masked\n   -->\n", false);
+  // list context: opener AT the item content column is a block (probe
+  // B/D): masks. Opener 4+ past the content column is inline text
+  // (probe C): live.
+  runProbe("r21-f1-list-block-mask", base + "\n- item\n  <!--\n  \u00a799999 masked\n  -->\n", false);
+  runProbe("r21-f1-list-inline-live", base + "\n- a\n  - b <!--\n    \u00a799999 live\n    -->\n", ["\u00a799999"]);
 });
 
 test("r20-F2 blockquote guard: complete comments no longer refuse, open comments still do", () => {
