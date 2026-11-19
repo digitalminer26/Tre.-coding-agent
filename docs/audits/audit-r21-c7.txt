@@ -1,0 +1,76 @@
+
+→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
+  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+
+→ subtask {"action":"create","items":["Inspect checker and design repro probes","Execute probes and report findings and coverage"…
+  ✓ created 2 subtask(s): 1. Inspect checker and design repro probes (queued) 2. Execute probes and report findings and coverage (queued) progress: 0/2
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"in-progress"}
+  ✓ 1. Inspect checker and design repro probes → in-progress 1. Inspect checker and design repro probes (in-progress) 2. Execute probes and report findings and coverage (queued) progress: 0/2
+
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c7; cat scripts/contract-check.mjs","timeout":120000}
+  ✓ [truncated: showing last 855 of 1425 lines (51174 of 85903 bytes); full output saved to /var/folders/8l/93gb73md5wz7jfm22_f85w_40000gn/T/coding-agent/bash-97f05490-8f41-4c8f-86f9-ce6f0585d3fe.log] //…
+
+→ bash {"command":"sed -n '110,390p' scripts/contract-check.mjs; node -e \"for(const x of ['commonmark','markdown-it'])try{con…
+  ✓ // Round-7: ANY CR (lone OR CRLF) FAILS — the line model is \n-only and // a CR riding inside masked/live text breaks the byte-exact contract. // A pending multi-line span is INTERRUPTED by a heading…
+
+→ subtask {"action":"mark","items":[],"id":1,"status":"done"}
+  ✓ 1. Inspect checker and design repro probes → done 1. Inspect checker and design repro probes (done) 2. Execute probes and report findings and coverage (queued) progress: 1/2
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"in-progress"}
+  ✓ 2. Execute probes and report findings and coverage → in-progress 1. Inspect checker and design repro probes (done) 2. Execute probes and report findings and coverage (in-progress) progress: 1/2
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nimport subprocess\np=Path('docs/audits/probes-r21-c7'); base=Pa…
+  ✓ inline 1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict token gramma…
+
+→ bash {"command":"python3 - <<'PY'\nfor x in ['commonmark','markdown_it','mistune']:\n try:\n m=__import__(x); print(x,getatt…
+  ✓ @alcalzone @types ansi-escapes ansi-regex ansi-styles auto-bind chalk cli-boxes cli-cursor cli-truncate exit:1 [stderr] contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle i…
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nimport subprocess\np=Path('docs/audits/probes-r21-c7'); base=Pa…
+  ✓ block0 exit 0 stderr: (empty) block3 exit 1 stderr: contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §…
+
+→ bash {"command":"tail -n 18 docs/11-orchestrator-schema.md; node scripts/contract-check.mjs docs/audits/probes-r21-c7/block3…
+  ✓ per-section disposition: - **Audit order (suggested):** G1 amendment (§14.10.1 `scopeRefs`) → G2 (§14.11, supplies the digest ruling G1 deferred) → G3 (§14.12, consumes G1+G2 states) → G4 (§14.13, in…
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nimport subprocess\np=Path('docs/audits/probes-r21-c7');b=Path('…
+  ✓ b3head 0 [] b3twosp 0 [] codehead 1 ['contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc"…
+
+→ subtask {"action":"mark","items":[],"id":2,"status":"done"}
+  ✓ 2. Execute probes and report findings and coverage → done 1. Inspect checker and design repro probes (done) 2. Execute probes and report findings and coverage (done) progress: 2/2
+## Finding
+
+1. **LOW — Indented code on a list-marker line is not tracked**
+
+   Appended to the valid base document:
+
+   ```markdown
+   # Probe
+
+   -     x
+         §99999
+         y
+   ```
+
+   **Expected:** The five spaces after `-` make the item’s content column 2. The four remaining spaces start an indented code block; the following six-space lines continue it. `§99999` is code and should be exempt.
+
+   **Executed repro:**
+
+   ```text
+   $ node scripts/contract-check.mjs docs/audits/probes-r21-c7/codehead.md
+   exit 1
+   stderr: contract-check: FAIL C9 ... — line 6006: §99999
+   ```
+
+   **Minimal fix:** When a list marker has more than four columns of padding and its first content begins an indented code block, initialize the indented-code state on that marker line, with the continuation floor at the item content column plus four.
+
+## Requested gate and state checks
+
+- **PASS: prefix and ownership probes.** Tried nested list markers (`nested`), blockquote opener and exit (`quote`), blockquote list item (`blockquoteitem`), tab-padded marker (`tabsmarker`), and tab-indented continuation (`tab`). Visible refs were reported; the blockquote cases also fail closed as unsupported. These probes did not establish that all possible marker prefixes are safe.
+- **PASS: continuation-column and closer probes.** Tried base columns 0, 3, 4 and 8 (`block0`, `b3head`, `block4`, `block8`), ordered-list continuation (`ordered`), tab continuation (`tab`), and `  - <!-- a --> b <!-- c` (`aftercloser`). The last reports the ref: the second opener follows text on the same line and is inline, not a new block start. Thus that particular input does **not** demonstrate an overstrict or HIGH error.
+- **PASS: marker-line interaction.** `- x <!--` reports the following visible ref. `-     x <!--` exposes the code-block tracking defect above rather than a false exemption.
+- **PASS: degenerate opener.** `<!--> x <!--\n§99999\n-->` reports `§99999` (`degenerate`, exit 1).
+- **PASS: span/comment interplay.** Tried ordinary, space-padded and double-backtick spans (`span`, `spanpad`, `span2`), an unclosed run followed by a blank (`unclosedspan`), multiline resume (`spanresume`), and fence interruption (`spanfence`). Visible refs were reported.
+- **PASS: fences and HTML blocks.** Tried tilde fences, longer fences, info strings, backtick fences, CDATA, processing instructions, and type-6/type-7 blocks (`tilde`, `longfence`, `info`, `fenceback`, `fencelong`, `cdata`, `pi`, `type6`, `type7`). Refs after the blocks were reported; the ref inside `fencelong` was exempt.
+- **PASS: other boundaries.** Tried setext and list-setext (`setext`, `setextlist`), frontmatter-like text (`front`), escaped openers (`escape`, `backslash2`), link/image/autolink forms (`link`, `image`, `autolink`), CRLF (`crlf`, refused), and an unclosed comment at EOF (`eof`, refused). No missed EOF-state diagnostic was observed.
+
+All fixtures are under `docs/audits/probes-r21-c7/`. These are probe results, not an exhaustive proof; no independent CommonMark renderer was available in this workspace for additional differential testing.

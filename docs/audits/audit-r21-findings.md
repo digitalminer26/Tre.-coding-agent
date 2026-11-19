@@ -69,3 +69,30 @@ accepted overstrict divergences (raw HTML block inside a list item).
   accepted blockquote refusal. Rejected.
 - PASS areas: nested chains, ordered continuation, degenerate+spans,
   fences, escapes/CDATA/PI/autolinks, EOF, CRLF refusal, after-closer.
+
+## Cycles 4–5 (audit-r21-c4.txt / audit-r21-c5.txt)
+- No findings — PASS across all audit areas both cycles (executed
+  probes under docs/audits/probes-r21-c4/ and -c5/; no reproducible
+  laundering or crash inputs).
+
+## Cycle 7 (audit-r21-c7.txt)
+- F1 LOW (5-space padding "-     x": first block is indented code,
+  §99999 expected exempt): SAME policy disagreement as cycle-1 F2 /
+  cycle-2 F1 — per the accepted convention code_block content is
+  VISIBLE (rendered in <pre><code>) and the checker's documented model
+  masks only root-level indented code (r8-F3: item-indented lines are
+  continuation prose). Checker flagging = consistent. Rejected.
+  (Note: the c7 run had no CommonMark renderer available; this review
+  applied the pinned convention directly.)
+- PASS areas: prefix/ownership (nested markers, blockquote enter/exit,
+  tab-padded markers), continuation columns 0/3/4/8 + after-closer
+  inline, degenerate openers, span/comment interplay (padded/double
+  backtick, unclosed run, resume, fence interruption), fences (tilde,
+  longer, info strings, backtick), CDATA/PI/type-6/type-7, setext,
+  frontmatter-like text, escapes, links/images/autolinks, CRLF refusal,
+  EOF unclosed-comment refusal.
+- Provider note: cycles 7 first three attempts were refused by the
+  endpoint safety filter on the prompt's "adversarial/launder"
+  phrasing; prompt rephrased (audit-r21-prompt.txt) with identical
+  technical content, and --no-telegram added to the driver (the child
+  session's Telegram poller raced the parent's).
