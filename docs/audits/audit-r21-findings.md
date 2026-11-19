@@ -113,3 +113,10 @@ accepted overstrict divergences (raw HTML block inside a list item).
   exposes).
 - Provider note: 6 attempts (transient "provider error" aborts mid-run
   at ~4-7 min); attempt 7 completed clean.
+
+## Cycle 9 (audit-r21-c9.txt)
+- No findings — differential probes (checker vs commonmark.js at
+  .scratch-r20/ref/node_modules, both renderers) across all 7 audit
+  areas: every visible ref reported, every masked ref exempt, all
+  fail-closed refusals (CRLF, EOF unclosed comment, blockquote
+  container) verified. PASS.
