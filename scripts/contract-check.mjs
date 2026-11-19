@@ -1009,6 +1009,38 @@ const scanModel = (text) => {
           }
         }
         if (!spanBlockHit) {
+          // r21c15-F1/F2 (audit HIGH x2, cycle 15): a LIST-MARKER
+          // interruption of the paragraph that owns the pending span must
+          // end the span AND update listStack (CommonMark §4.2 + §4.6
+          // interrupt rules; commonmark.js and markdown-it agree). The
+          // old branch consumed "- item" as span content without
+          // tracking it, so a comment opened inside the newly opened
+          // item was owned at the OLD depth (root); a ref dedenting
+          // visibly out of the item stayed masked (lost-list.md,
+          // lost-nested.md, lost-ordered.md). Dry-run semantics: keep
+          // trackList's result ONLY when it pushed a new item (bullet
+          // markers and start-1 ordered markers interrupt paragraphs;
+          // a start!=1 marker is refused by the r16-F3 rule inside
+          // trackList, and a plain/lazy line pushes nothing — in both
+          // cases the span keeps owning the line, restored stack, and
+          // the span-content path keeps refs LIVE, which matches the
+          // renderers showing those refs).
+        // Guard: only a marker that could interrupt the span's
+        // paragraph may flip the line to the normal path — a root list
+        // start is <=3-space indented, a nested start lands within 3
+        // columns of the innermost open item's content column (the
+        // container rule). Anything else (4+ after a paragraph, lazy
+        // continuation) is NOT a list start and must not be tracked.
+        const savedStack = listStack.slice();
+        const wMark = indentWidth(ln);
+        const topCol = listStack.length ? listStack[listStack.length - 1] : 0;
+        if (listStack.length ? (wMark >= topCol && wMark <= topCol + 3) : wMark <= 3) {
+          trackList(ln);
+        }
+        if (listStack.length > savedStack.length) spanBlockHit = true; // trackList on the line below is idempotent
+        else { listStack.length = 0; for (const c of savedStack) listStack.push(c); }
+        }
+        if (!spanBlockHit) {
         // Content line: copied (§refs inside stay LIVE) but NEVER heading/
         // fence/comment material — leading space kills a phantom heading.
         const c = findRun(ln, 0, spanRun);

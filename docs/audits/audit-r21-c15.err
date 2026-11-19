@@ -1,3 +1,4 @@
+resumed /Users/xilcilus/.tre/audits/r21-c15-sess.jsonl: 6 context message(s)
 Getting started:
   ChatGPT login: tre. login chatgpt (opens a browser; tokens are stored in ~/.tre/chatgpt-auth.json)
   tre. can work with your configured models, inspect and edit project files, run commands, and use available skills.
@@ -21,5 +22,3 @@ Behavior:
     · tre-release — Cut and publish a release of the Tre.-coding-agent repo — ve…
   blocked:  system-level sensitive reads + destructive commands (across the board)
   optional: --ask (prompt per call) · --no-approve (fail-closed) · --no-sandbox · --extra-root <dir> (one-shot)
-
-error: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. If you’re doing authorized security work that requires more cyber permissive safeguards, apply for Daybreak access via https://platform.openai.com/settings/organization/status-and-access before retrying.

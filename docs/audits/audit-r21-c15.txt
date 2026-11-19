@@ -1,21 +1,90 @@
 
-→ bash {"command":"[ ! -f ~/.tre/tokenomics.json ] || python3 ~/.tre/agent/skills/tokenomics-reporter/reporter.py || true; mkd…
-  ✗ Tool "bash" was blocked: access to system-level sensitive material is BLOCKED in every mode (~/.tre/tokenomics.json) — it resolves outside the workspace; only workspace-scoped sensitive files may be …
+→ bash {"command":"grep -nE 'atBlockStart|spanRun|trackList|processText|lineBase' scripts/contract-check.mjs; ls node_modules/…
+  ✓ 149: let spanRun = 0; // r6-F2: open multi-line inline span (required closer run) 295: // (each followed by ≥1 space/tab and, as trackList requires, with its 301: const atBlockStart = (ln, i, base = …
 
-→ subtask {"action":"create","items":["Inspect checker and construct span gate and standard battery probes","Execute probes and r…
-  ✓ created 2 subtask(s): 1. Inspect checker and construct span gate and standard battery probes (queued) 2. Execute probes and report verified findings (queued) progress: 0/2
+→ bash {"command":"sed -n '285,338p;590,660p;940,1095p' scripts/contract-check.mjs; cat package.json | grep -E 'markdown|commo…
+  ✗ exit code 1 // unclosed "<!--" ANYWHERE on ANY line, laundering everything after // e.g. "<!-- a --> <!-- x" under a phantom comment. When the opener is // NOT at a block-start its characters mask 1:…
 
-→ bash {"command":"mkdir -p docs/audits/probes-r21-c15; grep -nE 'atBlockStart|spanRun|trackList|inComment' scripts/contract-c…
-  ✓ 148: let inComment = false, inFence = false, fenceChar = "", fenceLen = 0, fenceIndent = 0, fenceBq = false, fenceBqDepth = 0, fenceListCol = -1; 149: let spanRun = 0; // r6-F2: open multi-line inlin…
+→ bash {"command":"mkdir -p docs/audits/probes-r21-c15; node -e \"for(const x of ['commonmark','markdown-it'])try{console.log(…
+  ✓ [('mistune', False), ('markdown_it', False), ('commonmark', False)] closed.md closer.md degenerate.md fence.md indent.md list1.md list4.md list8.md listbetween.md listdeep.md (dependency order), each…
 
-→ bash {"command":"node -e \"for(const x of ['commonmark','markdown-it'])try{console.log(x,require.resolve(x))}catch{}\"; tail…
-  ✓ G2↔G3 verdict), and the verdict table (G3↔G4 precedence) reopen the consuming sections for dependency-impact review before ratification. - **Implementation order (after all four ratified):** G1 → G5 …
+→ bash {"command":"for f in docs/audits/probes-r21-c15/*.md; do echo ==== $f; tail -10 \"$f\"; done | tail -300","timeout":120}
+  ✓ ==== docs/audits/probes-r21-c15/closed.md - **Open decisions summary:** O-G2-1…7, O-G3-1…2, O-G4-1…4, O-G5-1…3 (above; v4-corrected enumeration — v2 text predated O-G2-6/7). All are drafted with a de…
 
-→ bash {"command":"python3 - <<'PY'\nfor m in ['commonmark','markdown_it','mistune']:\n try:\n x=__import__(m); print(m,x.__fi…
-  ✓ /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/markdown-it/package.json /Users/xilcilus/projects/Tre.-coding-agent/.scratch-r20/ref/node_modules/commonmark/package.json
+→ bash {"command":"for f in docs/audits/probes-r21-c15/*.md; do node scripts/contract-check.mjs \"$f\" > /dev/null 2> docs/aud…
+  ✓ closed.md exit=0 closer.md exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pai…
 
-→ bash {"command":"cat > docs/audits/probes-r21-c15/run.cjs <<'EOF'\nconst fs=require('fs'),cp=require('child_process'); const…
-  ✓ closed exit=0 ref=false cm=false mi=true list1 exit=0 ref=false cm=false mi=true listdeep exit=0 ref=false cm=false mi=true listbetween exit=0 ref=false cm=false mi=true ordered exit=1 ref=true cm=tr…
+→ bash {"command":"p=docs/audits/probes-r21-c15/lost-list.md; cat docs/11-orchestrator-schema.md > \"$p\"; printf '\\n\\na `\\…
+  ✓ exit=0
 
-→ bash {"command":"node - <<'JS'\nconst c=require('./.scratch-r20/ref/node_modules/commonmark');let m=require('./.scratch-r20/…
-  ✓ "- x <!--\n §99999\n -->\n" <ul> <li>x <!-- §99999 --></li> </ul> <ul> <li>x <!-- §99999 --></li> </ul> "- a `\n\t<!--\n\t§99999\n\t`\n\t-->\n" <ul> <li>a ` <!-- §99999 ` --> </li> </ul> <ul> <li>a `…
+→ bash {"command":"find /Users/xilcilus/projects -path '*/node_modules/commonmark/package.json' -o -path '*/node_modules/markd…
+  ✓ (no output)
+
+→ bash {"command":"which ruby; ruby -e 'begin; require \"commonmarker\"; puts \"yes\"; rescue LoadError; end'; ls /usr/local/b…
+  ✓ /usr/bin/ruby } // r7-F3: a blockquote fence cannot outlive its blockquote — a line // WITHOUT the ">" prefix ends both. The line that ended the // blockquote is LIVE and falls through for normal pro…
+
+→ bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\np=Path('docs/audits/probes-r21-c15'); base=Path('docs/11-orches…
+  ✓ lost-deep exit=1 contract-check: FAIL C9 every body §ref resolves (headings, real §0 principle ids {1,2,3,4,5,6,7}, ledger rows in §1 only, external chains docs/N §ref with "doc" pairing, strict toke…
+## 1. HIGH — list opened during a pending span is not tracked
+
+**Probe appended to the valid base document:**
+
+```markdown
+a `
+- item
+  <!--
+§99999
+-->
+`
+```
+
+The list marker interrupts the first paragraph. The comment opens inside the list item, but the unindented `§99999` leaves that item and is visible CommonMark text. It must be flagged.
+
+**Executed repro:**
+
+```text
+$ node scripts/contract-check.mjs docs/audits/probes-r21-c15/lost-list.md
+exit 0
+stderr: empty
+```
+
+The pending-span branch consumes `- item` without updating `listStack`. Consequently, the comment is recorded as root-owned rather than list-owned, and the dedented visible ref is masked. The same result occurred with `1. item` in `lost-ordered.md`.
+
+**Minimal fix:** Process container-opening and paragraph-interruption transitions before treating a line as pending-span content. In particular, terminate the old span and update the list stack when a list marker interrupts its paragraph; then record the comment’s actual owning list depth.
+
+## 2. HIGH — nested list opened during a pending span loses comment ownership
+
+**Probe:**
+
+```markdown
+- outer
+  a `
+  - item
+    <!--
+  §99999
+  -->
+  `
+```
+
+The nested list interrupts the paragraph. The comment belongs to the nested item; the ref dedents out of that item and is visible in the outer item.
+
+**Executed repro:**
+
+```text
+$ node scripts/contract-check.mjs docs/audits/probes-r21-c15/lost-nested.md
+exit 0
+stderr: empty
+```
+
+This is the same missed-transition defect as finding 1, but demonstrates that retaining an *existing* outer list stack is insufficient: the newly opened inner item must also be recorded. The fix is the same.
+
+## Battery and verification results
+
+- **c14-F1 confirmed closed:** `closed.md` (`a \`` followed by a block comment containing the ref and a backtick) exited 0. An unclosed variant, `unclosed.md`, exited 1 with `unclosed <!-- masks the rest of the document from C9`.
+- **PASS: ordinary prefix and marker probes**, apart from the findings above. Tried `nested.md`, `marker.md`, `marker2.md`, `tabmarker.md`, and `quote.md`. The marker-content refs were flagged; the nested block comment was masked; the quote case produced the accepted unsupported-context refusal.
+- **PASS: closer and multiple-opener handling.** Tried `closer.md`, `multi.md`, `firstinline.md`, `degenerate.md`, and `aftercloser.md`; each flagged `§99999`. In `aftercloser.md`, the second opener follows text on the same line and is not a block start, even inside the list; keeping the ref live is correct, not a HIGH exemption error.
+- **PASS: span interactions**, excluding the list-transition defect above. Tried `span1.md`, `span2.md`, `span3.md`, `span4.md`, `spaninside.md`, and `reopenspan.md`; their visible refs were flagged.
+- **PASS: block-state and indentation probes**, subject to the pinned conventions. Tried `fence.md`, `setext.md`, `yaml.md`, `indent.md`, and `tab.md`; the first three exited 0, and the latter two flagged the ref.
+- **List-column and gate probes:** `list1.md`, `list4.md`, `list8.md`, and `listdeep.md` exited 0 for refs inside comments; `ordered.md` flagged the ref; `quoteitem.md` and `tab.md` flagged under the accepted fail-closed conventions. `listbetween.md` exited 0, but did not test dedent out of the newly opened item; the additional `lost-list.md` probe exposed finding 1.
+
+The reference renderer packages were not available in this environment, so I did not independently execute commonmark.js and markdown-it; the rendering expectations above follow the CommonMark container and block-interruption rules.

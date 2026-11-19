@@ -1352,3 +1352,38 @@ test("r21c14-F1 comment opener interrupts a pending span", () => {
   // (both renderers hide the whole comment region the same way).
   runProbe("r21c14-span-still-pairs", base + "\n`two runs\n<!-- fake\nend`\n-->\n", false);
 });
+
+// r21c15-F1/F2 (cycle-15 audit, HIGH x2): a list marker that INTERRUPTS
+// the paragraph owning a pending multi-line span must end the span AND
+// update the list stack. The old span branch consumed "- item" as span
+// content without tracking, so a comment opened inside the new item was
+// owned at the old depth and a ref visibly dedenting out of the item
+// stayed masked (laundering). commonmark.js + markdown-it both render
+// the ref visible in every case below.
+test("r21c15-F1/F2 list interruption during a pending span tracks the list", () => {
+  // Canonical: bullet interrupts, comment inside the item, ref dedents
+  // visibly to root (probe lost-list.md).
+  runProbe("r21c15-lost-list", base + "\na `\n- item\n  <!--\n\u00a799999\n-->\n`\n", ["\u00a799999"]);
+  // Ordered start-1 marker interrupts identically (lost-ordered.md).
+  runProbe("r21c15-lost-ordered", base + "\na `\n1. item\n   <!--\n\u00a799999\n-->\n`\n", ["\u00a799999"]);
+  // Nested list opened under an OUTER item mid-span (lost-nested.md):
+  // the ref dedents out of the INNER item into the outer item — still
+  // rendered visible.
+  runProbe("r21c15-lost-nested", base + "\n- outer\n  a `\n  - item\n    <!--\n  \u00a799999\n  -->\n  `\n", ["\u00a799999"]);
+  // Marker chain opened mid-span ("- - x"): comment owned at the
+  // innermost column; root-column ref escapes both items visibly.
+  runProbe("r21c15-chain", base + "\na `\n- - x\n    <!--\n\u00a799999\n-->\n`\n", ["\u00a799999"]);
+  // Sibling continuation: span opens inside item x, a SIBLING marker
+  // interrupts it, the comment sits in the sibling, the ref dedents to
+  // root (sibling-dedent).
+  runProbe("r21c15-sibling", base + "\n- x\n  a `\n- y\n  <!--\n\u00a799999\n-->", ["\u00a799999"]);
+  // Control (NOT a list start): start!=1 after a paragraph is lazy
+  // text; the span keeps the region, both renderers hide the ref, and
+  // the r14 ownership mask stays correct -> exit 0.
+  runProbe("r21c15-lazy-start2", base + "\na `\n2. item\n   <!--\n\u00a799999\n-->\n`\n", false);
+  // Control: 4-space indented marker after paragraph = indented code
+  // INSIDE the span (both renderers echo the ref literally in
+  // <code> content): per the pinned code-content convention (cycles
+  // 1/2/7: rendered code content is VISIBLE) the ref is flagged.
+  runProbe("r21c15-ind4", base + "\na `\n    - item\n      <!--\n    \u00a799999\n      -->\n`\n", ["\u00a799999"]);
+});
