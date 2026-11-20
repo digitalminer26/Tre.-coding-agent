@@ -1310,6 +1310,9 @@ const allow = new Set([
   // record kinds described in prose (declared by field-shape, not "kind":jsonc):
   "history-integrity-fault", "history-integrity-disposition", "residual-unit-release",
   "channel-open", "evidence-invalidation", "queue-receipt",
+  // G1 §14.10 owner-act op + refusal class (round-4; backticked in the
+  // §14.12.2 finalization table rows since the v9 fold):
+  "owner-filing-draft-drift", "filing-drift-resolution",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and
