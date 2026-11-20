@@ -186,6 +186,24 @@ else
   CC_STATUS=0
 fi
 
+# Check 9 — G1 NDR register self-check (Plan B, v22): citation integrity,
+#    no duplicate ids, §14.12.2 B/O cell budget; informational when the doc
+#    is absent.
+if [ -f "$ROOT/docs/11-orchestrator-schema.md" ]; then
+  NDR_OUT=$(mktemp)
+  node "$ROOT/scripts/g1-ndr-selfcheck.mjs" "$ROOT/docs/11-orchestrator-schema.md" >"$NDR_OUT" 2>&1
+  NDR_STATUS=$?
+  if [ "$NDR_STATUS" -ne 0 ]; then
+    cat "$NDR_OUT" >&2
+    CC_STATUS=1
+  else
+    tail -1 "$NDR_OUT" >&2
+  fi
+  rm -f "$NDR_OUT"
+else
+  NDR_STATUS=0
+fi
+
 if [ "$DEPS_STATUS" -ne 0 ] || [ "$SCAN_STATUS" -ne 0 ] || [ "$CC_STATUS" -ne 0 ]; then
   echo "quality-check: FAILED — dependency freeze, source scan, and/or contract check failed (see messages above)" >&2
   exit 1
