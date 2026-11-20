@@ -2704,8 +2704,13 @@ class TestV38Cycle6Audit(Base):
         # refuses decisions. The residual is the SPEC question S-A1 (how
         # an operator recovers a partial AUTH line). This pin asserts the
         # CODE-level guarantee only: the call fails and returns no id.
+        # audit C4-2: a short AUTH write must NEVER return an
+        # authorization. AUD55: driven with a NONEMPTY occurrence list
+        # (an empty list now refuses `auth-occurrences-empty` before
+        # the writer exists — see TestAud55EmptyAuthPolicy).
         from unittest import mock
         led = self.mk()
+        self.seed(CORRUPT + b"\n")
         real_write = os.write
         calls = {"n": 0}
         def one_byte(fd, data):
@@ -2713,7 +2718,8 @@ class TestV38Cycle6Audit(Base):
             return real_write(fd, data[:1]) if calls["n"] == 1 else 0
         with mock.patch("p9m3.ledger.os.write", side_effect=one_byte):
             with self.assertRaises(OSError):
-                led.authorize(occurrences=[])
+                led.authorize(occurrences=[{"offset": 0,
+                                            "hash": sha(CORRUPT)}])
 
     def test_C6_18_declared_fuse_refused_at_leg1(self):
         # audit C4-4: the DECLARED type takes the same FUSE predicate.
@@ -6676,3 +6682,117 @@ class TestAud52Cycle5Audit(Base):
                                     "accepts is exactly what the guard "
                                     "lets through")
         self.assertEqual([a["authId"] for a in auths], ["F117OK"])
+
+
+class TestAud55EmptyAuthPolicy(Base):
+    """AUD55 (auditor: gpt-6.1-terra): authorize could mint an AUTH
+    with ZERO occurrences — a submitted [] skipped every per-entry
+    check and the writer serialized `occurrences:[]` happily. Such an
+    AUTH is permanently stale-unrepairable: (c-O)(iii) compares it
+    against the CURRENT unmasked list, and a log with zero unmasked
+    occurrences never reaches a state an AUTH can drive (state `ok`
+    -> repair refuses `authorization-stale`), so the AUTH replays
+    through the audit trail forever while repairing nothing.
+    AUD52-c5 had explicitly PRESERVED the empty path to keep C6_17's
+    empty-list short-write drive alive; AUD55 supersedes that trade —
+    C6_17 now drives a NONEMPTY list into the same fault."""
+
+    def test_F118_authorize_refuses_an_empty_occurrence_list(self):
+        """F118 (submitted arm): [] on a log that HAS unmasked
+        malformed lines must refuse `auth-occurrences-empty` with
+        zero AUTH bytes — the state gate does not fire (the state IS
+        unmasked-malformed), so pre-fix the empty list reached the
+        writer. Control: the real occurrence list still authorizes."""
+        self.seed(CORRUPT + b"\n")
+        self.led = self.mk()
+        cls = self.led.classify()
+        self.assertEqual(cls["state"], STATE_UNMASKED,
+                         "F118 premise: the log has unmasked "
+                         "occurrences, so only the empty-list guard "
+                         "can stop this call")
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize([], auth_id="F118", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-occurrences-empty",
+                         "F118: [] must refuse as EMPTY, not pass "
+                         "shape checks into the writer")
+        self.assertFalse(os.path.exists(self.led.auth_path),
+                         "F118: zero AUTH bytes")
+        aid = self.led.authorize([self.occ(0, CORRUPT)],
+                                 auth_id="F118OK", test_only=True)
+        self.assertEqual(aid, "F118OK",
+                         "F118: the guard is emptiness, not the list")
+
+    def test_F118b_derived_empty_set_refuses_not_mints(self):
+        """F118 companion (derived arm): a classification reporting
+        UNMASKED with an EMPTY unmasked set (a conforming classifier
+        never produces this pair — the state requires >=1 occurrence
+        — so the seam is pinned with a mock) must refuse
+        `auth-occurrences-empty`, NOT derive [] and write it.
+        Pre-fix this minted exactly the zero-occurrence AUTH the
+        policy now forbids."""
+        from unittest import mock
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        fake = {"state": STATE_UNMASKED, "unmasked": [], "spent": set(),
+                "authorization_file_malformed": False}
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value=fake):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize(auth_id="F118B", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-occurrences-empty",
+                         "F118b: the derived list passes the SAME "
+                         "guard as a submitted one")
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118b: zero AUTH bytes")
+
+    def test_F118c_derived_path_missing_unmasked_refuses(self):
+        """F118 companion (derived-path shape): authorize() with NO
+        submitted list derives from cls["unmasked"]; a classification
+        reporting UNMASKED WITHOUT the key (conformingly unreachable —
+        the state implies the key) used to raise a raw KeyError from
+        the comprehension while the c4 fix text promised the
+        fail-closed `authorize-state-unclassifiable` refusal on ANY
+        shape without an unmasked set. NOW both paths honor the
+        promise identically: refusal, zero AUTH bytes."""
+        from unittest import mock
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        fake = {"state": STATE_UNMASKED, "spent": set(),
+                "authorization_file_malformed": False}
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value=fake):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize(auth_id="F118C", test_only=True)
+        self.assertEqual(cm.exception.code,
+                         "authorize-state-unclassifiable",
+                         "F118c: derived path refuses exactly like "
+                         "the submitted path on the same shape")
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118c: zero AUTH bytes")
+
+    def test_F118d_submitted_path_missing_unmasked_refuses(self):
+        """F118 companion (submitted-path shape): the c4 fix text
+        promised `authorize-state-unclassifiable` for ANY
+        classification shape without an "unmasked" set, but no test
+        ever drove the SUBMITTED path into that guard (AUD55 finding:
+        documented-but-untested). A conforming classifier never
+        omits the key outside the retired early-return shapes, so
+        the seam is pinned with a mock: refusal, zero AUTH bytes —
+        pre-fix (guard removed) a raw KeyError from the set
+        comprehension."""
+        from unittest import mock
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        fake = {"state": STATE_UNMASKED, "spent": set(),
+                "authorization_file_malformed": False}
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value=fake):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize([self.occ(0, CORRUPT)],
+                              auth_id="F118D", test_only=True)
+        self.assertEqual(cm.exception.code,
+                         "authorize-state-unclassifiable",
+                         "F118d: the submitted path honors the c4 "
+                         "promise the text already made")
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118d: zero AUTH bytes")

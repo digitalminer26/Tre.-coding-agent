@@ -2015,6 +2015,18 @@ class Ledger:
                 if cls["state"] != STATE_UNMASKED:
                     raise LedgerError("authorize-not-unmasked",
                                       state=cls["state"])
+                # AUD55: the DERIVED path checks the missing-"unmasked"
+                # shape too. Pre-fix the comprehension raised a raw
+                # KeyError on that (conformingly unreachable — state
+                # UNMASKED implies the key exists — but the c4 fix
+                # text promised fail-closed on ANY shape without an
+                # unmasked set, and a raw traceback is not a refusal).
+                if "unmasked" not in cls:
+                    raise LedgerError("authorize-state-unclassifiable",
+                                      state=cls["state"],
+                                      detail="classification produced no "
+                                             "unmasked set; refusing with "
+                                             "zero AUTH bytes")
                 occurrences = [{"offset": o["offset"], "hash": o["hash"]}
                                for o in cls["unmasked"]]
             # AUD52-c5 F-A: the submitted list must satisfy the READER's
@@ -2024,14 +2036,36 @@ class Ledger:
             # whose reader requires each entry to be an object with keys
             # exactly {"offset","hash"}: authorize minted a file its own
             # reader rejected as globally malformed. The check is
-            # deliberately NOT the full _valid_mask_list: a wrong-length
-            # or non-hex hash that passes set-keys/int/str shape still
-            # reaches the entry check, which compares against the REAL
-            # line's sha256 — so F102's pinned `auth-entry-unknown-
-            # occurrence` verdict survives, and any hash that passes
-            # THAT is valid-for-the-reader by construction. An EMPTY
-            # list keeps its pinned path (C6_17: it reaches the writer;
-            # the reader accepts []).
+            # deliberately NOT the full _valid_mask_list (the reader's
+            # entry-level shape, minus the 64-hex hash bound): a
+            # wrong-length or non-hex hash that passes set-keys/int/str
+            # shape still reaches the entry check, which compares
+            # against the REAL line's sha256 — so F102's pinned
+            # `auth-entry-unknown-occurrence` verdict survives, and any
+            # hash that passes THAT is valid-for-the-reader by
+            # construction.
+            # AUD55: an EMPTY occurrence list (submitted [] or derived
+            # from an unmasked set of []) refuses `auth-occurrences-
+            # empty` with zero AUTH bytes. A zero-occurrence AUTH is
+            # permanently stale-unrepairable: (c-O)(iii) compares its
+            # occurrences against the CURRENT unmasked list, and a log
+            # with zero unmasked occurrences never reaches a state
+            # where an AUTH can drive a repair (state `ok` refuses
+            # authorization-stale; a re-appearing malformed line makes
+            # the list unequal) — the AUTH replays through the audit
+            # trail forever while repairing nothing. This supersedes
+            # the AUD52-c5 note that PRESERVED the empty path to keep
+            # C6_17's empty-list drive alive: C6_17 now drives a
+            # NONEMPTY list into the same short-write fault.
+            if not occurrences:
+                raise LedgerError(
+                    "auth-occurrences-empty",
+                    detail="authorize requires at least one occurrence "
+                           "to repair; an AUTH with zero occurrences is "
+                           "permanently stale-unrepairable (a log with "
+                           "zero unmasked occurrences is not a "
+                           "repairable state); zero AUTH bytes",
+                )
             if (not isinstance(occurrences, list)
                     or any(not isinstance(e, dict)
                            or set(e) != {"offset", "hash"}

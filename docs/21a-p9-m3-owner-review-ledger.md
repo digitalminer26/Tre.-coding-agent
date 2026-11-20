@@ -7674,6 +7674,50 @@ findings, terra is the auditor, run 5 cycles until clear"):
   unchanged — enumerate only the missing rows (all but K1) into a
   c9 prompt IF the user extends the budget again.
 
+- AUD55 ROUND OPENED (2026-11-18, user: standing contract —
+  "implement the findings, gpt terra is the auditor, run 3 cycles").
+  Owner pre-audit findings against the c5-fixed tree (6173bae) —
+  folded here at OPEN; cycle dispositions append below as they land.
+  All reproduced, fixed, pinned, and individually
+  mutation-verified RED:
+  * F-A (MAJOR, authorize() mints zero-occurrence AUTHs): ACCEPTED,
+    FIXED — a submitted `occurrences=[]` skipped every per-entry
+    check (all loops vacuous) and serialized `"occurrences":[]`
+    into the AUTH. Such an AUTH is permanently stale-unrepairable:
+    (c-O)(iii) compares it against the CURRENT unmasked list and a
+    log with zero unmasked occurrences is not a repairable state
+    (state `ok` -> repair refuses `authorization-stale`), so the
+    AUTH replays through the audit trail forever while repairing
+    nothing. The AUD52-c5 text had PRESERVED this path to keep
+    C6_17's empty-list short-write drive alive; superseded — the
+    guard (submitted OR derived, before any byte) refuses
+    `auth-occurrences-empty`, and C6_17 was re-driven NONEMPTY into
+    the same fault (mutation-verified: neutering the guard turns
+    both arms RED). Pinned F118 (submitted arm + authorize-
+    still-works control), F118b (derived arm: UNMASKED state with
+    an EMPTY unmasked set, mocked seam — a conforming classifier
+    never produces the pair).
+  * F-B (MINOR, doc accuracy, three sites): ACCEPTED, FIXED —
+    (1) the c4 F-A fold's "empty-unmasked-set mutant ... pinned
+    jointly" claim measured WRONG (dropping ONLY the
+    `authorize-state-unclassifiable` guard turns F118b RED
+    directly; the masking observation was a mutant-order
+    artifact) — corrected in place; (2) the c5 F-A fold's
+    "C6_17's empty-list path are preserved" and "the reader's
+    shape" wording — superseded note added (entry shape minus
+    the hex bound; empty path now refuses); (3) the c4 promise
+    that ANY shape without "unmasked" is the fail-closed
+    `authorize-state-unclassifiable` refusal was DOCUMENTED BUT
+    UNTESTED on both authorize paths (no test drove the guard) —
+    F118c (derived path: was a raw KeyError from the list
+    comprehension — fixed with a same-shape guard; RED as
+    ERROR without it) and F118d (submitted path: guard removed
+    => raw KeyError; RED as ERROR) now pin both paths with zero
+    AUTH bytes each.
+  Gate after fixes: 169 tests (165 + F118/F118b/F118c/F118d in the
+  new TestAud55EmptyAuthPolicy class), zero-warning x2 at every
+  step, every guard individually mutation-verified RED.
+
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
   (owner-enumerated bounded rows, fresh context per cycle, tmp-copy
@@ -7810,9 +7854,14 @@ findings, terra is the auditor, run 5 cycles until clear"):
     + repair under a torn tail, spent AUTHs are skipped by replay
     and masked entries refuse with REAL spent facts). Both fixes
     mutation-verified RED (drop settle-first => F115 fails, F115b
-    errors; empty-unmasked-set mutant without fail-closed needs
-    BOTH halves removed to show — settle-first alone masks it, so
-    the pair is pinned jointly).
+    errors; the fail-closed half stands on its own: dropping ONLY
+    the `authorize-state-unclassifiable` guard while keeping the
+    empty-unmasked derivation turns F118b RED directly — the earlier
+    "pinned jointly" note was WRONG, measured AUD55: the masking
+    observation was mutant-order artifact, and AUD55 added F118b
+    (derived EMPTY unmasked set -> refusal, zero AUTH bytes) plus
+    F118c (derived path missing-"unmasked" -> the same refusal
+    instead of a raw KeyError; both mutation-verified RED).
   * F-B (MODERATE, confirmation-generation rotation can race the
     post-verify liveness check during outcome logging): ACCEPTED
     AS INHERENT BOUNDARY, NO CODE CHANGE — the confirmation log is
@@ -7862,8 +7911,15 @@ findings, terra is the auditor, run 5 cycles until clear"):
     validator: a str-wrong hash still reaches the entry check,
     where it is compared against the real line's sha256 — F102's
     pinned `auth-entry-unknown-occurrence` verdict and C6_17's
-    empty-list path are preserved (first fix attempt used the full
+    empty-list drive were preserved (first fix attempt used the full
     validator and broke both; caught by the suite before pinning).
+    SUPERSEDED NOTE (AUD55): the empty-list path was itself the
+    defect the c5 text's wording hid — see the AUD55 entry below:
+    `occurrences=[]` now refuses `auth-occurrences-empty` with zero
+    AUTH bytes, and C6_17 drives a NONEMPTY list into the same
+    short-write fault. "the reader's shape" in that text means the
+    reader's ENTRY shape minus the 64-hex hash bound (not the full
+    _valid_mask_list).
     Pinned F117 (five hostile shapes refuse zero-byte; control good
     entry still authorizes and the reader accepts the file),
     mutation-verified RED (drop-the-guard mutant, all arms).
