@@ -7730,6 +7730,14 @@ findings, terra is the auditor, run 5 cycles until clear"):
   re-measured: derived-guard mutant -> exactly F118c, submitted-
   guard mutant -> exactly F118d; "pinned jointly" stays dead).
   Cycle 2 to sweep the full S-A1-R v8 attack surface fresh.
+  CYCLE 2 (f53148d, gpt-6.1-terra, fresh context): `NO FINDINGS` —
+  swept the full authorize() surface independently (write-path
+  walk, guard ordering, refusal side effects, hostile AUTH replay
+  through _read_auths, classifier/masking independence) and
+  re-measured all three guard mutations from scratch: each turned
+  RED exactly as the corrected doc claims (empty guard -> F118 +
+  F118b; derived-key guard -> exactly F118c; submitted-key guard
+  -> exactly F118d). Cycle 3 final confirmation.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
