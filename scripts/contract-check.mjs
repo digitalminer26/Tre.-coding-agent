@@ -1312,7 +1312,8 @@ const allow = new Set([
   "channel-open", "evidence-invalidation", "queue-receipt",
   // G1 §14.10 owner-act op + refusal class (round-4; backticked in the
   // §14.12.2 finalization table rows since the v9 fold):
-  "owner-filing-draft-drift", "filing-drift-resolution",
+  "owner-filing-draft-drift", "owner-filing-mapping",
+  "filing-drift-resolution", "spool-loss-post-filing",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and
