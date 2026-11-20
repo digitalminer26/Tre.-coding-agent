@@ -7821,6 +7821,19 @@ findings, terra is the auditor, run 5 cycles until clear"):
   same class: prose claiming guard-reach without naming the
   earlier steps — now every formulation names the guard-point
   ordering). CYCLE 7 = final certification.
+  CYCLE 7 (2af7246 tree, gpt-6.1-terra, fresh context):
+  `ROUND CERTIFIED` — gate x2 @171 zero-warning; all three
+  standing mutants fresh-exact (empty -> F118+F118b; derived-key
+  -> F118c; submitted-key -> F118d+F118e); qualification verified
+  against the actual guard-point control flow on both arms; no
+  write-path bypass; entry claims/pins internally consistent;
+  working tree unchanged. AUD55 ROUND CLOSED CLEAN: the code fix
+  (fa81193) drew zero findings in any cycle; all six accepted
+  findings were doc-precision (guard-reach prose not naming
+  earlier steps), each fixed in place and finally PINNED
+  (F118e/F118f) rather than re-phrased. Round-wide lesson folded:
+  mutation claims name their measurement date + test set, and
+  guard-reach prose names the guard-point ordering.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
