@@ -7714,11 +7714,17 @@ findings, terra is the auditor, run 5 cycles until clear"):
     Qualification (measured, AUD55 c3+c4): the promise holds for
     the reach the guards actually have — SUBMITTED path: shapes at
     STATE_UNKNOWN/STATE_CONFLICT are refused earlier by the state
-    token, and any other state's shape lacking "unmasked" (e.g.
-    `ok`) reaches `authorize-state-unclassifiable` (the c3
+    token, and any other REACHED classification lacking "unmasked"
+    (e.g. `ok`) reaches `authorize-state-unclassifiable` (the c3
     qualifier's "all other states refused earlier on submitted"
     was itself overbroad — c4 measured `ok`-without-key landing
-    on the guard); DERIVED path: only entered at STATE_UNMASKED
+    on the guard; c6 precision: "reached" means AFTER the
+    step-before guards — an UNSETTLED classification is settled +
+    reclassified first so the post-settlement classification
+    determines the landing, and earlier occurrence-shape
+    validation (`auth-occurrences-invalid`/`auth-entry-*`) and
+    replay refusal can outrank the guard for a given payload);
+    DERIVED path: only entered at STATE_UNMASKED
     (whose shape lacking "unmasked" -> the same refusal), other
     states are refused elsewhere (`authorize-not-unmasked`/state
     token) and never reach the key guard. Zero bytes at every
@@ -7802,6 +7808,19 @@ findings, terra is the auditor, run 5 cycles until clear"):
   CLEAN five cycles running — per round discipline the doc is now
   written so every standing claim names its measurement date and
   the test set it was made against).
+  CYCLE 6 (399fdb7 tree, gpt-6.1-terra, fresh context): gate x2
+  @171, all three mutants fresh-exact (empty -> F118/F118b;
+  derived-key -> F118c; submitted-key -> F118d+F118e), no-bypass
+  walk CERTIFIED; 1 minor finding — "any other state's shape ...
+  reaches the guard" ignored that UNSETTLED is settled+reclassified
+  BEFORE the guard (post-settlement classification decides) and
+  that occurrence-shape validation / replay refusal can outrank
+  the guard for a given payload. ACCEPTED, FIXED in place with a
+  "reached classification" formulation spelling out what runs
+  before the guard (the four finding sites to date are all the
+  same class: prose claiming guard-reach without naming the
+  earlier steps — now every formulation names the guard-point
+  ordering). CYCLE 7 = final certification.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
