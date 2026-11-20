@@ -6796,3 +6796,50 @@ class TestAud55EmptyAuthPolicy(Base):
                          "promise the text already made")
         self.assertFalse(os.path.exists(led.auth_path),
                          "F118d: zero AUTH bytes")
+
+    def test_F118e_ok_shape_lands_on_guard_submitted(self):
+        """AUD55-c4 F-B: the submitted path's key guard is reached
+        by NON-UNMASKED shapes too — an `ok` classification without
+        an "unmasked" key lands on `authorize-state-unclassifiable`
+        (measured by the c4 auditor; the c3 qualifier's "all other
+        states refused earlier on submitted" was itself overbroad
+        and is corrected in the doc). Non-conforming shape, so
+        mocked at the seam; refusal, zero AUTH bytes."""
+        from unittest import mock
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        fake = {"state": STATE_OK, "spent": set(),
+                "authorization_file_malformed": False}
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value=fake):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize([self.occ(0, CORRUPT)],
+                              auth_id="F118E", test_only=True)
+        self.assertEqual(cm.exception.code,
+                         "authorize-state-unclassifiable",
+                         "F118e: ok-shape submitted lands on the "
+                         "key guard, exactly as the corrected doc "
+                         "sentence claims")
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118e: zero AUTH bytes")
+
+    def test_F118f_ok_shape_refused_earlier_derived(self):
+        """AUD55-c4 F-B companion (derived arm): a non-UNMASKED
+        classification is refused by `authorize-not-unmasked`
+        BEFORE the derived arm, so the arm's key guard is only
+        ever reached at STATE_UNMASKED (pin for the doc sentence:
+        other states are refused elsewhere and never reach it)."""
+        from unittest import mock
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        fake = {"state": STATE_OK, "spent": set(),
+                "authorization_file_malformed": False}
+        with mock.patch.object(type(led), "_resolve_locked",
+                               return_value=fake):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize(auth_id="F118F", test_only=True)
+        self.assertEqual(cm.exception.code, "authorize-not-unmasked",
+                         "F118f: derived arm refuses non-UNMASKED "
+                         "before its key guard is in play")
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118f: zero AUTH bytes")

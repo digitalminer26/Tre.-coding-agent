@@ -7711,21 +7711,29 @@ findings, terra is the auditor, run 5 cycles until clear"):
     that ANY shape without "unmasked" is the fail-closed
     `authorize-state-unclassifiable` refusal was DOCUMENTED BUT
     UNTESTED on both authorize paths (no test drove the guard).
-    Qualification (measured, AUD55 c3): the promise holds for the
-    shape the c4 text described — a classification at STATE_UNMASKED
-    whose payload lacks "unmasked" (the state the guard sits in);
-    payloads at OTHER states are refused EARLIER by the
-    state-specific refusals (`authorize-not-unmasked` derived /
-    `unknown` submitted), zero bytes either way — c3 found the
-    unqualified "ANY shape" phrasing overbroad and it is qualified
-    here, the entry now pins: F118c (derived path: was a raw
-    KeyError from the list
-    comprehension — fixed with a same-shape guard; RED as
-    ERROR without it) and F118d (submitted path: guard removed
-    => raw KeyError; RED as ERROR) now pin both paths with zero
-    AUTH bytes each.
-  Gate after fixes: 169 tests (165 + F118/F118b/F118c/F118d in the
-  new TestAud55EmptyAuthPolicy class), zero-warning x2 at every
+    Qualification (measured, AUD55 c3+c4): the promise holds for
+    the reach the guards actually have — SUBMITTED path: shapes at
+    STATE_UNKNOWN/STATE_CONFLICT are refused earlier by the state
+    token, and any other state's shape lacking "unmasked" (e.g.
+    `ok`) reaches `authorize-state-unclassifiable` (the c3
+    qualifier's "all other states refused earlier on submitted"
+    was itself overbroad — c4 measured `ok`-without-key landing
+    on the guard); DERIVED path: only entered at STATE_UNMASKED
+    (whose shape lacking "unmasked" -> the same refusal), other
+    states are refused elsewhere (`authorize-not-unmasked`/state
+    token) and never reach the key guard. Zero bytes at every
+    landing; the entry now pins: F118c (derived path: was a raw
+    KeyError from the list comprehension — fixed with a same-shape
+    guard; RED as ERROR without it) and F118d (submitted path:
+    guard removed => raw KeyError; RED as ERROR) pin both paths
+    with zero AUTH bytes each; AUD55-c4 measured the remaining
+    landings for a no-"unmasked" shape at `ok` (submitted: LANDS
+    on the key guard; derived: refused `authorize-not-unmasked`
+    before the arm — the arm is only entered at STATE_UNMASKED),
+    pinned F118e/F118f (zero AUTH bytes each).
+  Gate after fixes: 171 tests (165 + F118/F118b/F118c/F118d in the
+  new TestAud55EmptyAuthPolicy class + F118e/F118f added on the
+  c4 disposition), zero-warning x2 at every
   step, every guard individually mutation-verified RED.
   CYCLE 1 (fa81193, gpt-6.1-terra, findings table): code CLEAN —
   zero findings against the guards (the auditor independently
@@ -7760,6 +7768,22 @@ findings, terra is the auditor, run 5 cycles until clear"):
   claims (a)-(e) certified by c3 (suite x2 @169, all three mutants
   fresh-clone exact, no bypassing write path). RE-CERT CYCLE 4
   kicked per the AUD52 rejected-final-cycle precedent.
+  CYCLE 4 (a040fe3 tree, gpt-6.1-terra, fresh context): gate +
+  mutations + write-path walk all certified (fresh mutants exact:
+  empty -> F118/F118b, derived-key -> F118c, submitted-key ->
+  F118d); 1 minor finding — my c3 qualification was itself
+  overbroad: on the SUBMITTED path an `ok`-state classification
+  without "unmasked" is NOT refused earlier; it lands on
+  `authorize-state-unclassifiable` (UNKNOWN/CONFLICT are the only
+  earlier state-token refusals). ACCEPTED, FIXED in the
+  qualification sentence; both c4-measured landings are now
+  PINNED with zero AUTH bytes (F118e submitted-ok->guard, F118f
+  derived-ok->earlier refuse) and the corrected sentence matches
+  the pins. This was the third doc-phrasing finding in a row
+  (c1: wrong test id; c3: ANY-shape overbroad; c4: earlier-
+  refusal overbroad) — code remained CLEAN in all four cycles;
+  the doc claims are now pinned by measurement rather than prose.
+  Cycle 5 (fresh) will certify against the corrected text.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
