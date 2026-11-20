@@ -7746,6 +7746,20 @@ findings, terra is the auditor, run 5 cycles until clear"):
   RED exactly as the corrected doc claims (empty guard -> F118 +
   F118b; derived-key guard -> exactly F118c; submitted-key guard
   -> exactly F118d). Cycle 3 final confirmation.
+  CYCLE 3 (f53148d, gpt-6.1-terra, fresh context): `ROUND REJECTED:
+  1 finding` (minor, docs ~7711) — the F-B(3) phrase "ANY shape
+  without unmasked => authorize-state-unclassifiable" is overbroad:
+  a classification payload at a NON-UNMASKED state that also lacks
+  the key is refused EARLIER by the state-specific refusal
+  (`authorize-not-unmasked` derived / `unknown` submitted) — both
+  zero bytes. ACCEPTED, FIXED: phrase qualified to the
+  STATE_UNMASKED shape the c4 text described + earlier state
+  refusals acknowledged (annotation discipline: folded as a new
+  qualified sentence, the historical claim annotated not erased).
+  Gate re-run zero-warning x2 after the fix; all other close-out
+  claims (a)-(e) certified by c3 (suite x2 @169, all three mutants
+  fresh-clone exact, no bypassing write path). RE-CERT CYCLE 4
+  kicked per the AUD52 rejected-final-cycle precedent.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
