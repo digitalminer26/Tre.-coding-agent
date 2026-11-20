@@ -7724,6 +7724,18 @@ findings, terra is the auditor, run 5 cycles until clear"):
   auditor cycle caught F-A" claim holds). CYCLE 2 = independent
   surface sweep (fresh context, re-derive from ledger.py, not
   from this round's framing).
+  CYCLE 2 (2e54f62 tree, gpt-6.1-terra, fresh context): `CLEAN` —
+  zero findings on the independent sweep: fresh gate x2 zero-
+  warning; own-built hostile set (submitted + mocked-derived,
+  incl. [{}] and boundary shapes) all refused before AUTH
+  creation, valid control wrote a reader-accepted AUTH, replay
+  refused; guard-order mutation re-run -> exactly F118g's five
+  falsy subtests; grep of BOTH error codes' consumers across
+  ledger.py/test_ledger.py/21a — every claim about them still
+  holds under the new order. (Its first scratch gate invocation
+  died on an import error of the auditor's own harness setup,
+  redone clean — harness artifact, not tree.) CYCLE 3 = final
+  certification.
 
 - AUD55 ROUND OPENED (2026-11-18, user: standing contract —
   "implement the findings, gpt terra is the auditor, run 3 cycles").
