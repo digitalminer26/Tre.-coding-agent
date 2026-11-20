@@ -7698,8 +7698,9 @@ findings, terra is the auditor, run 5 cycles until clear"):
     mis-described its own cycle history** ("six accepted
     findings, all guard-reach prose, each pinned by
     F118e/F118f" overstated: five cycle findings across
-    c1/c3/c4/c5/c6 with mixed content — test-id attribution,
-    guard-reach prose x2, a stale mutation claim — and only the
+    c1/c3/c4/c5/c6 with mixed content — test-id attribution (c1),
+    guard-reach prose x3 (c3, c4, and c6 settle-first ordering),
+    a stale mutation claim (c5) — and only the
     c4 landing claims got test pins, the rest stand on the
     re-measured mutation logs). Corrected in the AUD55 entry
     with an enumeration + a post-round-audit paragraph; the
