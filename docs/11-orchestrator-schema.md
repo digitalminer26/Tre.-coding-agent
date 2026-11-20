@@ -157,6 +157,7 @@ mechanism).
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
+| 2026-11-22 | §14.10.0 (register + doctrine 1 + manifest), §14.10 (§14.10.1/.2/.3), §14.12.2 r4 rule-4 paragraph, docs/audits/g1-ndr-conflict-log.md, scripts/g1-ndr-selfcheck.mjs (comments only) | **G1 REVIEW ROUND 4 — CYCLE 16 (REGISTER-COMPLENESS AUDIT vs v22, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c16-terra-*`: CHANGES REQUESTED — 8 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored — sites-edited = canonical only (register entries, doctrine 1, registered expansions §14.10.1/.2/.3, the one demoted statement site converted to a citation in the same commit per doctrine 4) + grep-verified before this row).** R5-C16-1 NDR-a supervisor-derived mode corrected to its ratified expansion: mode defined by PROOF not origin (`origin` = observer, `producer` = appender; `"auditor" OR "owner"` both legal), v22's "owner-origin records" wording contradicted the entry-mode table. R5-C16-2 NDR-p edge (1) canonical text now covers `rejected-duplicate` **OR `superseded`** closures (was rejected-duplicate-only, contradicting its own registered expansion and ratified v10/v11 behavior — the register restates the ratified rule, adds none). R5-C16-3 NDR-n LIVE TIP definition corrected to the expansion (unique member NOT closed by `rejected-refuted`); terminalized members (duplicate/superseded) named as a DISTINCT role delegating via step-2 link effectivization — v22 register said the opposite of its expansion. R5-C16-4 NEW **NDR-r**: filing identity/replay/new-act refiling over identical bytes (redelivery idempotence vs new filing ATTEMPT vs same-act divergent bytes) — rule was body-only, unregistered. R5-C16-5 NEW **NDR-s** (refutation evidence: not-reproduced vs pre-fix baseline, incomplete-run no-record, owner-grade bar, no cross-lineage discharge) and NEW **NDR-t** (closed vocabularies, route×surface validity incl. `surface:"spec"`+`route:"code-fix"` refusal, append-only findingRef artifact + claimDigest binding) — rule families outside the v22 closed list. R5-C16-6 doctrine 1 REVISED: declared expansion = bounded FINITE set (one OR more, undeclared sites illegal), replacing "ONE named expansion site" which six entries already violated; NDR-q re-declared self-contained. R5-C16-7 §14.12.2 rule-4 accepted-fix paragraph DEMOTED to predicate + `per NDR-b` citation (full demoted predicate preserved verbatim in the conflict log §2b; conformance vector stays as application text). R5-C16-8 NDR-q now SUPPLIES its totality: per-condition closing inventory table (6 reachable conditions × closing act × validation operands × clearing evidence × forward effect), historical-vs-hold distinction, unlisted reachable hold ⇒ contract defect. Register closed set extended a…q → a…**t** (heading + manifest updated; self-check PASS at 20 entries, citations resolve, B/O cell budget respected). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v23, round-4 cycle-16 folded) |
 | 2026-11-22 | new §14.10.0, §14.10 (§14.10.1/.2/.3), §14.12.2 r4, new scripts/g1-ndr-selfcheck.mjs, new docs/audits/g1-ndr-conflict-log.md | **PLAN B EXECUTED (owner-approved: "Go on Plan B"; plan docs/audits/g1-plan-b-canonicalization.md; baseline v21 = cycle-15 fold) — §14.10 draft v21→v22: CANONICAL RULE REGISTER added as new §14.10.0.** Doctrinal change (no ratified decision altered, no module touched): 17 stable rule ids NDR-a…NDR-q carry the canonical statement of every §14.10 rule family (entry modes; accepted-fix evidence; claim equality; refusal binding two-class exception; byte provenance; MIXED joint re-derivation; intake-refusal ONLY-list; filing-integrity fault shape/identity/exclusion; withdrawal serialized-protocol determinism; append-legality gate + closed diagnostic mapping; crash-recovery duty total over candidate kinds a–d incl. R5-C15-1/2; terminal taxonomy & class membership; finalization B/O predicates; correction-lineage total four-step edge fold; drift-resolution op; two named reopening edges; needs-owner no-orphan-holds), each with *Applies* / *Expansion* (ONE named canonical expansion site) / *Cited at*. Register doctrine: elsewhere is predicate + `per NDR-<id>` only; register entry GOVERNS over diverging text; fold-hygiene v2 — a future fold edits a canonical entry + its expansion site + mechanical citation text only, Change Ledger lists NDR ids touched (extends the §14.9 gate). Duplicate statement sites converted to citations with every demoted sentence preserved verbatim in docs/audits/g1-ndr-conflict-log.md (finding→NDR mapping for R5-C5-5…R5-C15-2 included): §14.12.2 class-B row (3 bodies → NDR-h/i/k/l/m), class-O row (2 bodies → NDR-g/h/l/m), §14.10.3 terminal-outcome R2-terminality clause and outcome same-act binding clause (2 bodies → NDR-d — exactly the sites cycle-14 R5-C14-2 had to sweep). Self-check wired into `npm test` (quality-check.sh check 9): scripts/g1-ndr-selfcheck.mjs FAILS the build on unresolved `per NDR-` citations, duplicate/definition-less ids, entries missing *Expansion:*, or a >150-word B/O cell without a citation; PASS at commit (17 entries). Fold-hygiene gate honored: all body edits landed and grep-verified (anchor: §14.10.0 register text + NDR citations in B/O rows) BEFORE this row, single commit. Still DRAFT, NOT implemented; v22 is cycle-16 confirming-audit target (register-completeness prompt). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v22, Plan B canonical register landed) |
 | 2026-11-22 | §14.10 (§14.10.1/.3) | **G1 REVIEW ROUND 4 — CYCLE 15 (OWNER-EXTENDED CONFIRMING cycle beyond the 14-cap, owner direction "kick c and draft b") — §14.10 draft v20→v21 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c15-terra-*` against HEAD 3489ebb: CHANGES REQUESTED — 2 MAJOR, DECISIONS-REQUIRED: 0; both adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified (anchors R5-C15-1/2) before this row). R5-C15-1 recovery-vs-binding contradiction in the byte-free drift branch: v20's kind-(d) said recovery sets `pinnedVerdict` to "the re-derived verdict (eligibility-shaped drift refusals record `eligible`/null...)", but a drift refusal is BOUND TO P(W) (first exception class) and replay binding clause (1) requires every P(W)-bound refused outcome to carry `pinnedVerdict:"refused"` + code == R2's diagnostic — an `eligible`/null pair on a P(W)-bound refusal is malformed; recovery could be instructed to emit an outcome replay must reject. FIX: kind (d) conforming result is now `pinnedVerdict:"refused"` + code == re-derived drift diagnostic == R2.diagnosticCode; NO drift case is eligibility-shaped (the re-derivation over P(W) + the recorded `spoolObserved` can only return the drift refusal; a re-derived `eligible` contradicts the landed refusal ⇒ forged candidate ⇒ group-fault path); a normative replay vector for byte-free drift added closing the vector-list gap. R5-C15-2 applied-candidate recovery named no durable byte authority: kind (a) re-derives the P(W) verdict over "the finding's durable/re-digesting bytes", but the `audit-finding` record carries `claim`/`claimDigest`/`findingRef` — a digest does not reconstruct parseable draft bytes, and the SELF-EVIDENCED sentence (digest match proves identity) does not supply bytes to parse. FIX: the durable byte authority is the finding's IMMUTABLE `findingRef` ARTIFACT (written at intake: supervisor copied the adjudicated spool bytes there — confirmed/spool/stored bytes and attested digest are ONE byte-string), bound TWO-WAYS: sha256(findingRef bytes) == record `claimDigest` AND == act `draftSha256`; recovery PARSES that artifact over P(W) exactly as intake parsed the spool draft; missing/transient read ⇒ retry (same route as transient spool failure); deterministic digest mismatch against either bound ⇒ post-effect `findingRef-artifact` damage — recovery takes the ordinary route through the group-fault path (candidate failing re-validation ⇒ R5-C11-3 group fault), never an outcome. R5-C14 fix-verification (this cycle): C14-1 COMPLETE, C14-4 COMPLETE (auditor-verified); C14-2/C14-3 INCOMPLETE→cured (C15-1 closes the class/verdict conflict C14-2 left, C15-1/2 complete the kind split C14-3 opened). NOTE: the confirming audit self-reported coverage limits (correction-lineage, accepted-fix cross-product, filing-replay idempotence, needs-owner closing paths NOT exhaustively walked) — no clean-whole-target conclusion is claimed from cycle 15; plan for the structural exit filed at docs/audits/g1-plan-b-canonicalization.md (canonical rule register to kill the fold-residue plateau; v21 is that plan's baseline). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v21, owner-extended round-4 cycle-15 folded) |
 | 2026-11-22 | §14.10 (§14.10.1/.3), §14.12.2 r4 | **G1 REVIEW ROUND 4 — CYCLE 14 of 14 (FINAL cycle of the owner-extended round) — §14.10 draft v19→v20 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c14-terra-*` against HEAD e94f90b: CHANGES REQUESTED — 4 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified (anchors R5-C14-1…4) before this row).** R5-C14-1 (finding 1) class-B row sweep: the §14.12.2 B row still said group `withdrawn` ⇒ "terminal-by-refusal via the superseded R1 standing restored" — incompatible terminal states inside one finalization table (the adjacent O row carried the v19 result); restoring R1 also revives the unresolved-refusal contradiction. FIX: B row now reads TERMINAL-BY-DAMAGE with claim RETIRED (invalid R1 never restored, never a resolution target; no outcome owed, no O item — disposition record is the clearing evidence), open-OR-disposed exclusion confirmed swept. R5-C14-2 (finding 2) terminal-outcome summary sweep: the §14.10.3 terminal-outcome paragraph still said unconditionally "R2 binds the prefix P(W) named by W's binding pair, NOT its own log predecessor" — a validator following the summary rejects the conforming gate refusal, contradicting the two-class exception. FIX: summary now qualified by class: PINNED refusals bind P(W); APPEND-LEGALITY-GATE refusals bind their own immediate predecessor under the general rule; class replay-checkable from the record+outcome `pinnedVerdict` pair, never an asserted label. R5-C14-3 (finding 3) recovery-duty totality: the v19 pinned-verdict re-derivation duty assumed every single candidate was a refusal with draft bytes — it could not produce the APPLIED outcome (no R2 exists; "the landed gate refusal must be bound…" matches nothing) and could not verify byte-free drift refusals (`bytesSource:"none"` — no embedded/re-digesting bytes exist; current filesystem state cannot substitute for the recorded historical observation). FIX: duty SPLIT BY CANDIDATE KIND, total over all four kinds — (a) APPLIED finding: effect validation + re-derived P(W) verdict must be `eligible` (re-derived refusal ⇒ pinned-input violation ⇒ group-fault path); (b) PINNED refusal: re-derivation over P(W)+embedded bytes must equal `diagnosticCode`; (c) GATE refusal: collision diagnostic verified over append-time prefix by the ordinary rule + pinned duty re-derives `eligible`; (d) BYTE-FREE drift refusal: duty runs over the refusal record's OWN RECORDED `spoolObserved` observation re-derived against P(W) (no live-filesystem substitution). Failure route per kind: transient re-derivation failure ⇒ retry; deterministic ⇒ group-fault path; mismatch ⇒ group fault, never an outcome. R5-C14-4 (finding 4) MIXED-bytes admission vs provenance: the v19 label rule gave non-matching MIXED bytes `fresh-spool`+`observedSha256` while the general refusal-validation rule calls MIXED bytes that fail the act-digest re-check MALFORMED (integrity fault) — the same durable R2 was both valid-with-a-label and refused; an outcome label must never waive the act-byte binding. FIX: digest re-check is CONSTITUTIVE of a MIXED refusal; the `!=` ⇒ `fresh-spool` branch is DELETED — mismatch ⇒ not a valid candidate (malformed-record integrity route; at recovery: fails re-validation ⇒ group-fault path); `"fresh-spool"` retained only for no-embedded-bytes draft-derivative refusals named by `observedSha256`. R5-C13 fix-verification: C13-1 INCOMPLETE→cured (C14-1), C13-2 INCOMPLETE→cured (C14-1), C13-3 INCOMPLETE→cured (C14-4), C13-4 INCOMPLETE→cured (C14-3), C13-5 INCOMPLETE→cured (C14-2). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v20, round-4 cycle-14 folded — round complete: 14/14 cycles) |
@@ -1295,7 +1296,7 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
-| audit-finding records (§14.10) | G1 draft v22 (Plan B canonical rule register §14.10.0 NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
+| audit-finding records (§14.10) | G1 draft v23 (Plan B canonical rule register §14.10.0 NDR-a…t — extended v23 with cycle-16 findings; NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 + register-completeness cycle 16 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
@@ -1565,7 +1566,7 @@ section adds TWO record kinds — `audit-finding` and
 §0.7 holds unchanged: control logic keys on the closed fields only;
 free-text fields are advisory, never parsed.
 
-#### 14.10.0 Rule register (NDR-a … NDR-q) — canonical statements (v22)
+#### 14.10.0 Rule register (NDR-a … NDR-t) — canonical statements (v23)
 
 **Why this register exists (v22, Plan B).** Round-4 data (14 cycles +
 confirming cycle 15, plateau at 4–5 MAJOR/cycle since cycle 9) showed the
@@ -1583,9 +1584,18 @@ DECISIONS-REQUIRED, never resolved silently).
 **Register doctrine (normative, v22):**
 
 1. Each rule below is stated ONCE — the **canonical statement** in its
-   register entry, plus (where the rule needs clause-level detail) ONE
-   named **expansion site** elsewhere in §14.10 whose prose is the rule's
-   canonical expansion. The id (`NDR-a` … `NDR-q`) is stable forever; ids
+   register entry, plus (where the rule needs clause-level detail) a
+   **declared expansion**: the entry's `*Expansion:*` field names a
+   bounded, finite set of sites (one OR MORE — v23 R5-C16-6: v22 said
+   "ONE named expansion site" while six entries declared multi-site
+   expansions, making the fold boundary ambiguous; the fold rule is
+   unchanged — a fold edits the entry plus EXACTLY its declared set —
+   what changed is that a multi-site declaration is legal, an
+   UNDECLARED site is not; a rule whose detail genuinely lives in two
+   unmergeable places is declared as a two-site expansion, never left
+   undeclared). An entry whose rule is self-contained in the entry
+   declares `*Expansion:* (none — self-contained)`.
+   The id (`NDR-a` … `NDR-t`) is stable forever; ids
    are never reused or renumbered.
 2. Every OTHER location in §14.10 and its overlap zones (§14.9 fold-
    hygiene row, §14.12.2 class-B/O rows and the r4 chain-closure table,
@@ -1624,10 +1634,18 @@ DECISIONS-REQUIRED, never resolved silently).
   origin: (1) auditor intake — `origin:"auditor"`, originRef receipt,
   producer trio, via supervisor intake (which validates and mints the id);
   (2) owner-act — `origin:"owner"`, `ownerActRef` REQUIRED non-null, no
-  originRef, never a receipt outcome; (3) supervisor-derived — owner-origin
-  records admitted WITHOUT an act, originRef `{supervisor-derived}`,
-  `ownerActRef` null, producer = supervisor; derived mode is the
-  SUPERVISOR's filing privilege, never a worker's. Auditor workers append
+  originRef, never a receipt outcome; (3) supervisor-derived — records
+  admitted WITHOUT an owner act, `origin` is EITHER `"auditor"` OR
+  `"owner"` (whichever OBSERVED the defect — v23 R5-C16-1: v22's row
+  said "owner-origin records" only, contradicting its own registered
+  expansion, the §14.10.1 entry-mode table, which admits an
+  auditor-observed supervisor-derived finding; the mode is defined by
+  its PROOF, not by origin), originRef REQUIRED
+  `{origin:"supervisor-derived", fromRefusalId}`, `ownerActRef` null,
+  producer = supervisor session (the appender — observer ≠ appender:
+  `origin` names who observed, `producer` names who appended); derived
+  mode is the SUPERVISOR's filing privilege, never a worker's. Auditor
+  workers append
   `audit-finding` records only; they never append updates and cannot
   originate an `origin:"owner"` line by ANY route; the owner never appends
   to the log directly. The two non-intake modes' records are excluded
@@ -1727,7 +1745,11 @@ DECISIONS-REQUIRED, never resolved silently).
   draft-derivative or MIXED refusal; a missing or malformed binding pair;
   a self-contradictory field. Nothing else raises the kind. *Applies:*
   `owner-filing-integrity-fault` minting. *Expansion:* §14.10.3 fault
-  paragraph. *Cited at:* fault-list copy, §14.12.2 O row.
+  paragraph. *Cited at:* fault-list copy, §14.12.2 O row, §14.10.2
+  intake-refusal paragraph ("every failure mode" site) and its
+  re-adjudication paragraph (the two sites that restated this ONLY-list
+  in prose — cycle-16 audit F4: they are application copies of this
+  entry, not independent rules).
 - **NDR-h — Filing-integrity faults: shape, identity, exclusion.**
   Record `{faultTs, actId, failingCheck:"effect-record"|
   "findingRef-artifact"|"act-payload"|"intake-refusal"|
@@ -1906,7 +1928,12 @@ DECISIONS-REQUIRED, never resolved silently).
   a repeat = the step-4 cycle case ⇒ needs-owner); (3) per-member rows
   applied in ascending closed-member ULID order via the §14.12.2 r4
   chain table; (4) fixed point + cycle rules. LIVE TIP = the unique
-  member not closed by `rejected-duplicate`/`superseded`; duplicates
+  member NOT closed by `rejected-refuted` — the SAME definition as the
+  §14.10.2 lineage rules (v23 R5-C16-3: v22's register row said "not
+  closed by `rejected-duplicate`/`superseded`", contradicting the body;
+  these are DISTINCT roles — a member terminalized by duplicate/
+  superseded is never a live tip and delegates its row outcome to its
+  effective survivor via step-2 link effectivization). Duplicates
   resolve to the live tip's row outcome. TOTAL no-live-tip branch:
   resolution runs through the TIP-MOST member T — a valid T refutation
   AND D's link machine-checked against **T's** repro (earlier-member
@@ -1939,7 +1966,13 @@ DECISIONS-REQUIRED, never resolved silently).
 - **NDR-p — Reopening edges: exactly two, jointly exhaustive.** Closed
   finding states admit exactly TWO named reopening edges: (1) the minor
   owner-exception `accepted-fix` (per NDR-b) over a `rejected-duplicate`
-  closure; (2) the withdrawal-strand cure — an OWNER act appending
+  **OR `superseded`** closure (v23 R5-C16-2: the canonical text said
+  `rejected-duplicate` ONLY — contradicting its OWN registered expansion
+  (§14.10.2, v11 R5-C5-4) and the ratified v10/v11 behavior: `superseded`
+  members reach the same held state when their link fails revalidation,
+  so a `rejected-duplicate`-only cure stranded them with no exit; the
+  register restates the ratified rule, it adds none); (2) the
+  withdrawal-strand cure — an OWNER act appending
   `closed-residual` (owner authority, severity-agnostic, no repro
   operand) over a finding closed `rejected-duplicate`/`superseded` IFF
   its §14.12.2 r4 chain-closure evaluation CURRENTLY fires
@@ -1965,10 +1998,95 @@ DECISIONS-REQUIRED, never resolved silently).
   expressible or fail closed — an enumeration that leaves a hold with
   no exit is a contract defect (this is the invariant every round-4
   cycle-2 fix class enforced: no state may be both permanent and
-  owed-with-no-route). *Applies:* all of §14.10/§14.12.2. *Expansion:*
-  (none single — the property is per-condition; each condition names
-  its own closer at its site.) *Cited at:* register doctrine 2
+  owed-with-no-route). **Per-condition closing inventory (v23
+  R5-C16-8 — totality is now SUPPLIED, not asserted; every reachable
+  §14.10/§14.12.2 needs-owner/unclean condition, its closing act,
+  validation operands, clearing evidence, and forward effect):**
+  | condition | closing act | validation operands | clearing evidence | forward effect |
+  |---|---|---|---|---|
+  | filing refusal unresolved (`owner-filing-draft-drift` / `owner-filing-mapping`) | `filing-drift-resolution` (per NDR-o) | `refusedActId` = the live refusal's act; refiled binds a later APPLIED `audit-filing` | the conforming resolution record | act terminal; refiled ⇒ new finding, withdrawn ⇒ none |
+  | integrity fault, any `failingCheck` kind (per NDR-g/h) | `filing-integrity-disposition` (per NDR-m) | `faultId`; `outcome:"refiled"→newActId` binds equal-claim APPLIED filing; `"withdrawn"` always admissible | the disposition record IS the clearing evidence | fault disposed; damaged bytes stay invalid |
+  | r4 chain UNCLEAN — survivor retired by withdrawal | NDR-p edge (2): owner `closed-residual` | live strand proof: survivor id + disposition record cite | both citations in the update's authority | finding closed residual, verdicts frozen |
+  | r4 chain UNCLEAN — owner-authorized link that cannot machine-check (vector (d)) | minor: owner minor-exception `accepted-fix` (per NDR-b, over `rejected-duplicate` OR `superseded` per NDR-p edge (1)); non-minor: owner `closed-residual` (authority REQUIRED) | NDR-b predicate / closed-residual authority | the owner act itself (act-bound, not run-bound) | finding closed forward-only; chain row re-derives |
+  | `quiesce-stall` | no act — drains when the stalled condition clears | stall condition re-check at next boundary | drain record appended | boundary proceeds |
+  | `finding-hold` | `finding-hold-lift` (owner record, §14.12.4) | `findingId` of the held finding | the lift record | hold stops counting as sign-off holder |
+  A recorded uncleanness on a CLOSED cycle is historical (verdict
+  evidence), NOT a hold: only OPEN-cycle conditions above are holds
+  requiring a route. An unlisted reachable hold is a contract defect →
+  fail closed and register the missing row (this row-set is re-checked
+  by every cycle audit against the condition sites it cites).
+  *Applies:* all of §14.10/§14.12.2. *Expansion:*
+  (none — self-contained; each listed condition's ACT body lives at
+  its own NDR's expansion — the inventory maps, it restates nothing.)
+  *Cited at:* register doctrine 2
   (completeness check), cycle-16 audit prompt.
+- **NDR-r — Filing identity, replay, and re-filing over identical bytes.**
+  Three distinct cases, never collapsed: (1) REDELIVERY of the same act
+  (same act id AND effect id) is idempotent — replay recognizes the
+  already-applied effect, consumes nothing new, appends nothing new
+  (general single-consumption rule applied to filings). (2) A NEW
+  confirmed act over identical draft bytes is a NEW filing ATTEMPT with
+  a NEW effect id: it is NEVER refused as duplicate INTENT — duplicate
+  intent is not a validation concept — but is FULLY subject to every
+  ordinary intake rule on its own content (success ⇒ a SEPARATE
+  `audit-finding` record, conditional on intake per NDR-l; failure ⇒
+  refusal record + terminal-by-refusal per NDR-d/l; e.g. a resubmitted
+  correction draft is refused `correction-ambiguity` by lineage
+  linearity per NDR-n). (3) Same act id with DIVERGENT bytes is
+  refused (replay-integrity, per NDR-i's stage rules). Spool dedup is
+  STORAGE dedup and has no disposition meaning; two successful filings
+  of identical bytes are distinct findings dispositioned as such (any
+  `rejected-duplicate` link is the normal path). *Applies:*
+  `audit-filing` replay, intake, spool. *Expansion:* §14.10.3
+  "Identical bytes ≠ identical filing" paragraph. *Cited at:*
+  filing-replay paragraph, spool paragraphs, §14.12.2 effect fold.
+- **NDR-s — Refutation evidence rule.** `rejected-refuted` requires a
+  named re-run with `result:"not-reproduced"` (§14.12.4 amendment: the
+  repro command ran to COMPLETION against the finding's PRE-FIX
+  BASELINE — the round manifest's `targetDigest` for the finding's
+  cycle where one exists, else the episode policy `baseCommit` — and
+  the behavior `preFixObserved` claims did NOT occur),
+  `executedArtifactDigest` equal to that baseline, and the standard
+  `findingId`+`reproRunRef` binding. A run on a tree already containing
+  the fix tests the fix, NOT the claim: REFUTATION-INVALID. A run that
+  did not complete (crash/timeout/harness error/environment mismatch)
+  is NO RECORD and no evidence of anything. Refutation is owner-grade:
+  orchestrator-originated refutation is valid ONLY via a
+  trusted-gate/supervisor-authored run meeting ALL of the above; it is
+  the ONLY disposition closing a finding without acceptance or fix, so
+  its evidence bar is the highest in the enum; `accepted-fix` never
+  consumes `not-reproduced`/`red`; a refuted run's evidence never
+  discharges a duplicate of a corrected claim (per NDR-n); refutation
+  is repro-gated exactly like filing, and a wrong refutation is
+  corrected only via the `correctionOf` lineage (per NDR-n), never by
+  touching the closed record. *Applies:* `rejected-refuted` updates,
+  repro-run records, r4 refuted row. *Expansion:* §14.10.2
+  "What counts as a refuting run" paragraph. *Cited at:* §14.10.2
+  rejected-refuted bullet, r4 chain table refuted row, §14.12.2 r4
+  rule.
+- **NDR-t — Field validity and artifact immutability.** (1) Closed
+  vocabularies: any unknown value in a wire field makes the record
+  INVALID — the receiver refuses the line and surfaces it, never
+  silently drops it. (2) `route` is the ONLY routing field
+  (`code-fix` → implementation loop, `human-review` → owner ledger);
+  `surface:"spec"` with `route:"code-fix"` is INVALID at intake (a fix
+  whose subject is the spec edits the spec); a `code-fix` record
+  failing a G2 norm check is refused at intake with the `refusal-code`
+  journaled as an S5 decision-log record naming the refused line's
+  content hash (the line never becomes an `audit-finding`; a corrected
+  resubmission is a NEW record next cycle). (3) The `findingRef`
+  artifact is **append-only after filing**: `claimDigest` is
+  supervisor-computed at intake over the artifact bytes (plain sha256 —
+  evidence, not policy); consumers re-hash at check time and refuse a
+  mismatch (`finding-artifact-drift`); an edit (correction, retraction)
+  is a NEW findingRef + NEW `audit-finding` with the old record
+  `superseded` — legal ONLY while the old record is OPEN (a transition
+  onto a CLOSED finding is refused; the closed-record route is
+  `correctionOf` per NDR-n). *Applies:* intake validation, artifact
+  lifecycle. *Expansion:* §14.10.1 field-rules block (`route`×`surface`
+  bullet + `claimDigest`/artifact bullet). *Cited at:* §14.10.1 wire
+  comments, intake paragraphs, G2 gate description.
+
 
 **Statement-site manifest (every former restatement site → governing
 NDR):**
@@ -1996,7 +2114,14 @@ NDR):**
 | §14.10.2 lineage-fold paragraph (four steps) | total edge fold | NDR-n (canonical) |
 | §14.10.3 `filing-drift-resolution` op entry | refusal-id binding | NDR-o (canonical) |
 | §14.10.2 closed-state paragraph | reopening edges | NDR-p (canonical) |
-| §14.10.3 `finding-disposition` payload `reason` rule | reason echo binding (NDR-b's operand check) | NDR-b (citation) |
+| §14.10.3 "Identical bytes ≠ identical filing" paragraph | filing replay / new-act refiling | NDR-r (canonical; NEW v23 — v22 had this rule unregistered, cycle-16 F4) |
+| §14.10.2 "What counts as a refuting run" paragraph | refutation evidence | NDR-s (canonical; NEW v23 — cycle-16 F5) |
+| §14.12.4 repro-run result semantics | green/red/not-reproduced consumption | NDR-s (citation) |
+| §14.10.1 field-rules block (route×surface, claimDigest/artifact) | field validity + artifact immutability | NDR-t (canonical; NEW v23 — cycle-16 F5) |
+| §14.12.2 rule-4 accepted-fix paragraph (opinion rule) | accepted-fix evidence rule (demoted v23 R5-C16-7) | NDR-b (citation) |
+| §14.10.1 `findingRef`/artifact bullet | append-only artifact route | NDR-t (canonical expansion) |
+| §14.10.2 update-intake rule ("already-closed refused") | closed-state transitions | NDR-p (citation) |
+| §14.10.1 `finding-disposition` payload `reason` rule | reason echo binding (NDR-b's operand check) | NDR-b (citation) |
 | §14.9 fold-hygiene row | process gate | register doctrine 4 (fold-hygiene v2) |
 | §14.12.6 | no §14.10 rule bodies (verified v22) | — |
 
@@ -4848,19 +4973,19 @@ the round is those auditors plus the `audit-finding` records with
    evidence, for EVERY finding — opinion or not (v5, c3): the update
    MUST carry `reproRunRef` naming a durable **`repro-run` record**
    (14.12.4) — a supervisor-authored observation with required fields
-   — **EXCEPT the minor owner exception below and in §14.10.2 (v8
-   R4-C2-6 — v7 left THIS sentence unqualified, so a validator
-   applying it first refused the very minor the exception two
-   paragraphs down declares valid): the ONE rule across this section
-   is — every `accepted-fix` carries a conforming `reproRunRef`
-   UNLESS it satisfies the minor exception (minor + dispositionBy:
-   owner + riding a finding-disposition act + non-empty matching
-   reason + **`reproRunRef == null` — v11 R5-C5-6: the exception is
-   ONLY for a NULL reference; any NON-null reference must satisfy the
-   ordinary green-run validation regardless of the owner reason, so
-   an invalid/mismatched/red run attached to an "exception" accepted-
-   fix is refused like any other, and the exception never excuses a
-   bad run — it excuses the ABSENCE of one**). The owner-act/reason
+   — **EXCEPT the minor owner exception (v8 R4-C2-6; v23 R5-C16-7 —
+   THIS paragraph and the exception paragraph below are ONE rule
+   stated once, per NDR-b: every `accepted-fix` carries a conforming
+   `reproRunRef` UNLESS it satisfies the minor exception; the FULL
+   predicate (minor + dispositionBy:owner + riding a
+   finding-disposition act + non-empty matching reason +
+   `reproRunRef == null`; a NON-null reference must pass ordinary
+   green-run validation regardless of owner reason — the exception
+   excuses the ABSENCE of a run, never a bad one) is canonical in
+   NDR-b with its registered expansions (§14.10.1 acceptance contract
+   + §14.10.2 minor-exception text) — a validator reads the register
+   entry; restating its clauses HERE is the defect this demotion
+   removes). The owner-act/reason
    binding is machine-checkable
    evidence of a DIFFERENT kind — act-bound, not run-bound — and
    satisfies this paragraph's requirement for that case.

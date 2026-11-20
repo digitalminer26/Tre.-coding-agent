@@ -104,3 +104,33 @@ accepted-fix cross-product → NDR-b (single rule, exception is its only
 null route); filing-replay idempotence → NDR-c + NDR-i (one outcome per
 withdrawal, deterministic); needs-owner closing paths → NDR-q (no orphan
 holds).
+
+## 2b. Cycle-16 demotions and mappings (v22 → v23)
+
+### §14.12.2 rule-4 accepted-fix paragraph (opinion rule)
+
+Demoted (v23 R5-C16-7, replaced by a `per NDR-b` citation carrying the
+predicate summary; governing entries: NDR-b + its registered expansions
+§14.10.1 acceptance contract / §14.10.2 minor-exception text):
+
+> the ONE rule across this section is — every `accepted-fix` carries a conforming `reproRunRef` UNLESS it satisfies the minor exception (minor + dispositionBy: owner + riding a finding-disposition act + non-empty matching reason + **`reproRunRef == null` — v11 R5-C5-6: the exception is ONLY for a NULL reference; any NON-null reference must satisfy the ordinary green-run validation regardless of the owner reason, so an invalid/mismatched/red run attached to an "exception" accepted-fix is refused like any other, and the exception never excuses a bad run — it excuses the ABSENCE of one**)
+
+No semantic change — the predicate is byte-identical to NDR-b's.
+
+### Cycle-16 finding → action mapping (R5-C16-*)
+
+| finding | action | register effect |
+|---|---|---|
+| R5-C16-1 (MAJOR, EXPANSION-CONTRADICTION: NDR-a said supervisor-derived = owner-origin only; expansion table admits `"auditor" OR "owner"`) | NDR-a rewritten: mode defined by PROOF not origin; observer≠appender pinned | NDR-a (canonical corrected to ratified table) |
+| R5-C16-2 (MAJOR: NDR-p said edge (1) covers `rejected-duplicate` only; expansion + ratified v10/v11 behavior include `superseded`) | NDR-p canonical text now says `rejected-duplicate` **OR `superseded`** — restates ratified rule, adds none | NDR-p |
+| R5-C16-3 (MAJOR: register LIVE TIP defined as not-closed-by-duplicate/superseded vs expansion's not-closed-by-`rejected-refuted`) | NDR-n corrected to the expansion definition (not closed by `rejected-refuted`); terminalized members (duplicate/superseded) are a DISTINCT role — never live tips; they delegate via step-2 link effectivization to the effective survivor | NDR-n |
+| R5-C16-4 (MAJOR: filing replay / new-act refiling unregistered) | NEW **NDR-r** — filing identity, replay, re-filing over identical bytes; expansion = §14.10.3 "Identical bytes ≠ identical filing" paragraph | NDR-r (new) |
+| R5-C16-5 (MAJOR: refutation evidence, field validity, artifact immutability unregistered) | NEW **NDR-s** (refutation evidence — expansion §14.10.2 "What counts as a refuting run") and NEW **NDR-t** (closed vocabularies, route×surface validity, append-only artifact + claimDigest binding — expansion §14.10.1 field-rules block) | NDR-s, NDR-t (new) |
+| R5-C16-6 (MAJOR: "ONE named expansion site" vs multi-site declarations, NDR-q none) | Doctrine 1 REVISED: declared expansion = bounded FINITE set (one OR more); multi-site legal only if DECLARED; self-contained entries declare `(none — self-contained)`; NDR-q re-declared self-contained | doctrine 1, NDR-q |
+| R5-C16-7 (MAJOR: rule bodies remain at non-expansion sites — §14.12.2 rule-4 paragraph) | rule-4 paragraph demoted to predicate + `per NDR-b` citation (full predicate preserved above verbatim); conformance vector stays (it is application text, not a body) | NDR-b |
+| R5-C16-8 (MAJOR: NDR-q asserts totality without supplying it) | NDR-q gains the PER-CONDITION CLOSING INVENTORY table (six reachable conditions × closing act × operands × clearing evidence × forward effect) + historical-vs-hold distinction + unlisted-hold ⇒ contract defect | NDR-q |
+
+Register extension: v22 closed set a…q → v23 closed set a…**t**
+(heading updated). Self-check script entry-count expectation is derived
+from the heading, not hardcoded (it was never hardcoded — PASS reports
+the derived count).

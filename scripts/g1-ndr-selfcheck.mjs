@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// g1-ndr-selfcheck.mjs — Plan B register self-check (v22, docs/audits/
+// g1-ndr-selfcheck.mjs — Plan B register self-check (v23, docs/audits/
 // g1-plan-b-canonicalization.md). Pure node, reads docs/11-orchestrator-
 // schema.md only, never writes. Implements the mechanically auditable
 // clause of the §14.10.0 register doctrine:
 //   (1) every `per NDR-<id>` citation resolves to a defined register entry
-//   (2) no NDR id is defined twice (and ids are exactly the closed set a..q
-//       declared by the register heading until extended there)
+//   (2) no NDR id is defined twice (and ids are exactly the closed set
+//       declared by the register heading, extended there — v23: a..t)
 //   (3) §14.12.2 class-B/class-O finalization rows: a row over 150 words
 //       must carry a `per NDR-` citation (rule bodies belong to the register)
 //   (4) every register entry declares an *Expansion:* (a rule with no
