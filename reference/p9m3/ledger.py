@@ -2057,15 +2057,13 @@ class Ledger:
             # the AUD52-c5 note that PRESERVED the empty path to keep
             # C6_17's empty-list drive alive: C6_17 now drives a
             # NONEMPTY list into the same short-write fault.
-            if not occurrences:
-                raise LedgerError(
-                    "auth-occurrences-empty",
-                    detail="authorize requires at least one occurrence "
-                           "to repair; an AUTH with zero occurrences is "
-                           "permanently stale-unrepairable (a log with "
-                           "zero unmasked occurrences is not a "
-                           "repairable state); zero AUTH bytes",
-                )
+            # AUD56 F-A: the emptiness test must NOT outrank the
+            # type check — `not occurrences` is also true for "",
+            # {}, False, 0, (): those are INVALID inputs and keep
+            # their pinned `auth-occurrences-invalid` code (the
+            # AUD55 guard briefly stole them; owner audit caught
+            # the refusal-contract regression). ORDER: invalid type
+            # first, emptiness second, both before any AUTH byte.
             if (not isinstance(occurrences, list)
                     or any(not isinstance(e, dict)
                            or set(e) != {"offset", "hash"}
@@ -2078,6 +2076,15 @@ class Ledger:
                                          "(object, keys exactly offset+"
                                          "hash, int offset, str hash); "
                                          "refusing BEFORE any AUTH byte")
+            if not occurrences:
+                raise LedgerError(
+                    "auth-occurrences-empty",
+                    detail="authorize requires at least one occurrence "
+                           "to repair; an AUTH with zero occurrences is "
+                           "permanently stale-unrepairable (a log with "
+                           "zero unmasked occurrences is not a "
+                           "repairable state); zero AUTH bytes",
+                )
             # entry validity: entries must be malformed occurrences; a
             # schema-valid terminated line (incl. a DEAD REPAIR) refuses.
             data = self._read_bytes()

@@ -6683,7 +6683,6 @@ class TestAud52Cycle5Audit(Base):
                                     "lets through")
         self.assertEqual([a["authId"] for a in auths], ["F117OK"])
 
-
 class TestAud55EmptyAuthPolicy(Base):
     """AUD55 (auditor: gpt-6.1-terra): authorize could mint an AUTH
     with ZERO occurrences — a submitted [] skipped every per-entry
@@ -6843,3 +6842,28 @@ class TestAud55EmptyAuthPolicy(Base):
                          "before its key guard is in play")
         self.assertFalse(os.path.exists(led.auth_path),
                          "F118f: zero AUTH bytes")
+
+    def test_F118g_falsy_non_lists_keep_invalid_code(self):
+        """AUD56 F-A (owner audit): the AUD55 empty guard used bare
+        `not occurrences` BEFORE the type check, so falsy non-list
+        inputs ("", {}, False, 0, ()) refused
+        `auth-occurrences-empty` — a refusal-contract regression:
+        those are INVALID inputs and keep their pinned
+        `auth-occurrences-invalid` code (F117's truthy hostile shapes
+        never exposed it; `""` is falsy AND not a list). Fix: type
+        check first, emptiness second. Both codes refuse with zero
+        AUTH bytes either way; F118g pins the ORDER (mutant:
+        re-swap the two blocks -> the falsy set turns RED)."""
+        self.seed(CORRUPT + b"\n")
+        led = self.mk()
+        for bad in ("", {}, False, 0, ()):
+            with self.subTest(value=repr(bad)):
+                with self.assertRaises(LedgerError) as cm:
+                    led.authorize(bad, auth_id="F118G", test_only=True)
+                self.assertEqual(cm.exception.code,
+                                 "auth-occurrences-invalid",
+                                 "F118g: %r is an invalid TYPE and "
+                                 "must keep its pinned code, not be "
+                                 "stolen by the emptiness guard" % (bad,))
+        self.assertFalse(os.path.exists(led.auth_path),
+                         "F118g: zero AUTH bytes for every falsy input")

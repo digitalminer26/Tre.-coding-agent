@@ -7674,6 +7674,41 @@ findings, terra is the auditor, run 5 cycles until clear"):
   unchanged — enumerate only the missing rows (all but K1) into a
   c9 prompt IF the user extends the budget again.
 
+- AUD56 ROUND OPENED (2026-11-19, user: "address the findings, run
+  the audit 3 cycles - terra gpt"): the user-requested OWNER AUDIT
+  of the closed AUD55 fix (read-only review of 6173bae..a6e8676 +
+  a falsy-input probe at HEAD a6e8676) surfaced TWO minor findings
+  the seven AUD55 auditor cycles missed:
+  - **F-A (MINOR, REAL, fixed): the emptiness guard outranked the
+    invalid-type check.** `if not occurrences` is also true for
+    `""`, `{}`, `False`, `0`, `()` — falsy non-lists were refused
+    `auth-occurrences-empty` where F117 pins invalid shapes to
+    `auth-occurrences-invalid`. The AUD55 cycles missed it (their
+    hostile shapes were falsy-free — F117's `"notalist"` is
+    truthy). The refusal POSTURE was never weakened (every falsy
+    input refused, zero AUTH bytes); the regression was the
+    refusal CONTRACT (code + detail for type-mismatch inputs).
+    Fix: invalid-type check FIRST, emptiness SECOND — both before
+    any AUTH byte. Pin: F118g (the falsy set keeps
+    `auth-occurrences-invalid`, zero AUTH bytes). Mutation:
+    re-swap to the old order -> F118g's whole falsy set RED
+    (5 subtests). The `[]`-input mutation log ("empty ->
+    F118/F118b") is unchanged by the swap.
+  - **F-B (MINOR, REAL, fixed): the AUD55 close-out record
+    mis-described its own cycle history** ("six accepted
+    findings, all guard-reach prose, each pinned by
+    F118e/F118f" overstated: five cycle findings across
+    c1/c3/c4/c5/c6 with mixed content — test-id attribution,
+    guard-reach prose x2, a stale mutation claim — and only the
+    c4 landing claims got test pins, the rest stand on the
+    re-measured mutation logs). Corrected in the AUD55 entry
+    with an enumeration + a post-round-audit paragraph; the
+    discrepancy is recorded here rather than rewritten away.
+  Discipline: two findings, one round — F-A is the round's code
+  fix, F-B its own-doc correction (same commit, the AUD52-c4
+  precedent). The 3-cycle gpt-6.1-terra sweep reviews the fix;
+  dispositions append below as they land.
+
 - AUD55 ROUND OPENED (2026-11-18, user: standing contract —
   "implement the findings, gpt terra is the auditor, run 3 cycles").
   Owner pre-audit findings against the c5-fixed tree (6173bae) —
@@ -7696,7 +7731,19 @@ findings, terra is the auditor, run 5 cycles until clear"):
     both arms RED). Pinned F118 (submitted arm + authorize-
     still-works control), F118b (derived arm: UNMASKED state with
     an EMPTY unmasked set, mocked seam — a conforming classifier
-    never produces the pair).
+    never produces the pair). [AUD56 F-A correction: the guard as
+    first committed ran `if not occurrences` BEFORE the
+    invalid-type check, so falsy non-lists (`""`, `{}`, `False`,
+    `0`, `()`) — also `not occurrences` — were stolen from their
+    pinned `auth-occurrences-invalid` code. NO auditor cycle
+    caught it (the seven cycles' hostile inputs were falsy-free);
+    the user-requested OWNER AUDIT after the round closed judged
+    it REAL (a refusal-contract regression) — fixed in AUD56:
+    invalid-type FIRST, emptiness SECOND, order
+    pinned F118g (mutant: re-swap -> the falsy set RED). The
+    empty-guard mutation log "empty -> F118/F118b" is unchanged
+    by the swap: `[]` is type-valid, both pins still die on the
+    emptiness guard.]
   * F-B (MINOR, doc accuracy, three sites): ACCEPTED, FIXED —
     (1) the c4 F-A fold's "empty-unmasked-set mutant ... pinned
     jointly" claim measured WRONG (a single-guard mutant dropping
@@ -7828,12 +7875,35 @@ findings, terra is the auditor, run 5 cycles until clear"):
   against the actual guard-point control flow on both arms; no
   write-path bypass; entry claims/pins internally consistent;
   working tree unchanged. AUD55 ROUND CLOSED CLEAN: the code fix
-  (fa81193) drew zero findings in any cycle; all six accepted
-  findings were doc-precision (guard-reach prose not naming
-  earlier steps), each fixed in place and finally PINNED
-  (F118e/F118f) rather than re-phrased. Round-wide lesson folded:
-  mutation claims name their measurement date + test set, and
-  guard-reach prose names the guard-point ordering.
+  (fa81193) drew zero findings in any cycle; all SIX accepted
+  findings (five from cycles c1/c3-c6: c1 wrong test-id
+  attribution; c3 + c4 guard-reach prose overbroad about which
+  states land where; c5 a mutation claim gone stale when F118e
+  joined its guard; c6 guard-reach prose ignoring settle-first
+  ordering; plus the F-B fold of the round-open entry's own
+  doc-accuracy sites) were doc-precision — guard-
+  reach/mutation prose not naming its exact scope — each fixed
+  in place, the c4 landing claims PINNED by measurement
+  (F118e/F118f) and the rest corrected against the mutation logs
+  (the "each pinned by F118e/F118f" shorthand here overstated:
+  only the c4 landings got test pins; the rest stand on the
+  re-measured mutation evidence, the c7 audit re-verified them
+  line by line). Round-wide lesson folded: mutation claims name
+  their measurement date + test set, and guard-reach prose names
+  the guard-point ordering.
+  POST-ROUND OWNER AUDIT (user-requested, read-only, HEAD
+  a6e8676): found TWO findings the seven auditor cycles missed —
+  F-A (REAL): the emptiness guard outranked the invalid-type
+  check, stealing falsy non-list inputs from `auth-occurrences-
+  invalid` (no auditor cycle had caught it — their hostile
+  inputs were falsy-free; owner audit judged it REAL — refusal
+  CONTRACT regression, posture
+  never weakened); F-B (REAL): this close text overstated the
+  finding tally and pin attribution (corrected above). AUD55
+  reopened for the F-A code fix + F-B doc correction per the
+  AUD52-c4 precedent (code fix + its own-doc correction, one
+  commit); a 3-cycle gpt-6.1-terra sweep re-certifies. AUD56
+  ROUND OPENED — see its entry.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
