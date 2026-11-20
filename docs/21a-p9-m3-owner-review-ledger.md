@@ -7699,6 +7699,90 @@ findings, terra is the auditor, run 5 cycles until clear"):
   in the closure text (owner-measured this cycle). Auditor pacing
   rule WORKED (sweep-first): all 24 rows ran in ~160s.
 
+- AUD52-c2 (terra, HEAD 744fcff-tree): CYCLE INCOMPLETE per its own
+  criterion (unadjudicated survivors, one timeout, invalid R2/S5
+  variants, assignment-2 unexecuted); auditor verdict "no finding
+  established". OWNER ADJUDICATION (same session): the 31-row
+  operator-path sweep (list shipped 31 IDs, not the planned 28) —
+  20 KILLED with names, 9 SURVIVED-adjudicated-by-owner: T1 (drop
+  settle()'s leading resolve) GENUINE GAP -> F100; the reset-clears-
+  pending variant validly re-run by the owner (auditor's own R2 was
+  invalid) GENUINE GAP -> F101; T2/T3/T4/A2/A6/A9/A15/A16/A17/A18
+  owner re-run on tmp copies: T3/T4/A2/A6/A9/A15/A16 GENUINE GAPS ->
+  F103-F109 (each mutation-verified RED at pin time, incl. A15's
+  strict->loose cap flip and A16's zero-progress AUTH write);
+  T2/T9/T10/A17/A18 EQUIVALENT (owner repro). Abort boundary and
+  S5 exact-confirmation unexecuted by the auditor: owner ran S5
+  exact mutant — KILLED by F46's unique assertion (overlay charge).
+  Historical spot-checks CONFIRMED verbatim (136 @ 6d63ae6;
+  ledger.py unchanged da8bd7e..HEAD). Gate 142 zero-warning x2 at
+  the auditor's HEAD. Pinned suite F100-F109, 152 tests.
+
+- AUD52-c3 (terra, HEAD-tree @ 744fcff): SIX FINDINGS (1 crit,
+  3 major, 2 minor) — the round's first REAL production defects
+  since AUD51's c0. Owner dispositions:
+  * F-A (CRITICAL, un-fsynced AUTH becomes authority after crash):
+    REFUTED AS DEFECT / ACCEPTED AS DOCUMENTED BOUNDARY — the AUTH
+    file is durable-by-contract at append (write+fsync+dir-fsync
+    complete before authorize() RETURNS; a crash INSIDE that window
+    loses the whole call — the caller never received the id), and
+    the spec's crash-matrix places AUTH durability under the same
+    write-fsync-discipline as the ledger (docs/21 "AUTH bound
+    carries..." + the AUD43-era durability rows). The auditor's
+    window (die between final \n and fsync) has NO observable
+    success to defend — a lost AUTH with a durable REPAIR names an
+    id no AUTH file carries, which classify() already treats under
+    the existing named-basis rules (F99 malformed-auth row), not a
+    new state. NO CODE CHANGE; boundary documented. If the owner
+    later wants crash-atomic AUTH+intent, that is a SPEC change
+    (pending-marker for AUTH writes), tracked as candidate.
+  * F-B (MAJOR, whitespace-tail splice poisons AUTH file): ACCEPTED,
+    FIXED — authorize() now fstats the append fd and preprends "\n"
+    when the existing file lacks a trailing newline (fd opened
+    O_RDWR for the checked pread; writers are lock-serialized).
+    Nonblank unterminated tails can't reach the writer (reader
+    refuses at the top). Pinned F110 + F110b (no-spurious-newline
+    companion), mutation-verified.
+  * F-C (MAJOR, authorize KeyError on unknown-state classification):
+    ACCEPTED, FIXED — refuse STATE_UNKNOWN/STATE_CONFLICT before
+    touching the occurrence list (zero AUTH bytes; same fail-closed
+    trio as repair()); the eager-default KeyError path closed. The
+    legacy "occurrences" fallback is preserved ONLY for the
+    STATE_UNSETTLED early-return shape; an EMPTY unmasked list stays
+    empty (F26's masked-refusal invariant re-pinned as F111b — the
+    first fix attempt's or-chain fallback REGRESSED F26 and was
+    caught by the suite before commit). Pinned F111 + F111b.
+  * F-D (MAJOR, non-atomic (L_C,g_c) sampling -> false "repaired"
+    for a DEAD REPAIR): ACCEPTED, FIXED in two legs. Leg 1:
+    coherent generation-bracketed sampling (gen, length, gen) —
+    a generation that rotates inside the window refuses BEFORE any
+    ledger byte with `confirmation-generation-changed` and ZERO
+    intent journaled (D1-A allowance untouched); in-generation
+    appends still repair (F3 contract kept). Leg 2: post-write
+    liveness — if the generation rotated between sampling and the
+    verified append, the verdict downgrades to `outcome-unknown`
+    (durable bytes, unknown effectiveness), never "repaired" over a
+    record its generation binding makes DEAD. Pinned F112 (leg 1,
+    zero-byte + zero-intent assertions), F112b (in-generation still
+    repairs — over-strict mutant guard), F112c (leg 2, classify
+    shows the record DEAD exactly as predicted). All three legs
+    mutation-verified RED.
+  * F-E (MINOR, JSON-scalar confirmation header -> raw
+    AttributeError): ACCEPTED, FIXED — confirmation_gen() requires
+    a JSON OBJECT with a nonempty string confirmGen; everything
+    else (null/[]/7/"GEN9"/non-string/empty/undecodable) reads the
+    documented GEN0 fallback. Pinned F113 (nine hostile headers,
+    full repair flow through each).
+  * F-F (MINOR, test-only auth_id seam accepts ''/non-string):
+    ACCEPTED, FIXED — the seam refuses "" and non-strings with
+    `auth-id-invalid` before any byte (None stays the production
+    mint selector). Pinned F114, mutation-verified.
+  Gate after fixes: 161 tests (152 + 9 new F110-F114 arms),
+  zero-warning x2, all six fixes individually mutation-verified
+  RED on tmp copies (drop-the-guard mutants, one per fix).
+  F-A documented boundary: no test added (nothing to pin — the
+  contract predates and the auditor's repro has no success path).
+
 - AUD51 EXTENSION CLOSED (2026-11-17, user budget 3 confirming
   cycles c6-c8): UNCONFIRMED — no CYCLE CLEAN (c6: 1 finding ->
   F98; c7: 5 findings -> F99; c8: INCOMPLETE 0f). Cumulative round

@@ -1955,6 +1955,15 @@ class Ledger:
                                       detail="production authorize mints a "
                                              "fresh ULID; caller-chosen ids "
                                              "require test_only=True")
+                # AUD52-c3 F-F: the reader requires a nonempty string
+                # authId; the seam accepted '' (mints an AUTH its own
+                # reader rejects => malformed file) and non-strings
+                # (KeyError/corruption side effects). Refuse BEFORE any
+                # byte.
+                if not isinstance(auth_id, str) or not auth_id:
+                    raise LedgerError("auth-id-invalid", authId=auth_id,
+                                      detail="the test-only seam requires "
+                                             "a nonempty string authId")
                 if auth_id in auth_ids:
                     raise LedgerError("auth-id-exists", authId=auth_id)
                 if _log_names(auth_id):
@@ -2015,8 +2024,24 @@ class Ledger:
             # submitted list to equal the whole unmasked list: fixtures
             # F21/F1 pin that partial coverage is accepted at authorize
             # and refused later as `authorization-stale` at (c-O)(iii).
+            # AUD52-c3 F-C: `get()` evaluated its DEFAULT eagerly, so an
+            # early-return classification (over-cap / unreadable log =>
+            # `unknown` with NO "occurrences" key) raised KeyError
+            # instead of refusing. NOW: refuse `unknown`/`conflict`
+            # BEFORE touching the list (zero AUTH bytes). The legacy
+            # fallback to "occurrences" is preserved ONLY for the
+            # STATE_UNSETTLED early-return (which sets "occurrences"
+            # but no "unmasked"); an EMPTY "unmasked" (everything
+            # masked) stays empty — F26 pins that masked entries are
+            # refused, never resurrected via the full list.
+            if cls["state"] in (STATE_UNKNOWN, STATE_CONFLICT):
+                raise LedgerError(cls["state"], state=cls["state"],
+                                  detail="authorize refuses on the same "
+                                         "fail-closed states repair() "
+                                         "refuses; zero AUTH bytes")
             unmasked_set = {(o["offset"], o["hash"])
-                            for o in cls.get("unmasked", cls["occurrences"])}
+                            for o in cls.get("unmasked",
+                                             cls.get("occurrences", []))}
             for e in occurrences:
                 if (e["offset"], e["hash"]) not in unmasked_set:
                     raise LedgerError("auth-entry-not-unmasked", **e)
@@ -2025,13 +2050,30 @@ class Ledger:
             payload = json.dumps(rec, separators=(",", ":"))
             if len(payload.encode()) + 2 > CAPS["AUTH"]:
                 raise LedgerError("auth-too-large")
-            fd = os.open(self.auth_path, os.O_WRONLY | os.O_CREAT
+            # AUD52-c3 F-B fix needs a READABLE fd for the tail check;
+            # all writers run under the exclusion lock, so O_RDWR is
+            # safe for the append.
+            fd = os.open(self.auth_path, os.O_RDWR | os.O_CREAT
                          | os.O_APPEND | os.O_NOFOLLOW, 0o600)
             try:
                 # v38 cycle-6 (audit C4-2): a checked short-write loop. A
                 # partial write (or zero progress) is a FAILURE: the AUTH
                 # is never reported authorized over a malformed line.
                 data = (payload + "\n").encode()
+                # AUD52-c3 F-B: the reader accepts a whitespace-only
+                # UNTERMINATED tail; appending the payload directly
+                # SPADES it onto that tail — the result is one physical
+                # line whose size is tail+payload, and a tail just under
+                # the 64 KiB cap turns a SUCCESSFUL authorization into a
+                # globally malformed AUTH file. NOW the tail is
+                # terminated FIRST (the whitespace fragment becomes a
+                # blank inventory line the reader skips), so the payload
+                # always lands on its own line. A NONBLANK unterminated
+                # tail cannot reach here: _read_auths already refused
+                # with `authorization-file-malformed` at the top.
+                sz = os.fstat(fd).st_size
+                if sz > 0 and os.pread(fd, 1, sz - 1) != b"\n":
+                    data = b"\n" + data
                 off = 0
                 while off < len(data):
                     n = os.write(fd, data[off:])
@@ -2167,15 +2209,32 @@ class Ledger:
                                   reason="occurrence-list-changed")
 
             # (iv) build REPAIR; caps BEFORE any write
-            l_c = self.confirmation_length()
+            # AUD52-c3 F-D: the (l_c, g_c) pair must be sampled
+            # COHERENTLY — the confirmation log is NOT under the ledger
+            # lock, and the old l_c-then-g_c sequence could pair an OLD
+            # length with a NEW generation id: a REPAIR DEAD by
+            # watermark (or naming a generation it was not sampled
+            # from) while repair() still returned "repaired". NOW:
+            # sample gen, length, gen; a generation that moved inside
+            # the window refuses BEFORE any ledger byte (zero write,
+            # zero intent — the D1-A allowance is untouched).
             g_c = self.confirmation_gen()
+            l_c = self.confirmation_length()
             # TEST SEAM (v41, R4-c1): window hook invoked AFTER the L_C
             # read and BEFORE any ledger byte — lets fixture F3 land a
             # confirmation inside the race window the contract's F3
-            # row prescribes (production passes no hook).
+            # row prescribes (production passes no hook). The hook may
+            # still land a confirmation INSIDE the generation (F3):
+            # only a GENERATION change is refused.
             hook = getattr(self, "_test_hook_after_lc_read", None)
             if hook:
                 hook()
+            if self.confirmation_gen() != g_c:
+                raise LedgerError("confirmation-generation-changed",
+                                  detail="the confirmation log's generation "
+                                         "rotated inside the sampling "
+                                         "window; refusing before any "
+                                         "ledger byte (zero intent)")
             rec = {"t": "REPAIR", "authId": auth_id,
                    "masks": named[0]["occurrences"],
                    "all": {"hostToken": "ALL", "watermark": l_c,
@@ -2301,6 +2360,23 @@ class Ledger:
                 self._log_repair_outcome(auth_id, "outcome-unknown", True)
                 return {"outcome": "outcome-unknown", "durable": True,
                         "pending": self.durability_pending()}
+            # AUD52-c3 F-D (post-write leg): the record is on disk and
+            # byte-verified, but its confirmation set was sampled
+            # coherently from g_c. If the confirmation log ROTATED its
+            # generation between sampling and this moment, the record's
+            # epoch context is stale — its confirmations may belong to
+            # a superseded generation and never clear. "repaired"
+            # would overstate effectiveness; the honest verdict is the
+            # same outcome-unknown the unverified branch returns (the
+            # bytes ARE durable; effectiveness is unknown), never a
+            # satisfied caller holding a dead-generation REPAIR.
+            hook = getattr(self, "_test_hook_after_verify", None)
+            if hook:
+                hook()
+            if self.confirmation_gen() != g_c:
+                self._log_repair_outcome(auth_id, "outcome-unknown", True)
+                return {"outcome": "outcome-unknown", "durable": True,
+                        "pending": self.durability_pending()}
             self._log_repair_outcome(auth_id, "repaired", True)
             return {"outcome": "repaired", "durable": True, "pending": False}
 
@@ -2364,9 +2440,23 @@ class Ledger:
             os.close(fd)
         first = head.split(b"\n", 1)[0]
         try:
-            return json.loads(first.decode()).get("confirmGen", "GEN0")
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            # AUD52-c3 F-E: a scalar/array first line (e.g. `null\n`)
+            # PARSES but is not an object — `.get()` on it raised a raw
+            # AttributeError through classify/repair. Only a JSON
+            # OBJECT header can name a generation; anything else is
+            # the documented GEN0 fallback.
+            doc = json.loads(first.decode())
+        except (UnicodeDecodeError, ValueError):
             return "GEN0"
+        if not isinstance(doc, dict):
+            return "GEN0"
+        gen = doc.get("confirmGen", "GEN0")
+        # AUD52-c3 F-E (cont.): a non-string or empty confirmGen would
+        # crash the REPAIR builder downstream (`confirmGen` must be a
+        # str per the (b-O) schema) — the fallback also covers those.
+        if not isinstance(gen, str) or not gen:
+            return "GEN0"
+        return gen
 
     # ---------------- watermark / applied appends ----------------
 

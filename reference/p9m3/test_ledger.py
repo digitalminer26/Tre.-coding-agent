@@ -6228,3 +6228,283 @@ class TestV38Cycle11Audit(Base):
                          "F109: zero-progress AUTH write must raise EIO")
         self.assertEqual(len(zeros), 1,
                          "F109: the FIRST zero fails fast")
+
+
+class TestAud52Cycle3Audit(Base):
+    """AUD52 cycle-3 owner-adjudicated findings F-B..F-F, each pinned
+    with the finding's mutation story (RED under the named mutant)."""
+
+    def _rewrite_confirmations(self, content):
+        """TEST helper: replace the confirmation log wholesale — the
+        only way a GENERATION rotates (the header is the first line;
+        seed_confirmation_log appends and never rotates it)."""
+        p = os.path.join(self.dir, "confirmations.jsonl")
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    # ------------------------------------------------------------- F110 (F-B)
+    def test_F110_auth_append_terminates_whitespace_tail_first(self):
+        """AUD52-c3 F-B: the reader strips a whitespace-only
+        UNTERMINATED tail; the old writer appended the payload directly
+        onto it, SPADED tail+payload into one physical line — a tail
+        just under the 64 KiB line cap made the whole AUTH file
+        globally malformed after a SUCCESSFUL authorize. Mutant (the
+        pre-fix writer, no tail check): RED — the file turns malformed
+        and every later authorization refuses. Fix: terminate the tail
+        first; the payload always lands on its own line."""
+        tail = b" " * 60000                      # whitespace, unterminated
+        fd = os.open(os.path.join(self.dir, "authorizations.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, tail)
+        finally:
+            os.close(fd)
+        self.seed_at([(0, CORRUPT + b"-fb")])
+        self.led = self.mk()
+        auth = self.led.authorize([self.occ(0, CORRUPT + b"-fb")],
+                                  auth_id="FB1", test_only=True)
+        data = read_or_empty(os.path.join(self.dir, "authorizations.jsonl"))
+        self.assertTrue(data.endswith(b"\n"), "F110: AUTH file terminated")
+        self.assertEqual(self.led._read_auths()[1], False,
+                         "F110: a successful authorize must never make "
+                         "the AUTH file globally malformed (the F-B mutant)")
+        auths, _ = self.led._read_auths()
+        self.assertEqual([a["authId"] for a in auths], ["FB1"],
+                         "F110: exactly one valid AUTH — the payload on "
+                         "its own line, the whitespace a blank line")
+        # the payload is on its OWN line: the byte before it is '\n'
+        idx = data.index(b'"FB1"')
+        line_start = data.rindex(b"\n", 0, idx) + 1
+        self.assertTrue(data[line_start:idx + 4].startswith(b'{"t":"AUTH"'),
+                        "F110: payload framed on its own physical line")
+
+    def test_F110b_auth_append_no_spurious_newline_on_clean_tail(self):
+        """F110 companion (mutation both ways): on a file already
+        ending in '\\n' the fix must NOT insert an extra blank line —
+        an over-eager '\\n'-prepend mutant grows the file by one byte
+        per authorize."""
+        self.seed_at([(0, CORRUPT + b"-fb2")])
+        self.led = self.mk()
+        self.led.authorize([self.occ(0, CORRUPT + b"-fb2")],
+                           auth_id="FB2", test_only=True)
+        data = read_or_empty(os.path.join(self.dir, "authorizations.jsonl"))
+        self.assertTrue(data.endswith(b"}\n"),
+                        "F110b: clean tail stays clean — no extra byte")
+        self.assertFalse(data.endswith(b"\n\n"))
+
+    # ------------------------------------------------------------- F111 (F-C)
+    def test_F111_authorize_refuses_unknown_state_with_zero_bytes(self):
+        """AUD52-c3 F-C: on an over-cap (=> `unknown`) classification
+        the old `cls.get("unmasked", cls["occurrences"])` raised a raw
+        KeyError THROUGH authorize (no LedgerError, and callers typed
+        as success paths crashed). Mutant: RED KeyError. Fix: refuse
+        `unknown`/`conflict` before touching the occurrence list.
+        Pin: a LedgerError naming the state, and ZERO AUTH bytes."""
+        from unittest import mock
+        self.seed_at([(0, CORRUPT + b"-fc")])
+        led = self.mk()
+        with mock.patch("p9m3.ledger.LOG_CAP", 4):
+            with self.assertRaises(LedgerError) as cm:
+                led.authorize([self.occ(0, CORRUPT + b"-fc")],
+                              auth_id="FC1", test_only=True)
+            self.assertEqual(cm.exception.code, STATE_UNKNOWN,
+                             "F111: authorize refuses the same states "
+                             "repair() refuses (the F-C mutant raised "
+                             "KeyError, not LedgerError)")
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, "authorizations.jsonl")),
+            "F111: refusal wrote ZERO AUTH bytes")
+        # conflict state refuses too. The stage-4 unequal-confirmGen
+        # branch is UNREACHABLE for conforming writes (F7b pins it),
+        # so the state is injected at the resolve step: authorize
+        # must refuse on the STATE ALONE, before touching any list.
+        led2 = self.mk()
+        before = read_or_empty(os.path.join(self.dir, "authorizations.jsonl"))
+        with mock.patch.object(type(led2), "_resolve_locked",
+                               return_value={"state": STATE_CONFLICT}):
+            with self.assertRaises(LedgerError) as cm:
+                led2.authorize([self.occ(0, CORRUPT + b"-fc")],
+                               auth_id="FC3", test_only=True)
+        self.assertEqual(cm.exception.code, STATE_CONFLICT)
+        self.assertEqual(read_or_empty(
+            os.path.join(self.dir, "authorizations.jsonl")), before,
+            "F111: conflict refusal wrote zero bytes")
+
+    def test_F111b_authorize_empty_unmasked_still_refuses_masked(self):
+        """F111 companion (F26's invariant under the F-C fix): an
+        EMPTY "unmasked" list must NOT fall back to the full
+        occurrences list — masked entries stay refused."""
+        bad = CORRUPT + b"-f111b"
+        self.seed_at([(0, bad)])
+        self.led = self.mk()
+        occ = self.occ(0, bad)
+        auth = self.led.authorize([occ], auth_id="FB_C", test_only=True)
+        self.assertEqual(self.led.repair(auth)["outcome"], "repaired")
+        cls = self.led.classify()
+        self.assertEqual(cls["unmasked"], [], "fixture: everything masked")
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize([occ], auth_id="FB_C2", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-entry-not-unmasked",
+                         "F111b: an or-chain fallback to occurrences "
+                         "would resurrect the DEAD-on-arrival path F26 pins")
+
+    # ------------------------------------------------------------- F112 (F-D)
+    def test_F112_repair_refuses_before_byte_on_generation_rotation(self):
+        """AUD52-c3 F-D: (L_C, g_c) were sampled non-atomically; a
+        generation rotation between the two reads paired an OLD length
+        with the NEW generation id — a REPAIR DEAD-on-arrival while
+        repair() returned 'repaired'. Fix leg 1: gen-length-gen
+        coherent sampling, refuse BEFORE any ledger byte on rotation.
+        Mutant (pre-fix or check-after-intent): the refusal either
+        lands intent/bytes or raises nothing. Pin: code
+        `confirmation-generation-changed`, ZERO ledger bytes, ZERO
+        intent journal lines (the D1-A allowance is untouched)."""
+        corrupt = CORRUPT + b"-fd1"
+        self.seed_at([(50, corrupt)])
+        self.led = self.mk()
+        self.led.seed_confirmation_log(b'{"confirmGen":"GEN1"}\n')
+        auth = self.led.authorize([self.occ(50, corrupt)],
+                                  auth_id="FD1", test_only=True)
+        def _rotate():
+            # inside the sampling window, before any ledger byte: the
+            # confirmation log republishes with a NEW generation header
+            # (appending never rotates the header — first line wins)
+            self._rewrite_confirmations(b'{"confirmGen":"GEN2"}\n')
+        self.led._test_hook_after_lc_read = _rotate
+        before = self.raw()
+        journal = os.path.join(self.dir, "repair_intent.jsonl")
+        before_j = read_or_empty(journal)
+        with self.assertRaises(LedgerError) as cm:
+            self.led.repair(auth)
+        self.assertEqual(cm.exception.code, "confirmation-generation-changed",
+                         "F112: rotation inside the sampling window refuses")
+        self.assertEqual(self.raw(), before,
+                         "F112: refusal lands ZERO ledger bytes")
+        self.assertEqual(read_or_empty(journal), before_j,
+                         "F112: zero intent journaled — the refusal "
+                         "consumes no D1-A allowance")
+        # and the same AUTH still works once the log is stable:
+        self.led._test_hook_after_lc_read = None
+        self.assertEqual(self.led.repair(auth)["outcome"], "repaired",
+                         "F112: the refused attempt spent nothing")
+
+    def test_F112b_confirmation_inside_generation_still_repairs(self):
+        """F112 companion (mutation both ways): a confirmation that
+        lands INSIDE the generation (F3's race row) must still repair
+        — an over-strict mutant that refuses ANY length change in the
+        window turns F3 RED. The coherent sampler only refuses a
+        GENERATION change."""
+        corrupt = CORRUPT + b"-fd2"
+        self.seed_at([(50, corrupt)])
+        self.led = self.mk()
+        self.led.seed_confirmation_log(b"c" * 199 + b"\n")  # 200 B, GEN0
+        auth = self.led.authorize([self.occ(50, corrupt)],
+                                  auth_id="FD2", test_only=True)
+        self.led._test_hook_after_lc_read = lambda: (
+            self.led.seed_confirmation_log(b"d" * 9 + b"\n"))
+        self.assertEqual(self.led.repair(auth)["outcome"], "repaired",
+                         "F112b: in-generation appends are NOT a refusal")
+
+    def test_F112c_post_write_rotation_reports_outcome_unknown_not_repaired(self):
+        """AUD52-c3 F-D fix leg 2: the generation rotates AFTER the
+        REPAIR is written and verified but before the success verdict.
+        Pre-fix mutant returned 'repaired' over a record whose
+        confirmation set belongs to a superseded generation. Pin:
+        'outcome-unknown' (the bytes ARE durable; effectiveness is
+        not), an outcome-unknown journal line, and classify showing
+        the record DEAD (generation binding), never a satisfied
+        'repaired'."""
+        corrupt = CORRUPT + b"-fd3"
+        self.seed_at([(50, corrupt)])
+        self.led = self.mk()
+        self.led.seed_confirmation_log(b'{"confirmGen":"GEN1"}\n')
+        auth = self.led.authorize([self.occ(50, corrupt)],
+                                  auth_id="FD3", test_only=True)
+        self.led._test_hook_after_verify = lambda: (
+            self._rewrite_confirmations(b'{"confirmGen":"GEN2"}\n'))
+        res = self.led.repair(auth)
+        self.assertEqual(res["outcome"], "outcome-unknown",
+                         "F112c: post-write rotation forbids 'repaired'")
+        self.assertTrue(res["durable"],
+                        "F112c: the bytes are durable — only the "
+                        "effectiveness is unknown")
+        cls = self.led.classify()
+        self.assertTrue(any(d["reason"] == "mask-mismatch"
+                            for d in cls["dead_repairs"]),
+                        "F112c: the generation binding makes the record "
+                        "DEAD exactly as the auditor predicted")
+        journal = read_or_empty(
+            os.path.join(self.dir, "repair_intent.jsonl")).decode()
+        self.assertIn('"outcome-unknown"', journal,
+                      "F112c: journal honest about the verdict")
+
+    # ------------------------------------------------------------- F113 (F-E)
+    def test_F113_confirmation_gen_falls_back_on_non_object_header(self):
+        """AUD52-c3 F-E: a header that PARSES but is not a JSON object
+        (e.g. `null\\n`, `[]`, `7`) made confirmation_gen raise a raw
+        AttributeError THROUGH classify/repair; a non-string or empty
+        confirmGen crashed the REPAIR builder downstream. Mutants:
+        drop the isinstance guard => AttributeError; drop the str/empty
+        guard => downstream crash. Pin: every hostile header reads
+        GEN0 and a repair through each still works."""
+        for header in (b"null\n", b"[1,2]\n", b"7\n", b"\"GEN9\"\n",
+                       b'{"confirmGen":5}\n', b'{"confirmGen":""}\n',
+                       b'{"confirmGen":null}\n', b"not json\n", b"\xef\xfe\n"):
+            d = tempfile.mkdtemp(prefix="p9m3-fe-")
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+            os.chmod(d, 0o700)
+            fd = os.open(os.path.join(d, "confirmations.jsonl"),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, header)
+            finally:
+                os.close(fd)
+            led = Ledger(d)
+            self.assertEqual(led.confirmation_gen(), "GEN0",
+                             f"F113: header {header!r} must read GEN0 "
+                             "(pre-fix: raw AttributeError)")
+            # classify and a full repair flow survive the hostile header
+            fd = os.open(os.path.join(d, "consumptions.jsonl"),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, CORRUPT + b"-fe\n")
+            finally:
+                os.close(fd)
+            self.assertIn(led.classify()["state"],
+                          (STATE_UNMASKED, STATE_OK))
+            auth = led.authorize([{"offset": 0,
+                                   "hash": sha(CORRUPT + b"-fe")}],
+                                 auth_id="FE1", test_only=True)
+            self.assertEqual(led.repair(auth)["outcome"], "repaired",
+                             f"F113: repair survives header {header!r}")
+
+    # ------------------------------------------------------------- F114 (F-F)
+    def test_F114_test_seam_refuses_empty_or_nonstring_auth_id(self):
+        """AUD52-c3 F-F: the test-only auth_id seam accepted '' (the
+        reader requires a nonempty string => the writer mints an AUTH
+        its own reader rejects => globally malformed file) and
+        non-strings (KeyError/corruption side effects downstream).
+        Mutant (pre-fix): auth_id='' WROTE the file. Pin: refusal with
+        `auth-id-invalid` and zero bytes, for each hostile value."""
+        self.seed_at([(0, CORRUPT + b"-ff")])
+        self.led = self.mk()
+        for hostile in ("", 0, 5, None, [], {}):
+            with self.subTest(auth_id=repr(hostile)):
+                # None is the PRODUCTION selector (mint a ULID), so it
+                # must keep working when NOT test-flagged; test-flagged
+                # None is the seam misuse under test here.
+                if hostile is None:
+                    continue
+                with self.assertRaises(LedgerError) as cm:
+                    self.led.authorize([self.occ(0, CORRUPT + b"-ff")],
+                                       auth_id=hostile, test_only=True)
+                self.assertEqual(cm.exception.code, "auth-id-invalid",
+                                 "F114: seam must reject %r BEFORE any byte"
+                                 % (hostile,))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, "authorizations.jsonl")),
+            "F114: every hostile seam call wrote ZERO bytes")
