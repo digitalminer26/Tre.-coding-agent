@@ -7708,6 +7708,22 @@ findings, terra is the auditor, run 5 cycles until clear"):
   fix, F-B its own-doc correction (same commit, the AUD52-c4
   precedent). The 3-cycle gpt-6.1-terra sweep reviews the fix;
   dispositions append below as they land.
+  CYCLE 1 (f1fb221, gpt-6.1-terra, fresh context): `CLEAN` —
+  zero findings. Fresh scratch-copy gate 172 x2 zero-warning;
+  all five falsy non-lists probed live -> auth-occurrences-
+  invalid, zero AUTH bytes; both empty-list paths ->
+  auth-occurrences-empty; valid control authorizes. All four
+  mutants fresh-exact: guard re-swap -> exactly F118g's falsy
+  set RED; delete empty guard -> F118/F118b; derived-key ->
+  F118c; submitted-key -> F118d+F118e (no attribution shift
+  from the AUD55 logs). F117's hostile set verified truthy
+  (incl. "notalist") post-swap; derived arm unchanged, no
+  write-path bypass; the six-finding enumeration matches the
+  recorded c1-c7 dispositions; session-evidence grep confirmed
+  no AUD55 cycle ever probed falsy non-lists (the doc's "no
+  auditor cycle caught F-A" claim holds). CYCLE 2 = independent
+  surface sweep (fresh context, re-derive from ledger.py, not
+  from this round's framing).
 
 - AUD55 ROUND OPENED (2026-11-18, user: standing contract —
   "implement the findings, gpt terra is the auditor, run 3 cycles").
