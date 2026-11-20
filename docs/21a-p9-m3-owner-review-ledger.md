@@ -7756,6 +7756,24 @@ findings, terra is the auditor, run 5 cycles until clear"):
   folded: a post-round independent (non-auditor) audit pass
   earns its keep — falsy-vs-truthy hostile inputs are the split
   that auditor cycles with fixed probe sets systematically miss.
+  POST-CLOSE TRAIL (recorded, per discipline, at the user's
+  direction): a SECOND owner audit of the closed round found one
+  minor doc finding — this entry's F-B content breakdown read
+  "guard-reach prose x2", omitting the c6 settle-first finding
+  (the five-cycle tally itself was correct; the fuller c7-fold
+  enumeration in the AUD55 entry always named it). Fixed in
+  791b6c3 (breakdown now names all five with per-cycle IDs
+  c1/c3/c4/c6/c5; gate 172 zero-warning x2; code files untouched
+  so the c3 certification stands). A THIRD owner audit of that
+  fix: NO FINDINGS — the loop (audit -> fix -> audit) terminates
+  when a pass is clean. Code is final as of 791b6c3 (untouched
+  since the certified f1fb221); this trail fold completes the
+  21a record of the AUD55/AUD56 workstream. (Folding discipline
+  honored the hard way: the draft of this paragraph pinned
+  "final state" to 791b6c3/HEAD while being committed on top of
+  it — a self-referential staleness of exactly the class this
+  ledger audits for, caught in self-review and reworded to pin
+  the code, not the doc.)
 
 - AUD55 ROUND OPENED (2026-11-18, user: standing contract —
   "implement the findings, gpt terra is the auditor, run 3 cycles").
