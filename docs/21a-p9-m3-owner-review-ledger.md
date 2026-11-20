@@ -7710,8 +7710,16 @@ findings, terra is the auditor, run 5 cycles until clear"):
     the hex bound; empty path now refuses); (3) the c4 promise
     that ANY shape without "unmasked" is the fail-closed
     `authorize-state-unclassifiable` refusal was DOCUMENTED BUT
-    UNTESTED on both authorize paths (no test drove the guard) —
-    F118c (derived path: was a raw KeyError from the list
+    UNTESTED on both authorize paths (no test drove the guard).
+    Qualification (measured, AUD55 c3): the promise holds for the
+    shape the c4 text described — a classification at STATE_UNMASKED
+    whose payload lacks "unmasked" (the state the guard sits in);
+    payloads at OTHER states are refused EARLIER by the
+    state-specific refusals (`authorize-not-unmasked` derived /
+    `unknown` submitted), zero bytes either way — c3 found the
+    unqualified "ANY shape" phrasing overbroad and it is qualified
+    here, the entry now pins: F118c (derived path: was a raw
+    KeyError from the list
     comprehension — fixed with a same-shape guard; RED as
     ERROR without it) and F118d (submitted path: guard removed
     => raw KeyError; RED as ERROR) now pin both paths with zero
