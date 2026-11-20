@@ -7699,10 +7699,12 @@ findings, terra is the auditor, run 5 cycles until clear"):
     never produces the pair).
   * F-B (MINOR, doc accuracy, three sites): ACCEPTED, FIXED —
     (1) the c4 F-A fold's "empty-unmasked-set mutant ... pinned
-    jointly" claim measured WRONG (dropping ONLY the
-    `authorize-state-unclassifiable` guard turns F118b RED
-    directly; the masking observation was a mutant-order
-    artifact) — corrected in place; (2) the c5 F-A fold's
+    jointly" claim measured WRONG (a single-guard mutant dropping
+    ONLY the derived-path `authorize-state-unclassifiable` check
+    turns EXACTLY F118c RED and nothing else — F114/F114b stay
+    green, the masking-classify refusal lives independently in
+    _classify; F118b is pinned by the empty-list guard, not this
+    one) — corrected in place; (2) the c5 F-A fold's
     "C6_17's empty-list path are preserved" and "the reader's
     shape" wording — superseded note added (entry shape minus
     the hex bound; empty path now refuses); (3) the c4 promise
@@ -7717,6 +7719,17 @@ findings, terra is the auditor, run 5 cycles until clear"):
   Gate after fixes: 169 tests (165 + F118/F118b/F118c/F118d in the
   new TestAud55EmptyAuthPolicy class), zero-warning x2 at every
   step, every guard individually mutation-verified RED.
+  CYCLE 1 (fa81193, gpt-6.1-terra, findings table): code CLEAN —
+  zero findings against the guards (the auditor independently
+  reran the empty-guard mutant: exactly F118+F118b RED; the
+  submitted-guard mutant: exactly F118d RED); 1 minor finding —
+  my c4-fold correction had itself named F118b for the
+  derived-missing-key pin where measurement says EXACTLY F118c
+  (F118b refuses at the empty guard and never reaches the key
+  check). ACCEPTED, FIXED (two sites, ledger lines ~7701/~7857,
+  re-measured: derived-guard mutant -> exactly F118c, submitted-
+  guard mutant -> exactly F118d; "pinned jointly" stays dead).
+  Cycle 2 to sweep the full S-A1-R v8 attack surface fresh.
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
@@ -7854,11 +7867,15 @@ findings, terra is the auditor, run 5 cycles until clear"):
     + repair under a torn tail, spent AUTHs are skipped by replay
     and masked entries refuse with REAL spent facts). Both fixes
     mutation-verified RED (drop settle-first => F115 fails, F115b
-    errors; the fail-closed half stands on its own: dropping ONLY
-    the `authorize-state-unclassifiable` guard while keeping the
-    empty-unmasked derivation turns F118b RED directly — the earlier
-    "pinned jointly" note was WRONG, measured AUD55: the masking
-    observation was mutant-order artifact, and AUD55 added F118b
+    errors; the fail-closed half stands on its own: a single-guard
+    mutant dropping ONLY the derived-path
+    `authorize-state-unclassifiable` check turns EXACTLY F118c RED
+    and nothing else — the earlier "pinned jointly" note was
+    WRONG, measured AUD55: the masking observation was
+    mutant-order artifact; the AUD55 pins F118c/F118d each drive
+    their own path directly (measured: dropping the derived-path
+    guard -> exactly F118c RED, dropping the submitted-path guard
+    -> exactly F118d RED), and AUD55 added F118b
     (derived EMPTY unmasked set -> refusal, zero AUTH bytes) plus
     F118c (derived path missing-"unmasked" -> the same refusal
     instead of a raw KeyError; both mutation-verified RED).
