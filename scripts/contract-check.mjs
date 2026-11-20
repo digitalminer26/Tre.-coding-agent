@@ -1314,7 +1314,8 @@ const allow = new Set([
   // §14.12.2 finalization table rows since the v9 fold):
   "owner-filing-draft-drift", "owner-filing-mapping",
   "filing-drift-resolution", "spool-loss-post-filing",
-  "owner-filing-integrity-fault",
+  "owner-filing-integrity-fault", "filing-integrity-disposition",
+  "integrity-disposition-mismatch",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and
