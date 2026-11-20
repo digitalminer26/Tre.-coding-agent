@@ -7840,6 +7840,57 @@ findings, terra is the auditor, run 5 cycles until clear"):
   in the new TestAud52Cycle4Audit class), zero-warning x2, both
   code fixes individually mutation-verified RED.
 
+- AUD52-c5 (terra, HEAD-tree @ post-c4, CONFIRMING cycle): ONE
+  FINDING + a 5-fix confirmation sweep (F110/F112/F113/F115/F116 —
+  all PASS on the auditor's tmp copies). Launch note: three relaunch
+  attempts died on provider-side cybersecurity moderation of the
+  prompt text (no such flags in c1-c4 err logs); rewording to
+  defensive-review language cleared it. Owner dispositions:
+  * F-A (MAJOR, authorize writes an AUTH its own reader rejects):
+    ACCEPTED, FIXED — authorize checked entry (offset, hash) VALUES
+    against the ledger but never the entry's KEY SET: a correct
+    occurrence plus one extra member passed every check, serialized
+    into the AUTH, and _valid_mask_list (keys EXACTLY
+    {offset,hash}) then flagged the whole file malformed — authorize
+    returned an id and simultaneously poisoned the AUTH inventory
+    (reader refuses every authorization thereafter). End-to-end
+    repro on the pre-fix tree: extra-key entry => id returned,
+    _read_auths ([], True). Fix: submitted-list shape guard
+    (list of objects, keys exactly offset+hash, _is_int offset,
+    str hash; `auth-occurrences-invalid`, zero AUTH bytes) placed
+    before the entry checks. Deliberately NOT the full hex/64
+    validator: a str-wrong hash still reaches the entry check,
+    where it is compared against the real line's sha256 — F102's
+    pinned `auth-entry-unknown-occurrence` verdict and C6_17's
+    empty-list path are preserved (first fix attempt used the full
+    validator and broke both; caught by the suite before pinning).
+    Pinned F117 (five hostile shapes refuse zero-byte; control good
+    entry still authorizes and the reader accepts the file),
+    mutation-verified RED (drop-the-guard mutant, all arms).
+  Gate after fix: 165 tests (164 + F117 in the new
+  TestAud52Cycle5Audit class), zero-warning x2, guard
+  mutation-verified RED.
+
+- AUD52 ROUND CLOSED (2026-11-18, user max 5 cycles): UNCONFIRMED —
+  no cycle reached CYCLE CLEAN (c1/c2: INCOMPLETE self-assessed;
+  c3: 6 findings — 5 fixed+pinned F110-F114, 1 documented boundary;
+  c4: 3 findings — 2 fixed+pinned F115/F115b/F116, 1 documented
+  boundary (inherent lock-free-confirmation-log TOCTOU, damage
+  bounded by the c3 F-D outcome-unknown downgrade); c5: 1 finding —
+  fixed+pinned F117). Every accepted finding was reproduced on the
+  current tree, fixed, pinned, and individually mutation-verified
+  RED; suite grew 152 -> 165 across c3-c5 with the zero-warning gate
+  green at every commit. Production defects by cycle severity: c3
+  (1 crit-refuted/5 fixed), c4 (2 fixed), c5 (1 fixed) — the c4/c5
+  findings were BOTH in code the prior cycle had just fixed
+  (authorize's classification trust; caller-schema trust), the
+  classic fix-introduces-boundary pattern; the c5 sweep passing on
+  all five sampled fixes supports "no KNOWN open defect" without a
+  CLEAN claim. Two spec-change candidates tracked, unimplemented:
+  crash-atomic AUTH+intent (c3 F-A context) and a confirmation-log
+  advisory lock (c4 F-B). Final tree: HEAD with F117 folded; 165
+  tests zero-warning x2.
+
 - AUD51 EXTENSION CLOSED (2026-11-17, user budget 3 confirming
   cycles c6-c8): UNCONFIRMED — no CYCLE CLEAN (c6: 1 finding ->
   F98; c7: 5 findings -> F99; c8: INCOMPLETE 0f). Cumulative round

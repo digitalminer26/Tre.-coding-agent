@@ -2017,6 +2017,33 @@ class Ledger:
                                       state=cls["state"])
                 occurrences = [{"offset": o["offset"], "hash": o["hash"]}
                                for o in cls["unmasked"]]
+            # AUD52-c5 F-A: the submitted list must satisfy the READER's
+            # shape BEFORE any AUTH byte is written — a correct
+            # (offset, hash) pair plus an EXTRA key passed the old
+            # membership checks and serialized straight into the AUTH,
+            # whose reader requires each entry to be an object with keys
+            # exactly {"offset","hash"}: authorize minted a file its own
+            # reader rejected as globally malformed. The check is
+            # deliberately NOT the full _valid_mask_list: a wrong-length
+            # or non-hex hash that passes set-keys/int/str shape still
+            # reaches the entry check, which compares against the REAL
+            # line's sha256 — so F102's pinned `auth-entry-unknown-
+            # occurrence` verdict survives, and any hash that passes
+            # THAT is valid-for-the-reader by construction. An EMPTY
+            # list keeps its pinned path (C6_17: it reaches the writer;
+            # the reader accepts []).
+            if (not isinstance(occurrences, list)
+                    or any(not isinstance(e, dict)
+                           or set(e) != {"offset", "hash"}
+                           or not _is_int(e["offset"])
+                           or not isinstance(e["hash"], str)
+                           for e in occurrences)):
+                raise LedgerError("auth-occurrences-invalid",
+                                  detail="the submitted occurrence list "
+                                         "fails the reader's shape "
+                                         "(object, keys exactly offset+"
+                                         "hash, int offset, str hash); "
+                                         "refusing BEFORE any AUTH byte")
             # entry validity: entries must be malformed occurrences; a
             # schema-valid terminated line (incl. a DEAD REPAIR) refuses.
             data = self._read_bytes()

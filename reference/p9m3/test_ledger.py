@@ -6628,3 +6628,51 @@ class TestAud52Cycle4Audit(Base):
                              auth_id="FC4", test_only=True)
         self.assertEqual(led.repair(auth)["outcome"], "repaired",
                          "F116: repair flow survives the hostile header")
+
+
+class TestAud52Cycle5Audit(Base):
+    """AUD52 round, auditor cycle 5 (terra, HEAD-tree @ post-c4): the
+    confirming cycle. F-A (authorize serialized a caller-supplied
+    occurrence the reader's own schema would reject) is pinned here;
+    c5's five-fix confirmation sweep (F110/F112/F113/F115/F116) passed
+    on the auditor's tmp copies."""
+
+    def test_F117_authorize_refuses_entries_the_reader_would_reject(self):
+        """AUD52-c5 F-A (MAJOR): authorize validated (offset, hash)
+        values but not the entry's KEY SET — a correct occurrence plus
+        an extra member passed every check and was serialized into the
+        AUTH, whose reader requires keys EXACTLY {"offset","hash"}:
+        authorize returned an id and immediately left the AUTH file
+        globally malformed (reader refuses every authorization). Fix:
+        refuse a submitted list whose entries are not objects with
+        exactly offset+hash (int/str shape) BEFORE any byte — while
+        F102's wrong-but-str hash still reaches the entry check.
+        Mutant: drop the guard => the extra-key AUTH lands and the
+        reader flags malformed."""
+        self.seed(CORRUPT + b"\n")
+        self.led = self.mk()
+        good = self.occ(0, CORRUPT)
+        hostile = [[{"offset": 0, "hash": good["hash"], "extra": 1}],
+                   [dict(good, hash2=good["hash"])],
+                   [{"offset": True, "hash": good["hash"]}],
+                   [[good]],
+                   "notalist"]
+        for h in hostile:
+            with self.subTest(entry=repr(h)[:48]):
+                with self.assertRaises(LedgerError) as cm:
+                    self.led.authorize(h, auth_id="F117", test_only=True)
+                self.assertEqual(cm.exception.code,
+                                 "auth-occurrences-invalid",
+                                 "F117: %r must refuse BEFORE any AUTH "
+                                 "byte" % (h,))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.dir, "authorizations.jsonl")),
+            "F117: zero AUTH bytes for every hostile shape")
+        # control: the identical GOOD entry still authorizes normally
+        aid = self.led.authorize([good], auth_id="F117OK", test_only=True)
+        self.assertEqual(aid, "F117OK")
+        auths, malformed = self.led._read_auths()
+        self.assertFalse(malformed, "F117: the AUTH file the reader "
+                                    "accepts is exactly what the guard "
+                                    "lets through")
+        self.assertEqual([a["authId"] for a in auths], ["F117OK"])
