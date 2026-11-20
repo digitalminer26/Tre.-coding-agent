@@ -157,6 +157,7 @@ mechanism).
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
+| 2026-11-21 | §14.10 (§14.10.1/.2/.3), §14.9, §14.12.2 r4 | **G1 REVIEW ROUND 3 — §14.10 draft v5→v6 (five MAJOR findings from auditing v5 against itself and against §14.12; owner direction "address the findings"; all adopted; internal contradictions/unimplementable bindings only, no new capability; still DRAFT, NOT implemented, no module touched).** F1 (MAJOR): v5's wrong-refutation correction ordered the owner to mark the CLOSED finding `superseded` — an update to a closed finding the same section's intake rule refuses; replaced by an append-only `correctionOf` lineage field (closed record never touched; pair = one lineage for duplicate accounting; the artifact-edit supersede rule fenced to OPEN records by the same reasoning). F2 (MAJOR): `audit-filing` bound a draft PATH (post-confirmation byte swap slipped the binding); payload `{findingDraftRef, draftSha256, claim, cycle}` — CLI hashes the bytes DISPLAYED at confirmation into the digest-bound payload; intake re-hash mismatch = `owner-filing-draft-drift` (needs-owner, fails closed); deterministic draft→record mapping (machine-readable header, fields re-derived from confirmed bytes, `owner-filing-mapping` refusal) — c7-B1 reconstructibility on the owner channel. F3 (MAJOR): the wire block omitted `originRef` entirely and v5 never reconciled owner findings with §14.12.4's c4-B2 disjoint-origins invariant; entry-channel model pinned — origin=who-produced, proof=which channel (auditor+intake-receipt | owner+owner-act | +supervisor-derived third mode, never an origin value); exactly three legal (origin, proof) combinations, validator refuses the rest; owner filings are never receipt outcomes and never enter submissionAccounting. F4 (MAJOR): §14.10.2 allowed minor accepted-fix on owner reason while §14.12.2 rule 4 required a green run for EVERY finding — one rule stated identically in both: null ref valid ONLY for minor + dispositionBy:owner + riding finding-disposition act + non-empty reason echoed in the act payload; orchestrator never takes the exception. F5 (MAJOR): `rejected-refuted` "failed against preFixObserved" over a green|red enum where neither value names non-reproduction, with no artifact specified — repro-run result enum gains `not-reproduced` (completed run vs the finding's PRE-FIX BASELINE = cycle targetDigest else policy baseCommit; a run on a fixed tree refutes nothing and is refutation-invalid), crashed/aborted runs are NO RECORD (absence is the encoding; no aborted result value), accepted-fix never consumes not-reproduced/red, refuted never consumes green/red, r4 chain VALID row + opinion-rule channel list reconciled (closed-residual OR conforming refutation — the only two lifts). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v6, review round 3 folded) |
 | 2026-11-20 | §14.10 (§14.10.1/.2/.3/.5), §14.9, §14.12.2 r4, §14.12.6 | **G1 REVIEW ROUND 2 — §14.10 draft v4→v5 (findings G1-R2-1…R2-6, produced by auditing v4 against the p9m3 practice it abstracts — docs/21a AUD51–AUD56; owner direction "address the findings": all adopted as recommended; corrections of v4 against demonstrated practice, no new capability; still DRAFT, NOT implemented, no module touched).** R2-1 (MAJOR): disposition enum could not record "claim did not reproduce" — added `to:"rejected-refuted"` with REQUIRED non-null `reproRunRef` (refutation is repro-gated like filing; a wrong refutation is corrected by owner re-filing + `superseded`, never reopening — the AUD51-c5→c6→F98 path); propagated to the §14.12.2 r4 chain-closure table (a refutation discharges chain members only through machine-checked digest-equal links) and to §14.10.5's orchestrator-power list. R2-2 (MAJOR): emission authority had no owner-originated findings while §14.10.2's reopening rule assumed them — added `origin:"auditor|owner"` on `audit-finding` (owner-origin rides a new closed `op:"audit-filing"` owner-act `{findingDraftRef, claim, cycle}` with `ownerActRef` on the record; producer trio nullable for out-of-tre owner audits), `auditor` renamed `producer` (pre-implementation, no migration; §14.12.6 consumer ref updated). R2-3 (MAJOR): `accepted-fix`'s own R4 acceptance contract had no record field to bind the green re-run — `reproRunRef` added to `audit-finding-update`, required non-null for non-minor accepted-fix (both dispositionBy values) and for rejected-refuted; minors may close on owner reason (c7-B1 named-field-absent class, closed pre-implementation). R2-4 (MAJOR): the finding artifact was mutable after filing with no binding — added `claimDigest` (supervisor-computed at intake over the findingRef bytes; plain sha256 — evidence, not policy, no canonicalizer) + append-only-after-filing rule (edit = new findingRef + new record, old superseded; consumers re-hash, mismatch = `finding-artifact-drift`) — demonstrated live by the AUD56 trail fold. R2-5 (MINOR): `cycle` clause — numbering is episode-wide under G3's round record; post-close audits are later cycles. R2-6 (MINOR, no change): repro kinds have no doc-shaped kind; `command` + observed/expected prose covers doc findings in practice. DECISIONS-REQUIRED: 0 (round-1-style owner table: the round-2 decisions are the six adopted proposals, recorded in the §14.10 header) | G1 finding-record schema (draft v5, review round 2 folded) |
 | 2026-11-15 | §14.10 (rewritten v2) | **G1 OWNER REVIEW ROUND 1 FOLDED — §14.10 draft v2 (owner decisions R1–R8, recorded verbatim in new §14.10.4).** R1-B: class SPLIT into routed `route:code-fix|human-review` x domain `surface:code|test|doc|spec` (the vocabulary the live R5 round actually classified in); `surface:spec`+`route:code-fix` invalid at intake. R2-A: new second kind `audit-finding-update` fully specified (findingId, to, dispositionBy, authority, supersedes; no `from` — derivable under S5 single-writer; update-on-closed refused; one supersede encoding replaces the old companion-record half-mechanism). R3: emission authority — auditors append findings only via supervisor intake (id minted there, R7: fresh conforming ULID, collision-refused, caller ids test-only per F55/F56); supervisor is sole appender of updates; `dispositionBy:owner` requires a TTY-confirmed-channel reference (D2 precedent) in `authority` — closes implementer-downgrades-own-blocker. R4: minors never auto-hold sign-off, owner decides escalations; `accepted-fix` binds to repro re-run green (semantics pinned here; consumer enforces). R5-A: bounded `claim` + REQUIRED `findingRef` -> episode `findings/` (S4 layout amendment in-place). R6: `affectedNorm` now object `{doc,anchor,sha256|null}`, digest mandated-or-not deferred to G2, at-most-one-norm-per-finding. R8: opinion-holds-sign-off rule MOVED to G3 (enforcement) — §14.10 supplies `verdictBasis` only. `residual-risk-accepted` demoted from finding class to `closed-residual` DISPOSITION (authority REQUIRED). Still DRAFT, NOT implemented, no module touched. | G1 finding-record schema (draft v2, owner round-1 folded) |
 | 2026-11-18 | §14.10.3, §14.11.2, §14.12.2, §14.12.3, §14.13.4a, §14.14.4 | v12 owner decisions D0-b, D1-a, D2-b, D3-a, D4-a folded (draft v11→v12) | owner decisions D0–D4 |
@@ -1278,14 +1279,14 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
-| audit-finding records (§14.10) | G1 draft v5 (owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20) | drafted — NOT implemented; post-closure additive |
+| audit-finding records (§14.10) | G1 draft v6 (owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
 
 ### 14.10 Audit-finding records (G1 — the loop's classification hinge)
 
-**Status: DRAFT v5 (2026-11-20) — v2 + G5 `scopeRefs` amendment (§14.14.1)
+**Status: DRAFT v6 (2026-11-21) — v2 + G5 `scopeRefs` amendment (§14.14.1)
 + v4: route×surface note extended for the G2 intake gate (§14.11.4 seam
 fix, round-0 audit finding M9).
 + v5 (2026-11-20, **G1 review round 2**, findings G1-R2-1…R2-6 from
@@ -1322,6 +1323,37 @@ CLOSE). **(R2-6)** noted, NO change: repro kinds lack a doc-shaped kind;
 `command` + the observed/expected prose pair covers doc findings in
 practice. `auditor` → `producer` rename (pre-implementation, no
 migration; see 14.10.1).
++ v6 (2026-11-21, **G1 review round 3** — five MAJOR findings from the
+post-v5 audit ("address the findings"), all adopted; each an internal
+contradiction or an unimplementable binding, no new capability):
+**(F1)** v5's wrong-refutation correction instructed the owner to mark
+the closed finding `superseded` — an update to a closed finding, which
+the same section's intake rule REFUSES; replaced with an append-only
+`correctionOf` lineage link (the closed record is never touched; the
+pair is one lineage for duplicate accounting — the AUD51-c5→F98 path).
+**(F2)** the `audit-filing` owner-act bound a draft PATH, not bytes:
+a post-confirmation file edit slipped through; payload gains
+`draftSha256` (CLI-computed at confirmation, part of the digest-bound
+canonical payload; intake re-hash mismatch =
+`owner-filing-draft-drift`) + the deterministic draft→record mapping
+rule (header re-derivation, `owner-filing-mapping` refusal) — c7-B1
+reconstructibility applied to the owner channel. **(F3)** entry-
+channel model pinned against §14.12.4's c4-B2 disjoint origins:
+`origin` = who produced, entry = which proof (`originRef` intake for
+auditor findings — the v5 wire block omitted the field entirely;
+`ownerActRef` for owner filings, which are never receipt outcomes;
+supervisor-derived is a third entry mode, not an origin value) —
+three legal (origin, proof) combinations, all others refused.
+**(F4)** the minor-accepted-fix contradiction between §14.10.2 (null
+ref allowed on owner reason) and §14.12.2 rule 4 ("EVERY finding"
+needs a green run) closed with ONE rule stated identically in both:
+minor + owner-act + echoed non-empty reason, orchestrator excluded.
+**(F5)** refutation evidence made precise: repro-run `result` enum
+gains `not-reproduced` (green/red named no non-reproduction outcome;
+a crashed run is no record at all), refuting runs bind the finding's
+PRE-FIX BASELINE (targetDigest of the cycle, else policy baseCommit —
+a run on a fixed tree refutes nothing), the r4 chain-table VALID row
+and the opinion-rule channel list reconciled to it.
 Owner review round 1 folded (decisions R1–R8 recorded at §14.10.4). NOT IMPLEMENTED; post-P0 additive wire
 shape per the §14.9 closure rule. No module is touched by this section.**
 
@@ -1355,6 +1387,8 @@ state changes flow through `audit-finding-update` (§14.10.2).
   "origin":"auditor | owner",         // v5 R2-2: who produced the finding (see below)
   "producer":{ "endpoint":"…", "model":"gpt-6.1-terra", "sessionId":"…" },  // v5: renamed from `auditor` — it names whichever session produced the finding, owner audit included
   "ownerActRef":null,                 // v5 R2-2: REQUIRED non-null owner-act id when origin:"owner"; REQUIRED null otherwise
+  "originRef":null,                   // v6 F3: REQUIRED {origin:"intake",receiptId} when origin:"auditor" (the 14.12.4 c4-B2 binding); null when origin:"owner" (ownerActRef is that record's entry proof)
+  "correctionOf":null,                // v6 F1: REQUIRED non-null findingId only for the owner re-filing that corrects a WRONG refutation (rule in 14.10.2); REQUIRED null otherwise
   "route":"code-fix | human-review",               // THE routing field (R1-B)
   "surface":"code | test | doc | spec",            // artifact domain (R1-B)
   "severity":"blocker | major | minor",
@@ -1438,6 +1472,30 @@ drops it):
   refused at intake. This closes v4's contradiction: §14.10.2's
   reopening rule assumed the owner files findings while v4's emission
   authority let only auditors append them.
+- **Entry channels (v6 F3; reconciles this section with §14.12.4's
+  c4-B2 disjoint-origins invariant).** `origin` answers WHO produced
+  the claim; entry is proven by the channel field — the two are never
+  conflated: `origin:"auditor"` ⇒ `originRef =
+  {origin:"intake", receiptId}` REQUIRED non-null (the §14.12.4
+  round-intake binding) AND `ownerActRef` null; `origin:"owner"` ⇒
+  `ownerActRef` REQUIRED non-null AND `originRef` null — an owner
+  filing is NOT a receipt outcome, so it can never violate "every
+  receipt resolves to exactly one outcome", and it is absent from
+  `submissionAccounting` by construction (it never entered the round
+  queue; quiescence, 14.12.2 step 3, is unaffected).
+  **Supervisor-derived filings (G2 blockers, human-review records a
+  refusal produces, 14.12.4) are a third entry mode, not a value of
+  `origin`:** they carry `originRef = {origin:"supervisor-derived",
+  fromRefusalId}`, their `producer` trio names the supervisor session,
+  and their `origin` records who OBSERVED the defect —
+  "auditor"/"owner" per that observation. The field pair (origin,
+  entry proof) has exactly THREE legal combinations
+  (auditor+intake, owner+owner-act, auditor|owner+supervisor-derived)
+  and a validator refuses every other one; `correctionOf` may only be
+  non-null on the owner+owner-act combination (F1). An owner filing
+  whose draft names a defect a receipt already produced is the NORMAL
+  duplicate path (new finding + `rejected-duplicate`, owner-act
+  channel) — never a re-resolution of a closed receipt.
 - `claimDigest` (v5 R2-4) — computed by the SUPERVISOR at intake over
   the `findingRef` artifact's bytes (plain sha256 over the file — the
   artifact is evidence, not policy, so no canonicalizer: re-hashing
@@ -1450,8 +1508,10 @@ drops it):
   under a plain `findings/` dir it would be nothing).
   Companion rule: the artifact is **append-only after filing** — an
   edit (correction, retraction) is a NEW findingRef + a NEW
-  `audit-finding` record, the old one `superseded` (the corrected-
-  refutation path already stated); consumers re-hash at check time and
+  `audit-finding` record, the old one `superseded` — legal ONLY while
+  the old record is still OPEN (v6: a transition onto a CLOSED finding
+  is refused by the 14.10.2 intake rule; the closed-record correction
+  route is `correctionOf`, F1); consumers re-hash at check time and
   refuse a mismatch (`finding-artifact-drift`).
 - `affectedNorm` (R6) — an OBJECT `{doc, anchor, sha256}` or null
   (null = pure-code finding, no norm implicated). `anchor` is
@@ -1489,7 +1549,27 @@ from two encodings:
   transition is invalid.
 - `rejected-refuted` (v5 R2-1) records "the claim did not reproduce":
   **`reproRunRef` REQUIRED non-null**, naming the durable `repro-run`
-  record whose re-run failed against `preFixObserved`. It is the ONLY
+  record whose re-run failed against `preFixObserved`. **What counts
+  as a refuting run (v6 F5, G1 review round 3 — v5 said "failed" over
+  a `result:"green|red"` enum where neither value names
+  non-reproduction, and never said AGAINST WHAT ARTIFACT, so both a
+  run on the already-fixed tree and a crashed harness could be read
+  as refuting):** the run's `result` MUST be `not-reproduced` (§14.12.4
+  record amendment: the repro command ran to COMPLETION against the
+  finding's pre-fix baseline and the behavior `preFixObserved` claims
+  did NOT occur); `executedArtifactDigest` MUST equal the finding's
+  **pre-fix baseline** — the round manifest's `targetDigest` for the
+  finding's cycle where one exists, else the episode policy
+  `baseCommit` (a refutation run against a tree that already contains
+  a fix tests the fix, NOT the claim, and is REFUTATION-INVALID);
+  same `findingId` + `reproDigest` binding as every run. A run that
+  did not complete (crash, timeout, harness error, environment
+  mismatch) is **not evidence of anything** and must never be written
+  as a `repro-run` record at all (a plain failure note in the decision
+  log; the finding stays open); an inconclusive observation is not a
+  refutation. Refutation stays owner-grade evidence: an
+  orchestrator-originated refutation is valid ONLY through a
+  trusted-gate/supervisor-authored run meeting ALL of the above. It is the ONLY
   disposition that may close a finding without anyone accepting or
   fixing it, so its evidence bar is the highest in the enum. v4's enum
   forced practice into lies: AUD51-c5's owner-refuted M2 fit none of
@@ -1497,9 +1577,20 @@ from two encodings:
   `closed-residual` — accepting authority for a risk shown not to
   exist; `superseded` — no successor record). A refutation asserted
   without a named re-run is invalid — refutation is repro-gated exactly
-  like filing. **A wrong refutation is corrected the refuted way it
-  was found:** the owner re-files (new `audit-finding`, the old one
-  `superseded` by it) — the closed finding is never reopened (AUD51:
+  like filing. **A wrong refutation is corrected WITHOUT
+  touching the closed record (v6 F1, G1 review round 3):** a
+  correction NEVER updates the refuted finding — an update to a closed
+  finding is refused by the intake rule above, so v5's "the old one
+  `superseded` by it" was an illegal instruction: it demanded an
+  update the same section forbids. The route: the owner RE-FILES (new
+  `audit-finding`, `origin:"owner"` via the audit-filing act) carrying
+  **`correctionOf`** = the refuted finding's id (field in 14.10.1;
+  null elsewhere). The old finding stays closed as `rejected-refuted`
+  forever — history is never rewritten — and the pair is ONE lineage
+  for duplicate accounting (a later `rejected-duplicate` may name
+  either member as the surviving twin; the correction member is the
+  live claim; `superseded` keeps its own meaning — a closed record
+  never gains fields post-hoc). AUD51:
   c5 REFUTED an M2 claim — both mutant shapes red — and c6 showed the
   refutation was WRONG about the double-failure shape, which survived
   the whole suite; the finding was re-raised as that cycle's finding,
@@ -1518,9 +1609,17 @@ from two encodings:
   where an auditor cannot strike it). Required for BOTH
   `dispositionBy` values: an orchestrator-originated accepted-fix has
   no owner act at all, and v4 left its green re-run bound nowhere.
-  Minor-severity accepted-fix may carry null (a minor without a
-  machine re-run is closed on the owner's `reason` alone — minors are
-  owner-judgment by the severity rule). This field existed in the v4
+  Minor-severity accepted-fix may carry null —
+  the single carve-out (v6 F4, pinned jointly with §14.12.2 rule 4 so
+  the two sections can never diverge again): valid ONLY for
+  `dispositionBy:"owner"` riding a `finding-disposition` owner-act
+  with a non-empty `reason` echoed verbatim in the act's canonical
+  payload (validation checks the record's reason equals the act's —
+  the act IS the authority and its payload is the binding; minors are
+  owner-judgment by the severity rule, and the reason is what that
+  judgment leaves behind). An orchestrator-originated minor
+  accepted-fix with null ref is malformed — refused; §14.12.2 rule 4
+  is the consumer enforcement and states the same three conditions. This field existed in the v4
   owner payload (`finding-disposition.reproRunRef`) with no record
   field to receive it — c7-B1's named-field-absent defect class,
   closed pre-implementation.
@@ -1538,12 +1637,34 @@ structural, same posture as F53 (mint, don't trust):
   `origin:"auditor"`. They never append updates, and they cannot
   originate an `origin:"owner"` line (it requires an owning owner-act,
   14.10.1). **Owner-origin findings (v5 R2-2)** enter through the
-  owner-act channel: `op:"audit-filing"`, payload `{ findingDraftRef,
-  claim, cycle }` — `findingDraftRef` names the draft artifact whose
-  bytes the supervisor digests at intake into `claimDigest`; the
-  finding record's `ownerActRef` names the act, validation replays it
-  and re-digests the draft (same binding as every privileged kind).
-  The owner never appends to the log directly.
+  owner-act channel: `op:"audit-filing"` — the owner never
+  appends to the log directly. Payload + binding rules (v6 F2, G1
+  review round 3): v5's payload `{findingDraftRef, claim, cycle}`
+  bound a PATH, not bytes — between the owner's TTY confirmation and
+  intake, the file at that path could change, so re-digesting at
+  intake proved only what the supervisor read, never what the owner
+  authorized. The v6 payload is `{ findingDraftRef, draftSha256,
+  claim, cycle }` — **`draftSha256` (sha256 over the draft's exact
+  bytes) is computed by the CLI at confirmation time from the bytes
+  actually displayed to the owner and is part of the digest-bound
+  canonical payload** (a draft that changed after confirmation fails
+  closed at intake: `owner-filing-draft-drift`, needs-owner — the act
+  stands as evidence of what was confirmed, never silently re-digests
+  it). The supervisor copies the confirmed bytes to an immutable
+  `findingRef` artifact and the record's `claimDigest` is that same
+  digest: confirmed bytes, stored bytes, and attested digest are ONE
+  byte-string.
+  **Draft→record mapping (v6 F2):** the draft is a structured
+  artifact with a machine-readable header carrying the record's
+  closed-field set (route, surface, severity, verdictBasis, claim,
+  repro, scopeRefs, affectedNorm; free prose below) and `draftSha256`
+  covers the WHOLE artifact. Validation parses the header from the
+  confirmed bytes and **re-derives every authority-relevant record
+  field from it** — a record field differing from the confirmed draft
+  (or a header failing the §14.10.1 schema) is
+  `owner-filing-mapping`, refused at intake; the supervisor
+  transcribes an owner-origin record's classified fields, never
+  authors them.
 - **The supervisor is the sole appender of `audit-finding-update`.**
   `dispositionBy:"owner"` requires a recorded owner channel behind it:
   owner dispositions originate ONLY from the TTY-confirmed operator CLI
@@ -1621,11 +1742,19 @@ structural, same posture as F53 (mint, don't trust):
   - `audit-filing` (v5 R2-2 — §14.10.1's owner-origin findings need an
     op or the closed-schema rule itself would refuse the channel that
     files them; the c7-B1 defect class, closed at the same time as the
-    field that consumes it): `{ findingDraftRef, claim, cycle }` —
-    `findingDraftRef` names the draft artifact whose bytes the
-    supervisor digests at intake into the resulting `audit-finding`'s
-    `claimDigest` (validation re-digests; the act binds the bytes the
-    record attests to)
+    field that consumes it; **v6 F2**: `draftSha256` added and the
+    draft→record mapping rule stated in the 14.10.1/14.10.3 owner-
+    filing text above — the pre-F2 payload bound a path whose bytes
+    could change after confirmation): `{ findingDraftRef, draftSha256,
+    claim, cycle }` — the CLI hashes the draft's displayed bytes into
+    `draftSha256` BEFORE the act is appended, intake re-hashes the
+    draft file and refuses a mismatch (`owner-filing-draft-drift`),
+    and the resulting `audit-finding`'s `claimDigest` equals
+    `draftSha256`; validation replays the act, re-digests the draft,
+    and re-derives the record's classified fields from the confirmed
+    header (a conforming validator MUST be able to reconstruct every
+    authority-relevant field from the act's own payload + bytes —
+    c7-B1's reconstructibility standard applied here)
   - `finding-hold` / `finding-hold-lift`: `{ findingId }` — the
     resulting record's `dispositionBy`/`authority` are supervisor-
     stamped, not act-bound; the act binds the finding it escalates
@@ -2491,9 +2620,16 @@ the round is those auditors plus the `audit-finding` records with
    — not merely none with `cycle == n` (v2's round-local check leaked: an
    un-dispositioned old-cycle blocker vanished from the verdict). Clean
    round + open ancient blocker ⇒ unclean. Minors: see rule 5.
-4. **Opinion rule (R8 enforcement; v3 tightened):** an open blocker/major
-   with `verdictBasis:"opinion"` holds the round unclean unless dispositioned
-   `closed-residual` by the owner (authority) BEFORE the boundary.
+4. **Opinion rule (R8 enforcement; v3 tightened; channel list closed
+   v6 F5):** an open blocker/major with `verdictBasis:"opinion"` holds
+   the round unclean unless dispositioned BEFORE the boundary
+   `closed-residual` by the owner (authority) OR `rejected-refuted`
+   through a fully-conforming refuting run (§14.10.2 v6 F5 — the
+   self-limiting channel noted below; these are the ONLY two lifts:
+   the v3 sentence's "unless closed-residual" enumerated the
+   owner-judgment channel alone and read as though refutation could
+   not close an opinion finding, which the v5 R2-1 note two paragraphs
+   down contradicts).
    **Closing channels for opinion findings are restricted (v3):** an
    orchestrator may NOT move an opinion-basis blocker/major to
    `rejected-duplicate` or `superseded` — those bookkeeping transitions
@@ -2510,13 +2646,27 @@ the round is those auditors plus the `audit-finding` records with
    closure is evidence-bound through the same supervisor-authored
    channel as `accepted-fix`.)
    `{ findingId, reproDigest, executedArtifactDigest (the tested tree/
-   candidate sha), runner:"trusted-gate|supervisor", result:"green|red",
+   candidate sha), runner:"trusted-gate|supervisor",
+   result:"green|red|not-reproduced",
    runEvidenceRef (gate log / command record), ts }` — where
    `reproDigest` equals the finding's repro definition digest computed
    over its canonical serialization (v6: the repro digest is defined
    over the finding's `repro` object ONLY, excluding bookkeeping fields,
    so `repro.kind:"none"` findings have NO digest and cannot be
    "equalled"), `result == "green"` against `postFixExpected`, AND —
+   **result semantics closed (v6 F5):** `green` = `postFixExpected`
+   observed (supports `accepted-fix`); `red` = `postFixExpected` NOT
+   observed (supports NOTHING — evidence of a failed fix, recorded
+   for the trail); `not-reproduced` = the repro command ran to
+   COMPLETION against the finding's pre-fix baseline (§14.10.2 v6 F5
+   definition) and the claimed `preFixObserved` behavior did NOT
+   occur (supports `rejected-refuted` ONLY). A `not-reproduced` record
+   whose `executedArtifactDigest` ≠ the pre-fix baseline is
+   refutation-invalid; `accepted-fix` NEVER accepts
+   `not-reproduced`/`red`, `rejected-refuted` NEVER accepts
+   `green`/`red`. Runs that did not complete are never written as
+   repro-run records at all (no result value may encode "aborted" —
+   absence of a record is the honest encoding, §14.10.2 v6 F5). AND —
    **artifact binding (v6, c4-B4; tightened v7, c5-B2)** —
    `executedArtifactDigest` EQUALS the sha of a durable `acceptance`
    record (§14.3)/integration candidate that is the artifact being
@@ -2641,6 +2791,26 @@ the round is those auditors plus the `audit-finding` records with
    refused. `repro.kind:"none"` (unfalsifiable —
    typical opinion/human-review) ⇒ `accepted-fix` is REFUSED outright;
    owner dispositions only.
+   **Minor-severity exception (v6 F4 — G1 review round 3; closes the
+   contradiction with §14.10.2, which permits a minor `accepted-fix`
+   with null `reproRunRef` on the owner's reason while this rule
+   demanded a run for EVERY finding — a conforming G1 producer could
+   emit a transition G3 must refuse).** THE rule, both sections:
+   `accepted-fix` with `reproRunRef == null` is valid ONLY where (i)
+   the finding's `severity` is minor, AND (ii) `dispositionBy:
+   "owner"` riding a `finding-disposition` owner-act (whose
+   `reproRunRef` is likewise null — the act is the authority and the
+   record is its transcription, v8 c6-M7 alignment), AND (iii) the
+   update's `reason` is non-empty AND non-null (the reason is the
+   binding evidence — the act's canonical payload carries the same
+   reason string; validation checks agreement). Orchestrator-originated
+   `accepted-fix` NEVER takes the exception (no owner act exists for
+   it; v5 R2-3's "required for BOTH dispositionBy values" holds
+   exactly for the exception's non-minor case and for minors against
+   the orchestrator). A minor `accepted-fix` with null ref failing ANY
+   condition is the pre-existing refusal (missing/mismatched/
+   worker-authored ⇒ refused). §14.10.2's R2-3 paragraph carries the
+   identical carve-out.
    **Chains preserve obligations GLOBALLY, not only for opinion basis
    (v5, c3; state table v6, c4-M7):** `rejected-duplicate`/`superseded`
    is valid ONLY if the survivor has severity ≥ the source's and the
@@ -2662,7 +2832,7 @@ the round is those auditors plus the `audit-finding` records with
    |---|---|
    | open | member stays open (counts against sign-off as the survivor's severity) |
    | `accepted-fix` with VALID repro-run evidence (incl. artifact binding) | DISCHARGED — every member resolved |
-   | `rejected-refuted` (v5 R2-1) with VALID `reproRunRef` | DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed re-run refutes THAT repro, and digest-equality makes it the members' repro too); an owner-authorized link over a non-falsifiable repro does NOT share the refutation's evidence ⇒ UNCLEAN, needs its own disposition |
+   | `rejected-refuted` (v5 R2-1) with VALID `reproRunRef` (VALID = the v6 F5 closed definition: `not-reproduced` on the pre-fix baseline, supervisor/gate-authored, digest-bound) | DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed re-run refutes THAT repro, and digest-equality makes it the members' repro too); an owner-authorized link over a non-falsifiable repro does NOT share the refutation's evidence ⇒ UNCLEAN, needs its own disposition |
    | owner-closed `closed-residual` (authority REQUIRED) | member inherits the residual — resolved as residual, surfaced at P13; NOT a clean discharge |
    | owner `superseded` onto a third norm/finding | member relinks to the new survivor (revalidate severity/route/falsifiability) |
    | closed by any other route (stale, duplicate-of-nothing, dangling) | UNCLEAN — violation at every boundary thereafter |
