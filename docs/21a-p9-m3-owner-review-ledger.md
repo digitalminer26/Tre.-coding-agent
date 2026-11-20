@@ -7736,6 +7736,25 @@ findings, terra is the auditor, run 5 cycles until clear"):
   died on an import error of the auditor's own harness setup,
   redone clean — harness artifact, not tree.) CYCLE 3 = final
   certification.
+  CYCLE 3 (0aaaf75 tree, gpt-6.1-terra, fresh context):
+  `ROUND CERTIFIED` — fresh-copy gate x2 @172 zero-warning; all
+  four standing mutants fresh-exact (swap -> F118g x5; empty ->
+  F118+F118b; derived-key -> F118c; submitted-key -> F118d+
+  F118e); live probes confirmed the guard order (falsy non-lists
+  -> invalid; []/empty-derived -> empty; valid control
+  authorizes) with zero AUTH bytes on every refusal; the
+  corrected six-finding tally matches the recorded AUD55 c1-c7
+  dispositions and the AUD55 session-evidence spot-check found
+  no falsy non-list probe (the "no auditor cycle caught F-A"
+  claim stands); HEAD content equals f1fb221 for both code
+  files (folds touched the doc only). AUD56 ROUND CLOSED CLEAN:
+  three cycles, three fresh contexts, zero findings on the fix
+  (F-A code + F-B doc, one fix commit f1fb221); the owner-audit
+  -> auditor-sweep loop caught, fixed, and re-certified the two
+  findings the AUD55 auditor cycles missed. Round-wide lesson
+  folded: a post-round independent (non-auditor) audit pass
+  earns its keep — falsy-vs-truthy hostile inputs are the split
+  that auditor cycles with fixed probe sets systematically miss.
 
 - AUD55 ROUND OPENED (2026-11-18, user: standing contract —
   "implement the findings, gpt terra is the auditor, run 3 cycles").
