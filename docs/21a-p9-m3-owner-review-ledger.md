@@ -7725,7 +7725,10 @@ findings, terra is the auditor, run 5 cycles until clear"):
     landing; the entry now pins: F118c (derived path: was a raw
     KeyError from the list comprehension — fixed with a same-shape
     guard; RED as ERROR without it) and F118d (submitted path:
-    guard removed => raw KeyError; RED as ERROR) pin both paths
+    guard removed => raw KeyError; RED as ERROR; the same
+    submitted-key guard also turns F118e RED once that pin existed,
+    measured c5 — cycle-1/2 records naming only F118d are dated
+    historical measurements from before F118e) pin both paths
     with zero AUTH bytes each; AUD55-c4 measured the remaining
     landings for a no-"unmasked" shape at `ok` (submitted: LANDS
     on the key guard; derived: refused `authorize-not-unmasked`
@@ -7784,6 +7787,21 @@ findings, terra is the auditor, run 5 cycles until clear"):
   refusal overbroad) — code remained CLEAN in all four cycles;
   the doc claims are now pinned by measurement rather than prose.
   Cycle 5 (fresh) will certify against the corrected text.
+  CYCLE 5 (5c42ddd tree, gpt-6.1-terra, fresh context): gate x2
+  @171, all five pins + independent mocked ok-shape repro (both
+  arms, zero bytes), state-landing table vs the qualification
+  sentence, and the no-bypass write-path walk all CERTIFIED; 1
+  minor finding — the standing c4-fold claim "dropping the
+  submitted-path guard -> exactly F118d" went stale when F118e
+  joined the same guard (it now turns F118d AND F118e RED).
+  ACCEPTED: standing claim updated to name both; cycle-1/2
+  records dated as historical measurements from before F118e;
+  pin description notes the shared guard. CYCLE 6 = FINAL
+  certification scoped to the corrected claims (the c3/c4/c5
+  finding class is doc-phrasing drift around mutation logs, code
+  CLEAN five cycles running — per round discipline the doc is now
+  written so every standing claim names its measurement date and
+  the test set it was made against).
 
 - AUD52 ROUND OPENED (2026-11-17, user: "Audit Again using gpt terra.
   Implement findings. Run 5 cycles"). Same contract/rules as AUD51
@@ -7929,7 +7947,9 @@ findings, terra is the auditor, run 5 cycles until clear"):
     mutant-order artifact; the AUD55 pins F118c/F118d each drive
     their own path directly (measured: dropping the derived-path
     guard -> exactly F118c RED, dropping the submitted-path guard
-    -> exactly F118d RED), and AUD55 added F118b
+    -> F118d RED, and as of AUD55-c4 also F118e (the `ok`-shape
+    submitted landing pinned after that mutant was first run),
+    and AUD55 added F118b
     (derived EMPTY unmasked set -> refusal, zero AUTH bytes) plus
     F118c (derived path missing-"unmasked" -> the same refusal
     instead of a raw KeyError; both mutation-verified RED).
