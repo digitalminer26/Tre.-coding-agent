@@ -6508,3 +6508,123 @@ class TestAud52Cycle3Audit(Base):
         self.assertFalse(os.path.exists(
             os.path.join(self.dir, "authorizations.jsonl")),
             "F114: every hostile seam call wrote ZERO bytes")
+
+
+
+class TestAud52Cycle4Audit(Base):
+    """AUD52 round, auditor cycle 4 (terra, HEAD-tree @ post-c3):
+    findings against the c3-fixed tree. F-A (authorize consulted the
+    STATE_UNSETTLED early-return classification whose "occurrences"
+    list is the FULL list and whose spent/masked sets are empty) and
+    F-C (RecursionError on a deeply nested confirmation header) are
+    pinned here; F-B is dispositioned in the ledger doc (inherent
+    check-then-act window on the LOCK-FREE confirmation log — the
+    generation-bracketed sampling of c3 F-D already downgrades any
+    racing verdict to outcome-unknown, no stronger primitive exists
+    without a spec change)."""
+
+
+    def test_F115_authorize_under_torn_tail_never_resurrects_masked(self):
+        """AUD52-c4 F-A: classify()'s STATE_UNSETTLED early-return
+        carries the FULL occurrence list and an EMPTY spent set, and
+        authorize fell back to it — an already-masked occurrence was
+        re-authorized under a torn tail (and every spent AUTH passed
+        the replay check) — zero masked/spent facts were consulted.
+        Fix: authorize settles the tail under its lock and RECOMPUTES
+        classification first (repair()'s pinned rule). Pin: the masked
+        entry refuses `auth-entry-not-unmasked` with zero AUTH bytes."""
+        corrupt = CORRUPT + b"-fa1"
+        self.seed_at([(50, corrupt)])
+        self.led = self.mk()
+        auth = self.led.authorize([self.occ(50, corrupt)],
+                                  auth_id="FA1", test_only=True)
+        self.assertEqual(self.led.repair(auth)["outcome"], "repaired")
+        with open(os.path.join(self.dir, "consumptions.jsonl"), "ab") as f:
+            f.write(b"torn-no-newline")
+        self.assertEqual(self.led.classify()["state"], STATE_UNSETTLED)
+        ap = os.path.join(self.dir, "authorizations.jsonl")
+        before = os.path.getsize(ap)
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize([self.occ(50, corrupt)],
+                               auth_id="FA2", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-entry-not-unmasked",
+                         "F115: a masked occurrence must refuse under a "
+                         "torn tail (pre-fix: authorize SUCCEEDED)")
+        self.assertEqual(os.path.getsize(ap), before,
+                         "F115: zero AUTH bytes")
+
+    def test_F115b_settled_classification_makes_spent_facts_real(self):
+        """F115 companion (the fix is settle-first, not refuse-always):
+        the full coverage list — including the settled tear as its own
+        occurrence — authorizes AND repairs under a torn tail, replay
+        refuses while the AUTH is unspent, and after the REPAIR lands
+        the REAL spent facts are consulted: the spent AUTH is skipped
+        by replay (pre-fix the empty UNSETTLED spent set matched it as
+        "unspent" replay) and its masked entries refuse
+        `auth-entry-not-unmasked` (pre-fix the full-occurrence fallback
+        let them through)."""
+        c1, c2 = CORRUPT + b"-fa3", CORRUPT + b"-fa4"
+        o2, T = len(c1) + 1, b"torn-fa"
+        self.seed_at([(0, c1), (o2, c2)])
+        self.led = self.mk()
+        with open(os.path.join(self.dir, "consumptions.jsonl"), "ab") as f:
+            f.write(T)
+        occs = [self.occ(0, c1), self.occ(o2, c2),
+                self.occ(o2 + len(c2) + 1, T)]
+        a3 = self.led.authorize(occs, auth_id="FA3", test_only=True)
+        self.assertTrue(a3, "F115b: full-coverage authorize works under "
+                            "a torn tail (settle-first, not refuse)")
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize(occs, auth_id="FA4", test_only=True)
+        self.assertEqual(cm.exception.code, "authorization-replay",
+                         "F115b: unspent FA3 replays after settle")
+        self.assertEqual(self.led.repair(a3)["outcome"], "repaired",
+                         "F115b: the settled full list repairs")
+        with open(os.path.join(self.dir, "consumptions.jsonl"), "ab") as f:
+            f.write(b"torn2-fa")
+        self.assertEqual(self.led.classify()["state"], STATE_UNSETTLED)
+        ap = os.path.join(self.dir, "authorizations.jsonl")
+        before = os.path.getsize(ap)
+        with self.assertRaises(LedgerError) as cm:
+            self.led.authorize(occs, auth_id="FA6", test_only=True)
+        self.assertEqual(cm.exception.code, "auth-entry-not-unmasked",
+                         "F115b: with REAL spent facts FA3 is skipped "
+                         "(no authorization-replay) and the masked "
+                         "entries refuse; pre-fix the empty UNSETTLED "
+                         "spent set made FA3 fire as replay")
+        self.assertEqual(os.path.getsize(ap), before, "F115b: zero bytes")
+
+    # ------------------------------------------------------------- F116 (c4 F-C)
+    def test_F116_deeply_nested_header_reads_gen0_not_recursionerror(self):
+        """AUD52-c4 F-C: a validly-encoded header nested deeper than
+        the interpreter's recursion limit (1,100 '[' chars fit inside
+        the 4096-byte header read) made json.loads raise RecursionError
+        — a RuntimeError, NOT the ValueError the F-E guard caught — so
+        confirmation_gen/classify/repair died with a raw traceback
+        instead of the documented GEN0 fallback. Pin: GEN0, and the
+        full repair flow survives the header."""
+        header = b"[" * 1100 + b"]" * 1100 + b"\n"
+        self.assertLess(len(header), 4096)
+        d = tempfile.mkdtemp(prefix="p9m3-fc4-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.chmod(d, 0o700)
+        fd = os.open(os.path.join(d, "confirmations.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, header)
+        finally:
+            os.close(fd)
+        led = Ledger(d)
+        self.assertEqual(led.confirmation_gen(), "GEN0",
+                         "F116: deep-nesting header must read GEN0 "
+                         "(pre-fix: raw RecursionError)")
+        fd = os.open(os.path.join(d, "consumptions.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, CORRUPT + b"-fc4\n")
+        finally:
+            os.close(fd)
+        auth = led.authorize([{"offset": 0, "hash": sha(CORRUPT + b"-fc4")}],
+                             auth_id="FC4", test_only=True)
+        self.assertEqual(led.repair(auth)["outcome"], "repaired",
+                         "F116: repair flow survives the hostile header")

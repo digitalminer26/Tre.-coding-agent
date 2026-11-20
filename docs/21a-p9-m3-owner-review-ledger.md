@@ -7783,6 +7783,63 @@ findings, terra is the auditor, run 5 cycles until clear"):
   F-A documented boundary: no test added (nothing to pin — the
   contract predates and the auditor's repro has no success path).
 
+- AUD52-c4 (terra, HEAD-tree @ post-c3): THREE FINDINGS (1 major,
+  1 moderate, 1 minor) against the c3-fixed tree. Owner
+  dispositions:
+  * F-A (MAJOR, authorize() trusts the STATE_UNSETTLED
+    early-return classification): ACCEPTED, FIXED — the torn-tail
+    early return carries the FULL occurrence list and an EMPTY
+    spent set (masked/spent facts are never computed on that
+    path), and authorize's `cls.get("unmasked",
+    cls.get("occurrences", []))` fallback resurrected already-
+    masked entries (REPAIR-masked lines re-authorized into
+    DEAD-on-arrival AUTHs) and cleared every replay check under a
+    torn tail. Fix mirrors repair()'s pinned settle-first rule
+    (v38 cycle-1): on STATE_UNSETTLED authorize settles the tail
+    UNDER ITS OWN LOCK and RECOMPUTES classification before any
+    decision (durability-pending -> STATE_PENDING refusal, zero
+    AUTH bytes), and the "occurrences" fallback is retired
+    ENTIRELY — a classification shape with no "unmasked" set is
+    now the fail-closed `authorize-state-unclassifiable` refusal,
+    never a resurrection. Whitespace-only tails are unaffected
+    (tail_unsettled requires non-whitespace bytes, line ~1287).
+    End-to-end repro before/after: pre-fix authorize(masked occ)
+    under a torn tail MINTED the AUTH; post-fix it refuses
+    `auth-entry-not-unmasked` with zero bytes. Pinned F115 +
+    F115b (settle-first is real: unmasked entries still authorize
+    + repair under a torn tail, spent AUTHs are skipped by replay
+    and masked entries refuse with REAL spent facts). Both fixes
+    mutation-verified RED (drop settle-first => F115 fails, F115b
+    errors; empty-unmasked-set mutant without fail-closed needs
+    BOTH halves removed to show — settle-first alone masks it, so
+    the pair is pinned jointly).
+  * F-B (MODERATE, confirmation-generation rotation can race the
+    post-verify liveness check during outcome logging): ACCEPTED
+    AS INHERENT BOUNDARY, NO CODE CHANGE — the confirmation log is
+    LOCK-FREE BY DESIGN (external writer, audit c3 F-D context);
+    any check-then-act on it has a TOCTOU window no in-process
+    primitive closes without a spec change (a lockfile handshake
+    with the confirmer). The c3 F-D generation-bracketed sampling
+    already bounds the damage: any racing rotation downgrades the
+    verdict to outcome-unknown (durable bytes, unknown
+    effectiveness) and the record's generation binding makes it
+    classify DEAD — the auditor's window produces no FALSE
+    "repaired". Documented; candidate spec change (confirmation-
+    log advisory lock) tracked, not implemented.
+  * F-C (MINOR, RecursionError on deeply nested confirmation
+    header): ACCEPTED, FIXED — a validly-encoded header nested
+    past the interpreter limit (1,100 '[' chars fit the 4096-byte
+    pread) made json.loads raise RecursionError, a RuntimeError
+    the c3 F-E ValueError guard does not catch: raw traceback
+    through confirmation_gen/classify/repair instead of the GEN0
+    fallback. The except clause now covers RecursionError (same
+    documented fallback, identically). Pinned F116 (deep header
+    reads GEN0; full repair flow survives it), mutation-verified
+    RED.
+  Gate after fixes: 164 tests (161 + 3 new F115/F115b/F116 arms
+  in the new TestAud52Cycle4Audit class), zero-warning x2, both
+  code fixes individually mutation-verified RED.
+
 - AUD51 EXTENSION CLOSED (2026-11-17, user budget 3 confirming
   cycles c6-c8): UNCONFIRMED — no CYCLE CLEAN (c6: 1 finding ->
   F98; c7: 5 findings -> F99; c8: INCOMPLETE 0f). Cumulative round

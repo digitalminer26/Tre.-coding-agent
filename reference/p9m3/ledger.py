@@ -1995,6 +1995,22 @@ class Ledger:
                                   detail="%d valid AUTHs: the file's next "
                                          "entry would be malformed"
                                          % len(auths))
+            # AUD52-c4 F-A: the UNSETTLED early-return classification
+            # carries the FULL occurrence list and an EMPTY spent set
+            # (masked/spent facts are never computed on that path), so
+            # its "occurrences" could resurrect already-masked entries
+            # and clear every replay check. NOW authorize mirrors
+            # repair()'s pinned settle-first rule (v38 cycle-1): the
+            # tail is settled under this same lock and classification
+            # is RECOMPUTED before any authorization decision, so the
+            # unmasked/spent sets judged below are the real ones. A
+            # settlement that leaves the durability window pending
+            # refuses exactly like repair() (STATE_PENDING, zero AUTH
+            # bytes).
+            if cls["state"] == STATE_UNSETTLED:
+                cls = self.settle_in_lock()
+                if self.durability_pending():
+                    raise LedgerError(STATE_PENDING)
             if occurrences is None:
                 if cls["state"] != STATE_UNMASKED:
                     raise LedgerError("authorize-not-unmasked",
@@ -2028,20 +2044,29 @@ class Ledger:
             # early-return classification (over-cap / unreadable log =>
             # `unknown` with NO "occurrences" key) raised KeyError
             # instead of refusing. NOW: refuse `unknown`/`conflict`
-            # BEFORE touching the list (zero AUTH bytes). The legacy
-            # fallback to "occurrences" is preserved ONLY for the
-            # STATE_UNSETTLED early-return (which sets "occurrences"
-            # but no "unmasked"); an EMPTY "unmasked" (everything
-            # masked) stays empty — F26 pins that masked entries are
-            # refused, never resurrected via the full list.
+            # BEFORE touching the list (zero AUTH bytes). AUD52-c4 F-A
+            # retired the legacy fallback to "occurrences" ENTIRELY:
+            # the only classification that ever carried "occurrences"
+            # without "unmasked" was the STATE_UNSETTLED early-return,
+            # and that state is now settled+reclassified above before
+            # this point. A missing "unmasked" on ANY other shape is a
+            # fail-closed refusal (empty set => every entry refuses),
+            # never a resurrection via the full occurrence list — F26
+            # pins that masked entries are refused, and F26's sibling
+            # pin F115 keeps that true under a torn tail.
             if cls["state"] in (STATE_UNKNOWN, STATE_CONFLICT):
                 raise LedgerError(cls["state"], state=cls["state"],
                                   detail="authorize refuses on the same "
                                          "fail-closed states repair() "
                                          "refuses; zero AUTH bytes")
+            if "unmasked" not in cls:
+                raise LedgerError("authorize-state-unclassifiable",
+                                  state=cls["state"],
+                                  detail="classification produced no "
+                                         "unmasked set; refusing with "
+                                         "zero AUTH bytes")
             unmasked_set = {(o["offset"], o["hash"])
-                            for o in cls.get("unmasked",
-                                             cls.get("occurrences", []))}
+                            for o in cls["unmasked"]}
             for e in occurrences:
                 if (e["offset"], e["hash"]) not in unmasked_set:
                     raise LedgerError("auth-entry-not-unmasked", **e)
@@ -2446,7 +2471,14 @@ class Ledger:
             # OBJECT header can name a generation; anything else is
             # the documented GEN0 fallback.
             doc = json.loads(first.decode())
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            # AUD52-c4 F-C: a validly-encoded but DEEPLY NESTED header
+            # (>= sys.getrecursionlimit() levels — 1,100 `[` chars fit
+            # inside the 4096-byte read) makes json.loads raise
+            # RecursionError, a RuntimeError, NOT the ValueError the
+            # F-E guard caught: a raw traceback instead of the
+            # documented GEN0 fallback. Any non-decodable header is
+            # the fallback, identically.
             return "GEN0"
         if not isinstance(doc, dict):
             return "GEN0"
