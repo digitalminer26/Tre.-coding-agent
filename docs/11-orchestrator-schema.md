@@ -157,6 +157,7 @@ mechanism).
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
+| 2026-11-21 | §14.10 (§14.10.1/.2/.3), §14.12.2 r4 | **G1 REVIEW ROUND 4 — CYCLE 7 (confirming re-kick, owner direction "audit once again using terra") — §14.10 draft v12→v13 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c7-terra-*`: CHANGES REQUESTED — 6 MAJOR, DECISIONS-REQUIRED: 0; all adopted; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified before this row; NOTE: this audit observed v12 in the working tree at HEAD pre-commit (kick raced the cycle-6 commit) — audited content is the committed v12, cycle 8 kicked commit-first).** R5-C7-1 post-disposition re-classification: withdrawing an integrity fault made the damaged act an outstanding class-B effect again (the exclusion keyed on UNDISPOSITIONED) — the exclusion now keys on the fault record's EXISTENCE for `(actId, failingCheck)`: post-disposition the act is TERMINAL-BY-DAMAGE, the third terminal effect state (applied / terminal-by-refusal / terminal-by-damage), never outstanding, never rewritten; four replay vectors pinned (pre-fault / fault-open / withdrawn / refiled). R5-C7-2 stage-(0) gate made the post-effect integrity route unreachable (a validator walking stages failed at (0) "validates under the op schema" before stage-(2)/(3) routing could run): stage (0) is EXISTENCE+IDENTITY+single-consumption ONLY — every stage-(1)–(3) failure routes to its named closed outcome (drift / mapping / integrity-fault / terminal-by-refusal), none to a silent stage-(0) reject. R5-C7-3 recorded refusals were trusted on recognition alone (a forged refusal could terminalize an owed filing): permanent refusals now carry `{intakePrefixEndId, intakePrefixSha256}` binding the exact prefix adjudicated; replay re-derives the diagnostic over the bound prefix + verification source BEFORE honoring; non-re-deriving/binding-less refusals fail closed to a NEW `failingCheck:"intake-refusal"` integrity fault (disposition `withdrawn` on that kind returns the act to ordinary intake ONCE over the current prefix — the only route that changes a refusal's terminality). R5-C7-4 the identical-byte rule still mandated the append: the separate-record sentence is now CONDITIONAL on intake success (a failed attempt produces a refusal record, not an append). R5-C7-5 fault dedup keyed by `(actId, failingCheck)` ACROSS ALL FAULT STATES — open or disposed, one record for all time; re-observed permanent damage after disposition references the existing record, never re-mints or re-raises needs-owner; the other failingCheck of the same act is a distinct identity. R5-C7-6 damaged-survivor CHAIN closure defined (three r4 table rows added): fault OPEN ⇒ members hold UNCLEAN at the fault; `refiled` ⇒ the claim-equal fresh filing is the EFFECTIVE SURVIVOR via transshipment (forward-only); `withdrawn` ⇒ survivor is OWNER-RETIRED (members follow the retired-survivor rows — routing, not waiver); open and already-closed damaged survivors take the same path (a `filing-integrity-disposition` is not an `audit-finding-update`, so the closed-state refusal never bars it). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v13, round-4 cycle-7 folded) |
 | 2026-11-21 | §14.10 (§14.10.1/.2/.3), §14.9, §14.12.2 | **G1 REVIEW ROUND 4 — CYCLE 6 of 7 — §14.10 draft v11→v12 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c6-terra-*`: CHANGES REQUESTED — 5 MAJOR + 1 MINOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified before this row).** R5-C6-1 the post-effect `owner-filing-integrity-fault` was class O while the general effect fold made the SAME damaged act class B (block-append) and had NO expressible cure: the fault record is pinned (supervisor-authored, envelope-carried, `{faultTs, actId, failingCheck:"effect-record"|"findingRef-artifact", evidenceRefs[]}`, one undispositioned record per faulting act), the act is the SECOND named exclusion from class B (damaged bytes are not owed work — never simultaneously B and O), and the exit joins the closed op enum as `filing-integrity-disposition` `{faultId, outcome:"refiled"|"withdrawn", newActId|null}` — refiled binds a later APPLIED `audit-filing` act whose filed claim equals the faulted payload claim (mismatch ⇒ `integrity-disposition-mismatch`), withdrawn always admissible; one disposition per fault; damaged bytes never rewritten, never valid evidence; chain obligations untouched. R5-C6-2 permanent intake refusal pinned to the **intake-validation prefix**: the refusal record adjudicated at intake is never re-adjudicated against the evolved prefix (a target closing AFTER the refusal changes nothing; without the pin `correction-bad-target` flipped to admissible on replay, leaving terminality undefined). R5-C6-3 identical-byte re-filing clarified: a new act is a new filing ATTEMPT — never refused as duplicate INTENT, but fully subject to ordinary intake validation (a resubmitted correction draft is refused `correction-ambiguity` by lineage linearity; the header else passes or fails on its own merits). R5-C6-4 the minor-owner-exception predicate in §14.10.1 now names `reproRunRef == null` too (the §14.10.1 acceptance sentence omitted it while §14.12.2 required it: a non-null reference must pass ordinary green-run validation regardless of owner reason — the exception excuses the ABSENCE of a run, never a bad one). R5-C6-5 the closed-state paragraph's concluding sentence ("No other transition over any other closed state remains invalid") read as PERMITTING what the rule above refuses; rewritten: every OTHER transition over ANY closed state REMAINS INVALID — the named exception is the only reopening edge. MINOR R5-C6-6: the §14.10 status-history R2-6 note praising `command` as a doc-repro kind is marked WITHDRAWN (wire enum `probe|fixture|session-log|none`), decision itself unchanged. DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v12, round-4 cycle-6 folded) |
 | 2026-11-21 | §14.10 (§14.10.1/.2/.3), §14.12.2 r4 | **G1 REVIEW ROUND 4 — CYCLE 5 of 7 — §14.10 draft v10→v11 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c5-terra-*`: CHANGES REQUESTED — 6 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; contradictions/non-total folds only, no new capability; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified before this row).** R5-C5-1 vector (d) made actually reachable: A's conforming refutation + `rejected-refuted` closure inserted BEFORE B may name it (target validity refuses corrections of OPEN findings — the v10 vector omitted it), and both repro kinds corrected to `probe` (`command` is outside the wire enum). R5-C5-2 effective-survivor traversal made explicit and transitive: step 2 resolves through duplicate/superseded AND correction edges iteratively (visit-once; repeat = step-4 cycle case ⇒ needs-owner), and the r4 refuted row's "every duplicate link" is pinned to each member's OWN effective link post-transshipment — raw intermediate failure never propagates (the intermediate member whose own link fails is itself UNCLEAN); the two texts may never disagree; both verdicts of the E/D/A/B case hold. R5-C5-3 post-success replay de-circularized: mode selected by EXISTENCE+IDENTITY of the act-bound effect record (never by a validation result the stages produce), stage-3 re-derivation binds to the stage-(2) source (spool PRE-effect, `findingRef` POST-effect — the unqualified "from the spool bytes" withdrawn), and post-effect record/artifact damage fails closed to a NEW named class-O condition `owner-filing-integrity-fault` (never silently APPLIED nor drift; cleared only by owner disposition). R5-C5-4 the reopening exception extended to `superseded` closures (a superseded member with a failed link revalidation reaches the SAME held state as a `rejected-duplicate` one — the v10 duplicate-only cure stranded it with no exit; both §14.10.2 and the r4 chain row updated together). R5-C5-5 terminal-by-refusal made EXHAUSTIVE: every intake refusal of an `audit-filing` that re-derives on replay (drift, mapping, the four correction-lineage refusals, any finding-schema failure — diagnostic code preserved) is terminal-by-refusal and cleared only by `filing-drift-resolution`; transient failures retry, never terminalize; an unmapped refusal code = contract defect (effect fold + B/O rows reconciled). R5-C5-6 the minor exception names `reproRunRef == null` in EVERY predicate: a non-null reference must pass ordinary green-run validation regardless of owner reason — the exception excuses the ABSENCE of a run, never a bad one. DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v11, round-4 cycle-5 folded) |
 | 2026-11-21 | §14.10 (§14.10.1/.2/.3), §14.9, §14.12.2 r4 | **G1 REVIEW ROUND 4 — CYCLE 4 of 7 — §14.10 draft v9→v10 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c4-terra-*`: CHANGES REQUESTED — 9 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; contradictions/non-total folds only, no new capability; still DRAFT, NOT implemented, no module touched; fold-hygiene gate honored — all body edits landed and grep-verified before this row).** R5-C4-1 `taskId` source fixed: added EXPLICIT-NULL `taskId|null` to the closed `audit-filing` payload (the field-source map claimed it from the payload while the closed schema had none — task-specific owner filing inexpressible, null-task filing unsourceable), record copies verbatim, replay compares, 2 vectors (task-specific; explicit null; omission = malformed). R5-C4-2 mapping refusals no longer strand acts: terminal-by-refusal generalized to EVERY permanent filing refusal (`owner-filing-draft-drift` OR `owner-filing-mapping`), `filing-drift-resolution` generalized (`refusedActId` renamed from `driftedActId`, DRAFT no migration; refiled|withdrawn both admissible), effect fold + finalization B/O rows reconciled — a permanently-refused act is never class B forever. R5-C4-3 claim equality re-pinned: NFC of BOTH decoded JSON string values (v9's "byte equality, no normalization" contradicted the canonicalizer's mandatory NFC and left the header operand undefined; the withdrawn raw-byte reading is corrected), 3 vectors (decomposed-vs-composed conforming; escape-spelling conforming; case-differ refused); the v9 cross-reference to §14.10.1 corrected to §14.10.3. R5-C4-4 stage 0 vs redelivery: `consumed` is replay-DERIVED from the bound effect, not a stage-0 precondition — first-application vs replay split, second effect/divergent bytes still refused, `effectApplied` computed after the four stages. R5-C4-5 post-success spool loss: PRE-effect spool loss = drift (as before); POST-effect the immutable `findingRef` is the durable authority — act stays APPLIED, new supervisor `spool-loss-post-filing` ADVISORY record (never retracts/duplicates/requires anything), distinct cases pinned. R5-C4-6 edge fold made TOTAL: four ordered steps (correction pass — severity/route violations REFUSED AT INTAKE as `correction-severity-decrease`/`correction-route-mismatch`, never graph-then-unclean; link effectivization — raw intermediate links REPLACED not composed, member judged only by its own effective link vs the effective survivor, the E/D/A/B counterexample answered inline; per-member rows in ascending closed-member ULID order; fixed point + cycle rules). R5-C4-7 minor-exception chain row: "OR its own disposition is the same owner act" WITHDRAWN (inexpressible under single consumption, contradicted the row's own next clause); cure = the member's own exception `accepted-fix` owner act, and §14.10.2 gains its ONE named reopening exception (owner-only minor exception accepted-fix over a `rejected-duplicate` closure, forward-only, verdicts frozen). R5-C4-8 vector (d) fully specified as a reachable record sequence (A minor falsifiable → B correctionOf:A falsifiable repro dB → conforming not-reproduced run refuting B → D minor kind:none link-side repro → owner-act rejected-duplicate onto B ⇒ UNCLEAN needs-owner naming D; non-falsifiability pinned as D's link-side, not B's). R5-C4-9 the fold-hygiene gate the cycle-3 row claimed is now IN the normative body (§14.9, next to the pre-code ledger rule, reconciled with it: row+edits one commit, grep-verified anchors before the row is appended; body-diverging row = contract defect). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v10, round-4 cycle-4 folded) |
@@ -1285,7 +1286,7 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
-| audit-finding records (§14.10) | G1 draft v12 (owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–6 folded 2026-11-21 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–6 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
+| audit-finding records (§14.10) | G1 draft v13 (owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–7 folded 2026-11-21 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–7 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
@@ -1303,7 +1304,7 @@ otherwise claim edits that never landed).**
 
 ### 14.10 Audit-finding records (G1 — the loop's classification hinge)
 
-**Status: DRAFT v12 (2026-11-21) — v2 + G5 `scopeRefs` amendment (§14.14.1)
+**Status: DRAFT v13 (2026-11-21) — v2 + G5 `scopeRefs` amendment (§14.14.1)
 + v4: route×surface note extended for the G2 intake gate (§14.11.4 seam
 fix, round-0 audit finding M9).
 + v5 (2026-11-20, **G1 review round 2**, findings G1-R2-1…R2-6 from
@@ -2058,8 +2059,26 @@ structural, same posture as F53 (mint, don't trust):
   `audit-filing` — the refusal record, appended at intake, is
   DURABLE, IMMUTABLE, and TERMINAL FOR THE ACT as adjudicated
   against the **intake-validation prefix** (the log prefix that
-  existed when intake evaluated the act): later replay RECOGNIZES
-  the recorded refusal and never re-adjudicates its target/lineage/
+  existed when intake evaluated the act): **the refusal record
+  BINDS the prefix it was adjudicated against (v13 R5-C7-3,
+  checkability): a permanent-refusal record carries
+  `{ intakePrefixEndId, intakePrefixSha256 }` — the id and running
+  digest of the LAST record of the prefix intake read (the refusal
+  record's own predecessor — an append-only log's prefixes are
+  exactly its record-terminated initial segments, so the binding
+  is one field pair) — and replay VALIDATES the recorded refusal
+  by re-deriving its diagnostic code over exactly THAT frozen
+  prefix and its named verification source (the spool bytes for
+  drift/mapping; the log over the bound prefix for the lineage/
+  target/schema codes) before the refusal is honored: a refusal
+  whose code does NOT re-derive over its bound prefix, or a
+  permanent refusal missing the binding, is itself a forgery/
+  corruption case — fail closed to `owner-filing-integrity-fault`
+  class O naming the refusal record (never silently honored, never
+  silently dropped), and replay NEVER evaluates the refusal's
+  conditions against any later state**. Later replay RECOGNIZES
+  the recorded refusal (validated against its bound prefix) and
+  never re-adjudicates its target/lineage/
   schema conditions against the evolved prefix (a target closed
   AFTER the refusal, or a new diagnostic that a later prefix would
   yield, changes NOTHING — the recorded code stands; without this
@@ -2482,9 +2501,24 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   exist (fresh application — the single-consumption refusal targets
   a SECOND record naming an act whose named effect already exists
   and validates under DIFFERENT bytes or a different effect id,
-  which stays refused) or, on replay, when it exists, validates
-  under the act's op schema, is the record the act names (identity,
-  not coincidence), and stages (1)–(3) pass over it — ordering
+  which stays refused) or, on replay, when it exists, is the record
+  the act names (identity, not coincidence — **stage (0) checks
+  EXISTENCE + IDENTITY + single-consumption ONLY, never the
+  CONTENT-VALIDATION RESULT (v13 R5-C7-2: "validates under the
+  act's op schema" as a stage-(0) gate made the post-effect
+  integrity-fault branch unreachable — a validator walking stages
+  in order failed at (0) before the stage-(2)/(3) routing existed
+  to run)**: a post-effect effect record whose bytes FAIL the
+  op-schema/mapping checks is NOT a stage-(0) refusal — it routes
+  to its named closed outcome below (damaged record/artifact ⇒
+  `owner-filing-integrity-fault`; a record that fails identity or
+  a second record naming a consumed act ⇒ the general
+  single-consumption refusal), and the four stages are read as:
+  (0) provenance + identity, (1) payload re-digest, (2) spool/
+  post-success source, (3) full mapping — stages (1)–(3) run over
+  the post-effect source and EVERY failure there routes to its
+  named closed outcome (drift, mapping, integrity-fault, or
+  terminal-by-refusal), none to a silent stage-(0) reject; ordering
   relative to `effectApplied`: `effectApplied` is computed AFTER
   this four-stage replay, from its outcome, never read as an input
   to stage (0);**
@@ -2534,17 +2568,54 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   intake refusal); it is class O (owner-only) in the §14.12.2
   finalization table, **the fault record itself is
   supervisor-authored and envelope-carried with fields `{ faultTs,
-  actId, failingCheck:"effect-record"|"findingRef-artifact",
-  evidenceRefs[] }` (one undispositioned record per faulting act —
-  repeated detections reference the first, never duplicate it),
+  actId, failingCheck:"effect-record"|"findingRef-artifact"|
+  "intake-refusal" (v13 R5-C7-3 — the third kind: a permanent
+  refusal whose code fails to re-derive over its bound prefix or
+  whose prefix binding is missing; same dedup key, same
+  disposition ops — `withdrawn` on such a fault is the owner
+  asserting the forgery case and retiring the refusal, after which
+  the act returns to ordinary intake adjudication ONCE, re-run
+  over the CURRENT prefix with its result durably recorded as a
+  new intake outcome (the only route that changes a refusal's
+  terminality; a conforming re-run either applies or produces a
+  new, bound, permanent refusal)),
+  evidenceRefs[] }` — **dedup is keyed BY ACT AND FAILING CHECK
+  ACROSS ALL FAULT STATES (v13 R5-C7-5): at most one fault record
+  exists per `(actId, failingCheck)` pair FOR ALL TIME — open,
+  disposed, either — repeated detections (including detections
+  AFTER a conforming disposition: the damage is permanent and
+  replay re-observes it every pass) reference the existing record
+  and NEVER re-mint a new fault or re-raise needs-owner; damage
+  on the OTHER failingCheck of the same act is a distinct identity
+  and appends its own record once. Replay recognizes the disposed
+  state from the disposition record alone** ,
   and** it EXCLUDES the act from class B (v11
   R5-C6-1: the general fold rule "an act with `effectApplied:false`
   and NO terminal-by-refusal is an outstanding effect" would make
   the SAME damaged act class B — block-append, drain-progressing —
   contradicting class O: the rule is amended there, an act whose
-  bound effect is under an undispositioned `owner-filing-integrity-
-  fault` is NOT owed (nothing the supervisor can complete — the
+  bound effect is under an `owner-filing-integrity-fault` **in ANY
+  state (v13 R5-C7-1: the exclusion keys on the fault record's
+  EXISTENCE for `(actId, failingCheck)`, not on it being
+  undispositioned — after a conforming disposition the damaged act
+  is TERMINAL-BY-DAMAGE: its bytes are never repaired and never
+  evidence, so "the supervisor owes and can complete it" is false
+  forever and class B can never attach — open OR disposed, the act
+  is one of the three terminal effect states (applied /
+  terminal-by-refusal / terminal-by-damage), never outstanding)**
+  is NOT owed (nothing the supervisor can complete — the
   bytes are damaged, not missing) and is never class B** —
+  **replay vectors (v13 R5-C7-1/5): (i) PRE-FAULT: effect appended,
+  bytes intact ⇒ `effectApplied:true`, no fault. (ii) FAULT-OPEN:
+  artifact damaged, no disposition ⇒ fault F appended once, act
+  terminal-by-damage (NOT class B), boundary UNCLEAN+needs-owner
+  via F. (iii) WITHDRAWN: owner withdraws F ⇒ F disposed, needs-owner
+  cleared, further replays re-observe the damage and reference F
+  (never re-mint, never re-raise), act stays terminal-by-damage —
+  never class B. (iv) REFILED: owner refiles with a successful
+  later filing of the same claim ⇒ F disposed; the fresh finding is
+  live evidence; the faulted act stays terminal-by-damage — never
+  class B, never applied** —
   **cleared by the closed owner act `filing-integrity-disposition`
   (v12 R5-C6-1; joins the closed op enum below) with payload
   `{ faultId, outcome:"refiled"|"withdrawn", newActId|null }`** —
@@ -2561,11 +2632,29 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   NEVER rewritten and its damaged bytes are never treated as valid
   evidence — the fault record and the damaged finding remain as
   immutable evidence; `refiled` establishes the claim's FRESH filing
-  as the live evidence, `withdrawn` retires the claim; the faulted
-  finding keeps its damaged state and any chain row consuming it
-  stays UNCLEAN-until-disposition per the chain table (the
-  disposition clears the FAULT condition, never the finding's
-  chain obligations)** —
+  as the live evidence, `withdrawn` retires the claim; **the faulted
+  finding's CHAIN obligations resolve through the disposition record
+  itself (v13 R5-C7-6 — the chain table gains its machine-checked
+  link, no new op): `refiled` — the disposition record is the
+  EFFECTIVE-SURVIVOR binding for every chain row whose survivor (or
+  member link) names the damaged finding: the refiled finding (the
+  claim-equal fresh filing named by newActId) is the effective
+  survivor for those rows, traversed exactly like a correction-edge
+  transshipment (§14.10.2 fold), forward-only — rows evaluated over
+  earlier prefixes are never re-adjudicated; `withdrawn` — the
+  claim is OWNER-RETIREMENT: chain rows consuming the damaged
+  finding evaluate it as owner-retired (same forward-only effect as
+  an owner supersede of the survivor: members pointing at it
+  resolve per the existing chain-table rows for a retired survivor,
+  boundaries before the retirement keep their frozen verdicts),
+  and withdrawal alone NEVER silently discharges a chain — it
+  routes it through the named retired-survivor rows. Open and
+  already-closed damaged survivors take the SAME disposition path
+  (the disposition acts on the fault + finding identity, and §14.10.2's
+  closed-state refusal does NOT bar it — it is a `filing-integrity-
+  disposition`, not an `audit-finding-update` transition)** (the
+  disposition clears the FAULT condition, and the finding's chain
+  obligations follow exactly the routes above)** —
   **(3) full
   mapping, unwaived:** EVERY header/act/envelope mapping of the
   entry rule applies — the header parses per §14.10.1, every
@@ -2594,10 +2683,16 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   applied effect, consumes nothing new, appends nothing new (the
   general single-consumption rule; this sentence names its
   application to filings). (b) A NEW confirmed act over identical
-  draft bytes is a NEW filing with a NEW effect id: it appends a
-  SEPARATE `audit-finding` record — the spool reuses its content-
-  addressed bytes, but spool dedup is STORAGE dedup and has no
-  disposition meaning; duplicate INTENT is not a validation concept
+  draft bytes is a NEW filing ATTEMPT with a NEW effect id: **if
+  intake SUCCEEDS it** appends a
+  SEPARATE `audit-finding` record **(v13 R5-C7-4: the append is
+  CONDITIONAL on intake — the sentence describes the success
+  outcome, never a mandate that outranks intake; an attempt that
+  FAILS intake produces a refusal record and follows the
+  terminal-by-refusal rule above, not an append — the two sentences
+  may never both claim the same act)** — the spool reuses its
+  content-addressed bytes, but spool dedup is STORAGE dedup and has
+  no disposition meaning; duplicate INTENT is not a validation concept
   and is never refused at intake **AS INTENT DEDUP (v12 R5-C6-3: a
   new act over identical bytes is a new filing ATTEMPT, not an
   unconditional successful append — it remains subject to EVERY
@@ -2702,13 +2797,18 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   record IT mints, which exists on append, so the clearing effect
   can never itself dangle as a missing effect.** An act with
   `effectApplied:false` and NO terminal-by-refusal **and NOT under an
-  undispositioned `owner-filing-integrity-fault` (v12 R5-C6-1 — the
+  `owner-filing-integrity-fault` IN ANY STATE (v12 R5-C6-1;
+  exclusion keyed on fault EXISTENCE not undispositioned, v13
+  R5-C7-1 — the
   integrity-fault branch of the replay stages is the SECOND named
   exclusion from class B: damaged bytes are not owed work the
   supervisor can complete, so the same act is never simultaneously
-  class B (blocking) and class O (owner-only); it holds the boundary
-  through its class-O fault condition until `filing-integrity-
-  disposition` clears it)** is an **outstanding
+  class B (blocking) and class O (owner-only); post-disposition the
+  act is TERMINAL-BY-DAMAGE (the third terminal effect state —
+  applied / terminal-by-refusal / terminal-by-damage) and is never
+  re-classified as outstanding; while the fault is OPEN it holds the
+  boundary through its class-O fault condition until
+  `filing-integrity-disposition` clears it)** is an **outstanding
   effect**: class B in the §14.12.2 finalization decision table (the
   supervisor owes the effect and can complete it) — no CLEAN boundary
   appends while a drained act's effect is owed
@@ -3656,6 +3756,9 @@ the round is those auditors plus the `audit-finding` records with
    | `rejected-refuted` (v5 R2-1) with VALID `reproRunRef` (VALID = the v6 F5 closed definition: `not-reproduced` on the pre-fix baseline, supervisor/gate-authored, digest-bound) | DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed re-run refutes THAT repro, and digest-equality makes it the members' repro too). **(v11 R5-C5-2) "every duplicate link" = each member's OWN effective link after §14.10.2's transshipment — NOT every raw edge on the path: a raw intermediate link's failure does NOT propagate (a member whose own effective link is machine-check-equal to the refuted survivor's repro discharges even when an intermediate member's link is not); the intermediate member whose own link fails is itself UNCLEAN — this is the same per-member rule as §14.10.2 step 2, and the two texts may never disagree.** An owner-authorized link over a non-falsifiable repro does NOT share the refutation's evidence ⇒ UNCLEAN, needs its own disposition |
    | owner-closed `closed-residual` (authority REQUIRED) | member inherits the residual — resolved as residual, surfaced at P13; NOT a clean discharge |
    | owner `superseded` onto a third norm/finding | member relinks to the new survivor (revalidate severity/route/falsifiability) |
+   | survivor under an `owner-filing-integrity-fault` (v13 R5-C7-6 — damaged survivor, fault OPEN) | UNCLEAN + needs-owner through the fault condition; members hold at the fault, never discharge through damaged bytes |
+   | …fault DISPOSED `refiled` (v13 R5-C7-6) | the claim-equal fresh filing (disposition's `newActId`) is the EFFECTIVE SURVIVOR for these rows — members traverse to it exactly like a correction-edge transshipment (§14.10.2 fold), forward-only |
+   | …fault DISPOSED `withdrawn` (v13 R5-C7-6) | survivor is OWNER-RETIRED: members follow this table's retired-survivor rows (no silent discharge — withdrawal routes, it does not waive); open and already-closed damaged survivors take the same path (the disposition is a `filing-integrity-disposition`, not an `audit-finding-update`, so §14.10.2's closed-state refusal never bars it) |
    | closed by any other route (stale, duplicate-of-nothing, dangling) | UNCLEAN — violation at every boundary thereafter |
    Transitive chains resolve through this table end-to-end at every
    boundary; every survivor transition — including orchestrator
@@ -4023,8 +4126,8 @@ have disjoint, exhaustive effects:
 | Class | Condition (examples) | Boundary append? | Boundary verdict inputs | Cycle state after |
 |---|---|---|---|---|
 | **A — met/disposed** | receipts all filed/refused; owed filings drained; completion FSM settled; queue drained to empty; obligations met/waived/discharged; remote-terminal disposed; deferrals resolved in-window | YES | clean contribution | closes per verdict table (clean possible) |
-| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; drained `owner-act` with an outstanding effect (`effectRecordIds` not all present in the log, v10 c8-B1) — EXCLUDING a filing-class act that is **terminal-by-refusal** under §14.10.3 (v9 R4-C3-2: its never-created finding is NOT an owed record; the unresolved filing-refusal condition (drift, mapping, or any exhaustive-rule intake refusal, v10 R5-C4-2 / v11 R5-C5-5) in the O row IS its class-O item, so no act is ever simultaneously terminal (intake-refused) and owed (class B)); mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
-| **O — owner-only (unclosable-clean, closable-unclean)** | active `finding-hold`; unresolved filing-refusal condition — `owner-filing-draft-drift`, `owner-filing-mapping`, OR (v11 R5-C5-5) ANY permanent intake refusal of an `audit-filing` (§14.10.3's exhaustive rule names them; the condition cites the refusal record and its diagnostic code) — naming its terminal-by-refusal act (v9 R4-C3-2 — the refusal condition, not the never-created finding, is the owed-owner item; cleared only by a conforming `filing-drift-resolution` act, v10-generalized to either refusal kind, v11 to every permanent filing refusal); `owner-filing-integrity-fault` (v11 R5-C5-3; exit defined R5-C6-1 — post-effect artifact/record damage: fail-closed owner disposition via the closed `filing-integrity-disposition` op, never silently APPLIED nor drift, and its act is excluded from class B while the fault is undispositioned); unresolved `scope-escape`; `remote-terminal-unproven` without disposition; history-integrity-fault; deferred receipt still `deferred` (window elapsed or still open); nonempty pending-act queue whose entries are all class-O-shaped acts (holds/dispositions); escape-obligation open without waiver | YES — boundary appends, UNCLEAN | every unclean predicate of the verdict table fires; `needs-owner` | closed UNCLEAN + `needs-owner`; obligations carry into the next window (deferral) or stay episode-global (escape, fault); NEVER retroactively re-cleaned |
+| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; drained `owner-act` with an outstanding effect (`effectRecordIds` not all present in the log, v10 c8-B1) — EXCLUDING a filing-class act that is **terminal-by-refusal** under §14.10.3 (v9 R4-C3-2: its never-created finding is NOT an owed record; the unresolved filing-refusal condition (drift, mapping, or any exhaustive-rule intake refusal, v10 R5-C4-2 / v11 R5-C5-5) in the O row IS its class-O item, so no act is ever simultaneously terminal (intake-refused) and owed (class B)) — also EXCLUDING a filing-class act under an `owner-filing-integrity-fault` in ANY state (v13 R5-C7-1: terminal-by-damage — the class-O fault condition (open) or the disposition record (disposed) is its item, never an owed effect); mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
+| **O — owner-only (unclosable-clean, closable-unclean)** | active `finding-hold`; unresolved filing-refusal condition — `owner-filing-draft-drift`, `owner-filing-mapping`, OR (v11 R5-C5-5) ANY permanent intake refusal of an `audit-filing` (§14.10.3's exhaustive rule names them; the condition cites the refusal record and its diagnostic code) — naming its terminal-by-refusal act (v9 R4-C3-2 — the refusal condition, not the never-created finding, is the owed-owner item; cleared only by a conforming `filing-drift-resolution` act, v10-generalized to either refusal kind, v11 to every permanent filing refusal); `owner-filing-integrity-fault` (v11 R5-C5-3; exit defined R5-C6-1; lifecycle keyed R5-C7-1/5 — post-effect artifact/record damage (or a non-re-deriving bound refusal, failingCheck `intake-refusal`, v13 R5-C7-3): fail-closed owner disposition via the closed `filing-integrity-disposition` op, never silently APPLIED nor drift; the faulted act is excluded from class B on the fault record's EXISTENCE for `(actId, failingCheck)` — open OR disposed — and after disposition is TERMINAL-BY-DAMAGE, never re-classified as outstanding; one fault record per `(actId, failingCheck)` for all time, never re-minted by post-disposition re-observation); unresolved `scope-escape`; `remote-terminal-unproven` without disposition; history-integrity-fault; deferred receipt still `deferred` (window elapsed or still open); nonempty pending-act queue whose entries are all class-O-shaped acts (holds/dispositions); escape-obligation open without waiver | YES — boundary appends, UNCLEAN | every unclean predicate of the verdict table fires; `needs-owner` | closed UNCLEAN + `needs-owner`; obligations carry into the next window (deferral) or stay episode-global (escape, fault); NEVER retroactively re-cleaned |
 
 Precedence is mechanical (v10, c8-B2 — total, no silent waiver): a
 cycle is closable-unclean iff NO condition is in B (any single B —
