@@ -134,3 +134,56 @@ Register extension: v22 closed set a…q → v23 closed set a…**t**
 (heading updated). Self-check script entry-count expectation is derived
 from the heading, not hardcoded (it was never hardcoded — PASS reports
 the derived count).
+
+## 2c. Cycle-17 demotions and mappings (v23 → v24)
+
+### §14.12.2 minor-severity exception paragraph (demoted v24 R5-C17-4)
+
+Demoted (v24 R5-C17-4, replaced by a `per NDR-b` citation + retained
+application-local consequence; governing entry: NDR-b + registered
+expansions). Verbatim v23 text:
+
+> THE rule, both sections: `accepted-fix` with `reproRunRef == null` is valid ONLY where (i) the finding's `severity` is minor, AND (ii) `dispositionBy: "owner"` riding a `finding-disposition` owner-act (whose `reproRunRef` is likewise null — the act is the authority and the record is its transcription, v8 c6-M7 alignment), AND (iii) the update's `reason` is non-empty AND non-null (the reason is the binding evidence — the act's canonical payload carries the same reason string; validation checks agreement). Orchestrator-originated `accepted-fix` NEVER takes the exception (no owner act exists for it; v5 R2-3's "required for BOTH dispositionBy values" holds exactly for the exception's non-minor case and for minors against the orchestrator). A minor `accepted-fix` with null ref failing ANY condition is the pre-existing refusal (missing/mismatched/ worker-authored ⇒ refused).
+
+No semantic change — byte-identical to NDR-b's predicate.
+
+### §14.12.2 repro-run result-semantics paragraph (demoted v24 R5-C17-5)
+
+Demoted (v24 R5-C17-5, replaced by a `per NDR-s` citation; governing
+entry: NDR-s + registered expansion §14.10.2 "What counts as a
+refuting run"). Verbatim v23 text:
+
+> **result semantics closed (v6 F5):** `green` = `postFixExpected` observed (supports `accepted-fix`); `red` = `postFixExpected` NOT observed (supports NOTHING — evidence of a failed fix, recorded for the trail); `not-reproduced` = the repro command ran to COMPLETION against the finding's pre-fix baseline (§14.10.2 v6 F5 definition) and the claimed `preFixObserved` behavior did NOT occur (supports `rejected-refuted` ONLY). A `not-reproduced` record whose `executedArtifactDigest` ≠ the pre-fix baseline is refutation-invalid; `accepted-fix` NEVER accepts `not-reproduced`/`red`, `rejected-refuted` NEVER accepts `green`/`red`. Runs that did not complete are never written as repro-run records at all (no result value may encode "aborted" — absence of a record is the honest encoding, §14.10.2 v6 F5).
+
+### §14.12.2 r4 chain-closure table — minor-exception cell (demoted v24 R5-C17-8)
+
+Rule bodies converted to `per NDR-b`/`per NDR-p` citations. Verbatim
+v23 cell parentheticals:
+
+> (v9 R4-C3-7 — the only null-run accepted-fix that exists; act-bound evidence, so "VALID repro-run" can never be satisfied here and the fallback row must NOT swallow it: the exception is a row of its own)
+
+> (v10 R5-C4-7) the v9 alternative "OR its own disposition is the same owner act" is WITHDRAWN: the single-consumption rule (§14.10.3) lets one owner-act authorize exactly ONE privileged record (or one NAMED atomic group), no group exists for two finding dispositions, so the alternative was inexpressible AND contradicted this row's own next clause. Cure for an already-closed member a run cannot reach (e.g. non-falsifiable `rejected-duplicate`): its own `finding-disposition` owner-act under this exception, appended as the update §14.10.2 permits over a `rejected-duplicate` **or `superseded`** closure (v11 R5-C5-4 — superseded members reach the same held state via a failed link revalidation, so the reopening exception names both closures), FORWARD-ONLY — it re-evaluates LATER boundaries only (verdicts stay frozen, the general survivor-change rule above); until it lands the member is UNCLEAN with needs-owner naming it.
+
+### §14.12.2 r4 chain-closure table — refuted cell (demoted v24 R5-C17-5/8)
+
+Verbatim v23 cell definitional parentheticals:
+
+> (VALID = the v6 F5 closed definition: `not-reproduced` on the pre-fix baseline, supervisor/gate-authored, digest-bound)
+
+> (v11 R5-C5-2) "every duplicate link" = each member's OWN effective link after §14.10.2's transshipment — NOT every raw edge on the path: a raw intermediate link's failure does NOT propagate (a member whose own effective link is machine-check-equal to the refuted survivor's repro discharges even when an intermediate member's link is not); the intermediate member whose own link fails is itself UNCLEAN — this is the same per-member rule as §14.10.2 step 2, and the two texts may never disagree.
+
+### Cycle-17 finding → action mapping (R5-C17-*)
+
+| finding | action | register effect |
+|---|---|---|
+| R5-C17-1 (MAJOR, EXPANSION-CONTRADICTION: v23 live-tip definition makes a duplicate-closed correction member the live tip while NDR-n says terminalized members are never live tips) | NDR-n adds the EFFECTIVE LIVE TIP concept: a terminalized live tip resolves FORWARD along its own edge (transitively) to its effective survivor; EVERY consumer binds the effective tip; §14.10.2 lineage clause states the same rule | NDR-n, §14.10.2 |
+| R5-C17-2 (MAJOR, CITATION-DIVERGENCE: NDR-r's divergent-bytes refusal cited "NDR-i's stage rules" — NDR-i governs withdrawal only) | NDR-r now owns the rule: confirmed-act bytes are pinned by `draftSha256`, re-digest-checked on redelivery; NDR-i explicitly disclaimed as authority | NDR-r |
+| R5-C17-3 (MAJOR, INVENTORY-GAP: inventory row prescribed non-minor `closed-residual` that NDR-p refused — edge (2) was withdrawal-strand-only) | NDR-p edge (2) strand condition generalized to a CLOSED LIST: (a) owner-retired-by-withdrawal (v15), (b) survivor validly-refuted + member's own link owner-authorized (the vector-(d) cure; minor keeps edge (1)); evidence operands pinned per strand; §14.10.2 second-edge paragraph updated | NDR-p, §14.10.2, inventory row |
+| R5-C17-4 (MAJOR, EXPANSION-CONTRADICTION: demoted rule-4 paragraph still restated the full predicate; minor-exception paragraph still "THE rule, both sections") | rule-4 parenthetical demoted to citation+pointer; minor-exception paragraph demoted to `per NDR-b` with application-local consequence retained (verbatim texts logged above) | NDR-b |
+| R5-C17-5 (MAJOR, EXPANSION-CONTRADICTION: repro-run result semantics + r4 refuted cell restated NDR-s rules independently; r4 cell had no citation) | §14.12.2 result-semantics paragraph demoted to `per NDR-s`; refuted cell VALID definition now cites NDR-s, effective-link clause cites NDR-n step 2; cure cites NDR-p edge (2) strand (b) | NDR-s, NDR-n, NDR-p |
+| R5-C17-6 (MAJOR, EXPANSION-CONTRADICTION: manifest declared the recovery-reconstructibility clause an NDR-e expansion while NDR-e declares only the byte-provenance-fields paragraph and lists recovery under Cited at) | clause now carries `per NDR-e`/`per NDR-k` citations IN TEXT; manifest reclassified to citation (it is an application site) | manifest, §14.10.3 clause |
+| R5-C17-7 (MAJOR, INVENTORY-GAP: `residual-inherited` member (any severity) makes the round unclean until settlement — absent from NDR-q's inventory) | NEW inventory row: residual-inherited member → append-only `residual-re-resolution` record (§14.12.2 v9 c7-M7 route/operands/settlement/clearing evidence/forward effect) | NDR-q inventory |
+| R5-C17-8 (MAJOR, EXPANSION-CONTRADICTION: r4 table cells carried long rule bodies, several uncited — doctrine 3 violation) | minor-exception and refuted cells demoted to predicates + `per NDR-b/s/n/p` citations (verbatim preserved above); withdrawal cell cites NDR-p edge (2) strand (a); refiled cell cites NDR-n/NDR-c; manifest row updated | r4 table, manifest |
+| R5-C17-9 (MAJOR, FRESH: NDR-t said "the closed-record route is `correctionOf` per NDR-n" — but correctionOf admits ONLY `rejected-refuted` targets; a closed accepted-fix/closed-residual record has no such route) | NDR-t qualified: correctionOf is the wrong-REFUTATION route subject to its target predicate; other closed records untouchable except via NDR-p's two named edges | NDR-t |
+
+No register-extension this cycle (closed set stays a…t, 20 entries).
