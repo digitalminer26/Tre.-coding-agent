@@ -1324,7 +1324,7 @@ otherwise claim edits that never landed).**
 
 ### 14.10 Audit-finding records (G1 — the loop's classification hinge)
 
-**Status: DRAFT v33 (2026-11-22 — v33 folds the audit of commit 8c5d987 (vector V-g8's post-disposition outcome corrected — the present-but-UNESTABLISHED case and extinguishment precedence: a validated prefix CAN hold a gate whose establishing sync fails (neither clears nor is trusted), and a durable cancellation/settlement EXTINGUISHES regardless of gate presence — V-g8's outcome classifies in EXPLICIT ORDER: terminal records first per (d), then the gate branches ((c1)/(c2)) for an otherwise-live act, failed sync leaves the act under the barrier; cycle-1 folds also qualified (a) — after any gate-append failure the pass attempts no further appends — and added vector V-g9; cycle-2 folds added the THIRD ordering check O3 (a gate must precede every terminal record for its act — a gate appended after its act's cancellation/settlement is refused, terminal-first classification applies only after this check; vector V-g10 covers both gate↔terminal orderings) and corrected V-g9's indeterminate-write statement (no further append is attempted after a failure while the failed append's bytes may stand on disk); cycle-3 folds SEQUENCED (c1) — semantic checks (c1a: O1/O2/O3 + one-per-act + terminal-combination) run over the repaired prefix BEFORE any establishing sync, terminal-first classification (c1b), sync only for an otherwise-live act's gate (c1c) — vector V-g11, and the §14.12.4b unused-gate validity now requires ALL applicable checks, not O1 alone; cycle-4 (confirming) GENERALIZED the durability-establishment rule to every decision record — a readable cancellation/settlement with unknown originating fsync is established by the restart's own fsync (at (c1b)) before it may extinguish, failing sync is fail-stop with the act neither extinguished nor owed; vector V-g12)); cycle-5 (confirming) folds closed V-g8's own branch list over the terminal-establishment cases (branch (1) requires the terminal record ESTABLISHED; unknown-fsync-then-failed-sync ⇒ neither extinguished nor owed; vector V-g12b) and annotated the v32 row's superseded "owed only if" occurrence; cycle-6 (confirming) declared establishment PER-FILE — one fsync per pass establishes every readable record, the split terminal/gate sync-failure combination unreachable (vector V-g13); cycle-7 (confirming) qualified clearing rule (d) — applied only after (c1a)/(c1b), (d)(i) clears only an act with no established cancellation/settlement (V-g10(i) gains its single operative classification); cycle-8 (confirming) qualified the absent-gate rule (c2) — applies only to an act surviving (c1a)/(c1b) with no established cancellation/settlement and none pending/failed establishment (V-g11(i)/V-g12 gain (c2) explicitly excluded); post-round audit of 6c004b9 split V-g11(i)'s outcomes — the inert-gate/proceeds-normally half applies only when the terminal record is established, a failed establishing fsync fail-stops the pass; terra cycle-10 split V-g12(iii)/V-g12b the same way — the gate's inert classification attaches only on establishing-fsync success, on failure no classification attaches to act or gate; post-round-2 audit of 2c085c8 SCOPED V-g11(i)'s success half to this act — "recovery proceeds normally" no longer implied for the pass: the pass completes only if every other act completes, any other act's failure fail-stops the whole pass per (a)/(b), while this act's extinguishment stands across it); v32 folds the audit of commit dfb6cf8 (restart steps REORDERED — validate-before-repair: (c0) ownership → validation WITHOUT MUTATION → §13.1 tail repair, so a load-rejecting file is never touched even when its final fragment is independently repairable (vector V-g8); (c1) classification runs over the validated/repaired prefix; the establishing-sync rationale RESTATED — a readable gate with unknown fsync has not been PROVEN to satisfy the decision-record SYNC-BEFORE-ACK policy (storage-failure window), this is not a process-death claim (§13.1 R3 page-cache bytes survive process death)); v31 folds the audit of commit 7a83bc6 (restart must RE-ESTABLISH gate durability by its own sync — a readable prefix is not a durable prefix; torn gate lines classified via the §13.1 repair-then-append pass under exclusive ownership, with vectors V-g1…V-g7); v30 — v30 folds the audit of commit 2304792 (recovery-barrier fail-stop, cure-commitment scope, duplicate-link digest); v29 — v29 folds the audit of commit 2cca082, findings R5-C21-1…6 (see the v29 ledger row); v28 — round-4 cycles 6–20 folded (cycle 19 v26→v27: NDR-u/NDR-v cure-protocol owners; cycle 20 v27→v28: NDR-u's complete accepted-fix predicate + the confirming fold R5-C20F-1…5); per-cycle
+**Status: DRAFT v33 (2026-11-22 — v33 folds the audit of commit 8c5d987 (vector V-g8's post-disposition outcome corrected — the present-but-UNESTABLISHED case and extinguishment precedence: a validated prefix CAN hold a gate whose establishing sync fails (neither clears nor is trusted), and a durable cancellation/settlement EXTINGUISHES regardless of gate presence — V-g8's outcome classifies in EXPLICIT ORDER: terminal records first per (d), then the gate branches ((c1)/(c2)) for an otherwise-live act, failed sync leaves the act under the barrier; cycle-1 folds also qualified (a) — after any gate-append failure the pass attempts no further appends — and added vector V-g9; cycle-2 folds added the THIRD ordering check O3 (a gate must precede every terminal record for its act — a gate appended after its act's cancellation/settlement is refused, terminal-first classification applies only after this check; vector V-g10 covers both gate↔terminal orderings) and corrected V-g9's indeterminate-write statement (no further append is attempted after a failure while the failed append's bytes may stand on disk); cycle-3 folds SEQUENCED (c1) — semantic checks (c1a: O1/O2/O3 + one-per-act + terminal-combination) run over the repaired prefix BEFORE any establishing sync, terminal-first classification (c1b), sync only for an otherwise-live act's gate (c1c) — vector V-g11, and the §14.12.4b unused-gate validity now requires ALL applicable checks, not O1 alone; cycle-4 (confirming) GENERALIZED the durability-establishment rule to every decision record — a readable cancellation/settlement with unknown originating fsync is established by the restart's own fsync (at (c1b)) before it may extinguish, failing sync is fail-stop with the act neither extinguished nor owed; vector V-g12)); cycle-5 (confirming) folds closed V-g8's own branch list over the terminal-establishment cases (branch (1) requires the terminal record ESTABLISHED; unknown-fsync-then-failed-sync ⇒ neither extinguished nor owed; vector V-g12b) and annotated the v32 row's superseded "owed only if" occurrence; cycle-6 (confirming) declared establishment PER-FILE — one fsync per pass establishes every readable record, the split terminal/gate sync-failure combination unreachable (vector V-g13); cycle-7 (confirming) qualified clearing rule (d) — applied only after (c1a)/(c1b), (d)(i) clears only an act with no established cancellation/settlement (V-g10(i) gains its single operative classification); cycle-8 (confirming) qualified the absent-gate rule (c2) — applies only to an act surviving (c1a)/(c1b) with no established cancellation/settlement and none pending/failed establishment (V-g11(i)/V-g12 gain (c2) explicitly excluded); post-round audit of 6c004b9 split V-g11(i)'s outcomes — the inert-gate/proceeds-normally half applies only when the terminal record is established, a failed establishing fsync fail-stops the pass; terra cycle-10 split V-g12(iii)/V-g12b the same way — the gate's inert classification attaches only on establishing-fsync success, on failure no classification attaches to act or gate; post-round-2 audit of 2c085c8 SCOPED V-g11(i)'s success half to this act — "recovery proceeds normally" no longer implied for the pass: the pass completes only if every other act completes, any other act's failure fail-stops the whole pass per (a)/(b), while this act's extinguishment stands across it; post-round-3 audit of 650abe1 split the standing-across clause's provenance (PR-3 — the single "the establishing fsync already established them" was false for the already-durable path: an already-durable record is established regardless of any pass fsync; a pass-fsync-established one stands because that sync succeeded and no second establishing fsync is issued, making a later sync-failure for it unreachable) AND STRUCTURALLY FOLDED the residual finding class — since cycle 8 every finding was a narrative sentence scoping wider than its rule, never a misclassified state (three consecutive full-matrix CLEANs), so the outcome narratives of V-g8(1)(2)/V-g11(i)/V-g12/V-g12b were replaced by the NORMATIVE OUTCOME MATRIX (c1-M): pass-level outcomes P-REFUSE/P-SYNCFAIL/P-APPENDFAIL/P-COMPLETE and per-act rows E-1..E-12 over closed axes {TERMINAL: none | known-successful | UNKNOWN+sync-succeeded | UNKNOWN+sync-failed | UNKNOWN+no-result} x {GATE: absent | present-established | present-unsynced | ineligible-at-§1}, provenance causation confined to §0 where each statement is true by construction; the audit question becomes table completeness (a reachable combination with no row / rows assigning two operative classifications), and P-SYNCFAIL was corrected in-fold from "no act classified" (which contradicted E-2's already-durable extinguishment in the same failing pass) to "nothing depending on the failed fsync classifies; independently established classifications are kept" — fail-stop governs process progression, not erasure of established state); v32 folds the audit of commit dfb6cf8 (restart steps REORDERED — validate-before-repair: (c0) ownership → validation WITHOUT MUTATION → §13.1 tail repair, so a load-rejecting file is never touched even when its final fragment is independently repairable (vector V-g8); (c1) classification runs over the validated/repaired prefix; the establishing-sync rationale RESTATED — a readable gate with unknown fsync has not been PROVEN to satisfy the decision-record SYNC-BEFORE-ACK policy (storage-failure window), this is not a process-death claim (§13.1 R3 page-cache bytes survive process death)); v31 folds the audit of commit 7a83bc6 (restart must RE-ESTABLISH gate durability by its own sync — a readable prefix is not a durable prefix; torn gate lines classified via the §13.1 repair-then-append pass under exclusive ownership, with vectors V-g1…V-g7); v30 — v30 folds the audit of commit 2304792 (recovery-barrier fail-stop, cure-commitment scope, duplicate-link digest); v29 — v29 folds the audit of commit 2cca082, findings R5-C21-1…6 (see the v29 ledger row); v28 — round-4 cycles 6–20 folded (cycle 19 v26→v27: NDR-u/NDR-v cure-protocol owners; cycle 20 v27→v28: NDR-u's complete accepted-fix predicate + the confirming fold R5-C20F-1…5); per-cycle
 detail in the Change Ledger rows, the v-list below ends at v11/cycle 5) —
 v2 + G5 `scopeRefs` amendment (§14.14.1)
 + v4: route×surface note extended for the G2 intake gate (§14.11.4 seam
@@ -3731,6 +3731,162 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     introduces no new record kind, no stall classification, and no
     boundary: NDR-v and the stall rule are unchanged, and no boundary
     may be evaluated with the gate owed.
+    (c1-M) OUTCOME MATRIX (v33 structural fold, post-round-3 audit of
+    650abe1 — finding PR-3 and the finding CLASS behind it: since the
+    cycle-8 fold, every finding (PR-1, C10-1, PR-2, PR-3) was a
+    narrative SENTENCE scoping wider than its rule — a stray
+    "proceeds normally" / "either way" / "independently" /
+    "already established" — not a misclassified state. The state
+    space itself passed three consecutive full-matrix audits CLEAN;
+    the residual defect lives in prose. This matrix REPLACES the
+    outcome narratives of V-g8's ordered classification, V-g11(i),
+    V-g12, and V-g12b as the NORMATIVE outcome source: every
+    outcome claim attaches to exactly one row, provenance facts
+    (WHY a state holds) live only in section 0 where each is true
+    by construction, and the audit question becomes table
+    completeness — a reachable combination with no row, or two rows
+    classifying one combination differently — not stray-quantifier
+    hunt. Where any retained narrative conflicts with this matrix,
+    THE MATRIX IS NORMATIVE.
+    SCOPE: one row per (act, cell) for every `residual-cure` act
+    carrying a recovery (owed-completion) question at (c1),
+    evaluated over the prefix that PASSED (c1a), with the pass's
+    single establishing-fsync outcome (§0 mechanics, §1 pass-level
+    outcome) applied.
+    AXES (closed): TERMINAL — none (live act) | readable cancellation
+    or settlement with originating fsync KNOWN SUCCESSFUL | readable
+    with fsync UNKNOWN, demanded establishing fsync SUCCEEDED |
+    UNKNOWN, establishing fsync FAILED | UNKNOWN, no establishing
+    fsync demanded or completed yet (pass aborted elsewhere). GATE —
+    absent | present readable, established (own successful append,
+    own-demanding establishing fsync, or another act's demanding
+    establishing fsync — establishment is per-file (C6-1): the
+    outcome depends on the sync's RESULT alone, never on WHICH
+    record demanded it) | present not yet synced (reached only via
+    an aborted pass — no row attaches) | present-but-ineligible
+    (O3-violating etc.) — a pass-level REFUSAL at §1, never a row.
+    0. MECHANICS (the only place causation is stated): a pass
+    performs AT MOST ONE establishing fsync after (c1a) (C6-1); it
+    is DEMANDED by every act in state TERMINAL=UNKNOWN or
+    GATE=present-unsynced; if it is never demanded, no fsync is
+    issued and no act's outcome depends on an fsync result; one
+    successful fsync establishes EVERY readable record's bytes at
+    once (per-file, not per-record); a failing fsync fail-stops
+    the whole pass per (b) and attaches NO classification to any
+    record whose durability DEPENDS on it — every UNKNOWN-fsync
+    act and gate in the pass (C10-1 generalized to the pass: an
+    unestablished remainder classifies nothing), while records
+    established INDEPENDENTLY of that fsync (durable by
+    originating sync, or own-append success earlier in the pass)
+    keep their classification; an act's own successful
+    append makes ITS OWN gate established (durable-by-this-process)
+    with no fsync request of the establishing kind — an (a)
+    append's own sync-before-ack belongs to the append's write
+    path and is NOT what the "at most one establishing fsync per
+    pass" cap counts; the cap covers only syncs ISSUED AT RECOVERY
+    for records already in the file, and by the (c1b)/(c1c)
+    ordering the single establishing fsync (if demanded at all)
+    resolves BEFORE any (a) append begins, so at the moment of any
+    append failure every present-record classification is already
+    attached; a failure for another act — append or
+    sync — NEVER retroactively changes a classification THIS act
+    already holds (classifications attach at their own
+    establishment and never detach within a pass — the per-file
+    sync, once successful, cannot be un-succeeded, and an act
+    already durable by origin or by its own append is established
+    regardless of any later failure elsewhere in the pass).
+    1. PASS-LEVEL OUTCOMES (all passes): (P-REFUSE) (c0) validation
+    fault or (c1a) semantic violation (O1/O2/O3, one-per-act,
+    terminal-combination) ⇒ prefix refused or file untouched, fail-
+    stop (b), NO sync issued, nothing cleared, established, or
+    appended (C3-1; the matrix is never consulted for a refused
+    prefix). (P-SYNCFAIL) establishing fsync demanded and failed ⇒
+    fail-stop (b): NO classification attaches to any record whose
+    durability DEPENDS on that fsync — every record with UNKNOWN
+    originating fsync is neither extinguished nor cleared nor
+    owed-appended, gates included (C10-1). Records ALREADY
+    ESTABLISHED independently of it (durable by originating sync,
+    or by this pass's own earlier successful append) KEEP their
+    classification — establishment once held is never retaken by a
+    later failure (§0), and the next restart rederives the same
+    classification from the durable log anyway; the fail-stop
+    governs PROCESS PROGRESSION (exit nonzero, no boundary
+    evaluated, no append attempted), not the erasure of
+    independently established state. Next restart re-runs (c) for
+    the unestablished remainder. (P-APPENDFAIL) an owed-gate append (a) fails
+    (definite or indeterminate) ⇒ fail-stop (b), no further appends
+    of any kind attempted this pass (C1-2); the failing act's own
+    outcome is E-11; other acts keep the rows already attached.
+    (P-COMPLETE) no failure anywhere ⇒ every act classified per
+    §2, no owed gate remains, recovery proceeds to the normal
+    recovery steps. ONLY P-COMPLETE is a normal pass completion.
+    2. PER-ACT ROWS (one operative classification each):
+    E-1 TERMINAL known-successful, GATE absent ⇒ EXTINGUISHED per
+    (d)(ii)/(iii), nothing owed (V-g11(i) durable-by-origin case;
+    no sync demanded by this act).
+    E-2 TERMINAL known-successful, GATE present ⇒ EXTINGUISHED per
+    (d)(ii)/(iii) — operative; GATE INERT HISTORY (V-g10(i); no
+    sync demanded by this act; inertness attaches because the
+    TERMINAL record is established, independent of any pass fsync).
+    E-3 TERMINAL UNKNOWN + establishing fsync SUCCEEDED (demanded
+    by this act), GATE absent ⇒ EXTINGUISHED (V-g12(i)); no append
+    owed.
+    E-4 TERMINAL UNKNOWN + establishing fsync SUCCEEDED, GATE
+    present ⇒ EXTINGUISHED operative + GATE INERT HISTORY
+    (V-g12(iii)/V-g12b success halves).
+    E-5 TERMINAL UNKNOWN + establishing fsync FAILED ⇒ NEITHER
+    extinguished NOR owed (V-g12(ii)); pass outcome is P-SYNCFAIL
+    (other acts in the pass: everything depending on that fsync
+    classifies nothing; independently established acts keep their
+    rows — §0/P-SYNCFAIL).
+    E-6 TERMINAL UNKNOWN + no establishing fsync issued (the pass
+    was REFUSED at §1 before the fsync the act demands could run —
+    since a present UNKNOWN record DEMANDS the fsync, the only
+    way to hold this act with no fsync result is a (c1a) refusal
+    elsewhere in the prefix) ⇒ UNCLASSIFIED (V-g12b pending case;
+    pass outcome P-REFUSE — a refused prefix classifies nothing).
+    E-7 GATE live (TERMINAL=none), present + ESTABLISHED, or
+    appended successfully under (a) ⇒ CLEARED per (d)(i) — the
+    three establishment provenances (own append / own-demanding
+    sync / another act's demanding sync) are OUTCOME-EQUIVALENT
+    (V-g13); no append owed.
+    E-8 GATE live, present + UNSYNCED, establishing fsync DEMANDED
+    and FAILED ⇒ UNDER THE BARRIER — neither cleared nor trusted
+    for dispatch (V-g3/V-g6); pass outcome P-SYNCFAIL. (A present
+    unsynced gate DEMANDS the fsync: if it succeeds the gate is
+    established and the row is E-7; if the pass is refused before
+    the sync, no row stands — E-9.)
+    E-9 GATE live, present, no establishing-fsync result because the
+    pass was REFUSED at §1 before the sync ran ⇒ no row stands
+    (P-REFUSE precedes — a refused prefix classifies nothing).
+    E-10 GATE live, absent ⇒ OWED, appended once under (a);
+    append SUCCEEDS ⇒ E-7; append attempt fails ⇒ E-11; any other
+    act's establishing fsync result (success or failure) does not
+    change this act's owed-ness (an owed append is not an fsync
+    demand; V-g11(i) multi-act composition, PR-2 scoped to this
+    act): an absent gate demands no establishing fsync, so the
+    pass's single establishing fsync — if any — resolves BEFORE
+    the (a) append loop begins (§0), and its result neither
+    creates nor removes this act's owed-ness; owed-ness changes
+    only via this act's own append.
+    E-11 own gate-append FAILED (definite or indeterminate) ⇒
+    pass outcome P-APPENDFAIL; definite: act UNSETTLED, gate OWED
+    for the next process; indeterminate: bytes may stand (readable
+    ≠ proven), resolved only by the next process's (c) (V-g9's
+    second gate; V-g5).
+    E-12 GATE live, absent, but another act's failure aborts the
+    pass before this act's append is attempted ⇒ remains OWED
+    (the (a) qualification, C1-2: gates not yet restored stay owed
+    for the next process's pass; V-g9's first gate is the
+    counter-case — its own append succeeded, so it stands at E-7).
+    CONSISTENCE CLAUSES: every reachable (act, pass) combination
+    lands in EXACTLY ONE row (or a §1 pass-level outcome that
+    classifies nothing); no pair of rows assigns two operative
+    classifications to one combination; an act with an ESTABLISHED
+    terminal record NEVER clears via (d)(i) (C7-1 — E-2 extinguishes
+    rather than clears) and an act with NO established terminal
+    record NEVER extinguishes; (c2)'s owed rule is E-10 restated;
+    (d)(i)/(ii)/(iii) are the row mechanics for E-7/E-1/E-3.
     Vectors (v31 A2): V-g1 — the log ends in a PARTIAL gate line
     (`{"kind":"cure-gate","id":…` truncated): repair truncates the
     fragment, classification sees NO gate, the act stays owed, and (a)
@@ -3890,10 +4046,19 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     pass completes normally only if EVERY other act in it also
     completes: another act's establishing-sync or gate-append
     failure fail-stops the whole pass per (a)/(b). THIS act's
-    extinguishment STANDS across another act's failure — the
-    establishing fsync already established the file's readable
-    records and a later failure for another act cannot
-    un-establish them; (failure — the establishing fsync FAILS)
+    extinguishment STANDS across another act's failure — by EITHER
+    establishment provenance, stated separately (v33 post-round-3
+    audit of 650abe1, PR-3: the earlier single-provenance "the
+    establishing fsync already established them" was FALSE for the
+    already-durable path): a terminal record ALREADY DURABLE by its
+    originating sync is established regardless of any pass fsync,
+    and another act's later failure cannot un-establish it; a
+    record established by the PASS's establishing fsync stands
+    because that fsync SUCCEEDED and, per (c1c) (C6-1), NO SECOND
+    ESTABLISHING FSYNC IS ISSUED in this pass — a later
+    establishing-sync failure is UNREACHABLE; only an
+    APPEND failure for another act can occur, and appends do not
+    un-establish anything; (failure — the establishing fsync FAILS)
     the pass FAIL-STOPS per (b): nothing proceeds, no append is
     owed or made for this act, no boundary is evaluated, and the
     episode advances nothing until the next restart re-runs (c). (ii) an O3-INVALID prefix (V-g10 (ii)
