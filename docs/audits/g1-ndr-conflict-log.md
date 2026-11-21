@@ -201,13 +201,22 @@ citations only.
 
 Verbatim v24 sentence reduced to the NDR-b predicate citation:
 
-> `accepted-fix` remains allowed ONLY with machine-checkable evidence, for EVERY finding — opinion or not (v5, c3): the update MUST carry `reproRunRef` naming a durable **`repro-run`** record (14.12.4) — a supervisor-authored observation with required fields — **EXCEPT the minor owner exception (v8 R4-C2-6; v24 R5-C17-4 — demoted: …)**. … satisfies this paragraph's requirement for that case. Conformance vector: minor + owner act + matching reason + null ref passes BOTH this paragraph and the exception paragraph; major + null ref fails both.
+> Verbatim v24 (restored complete — cycle 19 F5 restore: the cycle-18
+> fold abridged this with internal ellipses, breaking the verbatim contract;
+> the full v24 sentence is reproduced here without omission):
+
+> `accepted-fix` remains allowed ONLY with machine-checkable evidence, for EVERY finding — opinion or not (v5, c3): the update MUST carry `reproRunRef` naming a durable **`repro-run` record** (14.12.4) — a supervisor-authored observation with required fields — **EXCEPT the minor owner exception (v8 R4-C2-6; v24 R5-C17-4 — demoted: the FULL accepted-fix evidence predicate, the minor exception's conditions, and the "absence of a run is excused, a bad run never is" clause are canonical in NDR-b with its registered expansions (§14.10.1 acceptance contract + §14.10.2 minor-exception text) — a validator reads the register entry; the v23 text here restated the full parenthesized predicate, which is exactly what this demotion removes). The owner-act/reason binding is machine-checkable evidence of a DIFFERENT kind — act-bound, not run-bound — and satisfies this paragraph's requirement for that case. Conformance vector: minor + owner act + matching reason + null ref passes BOTH this paragraph and the exception paragraph; major + null ref fails both (v5 R2-1 note: `rejected-refuted` is NOT added to the restricted list because it is self-limiting — its REQUIRED `reproRunRef` can only exist for a finding with a falsifiable repro, so it can never close a kind:"none" opinion finding, and where a repro exists the closure is evidence-bound through the same supervisor-authored channel as `accepted-fix`.)
 
 ### §14.12.2 kind:`none` prose (reduced v25 R5-C18-5)
 
 Verbatim v24 (itself the v23→v24 fold of the v7 R4-C1-7 rule):
 
-> **the sole route an `accepted-fix` on a kind:"none" finding can take is the minor owner exception below (v7 R4-C1-7 — v6 said "REFUSED outright" while §14.10.1 permits minor findings with `repro.kind:"none"` and the exception two paragraphs down claimed such minors close on the owner's reason — the two rules contradicted):** non-minor kind:"none" ⇒ `accepted-fix` refused for EVERY producer; minor kind:"none" ⇒ ONLY via the owner exception (i)+(ii)+(iii) below, never orchestrator-originated.
+> **the sole route an `accepted-fix` on a kind:"none" finding can take is the minor owner
+> exception below (v7 R4-C1-7 — v6 said "REFUSED outright" while §14.10.1 permits minor findings
+> with `repro.kind:"none"` and the exception two paragraphs down claimed such minors close on the
+> owner's reason — the two rules contradicted):** non-minor kind:"none" ⇒ `accepted-fix` refused
+> for EVERY producer; minor kind:"none" ⇒ ONLY via the owner exception (i)+(ii)+(iii) below,
+> never orchestrator-originated.
 
 ### §14.12.2 r4 chain-closure table — cells reduced v25 R5-C18-7
 
@@ -216,19 +225,57 @@ cells; cycle 18 reduced them to row predicates + outcomes + citations):
 
 Minor-exception cell (v24):
 
-> DISCHARGED ONLY where the member is minor AND linked by a machine-checked reproDigest-equal link; a non-minor member, or a non-machine-checked link, ⇒ UNCLEAN, needs its own disposition — the exception never discharges what a run-backed acceptance could not. **(v10 R5-C4-7: the v9 alternative "OR its own disposition is the same owner act" is WITHDRAWN — the single-consumption rule (§14.10.3) lets one owner-act authorize exactly ONE privileged record (or one NAMED atomic group), no group exists for two finding dispositions, so the alternative was inexpressible AND contradicted this row's own next clause; verbatim in conflict log §2c.) Cure for an already-closed member a run cannot reach (e.g. non-falsifiable `rejected-duplicate`): NDR-p edge (1) — its own `finding-disposition` owner-act under the NDR-b minor exception, FORWARD-ONLY (v11 R5-C5-4: both `rejected-duplicate` and `superseded` closures named; superseded members reach the same held state via a failed link revalidation); until it lands the member is UNCLEAN with needs-owner naming it — per NDR-p/NDR-b**
+> DISCHARGED ONLY where the member is minor AND linked by a machine-checked reproDigest-equal
+> link; a non-minor member, or a non-machine-checked link, ⇒ UNCLEAN, needs its own disposition —
+> the exception never discharges what a run-backed acceptance could not. **(v10 R5-C4-7: the v9
+> alternative "OR its own disposition is the same owner act" is WITHDRAWN — the
+> single-consumption rule (§14.10.3) lets one owner-act authorize exactly ONE privileged record
+> (or one NAMED atomic group), no group exists for two finding dispositions, so the alternative
+> was inexpressible AND contradicted this row's own next clause; verbatim in conflict log §2c.)
+> Cure for an already-closed member a run cannot reach (e.g. non-falsifiable
+> `rejected-duplicate`): NDR-p edge (1) — its own `finding-disposition` owner-act under the NDR-b
+> minor exception, FORWARD-ONLY (v11 R5-C5-4: both `rejected-duplicate` and `superseded` closures
+> named; superseded members reach the same held state via a failed link revalidation); until it
+> lands the member is UNCLEAN with needs-owner naming it — per NDR-p/NDR-b**
 
 Refuted cell (v24):
 
-> DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed re-run refutes THAT repro, and digest-equality makes it the members' repro too). "Every duplicate link" = each member's OWN EFFECTIVE link after the §14.10.2 fold's link effectivization — NOT every raw edge on the path (per NDR-n step 2; v11 R5-C5-2: a raw intermediate link's failure does NOT propagate; the intermediate member whose own link fails is itself UNCLEAN — the same per-member rule, the two texts may never disagree; verbatim in conflict log §2c).
+> DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed
+> re-run refutes THAT repro, and digest-equality makes it the members' repro too). "Every
+> duplicate link" = each member's OWN EFFECTIVE link after the §14.10.2 fold's link
+> effectivization — NOT every raw edge on the path (per NDR-n step 2; v11 R5-C5-2: a raw
+> intermediate link's failure does NOT propagate; the intermediate member whose own link fails is
+> itself UNCLEAN — the same per-member rule, the two texts may never disagree; verbatim in
+> conflict log §2c). An owner-authorized link over a non-falsifiable repro does NOT share the
+> refutation's evidence ⇒ UNCLEAN, needs its own disposition (cured per NDR-p edge (2) strand (b)
+> — v24 R5-C17-3)
 
 Refiled cell (v24):
 
-> the claim-equal fresh filing (disposition's `newActId`) is the EFFECTIVE SURVIVOR for these rows — members traverse to it exactly like a correction-edge transshipment (§14.10.2 fold), forward-only; the fresh finding carries the faulted finding's severity and route BY THE DISPOSITION'S OWN VALIDATION (§14.10.3: severity/route preservation, fail-closed to `withdrawn`-only when the damaged record cannot establish the fields), so member relinks revalidate against those preserved values exactly as a same-severity survivor transition
+> the claim-equal fresh filing (disposition's `newActId`) is the EFFECTIVE SURVIVOR for these
+> rows — members traverse to it exactly like a correction-edge transshipment (§14.10.2 fold),
+> forward-only; the fresh finding carries the faulted finding's severity and route BY THE
+> DISPOSITION'S OWN VALIDATION (§14.10.3: severity/route preservation, fail-closed to
+> `withdrawn`-only when the damaged record cannot establish the fields), so member relinks
+> revalidate against those preserved values exactly as a same-severity survivor transition
 
 Withdrawn cell (v24):
 
-> survivor is OWNER-RETIRED-BY-WITHDRAWAL (this IS the named row — v13 pointed to "retired-survivor rows" that do not exist here): the damaged survivor never discharges through its own disposition — every member whose chain evaluation consumes it is UNCLEAN + needs-owner naming that member at EVERY boundary thereafter (forward-only; boundaries before the withdrawal keep their frozen verdicts), including already-closed major members whose link pointed at the damaged survivor; the ONLY cure is each member's OWN route (v15 R5-C9-1 precision: an OPEN member takes this table's ordinary disposition rows as if it stood alone; an ALREADY-CLOSED member (e.g. major `rejected-duplicate`/`superseded` — §14.10.2 refuses ordinary transitions over closures) is cured by NDR-p edge (2) strand (a) — v24 R5-C17-8 citation: §14.10.2's SECOND named reopening edge, the owner `closed-residual` withdrawal-strand act citing this disposition — forward-only, resolved as residual at P13; every strand HAS a reachable cure — withdrawal blocks nothing, it waives nothing; no silent discharge, no orphan hold — the edge predicate is canonical in NDR-p); open and already-closed damaged survivors take the same path (the disposition is a `filing-integrity-disposition`, not an `audit-finding-update`, so §14.10.2's closed-state refusal never bars IT)
+> survivor is OWNER-RETIRED-BY-WITHDRAWAL (this IS the named row — v13 pointed to
+> "retired-survivor rows" that do not exist here): the damaged survivor never discharges through
+> its own disposition — every member whose chain evaluation consumes it is UNCLEAN + needs-owner
+> naming that member at EVERY boundary thereafter (forward-only; boundaries before the withdrawal
+> keep their frozen verdicts), including already-closed major members whose link pointed at the
+> damaged survivor; the ONLY cure is each member's OWN route (v15 R5-C9-1 precision: an OPEN
+> member takes this table's ordinary disposition rows as if it stood alone; an ALREADY-CLOSED
+> member (e.g. major `rejected-duplicate`/`superseded` — §14.10.2 refuses ordinary transitions
+> over closures) is cured by NDR-p edge (2) strand (a) — v24 R5-C17-8 citation: §14.10.2's SECOND
+> named reopening edge, the owner `closed-residual` withdrawal-strand act citing this disposition
+> — forward-only, resolved as residual at P13; every strand HAS a reachable cure — withdrawal
+> blocks nothing, it waives nothing; no silent discharge, no orphan hold — the edge predicate is
+> canonical in NDR-p); open and already-closed damaged survivors take the same path (the
+> disposition is a `filing-integrity-disposition`, not an `audit-finding-update`, so §14.10.2's
+> closed-state refusal never bars IT)
 
 ### §14.10.3 recovery-reconstructibility clause — RECLASSIFIED, not demoted (v25 R5-C18-6)
 

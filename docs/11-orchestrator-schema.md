@@ -157,6 +157,7 @@ mechanism).
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
+| 2026-11-22 | §14.10.3 (residual-cure commitment shape + settlement ordering proof), §14.10.2 (caller text), effect-binding paragraph, envelope inventory, NDR-q inventory row, docs/audits/g1-ndr-conflict-log.md §2d | **G1 REVIEW ROUND 4 — CYCLE 18 FOLLOW-UP (owner-driven fix pass on the v25 cycle-18 fold, 2026-11-22; findings F1-F5 raised against v25's residual-cure protocol; still DRAFT, NOT implemented, no module touched).** R5-C18F-1 the cure `commitment` is the PAIR `{digest, preimage}` (a bare digest is one-way: phase 2 cannot re-check fields derived from it) — confirmation requires `sha256(preimage)==digest` AND the preimage parses to the closed per-route shape (`cure-commitment-malformed`, refused); `reproDigestOrNull` resolved at confirmation by a deterministic rule over existing records; settlement re-digests evidence against the PREIMAGE. R5-C18F-2 settlement id is the deterministic `cure-settlement-<cureActId>` — declared the SECOND NAMED EXCEPTION to the effect-binding rule: while the settlement is absent the cure act is neither `effectApplied:true` nor class B (owed by EVIDENCE ARRIVAL, not supervisor effort; adds no hold beyond the residual-inherited uncleanliness it clears); crash-between-confirmation-and-settlement replayed from the deterministic id; id-collision refusal IS the one-settlement-per-act guarantee; an unsettled cure NEVER finalizes its round. R5-C18F-3 the §14.10.3 single evidence check + settlement existence is the SOLE clearing condition — the §14.12.2 replay text's trailing conjunct "fix reproduced green, or the fresh finding itself disposed" is WITHDRAWN (it double-counted the check and demanded a disposition on fresh findings the cure does not own). R5-C18F-4 "seq-after the cure act" undefined between git commits and S5 log lines → the accepted-fix ordering proof is DEFINED: `executedArtifactDigest` is a commit in the gated candidate lineage of `expectedFixBaseline` — git ancestor-of (same closure walk as artifact binding) AND NOT EQUAL to the baseline (fail-closed). R5-C18F-5 conflict-log §2d verbatim preservation restored COMPLETE (the cycle-18 fold abridged rule-4/kind-none/four r4 cells with internal ellipses — paraphrase-passed-of-verbatim; full v24 texts re-pasted from the v24 blob). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v26, round-4 cycle-18 follow-up folded) |
 | 2026-11-22 | §14.10.0 (NDR-p/s/e/q + inventory + manifest), §14.10.2 (second-edge rename, lineage visit-once), §14.10.3 (residual-cure two-phase + settlement record, recovery clause reclassified), §14.12.2 (rule-4 predicate, kind-none prose, r4 four cells), envelope inventory, docs/audits/g1-ndr-conflict-log.md §2d | **G1 REVIEW ROUND 4 — CYCLE 18 (REGISTER-COMPLENESS AUDIT vs v24, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c18-terra-*`: CHANGES REQUESTED — 7 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored).** R5-C18-1 NDR-p edge (2) canonical sentence replaced: the v24 text kept the withdrawal-only IFF inline AND appended a two-strand closed list contradicting it — now ONE predicate over the closed list {(a) owner-retired-by-withdrawal, (b) validly-refuted survivor + owner-authorized member link} with per-strand evidence operands and fail-closed validation; §14.10.2 paragraph renamed to follow. R5-C18-2 NDR-s OWNS the complete three-value result semantics (green = postFixExpected observed; red = completed, not observed, supports NOTHING; not-reproduced = completed vs pre-fix baseline, refutation-only) — the v24 §14.12.2 demotion cited NDR-s for definitions it did not state; §14.12.4 field list registered as NDR-s expansion. R5-C18-3 residual cure made EXECUTABLE: two-phase protocol — owner act `residual-cure` binds {findingId, survivorId, route, commitment} (no evidence needed at confirmation), supervisor settles with the NEW `residual-cure-settlement` record (joins the envelope record-kind inventory) once the green run / fresh filing exists and re-digests to the commitment; no forked cure; forward-only clearing; NDR-q inventory row and §14.12.2 caller updated. R5-C18-4 NDR-n effective-tip walk: v24's 'chains are acyclic so the walk terminates' asserted away the fold's own malformed-cycle case — resolution now shares the fold's visit set; a repeat visit ⇒ NO effective tip ⇒ needs-owner (§14.10.2 lineage paragraph: cyclic prefix ⇒ chain UNCLEAN + needs-owner naming the lineage). R5-C18-5 §14.12.2 rule-4 predicate sentence and the kind:"none" prose demoted to `per NDR-b` citations (the v24 demotions left the predicate itself restated; verbatim v24 texts in docs/audits/g1-ndr-conflict-log.md§2d; vectors kept as applications). R5-C18-6 the recovery-reconstructibility clause is a DECLARED BOUNDED EXPANSION of NDR-e (v24 R5-C17-6's citation reclassification left a normative case-level algorithm outside the declared set — the boundary now matches the text; NDR-e *Expansion:* + manifest updated). R5-C18-7 r4 chain-closure table: minor-exception/refuted/refiled/withdrawn cells reduced to row predicates + outcomes + `per NDR-b/s/n/p/c` citations (v24 left rule bodies despite the predicates-only claim; removed v24 bodies verbatim in docs/audits/g1-ndr-conflict-log.md§2d); manifest row corrected. Register closed set unchanged (a…t, 20 entries; self-check PASS). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v25, round-4 cycle-18 folded) |
 | 2026-11-22 | §14.10.0 (NDR-n/r/p/q/t + inventory), §14.10.2 (effective-tip, second-edge), §14.10.3 (recovery clause citations), §14.12.2 (rule-4/minor-exception/result-semantics paragraphs, r4 chain-closure cells), docs/audits/g1-ndr-conflict-log.md | **G1 REVIEW ROUND 4 — CYCLE 17 (REGISTER-FOLD CYCLE vs v23, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c17-terra-*`: CHANGES REQUESTED — 9 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored).** R5-C17-1 NDR-n gains the EFFECTIVE LIVE TIP concept (terminalized live tip resolves forward along its own edge to the effective survivor; every consumer binds the effective tip — v23's live-tip text made a duplicate-closed correction member the tip, contradicting NDR-n's own terminalized-member rule). R5-C17-2 NDR-r owns the divergent-bytes refusal outright (bytes pinned by `draftSha256`, re-digest on redelivery); the "per NDR-i's stage rules" mis-citation is struck — NDR-i governs withdrawal only. R5-C17-3 NDR-p edge (2) strand condition generalized to the CLOSED LIST {(a) owner-retired-by-withdrawal, (b) survivor validly-refuted + member's own link owner-authorized}; evidence operands pinned per strand; §14.10.2 second-edge paragraph and the inventory row follow (the v23 row prescribed a non-minor `closed-residual` edge NDR-p refused). R5-C17-4 §14.12.2 minor-exception paragraph demoted to `per NDR-b` citation + application-local consequence (verbatim v23 text preserved in docs/audits/g1-ndr-conflict-log.md§2c). R5-C17-5 §14.12.2 repro-run result-semantics paragraph demoted to `per NDR-s`; r4 refuted cell's VALID definition cites NDR-s, effective-link clause cites NDR-n step 2. R5-C17-6 §14.10.3 recovery-reconstructibility clause carries `per NDR-e`/`per NDR-k` citations IN TEXT; manifest reclassified expansion→citation (NDR-e declares only the byte-provenance paragraph; recovery is listed under Cited at). R5-C17-7 NDR-q inventory gains the `residual-inherited` row (append-only `residual-re-resolution` record — route, operands, settlement, clearing evidence, forward effect per §14.12.2 v9 c7-M7). R5-C17-8 r4 chain-closure table: the minor-exception and refuted cells demoted to predicates + `per NDR-b/s/n/p` citations (verbatim cell text preserved in docs/audits/g1-ndr-conflict-log.md§2c); the withdrawal and refiled cells annotated with `per NDR-p`/`per NDR-n`/`per NDR-c` citations on their existing predicates — doctrine 3 restored; manifest row updated. R5-C17-9 NDR-t qualified: `correctionOf` per NDR-n is the wrong-REFUTATION route admitting ONLY `rejected-refuted`-closed targets (`correction-bad-target` predicate) — NOT a general route for closed records; other closed records untouchable except via NDR-p's two named reopening edges. Register closed set unchanged (a…t, 20 entries; self-check PASS). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v24, round-4 cycle-17 folded) |
 | 2026-11-22 | §14.10.0 (register + doctrine 1 + manifest), §14.10 (§14.10.1/.2/.3), §14.12.2 r4 rule-4 paragraph, docs/audits/g1-ndr-conflict-log.md, scripts/g1-ndr-selfcheck.mjs (comments only) | **G1 REVIEW ROUND 4 — CYCLE 16 (REGISTER-COMPLENESS AUDIT vs v22, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c16-terra-*`: CHANGES REQUESTED — 8 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored — sites-edited = canonical only (register entries, doctrine 1, registered expansions §14.10.1/.2/.3, the one demoted statement site converted to a citation in the same commit per doctrine 4) + grep-verified before this row).** R5-C16-1 NDR-a supervisor-derived mode corrected to its ratified expansion: mode defined by PROOF not origin (`origin` = observer, `producer` = appender; `"auditor" OR "owner"` both legal), v22's "owner-origin records" wording contradicted the entry-mode table. R5-C16-2 NDR-p edge (1) canonical text now covers `rejected-duplicate` **OR `superseded`** closures (was rejected-duplicate-only, contradicting its own registered expansion and ratified v10/v11 behavior — the register restates the ratified rule, adds none). R5-C16-3 NDR-n LIVE TIP definition corrected to the expansion (unique member NOT closed by `rejected-refuted`); terminalized members (duplicate/superseded) named as a DISTINCT role delegating via step-2 link effectivization — v22 register said the opposite of its expansion. R5-C16-4 NEW **NDR-r**: filing identity/replay/new-act refiling over identical bytes (redelivery idempotence vs new filing ATTEMPT vs same-act divergent bytes) — rule was body-only, unregistered. R5-C16-5 NEW **NDR-s** (refutation evidence: not-reproduced vs pre-fix baseline, incomplete-run no-record, owner-grade bar, no cross-lineage discharge) and NEW **NDR-t** (closed vocabularies, route×surface validity incl. `surface:"spec"`+`route:"code-fix"` refusal, append-only findingRef artifact + claimDigest binding) — rule families outside the v22 closed list. R5-C16-6 doctrine 1 REVISED: declared expansion = bounded FINITE set (one OR more, undeclared sites illegal), replacing "ONE named expansion site" which six entries already violated; NDR-q re-declared self-contained. R5-C16-7 §14.12.2 rule-4 accepted-fix paragraph DEMOTED to predicate + `per NDR-b` citation (full demoted predicate preserved verbatim in the docs/audits/g1-ndr-conflict-log.md§2b; conformance vector stays as application text). R5-C16-8 NDR-q now SUPPLIES its totality: per-condition closing inventory table (6 reachable conditions × closing act × validation operands × clearing evidence × forward effect), historical-vs-hold distinction, unlisted reachable hold ⇒ contract defect. Register closed set extended a…q → a…**t** (heading + manifest updated; self-check PASS at 20 entries, citations resolve, B/O cell budget respected). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v23, round-4 cycle-16 folded) |
@@ -1298,7 +1299,7 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
-| audit-finding records (§14.10) | G1 draft v25 (Plan B canonical rule register §14.10.0 NDR-a…t — cycle-18 fold 2026-11-22 (R5-C18-1…7: NDR-p two-strand canonical predicate, NDR-s three-value result semantics owned, two-phase residual cure, NDR-n visit-once effective tip, rule-4/kind-none/r4-cell demotions completed, recovery clause declared NDR-e expansion); cycle-17 fold (R5-C17-1…9: effective live tip, NDR-r divergent bytes, NDR-p edge-2 closed strand list, doctrine-3 demotions §14.12.2, NDR-q residual-inherited inventory row, NDR-t closed-record qualification); extended v23 with cycle-16 findings; NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 + register-completeness cycle 16 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
+| audit-finding records (§14.10) | G1 draft v26 (Plan B canonical rule register §14.10.0 NDR-a…t — cycle-18 follow-up fold 2026-11-22 (R5-C18F-1…5: cure commitment is a re-checkable {digest,preimage} pair, deterministic settlement id `cure-settlement-<actId>` as the SECOND named effect-binding exception, single evidence check as the SOLE clearing condition (trailing conjunct withdrawn), git-ordering proof defined as ancestor-of ≠ baseline over the gated candidate lineage, docs/audits/g1-ndr-conflict-log.md §2d verbatim texts restored complete); cycle-18 fold 2026-11-22 (R5-C18-1…7: NDR-p two-strand canonical predicate, NDR-s three-value result semantics owned, two-phase residual cure, NDR-n visit-once effective tip, rule-4/kind-none/r4-cell demotions completed, recovery clause declared NDR-e expansion); cycle-17 fold (R5-C17-1…9: effective live tip, NDR-r divergent bytes, NDR-p edge-2 closed strand list, doctrine-3 demotions §14.12.2, NDR-q residual-inherited inventory row, NDR-t closed-record qualification); extended v23 with cycle-16 findings; NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 + register-completeness cycle 16 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
@@ -1568,7 +1569,7 @@ section adds TWO record kinds — `audit-finding` and
 §0.7 holds unchanged: control logic keys on the closed fields only;
 free-text fields are advisory, never parsed.
 
-#### 14.10.0 Rule register (NDR-a … NDR-t) — canonical statements (v25)
+#### 14.10.0 Rule register (NDR-a … NDR-t) — canonical statements (v26)
 
 **Why this register exists (v22, Plan B).** Round-4 data (14 cycles +
 confirming cycle 15, plateau at 4–5 MAJOR/cycle since cycle 9) showed the
@@ -2047,7 +2048,7 @@ DECISIONS-REQUIRED, never resolved silently).
   | integrity fault, any `failingCheck` kind (per NDR-g/h) | `filing-integrity-disposition` (per NDR-m) | `faultId`; `outcome:"refiled"→newActId` binds equal-claim APPLIED filing; `"withdrawn"` always admissible | the disposition record IS the clearing evidence | fault disposed; damaged bytes stay invalid |
   | r4 chain UNCLEAN — survivor retired by withdrawal | NDR-p edge (2) strand (a): owner `closed-residual` | live strand proof: survivor id + disposition record cite | both citations in the update's authority | finding closed residual, verdicts frozen |
   | r4 chain UNCLEAN — owner-authorized link that cannot machine-check (vector (d)) | minor: owner minor-exception `accepted-fix` (per NDR-b, over `rejected-duplicate` OR `superseded` per NDR-p edge (1)); non-minor: owner `closed-residual` per NDR-p edge (2) strand (b) (v24 R5-C17-3 — the edge's strand proof is the survivor's valid refutation + the member's owner-authorized link; v23's bare "authority REQUIRED" prescribed a transition NDR-p refused) | NDR-b predicate / edge-(2) strand (b) proof: survivor id + its `reproRunRef` | the owner act itself (act-bound, not run-bound) + the two strand citations | finding closed forward-only; chain row re-derives |
-  | `residual-inherited` chain member (any severity, v24 R5-C17-7 — the closed member inherits an owner-accepted `closed-residual` survivor; §14.12.2: the round carrying it is unclean until settlement, forward-only) | TWO-PHASE residual-cure protocol (§14.10.3 v25 R5-C18-3: act `residual-cure` binds `{findingId, survivorId, route, commitment}`, then the supervisor settles with `residual-cure-settlement` once the evidence exists — the v24 row's single-record form demanded evidence at confirmation time and was unexecutable) | act operands `findingId` + `survivorId` naming the SURVIVOR's owner-accepted residual disposition (refused if never owner-accepted; a second unsettled cure on the same pair refused — no forked cure); commitment re-digest check at settlement | the `residual-cure-settlement` record (green repro-run or filed finding re-digesting to the act's commitment) | member clears for boundaries AFTER the settlement; earlier boundaries keep their state; current round unclean until settled |
+  | `residual-inherited` chain member (any severity, v24 R5-C17-7 — the closed member inherits an owner-accepted `closed-residual` survivor; §14.12.2: the round carrying it is unclean until settlement, forward-only) | TWO-PHASE residual-cure protocol (§14.10.3 v25 R5-C18-3: act `residual-cure` binds `{findingId, survivorId, route, commitment}`, then the supervisor settles with `residual-cure-settlement` once the evidence exists — the v24 row's single-record form demanded evidence at confirmation time and was unexecutable) | act operands `findingId` + `survivorId` naming the SURVIVOR's owner-accepted residual disposition (refused if never owner-accepted; a second unsettled cure on the same pair refused — no forked cure); commitment `{digest,preimage}` re-digest + evidence check (§14.10.3) at settlement | the `residual-cure-settlement` record (green repro-run or filed finding passing the §14.10.3 single evidence check against the commitment preimage) | member clears for boundaries AFTER the settlement; earlier boundaries keep their state; current round unclean until settled |
   | `quiesce-stall` | no act — drains when the stalled condition clears | stall condition re-check at next boundary | drain record appended | boundary proceeds |
   | `finding-hold` | `finding-hold-lift` (owner record, §14.12.4) | `findingId` of the held finding | the lift record | hold stops counting as sign-off holder |
   A recorded uncleanness on a CLOSED cycle is historical (verdict
@@ -3212,30 +3213,70 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     whose lineage cites the record (the record cannot pre-exist the
     finding it cites and vice versa — an append-only cycle). PHASE
     1: this act binds a COMMITMENT, not evidence:
-    `{ findingId, survivorId, route,
-    commitment }` where `commitment` = sha256 over the canonical
-    JSON `{route, accepted-fix: {reproDigest, expectedFixBaseline}
-    | fresh-finding-cycle: {claimDigest, reproDigestOrNull}}`
-    (machine-checkable at phase 2; REQUIRED non-null). PHASE 2:
-    the supervisor appends a distinct durable settlement record
-    `residual-cure-settlement { id, cureActId, evidenceRef, ts,
+    `{ findingId, survivorId, route, commitment }` where
+    `commitment` is the PAIR `{ digest, preimage }` (v26 R5-C18F-1 —
+    a bare digest is NOT re-checkable: phase 2 cannot derive fields
+    from a one-way hash, so the act carries the preimage it digested)
+    — `preimage` is the canonical single-line JSON string
+    `{route, accepted-fix: {reproDigest, expectedFixBaseline}
+    | fresh-finding-cycle: {claimDigest, reproDigestOrNull}}` (the
+    closed per-route shape, keys in the order shown) and `digest` =
+    sha256 of those exact bytes. Confirmation validation (fail-closed,
+    BOTH required): `sha256(preimage) == digest` and the preimage
+    parses to the CLOSED shape for the payload's `route` (extra or
+    missing member ⇒ `cure-commitment-malformed`, refused).
+    `reproDigestOrNull` is resolved AT CONFIRMATION by a deterministic
+    rule over records that already exist: if the survivor's closure
+    carries a machine-checkable `reproDigest` (§14.10.2 effective
+    link), the owner MUST bind that digest (validator-required);
+    if the survivor's closure is non-falsifiable (no machine-checkable
+    digest exists — e.g. an opinion route), the owner binds `null`.
+    The preimage is IMMUTABLE (append-only — never rewritten; a
+    changed intent is a NEW cure act, and the second-unsettled-cure
+    refusal on the same pair (§14.10.0 route row — no forked cure)
+    still applies). REQUIRED non-null.
+    PHASE 2: the supervisor appends a distinct durable settlement
+    record `residual-cure-settlement { id, cureActId, evidenceRef, ts,
     route }` in the S5 decision log (this kind JOINS the envelope
     record-kind inventory alongside `finding-hold`/`-lift` and the
     §14.10 kinds — v25 R5-C18-3; `route` is copied verbatim from the
     act at append; a settlement whose route differs from its act's
-    is malformed, refused)
-    once the evidence EXISTS: `accepted-fix` —
-    `evidenceRef` names a `repro-run` record `result:"green"`
-    whose executed fix commit is seq-after the cure act and whose
-    repro definition re-digests to the commitment's `reproDigest`
-    against `expectedFixBaseline`; `fresh-finding-cycle` —
-    `evidenceRef` names a filed finding whose `claimDigest`
-    re-digests to the commitment's `claimDigest` and whose lineage
-    cites the cure act. ONE settlement per cure act (a second is
+    is malformed, refused; `id` is the deterministic
+    `cure-settlement-<cureActId>` — v26 R5-C18F-2, the id is fully
+    derivable from the act BEFORE the settlement exists, which is what
+    makes the act's effect binding re-checkable (see the effect-binding
+    paragraph), and the id-collision refusal IS the one-settlement-
+    per-act uniqueness guarantee).
+    The settlement is appended ONCE THE EVIDENCE EXISTS AND PASSES THE
+    SINGLE EVIDENCE CHECK (v26 R5-C18F-1/F-3 — one predicate,
+    machine-checkable at settlement time from durable records only,
+    recomputed identically by every replay):
+    `accepted-fix` — `evidenceRef` names a `repro-run` record
+    `result:"green"` AND (a) its repro definition re-digests to the
+    preimage's `reproDigest` against `expectedFixBaseline` AND
+    (b) ORDERING PROOF (v26 R5-C18F-4 — "seq-after the cure act" was
+    undefined between git commits and S5 log lines): the run's
+    `executedArtifactDigest` is a commit in the gated candidate
+    lineage of `expectedFixBaseline` — git ancestor-of (walkable in
+    the object store, the same closure walk as the artifact-binding
+    check) AND NOT EQUAL to `expectedFixBaseline` (a fix IS a change
+    over the baseline; an equal digest fails the check, fail-closed);
+    `fresh-finding-cycle` — `evidenceRef` names a filed finding (an
+    APPLIED `audit-filing` act) whose `claimDigest` re-digests to the
+    preimage's `claimDigest` AND whose lineage cites the cure act.
+    NO FURTHER CONJUNCT (v26 R5-C18F-3 — the replay text's trailing
+    "or the fresh finding itself disposed" is WITHDRAWN: settlement
+    requires no disposition on the evidence beyond the check itself —
+    a fresh finding enters its own round as ordinary open work and is
+    disposed by the ordinary rules on its own record; the cure closes
+    the OLD chain's residual question, it does not pre-dispose the
+    new finding). ONE settlement per cure act (a second is
     malformed, refused); the settlement's route is the act's
-    (never re-litigated); missing evidence ⇒ no settlement (the
-    pair stays unsettled — an unsettled cure adds NO hold beyond
-    the residual-inherited uncleanliness it exists to clear).
+    (never re-litigated); missing evidence OR a failed check ⇒ no
+    settlement (the pair stays unsettled — an unsettled cure adds NO
+    hold beyond the residual-inherited uncleanliness it exists to
+    clear; settlement is owed by EVIDENCE ARRIVAL, never by supervisor
+    effort — see the effect-binding paragraph, v26 R5-C18F-2).
     One act cures ONE (`findingId`, `survivorId`) pair; the
     record's `authority` is supervisor-stamped from the act, as
     everywhere.)
@@ -4333,7 +4374,32 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   the resolution act is consumed under the
   GENERAL effect rule — its effectRecordIds name the resolution
   record IT mints, which exists on append, so the clearing effect
-  can never itself dangle as a missing effect.** An act with
+  can never itself dangle as a missing effect.** **SECOND NAMED
+  EXCEPTION — the two-phase residual-cure act (v26 R5-C18F-2):** a
+  `residual-cure` act's effect IS its settlement record
+  `cure-settlement-<actId>` (§14.10.3 protocol), whose ID is
+  deterministically derivable from the act BEFORE it exists —
+  `effectRecordIds` is the singleton of that derived id, and
+  `effectApplied` is true iff the settlement exists, binds the act,
+  and passes the §14.10.3 evidence check (replay recomputes it).
+  The act confirms with its effect record NOT yet in existence (a
+  legal state — the pre-refusal state of a refusal-fork act is the
+  same shape: confirmed, effect not yet appended), so this is NOT a
+  contradiction of the existence rule, it is a pre-REGISTERED effect
+  identity. While the settlement is absent the act is NEITHER
+  `effectApplied:true` NOR class B: settlement is owed by EVIDENCE
+  ARRIVAL, not by supervisor effort, so the general "the supervisor
+  owes it and can complete it" predicate is false and class B would
+  block appends forever on evidence no one can compel; the act holds
+  NO additional condition — an unsettled cure adds no hold beyond
+  the residual-inherited uncleanliness the cure exists to clear
+  (§14.12.2 chain rule, v25 R5-C18-3), which is its own unclean
+  row until settlement lands. A crash between confirmation and
+  settlement leaves a confirmed, unsettled cure: replay re-derives
+  the pending settlement from the deterministic id and, when the
+  evidence arrives and passes the check, the supervisor appends the
+  settlement with that id — an unsettled cure NEVER finalizes the
+  round it is live in.** An act with
   `effectApplied:false` and NO terminal-by-refusal **and NOT under an
   `owner-filing-integrity-fault` (v12 R5-C6-1; exclusion keyed on fault
   EXISTENCE not undispositioned, v13
@@ -5334,11 +5400,15 @@ the round is those auditors plus the `audit-finding` records with
    evidence cannot exist when the act is confirmed): PHASE 1 is the
    owner `residual-cure` act (closed op, §14.10.3) binding
    `{findingId, survivorId, route, commitment}` — the commitment is
-   a sha256 over the route-specific evidence description; PHASE 2 is
+   the `{digest, preimage}` pair verified at confirmation
+   (v26 R5-C18F-1); PHASE 2 is
    the supervisor-appended `residual-cure-settlement` record naming
-   the cure act and the now-existing evidence (green repro-run
-   re-digesting to the commitment, or a filed finding whose
-   claimDigest re-digests to it and whose lineage cites the act),
+   the cure act and the now-existing evidence, appended ONLY where
+   the §14.10.3 single evidence check passes (green repro-run whose
+   repro definition re-digests to the preimage AND whose executed
+   artifact satisfies the v26 R5-C18F-4 git-ordering proof, or a
+   filed finding whose claimDigest re-digests to the preimage and
+   whose lineage cites the act),
    one settlement per act. Naming the SURVIVOR's closed residual
    disposition it re-resolves, it is NOT a transition on the closed
    finding (G1's "a transition applied to an already-closed finding
@@ -5346,8 +5416,14 @@ the round is those auditors plus the `audit-finding` records with
    finding's disposition; it records the owner's act of RE-OPENING
    THE RESIDUAL QUESTION onto new work). Replay re-derives chain state
    FORWARD ONLY: a chain row's `residual-inherited` member clears
-   for boundaries AFTER the settlement record lands (fix
-   reproduced green, or the fresh finding itself disposed) and every
+   for boundaries AFTER the settlement record lands — the settlement
+   record's existence + the §14.10.3 evidence check is the SOLE
+   clearing condition (v26 R5-C18F-3: the trailing conjunct "fix
+   reproduced green, or the fresh finding itself disposed" is
+   WITHDRAWN — no disposition on the evidence beyond the check is
+   required; a fresh finding stays open as ordinary work on its own
+   record and disposes by the ordinary rules)
+   and every
    earlier boundary keeps its original state — prior boundaries
    never re-derive cleaner; the inherited member of the CURRENT
    round is unclean until its re-resolution settles, and an unsettled
@@ -6543,7 +6619,9 @@ the example-syntax clause below.**
   verbatim from that act (a settlement whose route differs from its
   act's is malformed, refused), `evidenceRef` names the green
   `repro-run` record or the filed finding per the act's route,
-  re-digesting to the act's `commitment` (§14.10.3); one settlement
+  passing the §14.10.3 single evidence check against the act's
+  commitment PREIMAGE (v26 R5-C18F-1); `id` is the deterministic
+  `cure-settlement-<cureActId>` (v26 R5-C18F-2); one settlement
   per cure act (a second is malformed, refused); appended to the S5
   decision log, replayed as the sole clearing evidence of the
   residual-inherited uncleanliness forward of its append position.
