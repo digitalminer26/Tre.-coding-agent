@@ -187,3 +187,70 @@ Verbatim v23 cell definitional parentheticals:
 | R5-C17-9 (MAJOR, FRESH: NDR-t said "the closed-record route is `correctionOf` per NDR-n" — but correctionOf admits ONLY `rejected-refuted` targets; a closed accepted-fix/closed-residual record has no such route) | NDR-t qualified: correctionOf is the wrong-REFUTATION route subject to its target predicate; other closed records untouchable except via NDR-p's two named edges | NDR-t |
 
 No register-extension this cycle (closed set stays a…t, 20 entries).
+
+## §2d — Cycle 18 demotions & reclassifications (v24 → v25)
+
+Source: G1 review round 4, cycle 18 (auditor gpt-6.1-terra, detached
+one-shot, `~/.tre/audits/g1r4-c18-terra-*`, register-completeness vs v24).
+CHANGES REQUESTED — 7 MAJOR, DECISIONS-REQUIRED: 0; all adopted as
+recommended. Verbatim v24 texts of every demoted/reduced statement are
+preserved below; the corresponding body sites now carry predicates +
+citations only.
+
+### §14.12.2 rule-4 accepted-fix paragraph (reduced v25 R5-C18-5)
+
+Verbatim v24 sentence reduced to the NDR-b predicate citation:
+
+> `accepted-fix` remains allowed ONLY with machine-checkable evidence, for EVERY finding — opinion or not (v5, c3): the update MUST carry `reproRunRef` naming a durable **`repro-run`** record (14.12.4) — a supervisor-authored observation with required fields — **EXCEPT the minor owner exception (v8 R4-C2-6; v24 R5-C17-4 — demoted: …)**. … satisfies this paragraph's requirement for that case. Conformance vector: minor + owner act + matching reason + null ref passes BOTH this paragraph and the exception paragraph; major + null ref fails both.
+
+### §14.12.2 kind:`none` prose (reduced v25 R5-C18-5)
+
+Verbatim v24 (itself the v23→v24 fold of the v7 R4-C1-7 rule):
+
+> **the sole route an `accepted-fix` on a kind:"none" finding can take is the minor owner exception below (v7 R4-C1-7 — v6 said "REFUSED outright" while §14.10.1 permits minor findings with `repro.kind:"none"` and the exception two paragraphs down claimed such minors close on the owner's reason — the two rules contradicted):** non-minor kind:"none" ⇒ `accepted-fix` refused for EVERY producer; minor kind:"none" ⇒ ONLY via the owner exception (i)+(ii)+(iii) below, never orchestrator-originated.
+
+### §14.12.2 r4 chain-closure table — cells reduced v25 R5-C18-7
+
+Verbatim v24 cell bodies (the v24 demotion left rule prose inside the
+cells; cycle 18 reduced them to row predicates + outcomes + citations):
+
+Minor-exception cell (v24):
+
+> DISCHARGED ONLY where the member is minor AND linked by a machine-checked reproDigest-equal link; a non-minor member, or a non-machine-checked link, ⇒ UNCLEAN, needs its own disposition — the exception never discharges what a run-backed acceptance could not. **(v10 R5-C4-7: the v9 alternative "OR its own disposition is the same owner act" is WITHDRAWN — the single-consumption rule (§14.10.3) lets one owner-act authorize exactly ONE privileged record (or one NAMED atomic group), no group exists for two finding dispositions, so the alternative was inexpressible AND contradicted this row's own next clause; verbatim in conflict log §2c.) Cure for an already-closed member a run cannot reach (e.g. non-falsifiable `rejected-duplicate`): NDR-p edge (1) — its own `finding-disposition` owner-act under the NDR-b minor exception, FORWARD-ONLY (v11 R5-C5-4: both `rejected-duplicate` and `superseded` closures named; superseded members reach the same held state via a failed link revalidation); until it lands the member is UNCLEAN with needs-owner naming it — per NDR-p/NDR-b**
+
+Refuted cell (v24):
+
+> DISCHARGED ONLY where every duplicate link is machine-checked (`reproDigest` equal — the failed re-run refutes THAT repro, and digest-equality makes it the members' repro too). "Every duplicate link" = each member's OWN EFFECTIVE link after the §14.10.2 fold's link effectivization — NOT every raw edge on the path (per NDR-n step 2; v11 R5-C5-2: a raw intermediate link's failure does NOT propagate; the intermediate member whose own link fails is itself UNCLEAN — the same per-member rule, the two texts may never disagree; verbatim in conflict log §2c).
+
+Refiled cell (v24):
+
+> the claim-equal fresh filing (disposition's `newActId`) is the EFFECTIVE SURVIVOR for these rows — members traverse to it exactly like a correction-edge transshipment (§14.10.2 fold), forward-only; the fresh finding carries the faulted finding's severity and route BY THE DISPOSITION'S OWN VALIDATION (§14.10.3: severity/route preservation, fail-closed to `withdrawn`-only when the damaged record cannot establish the fields), so member relinks revalidate against those preserved values exactly as a same-severity survivor transition
+
+Withdrawn cell (v24):
+
+> survivor is OWNER-RETIRED-BY-WITHDRAWAL (this IS the named row — v13 pointed to "retired-survivor rows" that do not exist here): the damaged survivor never discharges through its own disposition — every member whose chain evaluation consumes it is UNCLEAN + needs-owner naming that member at EVERY boundary thereafter (forward-only; boundaries before the withdrawal keep their frozen verdicts), including already-closed major members whose link pointed at the damaged survivor; the ONLY cure is each member's OWN route (v15 R5-C9-1 precision: an OPEN member takes this table's ordinary disposition rows as if it stood alone; an ALREADY-CLOSED member (e.g. major `rejected-duplicate`/`superseded` — §14.10.2 refuses ordinary transitions over closures) is cured by NDR-p edge (2) strand (a) — v24 R5-C17-8 citation: §14.10.2's SECOND named reopening edge, the owner `closed-residual` withdrawal-strand act citing this disposition — forward-only, resolved as residual at P13; every strand HAS a reachable cure — withdrawal blocks nothing, it waives nothing; no silent discharge, no orphan hold — the edge predicate is canonical in NDR-p); open and already-closed damaged survivors take the same path (the disposition is a `filing-integrity-disposition`, not an `audit-finding-update`, so §14.10.2's closed-state refusal never bars IT)
+
+### §14.10.3 recovery-reconstructibility clause — RECLASSIFIED, not demoted (v25 R5-C18-6)
+
+Cycle 18 F6: v24 R5-C17-6 reclassified the clause from expansion to
+citation while the normative case-level label-assignment algorithm
+remained in the clause — the declared boundary and the text disagreed.
+Cycle 18 resolution goes the other way: the clause is now a DECLARED
+BOUNDED EXPANSION of NDR-e (doctrine 1 v23 permits one OR more declared
+expansions); the manifest row agrees. No text was removed — the site's
+classification changed, so no verbatim preservation is required; the
+history of the classification is in this paragraph and the ledger row.
+
+### Cycle-18 finding → action mapping (R5-C18-*)
+
+| finding | action | register effect |
+|---|---|---|
+| R5-C18-1 (MAJOR, EXPANSION-CONTRADICTION: NDR-p's canonical edge-(2) sentence kept the withdrawal-only IFF while the v24 closed list admitted strand (b) — simultaneously excludes and admits) | Canonical sentence replaced with ONE predicate over the two-strand closed list with strand-specific evidence and severity conditions; §14.10.2 paragraph, inventory row and the r4 caller re-walked | NDR-p, §14.10.2, inventory |
+| R5-C18-2 (MAJOR, CITATION-DIVERGENCE: the result-semantics demotion cites NDR-s for definitions (green = postFixExpected observed, red = not observed) that NDR-s does not contain) | NDR-s gains the COMPLETE three-value result semantics as its canonical content + declared expansion; §14.12.2 cites it; r4 VALID citation checked against owner-origin refutation requirements | NDR-s, §14.12.2 |
+| R5-C18-3 (MAJOR, INVENTORY-GAP: residual cure unexecutable — the act payload required evidenceRef to a fix committed only after confirmation) | TWO-PHASE protocol: act `residual-cure` binds {findingId, survivorId, route, commitment}; the supervisor settles with the new `residual-cure-settlement` record (joins the envelope inventory) once green-run/fresh-finding evidence exists; replay/authorization/failure rules stated; inventory row points at the settlement evidence | NDR-q inventory, §14.10.3, envelope inventory |
+| R5-C18-4 (MAJOR, FRESH: effective-tip clause asserted "chains are acyclic so the walk terminates" while the fold treats cycles as malformed input — A→B→A had no defined result) | Effective-tip resolution uses the SAME visit set as the fold: a repeat visit ⇒ NO effective tip ⇒ needs-owner (NDR-n); the §14.10.2 lineage paragraph gets the same fix (cyclic prefix ⇒ chain UNCLEAN + needs-owner naming the lineage) | NDR-n, §14.10.2 |
+| R5-C18-5 (MAJOR, EXPANSION-CONTRADICTION: rule-4 paragraph and kind-none prose still restated NDR-b's predicate after the claimed demotions) | Both sites converted to predicates + `per NDR-b` citations; concrete vectors retained as applications (verbatim v24 texts above) | NDR-b, §14.12.2 |
+| R5-C18-6 (MAJOR, EXPANSION-CONTRADICTION: recovery-reconstructibility clause classified a citation but contains a normative case-by-case assignment algorithm) | Clause declared a BOUNDED EXPANSION of NDR-e (honest boundary; doctrine 1 finite-set rule); NDR-e *Expansion:* and manifest row updated to agree | NDR-e, §14.10.3, manifest |
+| R5-C18-7 (MAJOR, EXPANSION-CONTRADICTION: r4 cells still carried rule bodies (single-consumption explanation, transshipment definition, withdrawal cure algorithm) despite the manifest claiming predicates-only) | Four cells reduced to row predicates + outcomes + citations; removed v24 wording preserved verbatim above; manifest + ledger claims re-checked | r4 table, manifest |
+
+No register-extension this cycle (closed set stays a…t, 20 entries).

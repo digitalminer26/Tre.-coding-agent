@@ -1310,6 +1310,9 @@ const allow = new Set([
   // record kinds described in prose (declared by field-shape, not "kind":jsonc):
   "history-integrity-fault", "history-integrity-disposition", "residual-unit-release",
   "channel-open", "evidence-invalidation", "queue-receipt",
+  // v25 R5-C18-3: two-phase residual-cure settlement record (§14.10.3,
+  // declared in the §14.12.4b introduced-kinds inventory by field-shape):
+  "residual-cure-settlement",
   // G1 §14.10 owner-act op + refusal class (round-4; backticked in the
   // §14.12.2 finalization table rows since the v9 fold):
   "owner-filing-draft-drift", "owner-filing-mapping",
