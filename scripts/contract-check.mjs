@@ -1319,6 +1319,9 @@ const allow = new Set([
   "filing-drift-resolution", "spool-loss-post-filing",
   "owner-filing-integrity-fault", "filing-integrity-disposition",
   "integrity-disposition-mismatch",
+  // v27 R5-C19-5: residual-cure cancellation owner-act op (§14.10.3,
+  // declared by field-shape in the op enum; mints no record kind):
+  "residual-cure-cancel",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and

@@ -58,6 +58,8 @@ tre.json
 .build.out
 # measurement scratch space for guard audits — never in git.
 .audit-tmp/
+# Round-4 cycle-20+ audit/fold scratch (fold scripts, before/after texts) — same policy.
+.audit-scratch/
 # P7 R4–R8 audit-cycle scratch (adversarial repro harnesses, test/build logs,
 # leaked-fixture cleanup) — repros are cited by path in docs/11 §11.1 but the
 # scripts themselves are workspace scratch, not project history.

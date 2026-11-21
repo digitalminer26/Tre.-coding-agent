@@ -157,6 +157,8 @@ mechanism).
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v6→v7→v8 through cycles 2–3 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v6c2-*`/`m3v7c3-*`; no module touched).** v7 (cycle 2 on v6: 2 blockers + 6 majors + 3 minors): coverage gained its missing DIRECTION (every enumerated episode must appear as exactly one input — B1: inputs {A} vs enumeration {A,B} passed while B's spend vanished); the marker/ledger crash window's "self-heal" was a fiction (a crashed process has no queued write; the restarted owner passes the fleet gate BEFORE reserving — B2 permanent freeze) replaced by DURABLE ORDERING (complete-ledger fsync before marker link; zero-byte ledger = proof of zero spend ⇒ `init-pending` zero term); `CurrentEpisode` param added to `projectFleet`/`fleetSummary` (the exception was unrepresentable); repeat rollback became journal-keyed lifecycle `refused(already-executed)` (tree equality retained only as the empty-difference no-op — after promote→revert→reintroduce the old actionId must NOT roll back independently-gated new work); marker publication moved rename→`link()` (rename clobbered concurrent adoption evidence); adoption bound to its validated ledger (first-record identity); `unterminated-kept` settled-finality claim withdrawn (a writer may still append legal bytes) — ANY population cut/ambiguous ⇒ WHOLE consult indeterminate, whitespace-EOF UNSETTLED never `blank-suffix`. v8 (cycle 3 on v7: 3 blockers + 5 majors + 3 minors): the ledger's DIRECTORY ENTRY fsynced before marker link (file fsync persists content not entries — the deletion-detection proof hardened, B1); adoption marker gains `adoptedSha256` prefix digest verified on every consult (first-record + length cannot stop a same-first-record rewrite omitting later spend, B2); coverage rule (vi) REQUIRES exactly one input matching `current` (complete-empty enumeration + `[]` = refusal, never zero-Σ admit, B3); `initEpisode` classification marker-FIRST (valid marker + absent ledger refuses — init never mints a zero ledger over a deletion) while publication stays ledger-first (M1); logical `actionId` (pins/seq EXCLUDED) separated from execution identity `actionId#r<n>` with durable max+1 suffix allocation (M2); rollback precedence table 0a own-record recovery → 0b promotion lifecycle (sticky `already-executed` in BOTH modes, BEFORE the ancestor test so a rewind cannot mask it) → 0c provenance/ancestor (revert-scoped) → 0d empty-difference no-op (M3); the §3 release bar reconciled line-for-line with the body (four residual contradictions, M4); `O_EXCL`/fsync/link failure state machine (M5). **Loop status: cycle-4 fresh adversarial audit of v8 IN FLIGHT (`~/.tre/audits/m3v8c4-terra-*`); D1–D9 sign-off bar unchanged (two more confirming rounds with no blocker/major — cycles 2 AND 3 both filed blockers, so the count has not started)** | M3 scoping (docs/21 draft v8) |
 | 2026-11-15 | §10 Q5, §11.4 M3, §14.7 | **M3 scoping: docs/21 advanced v8→v9 through cycle 4 of the confirming round (auditor gpt-6.1-terra, detached `~/.tre/audits/m3v8c4-*`; 3 blockers + 7 majors + 4 minors; no module touched).** Cycle 4 attacked the seams v8 introduced: (B1) the `O_EXCL` loser published a marker on a winner's ledger whose fsync chain NOBODY established → durability is now PER-PUBLISHER (loser opens+fsyncs the existing zero-byte file and fsyncs `events/` before linking); (B2) the valid-marker retry was a no-op that could succeed on a marker whose link dir-fsync had FAILED → ANY success return (fresh or retry) now means the full chain is durable (retry revalidates AND re-establishes); (B3) rewind recovery reused the revert descendant test — vacuously true PRE-CAS (`M` is an ancestor of `C` before any rewind lands) → rewind landing proven by TIP IDENTITY (`main == M` exactly, disclosed ABA residue; crash-before-CAS ⇒ `intent-open`, never an ack). Majors: §3's "not-ancestor for BOTH modes" pin contradicted §1.2's revert-only scoping (provenance pins SPLIT per mode; rewind currency = `expectedMainTip == candidateSha` ⇒ `rewind-blocked`); discovery summary row now splits marker-absent/ledger-present by ledger BYTES matching the crash table; failure machine separates the link's EXPECTED `EEXIST` from fatal errors and dropped the impossible "no classification change" promise; new 0a′ cross-identity guard — unresolved rollback intents indexed by PROMOTION actionId before any new identity executes; `executionSeq` demoted to OPTIONAL EXPECTATION with journal-allocated `r` (intent-append = atomic claim, `refused(execution-seq-mismatch)` added to the union); redelivery semantics stated (pins never participate in identity; acked ⇒ sticky regardless of new pins; each `r` attests its own intent record); adoption inherits the FULL durability ordering (pre-link ledger+dir fsyncs), `firstRecordTs` pinned diagnostic-only; minors: header three/two path count, step-3 snapshot exclusions restated, the claimed-but-absent §3 rewind pins genuinely added. **Loop status: cycle-5 fresh adversarial audit of v9 IN FLIGHT (`~/.tre/audits/m3v9c5-terra-*`, kick `m3v9c5-terra-kick.sh`); trajectory c1 4B/7M → c2 2B/6M → c3 3B/5M → c4 3B/7M/4m — sign-off bar unchanged, count has never started** | M3 scoping (docs/21 draft v9) |
 | 2026-11-15 | §14.3, §14.9, new §14.10 | **G1 audit-finding record DRAFTED (owner goal: automate the audit-fix loop, HANDOFF 2026-11-15; the loop's classification hinge). New §14.10 defines `kind:"audit-finding"` for the S5 decision log — closed `class` (code-defect / spec-gap / spec-ambiguity / residual-risk-accepted, exactly HANDOFF G1's set), `severity`, `verdictBasis` (repro outranks evidence-only outranks opinion; opinion alone cannot hold a sign-off), bounded single-line `claim`, mandatory `repro` for non-minor code-defects (`finding-intake-invalid` otherwise — a claim the next cycle cannot re-run wastes a cycle), ≥1 `evidenceRefs` (orchestrator echoes are not evidence — D-round forensics rule), append-only disposition transitions (orchestrator vs owner attribution; duplicate rejections cite the surviving id). STATUS: DRAFT, owner review open, NOT implemented — post-P0 additive wire shape per the §14.9 rule (row before code, per that rule itself); no module touched. Explicitly out of §14.10: routing (post-G2), norm state (G2), convergence stop rule (G3), cycle budget (G4), partitioning (G5). §14.9 checklist gains a drafted row for §14.10. | G1 finding-record schema (draft) |
+| 2026-11-22 | §14.10.0 (NDR-u paragraph (3) owns the full accepted-fix predicate; NDR-u expansion gains the cure-gate/witness shapes), §14.10.1 (`cureActRef` header→payload→record chain, mapping equality = `claim` + `cureActRef`), §14.10.3 (`cure-gate` record, `ancestryWitness` closed shape, `repro-run` `cureGateId` field, P3/B-row cancellation clearing), §14.10.0 manifest (cure-gate row), status row | **G1 REVIEW ROUND 4 — CYCLE 20 (audit of the v27 fold; auditor = the in-session audit of 2026-11-22, five findings; still DRAFT, NOT implemented, no module touched).** R5-C20-1 NDR-u now owns the COMPLETE three-conjunct accepted-fix predicate (the canonical entry governed a two-conjunct text the expansion had already superseded — a validator following the canonical entry could accept a settlement the expansion refuses). R5-C20-2 the v27 post-confirmation claim had no mechanism: a run recorded after confirmation could still be a pre-confirmation result; NEW `cure-gate {id, cureActId, nonce}` record appended immediately after confirmation (separate append — the confirming fold R5-C20F-4 removed the original same-critical-section claim and pinned D1=A complete-the-pair recovery), `repro-run.cureGateId` + the nonce echoed in `runEvidenceRef` (predicate: gate nonce verbatim in the durable run evidence — confirming fold R5-C20F-2); a run without it or naming another gate is refused; the runner-side residual (a fabricated echo) is a STATED TRUST residual. R5-C20-3 the settlement's ancestry witness had two incompatible shapes and no definition; ONE closed shape `ancestryWitness {executedArtifactDigest, expectedFixBaseline, result:"ancestor-proper"}` (REQUIRED non-null for accepted-fix, null for fresh-finding-cycle), producer = supervisor at settlement-append, failed walk ⇒ no settlement — defined ONCE at §14.10.3, mirrored in the record-kind inventory by reference only. (The cancelled cure's stranded queue entry — P3/B-row clearing on the cancellation record — is the FOLLOW-UP remediation tagged R5-C20P-3, not a canonical finding.) R5-C20-4 the owner-filing equality rule named `claim` only while the header carries `cureActRef` too — the header↔payload comparison set is now exactly {claim, cureActRef}, `cycle` explicitly excluded (payload-only, no header source). Confirming fold (R5-C20F-1…5, adopted as recommended): F-1 the §14.12.4b record-kind inventory did not carry the `cure-gate` kind §14.10 cited — inventory row added, shape/recovery owned by §14.10.3 (mirrored by reference only); F-2 the nonce-verification predicate was unpinned and a lost gate record left evidence sourceless — predicate pinned to gate-`nonce`-substring-of-`runEvidenceRef` durable content, lost-gate refusal stated; F-3 `cureGateId` nullability was stated as a cure-identity test not decidable at append — split to append-decidable form (non-null iff the run was dispatched under a cure-gate) and the `repro-run` `result` field comment restored to NDR-s's three-value enum `green|red|not-reproduced` (the two-value stale comment would refuse every refutation run); F-4 the same-critical-section atomicity claim was inexpressible on an append-only log — owner decision D1=A: append-then-dispatch gating, at most one gate per act, torn pair recovered as an OWED COMPLETION by the supervisor recovery pass (cancel-only D1=B rejected); F-5 four enforcements rested on undeclared trust (runner honesty, git-object honesty, preimage retention, log-pair recovery) — declared trust basis **TA-1…TA-5** added at §14.10.0 with manifest row, cited at every enforcement site (a finding that an enforcement rests on TA-n is answered there, not re-found). Status/ledger currency: the workstream status row, the section-13 pointer, and every draft marker now read v28; after renumbering the canonical cycle-20 findings are exactly 1–4 (witness = 3, equality = 4) with the stranded-queue remediation re-tagged out of the canonical set as R5-C20P-3 Follow-up remediation tags shipped this draft (R5-C20P-1/2/3/5): P-1 the effect-binding caller text omitted terminal-by-cancellation from its never-owed list; P-2 the `cureActRef` header→payload→record lineage chain (the wire field had no source in the field-source map); P-3 the stranded-queue/cancellation clearing above; P-5 the `cureActRef` intake-identity vs settlement-state validation split (identity at intake over the intake prefix; CONFIRMED+UNSETTLED+NOT-CANCELLED at settlement — a finding naming a settled/cancelled cure conforms and settles nothing); P-6 the owed gate-completion is EXTINGUISHED when the act is cancelled before recovery (a gate for a cancelled act is refused `cure-already-cancelled`) — self-audit cycle 22, 2026-11-22. Cycle-23 confirming pass (wording aligned to the shipped recovery, no new rule): TA-2 restated so the NONCE MINTER is the supervisor (the runner's obligation is the honest echo — the v28 text credited the runner with minting); the retro-claim sentence rewritten (the `{id, nonce}` pair may be minted by the recovery append, the bar is the mint, not the calendar moment of confirmation); the §14.12.4b `cure-gate` row's "immediately after" qualified for the owed-completion case (after the act, never before, never for a cancelled act); the NDR-u expansion manifest row aligned (shapes AND their append/binding clauses; the predicate remains para (3)). Cycle-24 confirming pass (consumer-site alignment, no new rule): the §14.12.2 chain-rule paraphrase of the evidence check still recited the v26 two-conjunct git-ordering proof — rewritten to cite NDR-u para (3) with the three-conjunct witness (b1+b2+b3); the settlement b3 sentence's "minted AT confirmation" aligned to the recovery-mint case (mint, not calendar confirmation). The tag R5-C20P-4 is VACATED by the renumbering — no body bears it and none may be created; the gap is intentional and grep-verified empty. DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v28, cycle-20 audit fold) |
+| 2026-11-22 | §14.10.0 (NEW NDR-u/NDR-v + NDR-b/NDR-l/NDR-q edits + heading + doctrine 1 + manifest), §14.10.1 (`cureActRef` wire field), §14.10.3 (cure protocol: repro check + ordering witness + cancellation; effect-binding caller sweep; `residual-cure-cancel` op entry), §14.12.2 (B row, queue P3, drain excuse, stall paragraph exclusions) | **G1 REVIEW ROUND 4 — CYCLE 19 (auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c19-terra-*`, against v26: CHANGES REQUESTED — 1 BLOCKER + 5 MAJOR; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored).** R5-C19-1 (F1, MAJOR UNREGISTERED-RULE) the cure protocol and the effect-binding exception had NO canonical owner (NDR-q declared itself self-contained while pointing at bodies no entry owned): NEW **NDR-u** owns the complete two-phase residual-cure protocol (confirmation shape, pair uniqueness, settlement with the single evidence check + ordering witness, cancellation, no-hold/never-finalize) and NEW **NDR-v** owns the effect-binding exception CLOSED SET + caller sweep; NDR-q's expansion claim rewritten to map the cure rows to NDR-u; statement-site manifest gains rows for §14.10.3 cure entries → NDR-u, effect-binding paragraph → NDR-v, consumer-site exclusions → NDR-v; register extended NDR-a…t → NDR-a…**v** (heading + doctrine 1 id list). R5-C19-2 (F2, BLOCKER — one prefix, two classifications: the v26 exception lived only at its own paragraph while the general effect fold, the §14.12.2 B row, the queue P3 predicate and the quiesce-stall rule each still classed a confirmed-unsettled cure act B from their own text) NDR-v's CALLER SWEEP governs EVERY consumer of the effect fold: all four sites now carry the exclusion as an exclusion CLAUSE citing NDR-v (no rule body restated, doctrine 3), the stall route is explicitly vacated (no supervisor-owed work exists to convert), and the boundary while unsettled is the residual's own UNCLEAN + needs-owner boundary unchanged. R5-C19-3 (F3, MAJOR — fresh-route settlement never checked the committed `reproDigestOrNull` and the "lineage cites the cure act" operand had no wire field) the `audit-finding` wire shape gains **`cureActRef:string|null` REQUIRED-PRESENT** (non-null validated at intake to resolve in-log to a confirmed, unsettled `residual-cure` act — `cure-unknown-act` refused; it is the ONLY encoding of cure lineage, prose/evidenceRefs settle nothing); the fresh-finding settlement check now includes the repro re-digesting to the committed `reproDigestOrNull` (a null commits no digest and none may be invented). R5-C19-4 (F4, MAJOR — ancestry alone proves no ordering against confirmation; replay authority unpinned) the accepted-fix ordering witness is the TWO-CONJUNCT witness: (b1) git ancestor-of `expectedFixBaseline` AND ≠ baseline, walked ONCE at settlement-append against the gated candidate lineage pinned in the artifact store (missing/pruned/unverifiable closure FAILS CLOSED) AND (b2) the run record's S5-log position is AFTER the cure act (log position is the one durable episode-time order authority); replay consumes the durable settlement record and NEVER re-walks a git graph. R5-C19-5 (F5, MAJOR INVENTORY-GAP — a confirmed cure with an unsatisfiable commitment locked its pair forever: immutable commitment + second-unsettled-cure refusal + no exit) NEW owner op **`residual-cure-cancel {cureActId}`** (REQUIRED target confirmed + UNSETTLED + not already cancelled; refused `cure-already-settled`/`cure-unknown-act`/`cure-already-cancelled`; empty effect set with observation-only attestation — its consequence is a state fold, mints nothing, no new envelope kind): the cancelled cure becomes **terminal-by-cancellation** (NEW fifth named effect state in NDR-l's taxonomy, reachable by this op class only), its derived settlement id is PERMANENTLY VACATED (a later settlement bearing it is malformed — cancellation beats evidence, fail-closed), and the pair is RE-ELIGIBLE for a fresh cure (the uniqueness refusal now checks UNSETTLED-AND-NOT-CANCELLED); NDR-q inventory gains the locked-pair closing row. R5-C19-6 (F6, MAJOR CITATION-DIVERGENCE — the r4 minor-exception chain cell cited NDR-b for a member-discharge rule NDR-b did not state) the CHAIN-MEMBER DISCHARGE predicate (an exception-closed `accepted-fix` discharges a member ONLY if the member is minor AND its OWN effective link (per NDR-n step 2) is machine-checkable; otherwise UNCLEAN, own disposition needed, closed member curable only via NDR-p edge (1)) is canonical IN NDR-b; the cell and manifest cite NDR-b. DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v27, round-4 cycle-19 folded) |
 | 2026-11-22 | §14.10.3 (residual-cure commitment shape + settlement ordering proof), §14.10.2 (caller text), effect-binding paragraph, envelope inventory, NDR-q inventory row, docs/audits/g1-ndr-conflict-log.md §2d | **G1 REVIEW ROUND 4 — CYCLE 18 FOLLOW-UP (owner-driven fix pass on the v25 cycle-18 fold, 2026-11-22; findings F1-F5 raised against v25's residual-cure protocol; still DRAFT, NOT implemented, no module touched).** R5-C18F-1 the cure `commitment` is the PAIR `{digest, preimage}` (a bare digest is one-way: phase 2 cannot re-check fields derived from it) — confirmation requires `sha256(preimage)==digest` AND the preimage parses to the closed per-route shape (`cure-commitment-malformed`, refused); `reproDigestOrNull` resolved at confirmation by a deterministic rule over existing records; settlement re-digests evidence against the PREIMAGE. R5-C18F-2 settlement id is the deterministic `cure-settlement-<cureActId>` — declared the SECOND NAMED EXCEPTION to the effect-binding rule: while the settlement is absent the cure act is neither `effectApplied:true` nor class B (owed by EVIDENCE ARRIVAL, not supervisor effort; adds no hold beyond the residual-inherited uncleanliness it clears); crash-between-confirmation-and-settlement replayed from the deterministic id; id-collision refusal IS the one-settlement-per-act guarantee; an unsettled cure NEVER finalizes its round. R5-C18F-3 the §14.10.3 single evidence check + settlement existence is the SOLE clearing condition — the §14.12.2 replay text's trailing conjunct "fix reproduced green, or the fresh finding itself disposed" is WITHDRAWN (it double-counted the check and demanded a disposition on fresh findings the cure does not own). R5-C18F-4 "seq-after the cure act" undefined between git commits and S5 log lines → the accepted-fix ordering proof is DEFINED: `executedArtifactDigest` is a commit in the gated candidate lineage of `expectedFixBaseline` — git ancestor-of (same closure walk as artifact binding) AND NOT EQUAL to the baseline (fail-closed). R5-C18F-5 conflict-log §2d verbatim preservation restored COMPLETE (the cycle-18 fold abridged rule-4/kind-none/four r4 cells with internal ellipses — paraphrase-passed-of-verbatim; full v24 texts re-pasted from the v24 blob). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v26, round-4 cycle-18 follow-up folded) |
 | 2026-11-22 | §14.10.0 (NDR-p/s/e/q + inventory + manifest), §14.10.2 (second-edge rename, lineage visit-once), §14.10.3 (residual-cure two-phase + settlement record, recovery clause reclassified), §14.12.2 (rule-4 predicate, kind-none prose, r4 four cells), envelope inventory, docs/audits/g1-ndr-conflict-log.md §2d | **G1 REVIEW ROUND 4 — CYCLE 18 (REGISTER-COMPLENESS AUDIT vs v24, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c18-terra-*`: CHANGES REQUESTED — 7 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored).** R5-C18-1 NDR-p edge (2) canonical sentence replaced: the v24 text kept the withdrawal-only IFF inline AND appended a two-strand closed list contradicting it — now ONE predicate over the closed list {(a) owner-retired-by-withdrawal, (b) validly-refuted survivor + owner-authorized member link} with per-strand evidence operands and fail-closed validation; §14.10.2 paragraph renamed to follow. R5-C18-2 NDR-s OWNS the complete three-value result semantics (green = postFixExpected observed; red = completed, not observed, supports NOTHING; not-reproduced = completed vs pre-fix baseline, refutation-only) — the v24 §14.12.2 demotion cited NDR-s for definitions it did not state; §14.12.4 field list registered as NDR-s expansion. R5-C18-3 residual cure made EXECUTABLE: two-phase protocol — owner act `residual-cure` binds {findingId, survivorId, route, commitment} (no evidence needed at confirmation), supervisor settles with the NEW `residual-cure-settlement` record (joins the envelope record-kind inventory) once the green run / fresh filing exists and re-digests to the commitment; no forked cure; forward-only clearing; NDR-q inventory row and §14.12.2 caller updated. R5-C18-4 NDR-n effective-tip walk: v24's 'chains are acyclic so the walk terminates' asserted away the fold's own malformed-cycle case — resolution now shares the fold's visit set; a repeat visit ⇒ NO effective tip ⇒ needs-owner (§14.10.2 lineage paragraph: cyclic prefix ⇒ chain UNCLEAN + needs-owner naming the lineage). R5-C18-5 §14.12.2 rule-4 predicate sentence and the kind:"none" prose demoted to `per NDR-b` citations (the v24 demotions left the predicate itself restated; verbatim v24 texts in docs/audits/g1-ndr-conflict-log.md§2d; vectors kept as applications). R5-C18-6 the recovery-reconstructibility clause is a DECLARED BOUNDED EXPANSION of NDR-e (v24 R5-C17-6's citation reclassification left a normative case-level algorithm outside the declared set — the boundary now matches the text; NDR-e *Expansion:* + manifest updated). R5-C18-7 r4 chain-closure table: minor-exception/refuted/refiled/withdrawn cells reduced to row predicates + outcomes + `per NDR-b/s/n/p/c` citations (v24 left rule bodies despite the predicates-only claim; removed v24 bodies verbatim in docs/audits/g1-ndr-conflict-log.md§2d); manifest row corrected. Register closed set unchanged (a…t, 20 entries; self-check PASS). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v25, round-4 cycle-18 folded) |
 | 2026-11-22 | §14.10.0 (NDR-n/r/p/q/t + inventory), §14.10.2 (effective-tip, second-edge), §14.10.3 (recovery clause citations), §14.12.2 (rule-4/minor-exception/result-semantics paragraphs, r4 chain-closure cells), docs/audits/g1-ndr-conflict-log.md | **G1 REVIEW ROUND 4 — CYCLE 17 (REGISTER-FOLD CYCLE vs v23, auditor gpt-6.1-terra, detached one-shot `~/.tre/audits/g1r4-c17-terra-*`: CHANGES REQUESTED — 9 MAJOR, DECISIONS-REQUIRED: 0; all adopted as recommended; still DRAFT, NOT implemented, no module touched; fold-hygiene v2 gate honored).** R5-C17-1 NDR-n gains the EFFECTIVE LIVE TIP concept (terminalized live tip resolves forward along its own edge to the effective survivor; every consumer binds the effective tip — v23's live-tip text made a duplicate-closed correction member the tip, contradicting NDR-n's own terminalized-member rule). R5-C17-2 NDR-r owns the divergent-bytes refusal outright (bytes pinned by `draftSha256`, re-digest on redelivery); the "per NDR-i's stage rules" mis-citation is struck — NDR-i governs withdrawal only. R5-C17-3 NDR-p edge (2) strand condition generalized to the CLOSED LIST {(a) owner-retired-by-withdrawal, (b) survivor validly-refuted + member's own link owner-authorized}; evidence operands pinned per strand; §14.10.2 second-edge paragraph and the inventory row follow (the v23 row prescribed a non-minor `closed-residual` edge NDR-p refused). R5-C17-4 §14.12.2 minor-exception paragraph demoted to `per NDR-b` citation + application-local consequence (verbatim v23 text preserved in docs/audits/g1-ndr-conflict-log.md§2c). R5-C17-5 §14.12.2 repro-run result-semantics paragraph demoted to `per NDR-s`; r4 refuted cell's VALID definition cites NDR-s, effective-link clause cites NDR-n step 2. R5-C17-6 §14.10.3 recovery-reconstructibility clause carries `per NDR-e`/`per NDR-k` citations IN TEXT; manifest reclassified expansion→citation (NDR-e declares only the byte-provenance paragraph; recovery is listed under Cited at). R5-C17-7 NDR-q inventory gains the `residual-inherited` row (append-only `residual-re-resolution` record — route, operands, settlement, clearing evidence, forward effect per §14.12.2 v9 c7-M7). R5-C17-8 r4 chain-closure table: the minor-exception and refuted cells demoted to predicates + `per NDR-b/s/n/p` citations (verbatim cell text preserved in docs/audits/g1-ndr-conflict-log.md§2c); the withdrawal and refiled cells annotated with `per NDR-p`/`per NDR-n`/`per NDR-c` citations on their existing predicates — doctrine 3 restored; manifest row updated. R5-C17-9 NDR-t qualified: `correctionOf` per NDR-n is the wrong-REFUTATION route admitting ONLY `rejected-refuted`-closed targets (`correction-bad-target` predicate) — NOT a general route for closed records; other closed records untouchable except via NDR-p's two named reopening edges. Register closed set unchanged (a…t, 20 entries; self-check PASS). DECISIONS-REQUIRED: 0 | G1 finding-record schema (draft v24, round-4 cycle-17 folded) |
@@ -1299,7 +1301,7 @@ no later successful tool call; `stopped` ← `guardStop`/`runEnd` at tail;
 | progressNudge shape (§14.6) | this section | done → P1 implements |
 | policy shapes (§14.7) | this section | done |
 | workerState set (§14.8) | this section | done |
-| audit-finding records (§14.10) | G1 draft v26 (Plan B canonical rule register §14.10.0 NDR-a…t — cycle-18 follow-up fold 2026-11-22 (R5-C18F-1…5: cure commitment is a re-checkable {digest,preimage} pair, deterministic settlement id `cure-settlement-<actId>` as the SECOND named effect-binding exception, single evidence check as the SOLE clearing condition (trailing conjunct withdrawn), git-ordering proof defined as ancestor-of ≠ baseline over the gated candidate lineage, docs/audits/g1-ndr-conflict-log.md §2d verbatim texts restored complete); cycle-18 fold 2026-11-22 (R5-C18-1…7: NDR-p two-strand canonical predicate, NDR-s three-value result semantics owned, two-phase residual cure, NDR-n visit-once effective tip, rule-4/kind-none/r4-cell demotions completed, recovery clause declared NDR-e expansion); cycle-17 fold (R5-C17-1…9: effective live tip, NDR-r divergent bytes, NDR-p edge-2 closed strand list, doctrine-3 demotions §14.12.2, NDR-q residual-inherited inventory row, NDR-t closed-record qualification); extended v23 with cycle-16 findings; NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 + register-completeness cycle 16 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
+| audit-finding records (§14.10) | G1 draft v28 (cycle-20 audit fold: NDR-u owns the full three-conjunct accepted-fix predicate; `cure-gate` + `cureGateId` + `ancestryWitness` shapes defined once; header↔payload equality = `claim` + `cureActRef`; confirming fold R5-C20F-1…5 adds the §14.12.4b inventory row, the pinned nonce predicate + append-decidable nullability split, the TA-1…TA-5 trust basis, and the D1=A complete-the-pair recovery; see ledger rows v28 R5-C20-1…4 + R5-C20F-1…5); prior: G1 draft v27 (Plan B canonical rule register §14.10.0 NDR-a…v — cycle-19 fold 2026-11-22 (R5-C19-1…6: NEW NDR-u two-phase residual-cure protocol canonical, NEW NDR-v effect-binding exception closed set + caller sweep with all four consumer sites converted to exclusion clauses, `cureActRef` REQUIRED-PRESENT wire field as sole cure-lineage operand + fresh-route repro check, two-conjunct ordering witness (git walk once at append, fail-closed closure; S5 log position after the act) replacing ancestry-alone, `residual-cure-cancel` owner op + terminal-by-cancellation fifth terminal state + vacated settlement ids + pair re-eligibility, chain-member discharge predicate canonical in NDR-b); cycle-18 follow-up fold 2026-11-22 (R5-C18F-1…5: cure commitment is a re-checkable {digest,preimage} pair, deterministic settlement id `cure-settlement-<actId>` as the SECOND named effect-binding exception, single evidence check as the SOLE clearing condition (trailing conjunct withdrawn), git-ordering proof defined as ancestor-of ≠ baseline over the gated candidate lineage, docs/audits/g1-ndr-conflict-log.md §2d verbatim texts restored complete); cycle-18 fold 2026-11-22 (R5-C18-1…7: NDR-p two-strand canonical predicate, NDR-s three-value result semantics owned, two-phase residual cure, NDR-n visit-once effective tip, rule-4/kind-none/r4-cell demotions completed, recovery clause declared NDR-e expansion); cycle-17 fold (R5-C17-1…9: effective live tip, NDR-r divergent bytes, NDR-p edge-2 closed strand list, doctrine-3 demotions §14.12.2, NDR-q residual-inherited inventory row, NDR-t closed-record qualification); extended v23 with cycle-16 findings; NDR-a…q landed 2026-11-22; owner round-1 R1–R8 folded 2026-11-15; round-2 R2-1…R2-6 folded 2026-11-20; round-3 F1–F5 folded 2026-11-21; round-4 cycles 1–14 + owner-extended confirming cycle 15 + register-completeness cycle 16 folded 2026-11-21/22 — cycle-2 body edits lost to a crashed fold script, re-landed in cycle 3 with a fold-hygiene gate, cycles 4–12 folds honor it, auditor gpt-6.1-terra) | drafted — NOT implemented; post-closure additive |
 
 P0 is **closed** by this section; P0-dependent compartments may start.
 Wire-shape changes after closure require a Change Ledger row before code.
@@ -1317,7 +1319,7 @@ otherwise claim edits that never landed).**
 
 ### 14.10 Audit-finding records (G1 — the loop's classification hinge)
 
-**Status: DRAFT v20 (2026-11-22 — round-4 cycles 6–14 folded (FINAL cycle of the extended round); per-cycle
+**Status: DRAFT v28 (2026-11-22 — round-4 cycles 6–20 folded (cycle 19 v26→v27: NDR-u/NDR-v cure-protocol owners; cycle 20 v27→v28: NDR-u's complete accepted-fix predicate + the confirming fold R5-C20F-1…5); per-cycle
 detail in the Change Ledger rows, the v-list below ends at v11/cycle 5) —
 v2 + G5 `scopeRefs` amendment (§14.14.1)
 + v4: route×surface note extended for the G2 intake gate (§14.11.4 seam
@@ -1569,7 +1571,7 @@ section adds TWO record kinds — `audit-finding` and
 §0.7 holds unchanged: control logic keys on the closed fields only;
 free-text fields are advisory, never parsed.
 
-#### 14.10.0 Rule register (NDR-a … NDR-t) — canonical statements (v26)
+#### 14.10.0 Rule register (NDR-a … NDR-v) — canonical statements (v28)
 
 **Why this register exists (v22, Plan B).** Round-4 data (14 cycles +
 confirming cycle 15, plateau at 4–5 MAJOR/cycle since cycle 9) showed the
@@ -1598,7 +1600,8 @@ DECISIONS-REQUIRED, never resolved silently).
    unmergeable places is declared as a two-site expansion, never left
    undeclared). An entry whose rule is self-contained in the entry
    declares `*Expansion:* (none — self-contained)`.
-   The id (`NDR-a` … `NDR-t`) is stable forever; ids
+   The id (`NDR-a` … `NDR-v` — extended v27 R5-C19-1 with the cure
+   protocol and effect-binding-exception entries) is stable forever; ids
    are never reused or renumbered.
 2. Every OTHER location in §14.10 and its overlap zones (§14.9 fold-
    hygiene row, §14.12.2 class-B/O rows and the r4 chain-closure table,
@@ -1666,8 +1669,18 @@ DECISIONS-REQUIRED, never resolved silently).
   reference must pass ordinary green-run validation regardless of owner
   reason. `repro.kind:"none"` is refused for non-minor findings for every
   producer; a minor kind:none finding reaches `accepted-fix` ONLY via the
-  exception. *Applies:* `audit-finding-update`, dispositionBy, §14.12.2
-  rule 4. *Expansion:* §14.10.1 acceptance sentence + §14.10.2 minor
+  exception. **CHAIN-MEMBER DISCHARGE (v27 R5-C19-6 — the r4 chain table's
+  minor-exception row applies this predicate; v26 cited this entry for it
+  but the entry did not state it — it is canonical HERE now): an
+  `accepted-fix` closed via the minor owner exception DISCHARGES an r4
+  chain member ONLY where the member is minor AND the member's OWN
+  effective link (per NDR-n step 2) is machine-checked
+  (`reproDigest` equal); otherwise the member is UNCLEAN, needs its own
+  disposition, and an already-closed member the run cannot reach is cured
+  ONLY by NDR-p edge (1), forward-only (the exception excuses the ABSENCE
+  of a run — it never validates a non-machine-checked member link).**
+  *Applies:* `audit-finding-update`, dispositionBy, §14.12.2
+  rule 4, r4 minor-exception chain row (v27 R5-C19-6). *Expansion:* §14.10.1 acceptance sentence + §14.10.2 minor
   exception text. *Cited at:* §14.12.2 rule 4, r4 chain table exception
   row, §14.10.3 `finding-disposition` payload `reason` rule (the reason
   echo binding is this rule's operand check, not an independent rule).
@@ -1880,7 +1893,12 @@ DECISIONS-REQUIRED, never resolved silently).
   §14.12.2 B row.
 - **NDR-l — Terminal taxonomy & class membership.** An act's terminal
   effect states are EXACTLY: **applied** | **terminal-by-refusal** |
-  **terminal-by-damage** | **terminal-by-disposition**; plus the named
+  **terminal-by-damage** | **terminal-by-disposition** |
+  **terminal-by-cancellation** (v27 R5-C19-5 — a confirmed, unsettled
+  `residual-cure` act exited by `residual-cure-cancel` per NDR-u:
+  NOTHING is owed — neither a class-B item nor a class-O item, the
+  cancellation record IS the clearing evidence — reachable by THAT op
+  class only); plus the named
   non-terminal durable replay state **`readjudication-owed`** (class B,
   drain-progressing, until the re-adjudication outcome lands), and
   **claim-retired** (a disposition-retired claim: the act is
@@ -2048,7 +2066,8 @@ DECISIONS-REQUIRED, never resolved silently).
   | integrity fault, any `failingCheck` kind (per NDR-g/h) | `filing-integrity-disposition` (per NDR-m) | `faultId`; `outcome:"refiled"→newActId` binds equal-claim APPLIED filing; `"withdrawn"` always admissible | the disposition record IS the clearing evidence | fault disposed; damaged bytes stay invalid |
   | r4 chain UNCLEAN — survivor retired by withdrawal | NDR-p edge (2) strand (a): owner `closed-residual` | live strand proof: survivor id + disposition record cite | both citations in the update's authority | finding closed residual, verdicts frozen |
   | r4 chain UNCLEAN — owner-authorized link that cannot machine-check (vector (d)) | minor: owner minor-exception `accepted-fix` (per NDR-b, over `rejected-duplicate` OR `superseded` per NDR-p edge (1)); non-minor: owner `closed-residual` per NDR-p edge (2) strand (b) (v24 R5-C17-3 — the edge's strand proof is the survivor's valid refutation + the member's owner-authorized link; v23's bare "authority REQUIRED" prescribed a transition NDR-p refused) | NDR-b predicate / edge-(2) strand (b) proof: survivor id + its `reproRunRef` | the owner act itself (act-bound, not run-bound) + the two strand citations | finding closed forward-only; chain row re-derives |
-  | `residual-inherited` chain member (any severity, v24 R5-C17-7 — the closed member inherits an owner-accepted `closed-residual` survivor; §14.12.2: the round carrying it is unclean until settlement, forward-only) | TWO-PHASE residual-cure protocol (§14.10.3 v25 R5-C18-3: act `residual-cure` binds `{findingId, survivorId, route, commitment}`, then the supervisor settles with `residual-cure-settlement` once the evidence exists — the v24 row's single-record form demanded evidence at confirmation time and was unexecutable) | act operands `findingId` + `survivorId` naming the SURVIVOR's owner-accepted residual disposition (refused if never owner-accepted; a second unsettled cure on the same pair refused — no forked cure); commitment `{digest,preimage}` re-digest + evidence check (§14.10.3) at settlement | the `residual-cure-settlement` record (green repro-run or filed finding passing the §14.10.3 single evidence check against the commitment preimage) | member clears for boundaries AFTER the settlement; earlier boundaries keep their state; current round unclean until settled |
+  | `residual-inherited` chain member (any severity, v24 R5-C17-7 — the closed member inherits an owner-accepted `closed-residual` survivor; §14.12.2: the round carrying it is unclean until settlement, forward-only) | TWO-PHASE residual-cure protocol per NDR-u (canonical, v27 R5-C19-1 — the protocol body now has a register owner; NDR-q maps, restates nothing; §14.10.3 is its declared expansion. v25 R5-C18-3: act `residual-cure` binds `{findingId, survivorId, route, commitment}`, then the supervisor settles with `residual-cure-settlement` once the evidence exists — the v24 row's single-record form demanded evidence at confirmation time and was unexecutable) | act operands `findingId` + `survivorId` naming the SURVIVOR's owner-accepted residual disposition (refused if never owner-accepted; a second unsettled cure on the same pair refused — no forked cure); commitment `{digest,preimage}` re-digest + evidence check (§14.10.3) at settlement | the `residual-cure-settlement` record (green repro-run or filed finding passing the §14.10.3 single evidence check against the commitment preimage) | member clears for boundaries AFTER the settlement; earlier boundaries keep their state; current round unclean until settled |
+  | **locked-pair: confirmed cure whose commitment can never be satisfied (v27 R5-C19-5 — the immutable commitment + no-forked-cure rule left NO exit: a corrected cure was refused while the broken one stood unsettled forever)** | `residual-cure-cancel {cureActId}` (owner op per NDR-u (4): REQUIRED target CONFIRMED + UNSETTLED + not already cancelled; refused `cure-already-settled`/`cure-unknown-act`/`cure-already-cancelled`) | the cancellation record (act-bound, supervisor-stamped authority) | the cancelled cure becomes terminal-by-cancellation (per NDR-l), its derived settlement id permanently vacated; the pair becomes RE-ELIGIBLE for a fresh `residual-cure` once no un-cancelled unsettled cure remains | owner re-confirms with a corrected commitment; the pair's uncleanliness persists UNCLEAN + needs-owner across the gap exactly as before any cure existed |
   | `quiesce-stall` | no act — drains when the stalled condition clears | stall condition re-check at next boundary | drain record appended | boundary proceeds |
   | `finding-hold` | `finding-hold-lift` (owner record, §14.12.4) | `findingId` of the held finding | the lift record | hold stops counting as sign-off holder |
   A recorded uncleanness on a CLOSED cycle is historical (verdict
@@ -2058,7 +2077,12 @@ DECISIONS-REQUIRED, never resolved silently).
   by every cycle audit against the condition sites it cites).
   *Applies:* all of §14.10/§14.12.2. *Expansion:*
   (none — self-contained; each listed condition's ACT body lives at
-  its own NDR's expansion — the inventory maps, it restates nothing.)
+  its own NDR's expansion — the inventory maps, it restates nothing.
+  v27 R5-C19-1: the cure rows map to **NDR-u** (protocol canonical)
+  with its §14.10.3 expansion, and the cure act's class membership to
+  **NDR-v**; the v26 claim that these bodies lived at "their own NDR's
+  expansion" was FALSE for the cure protocol — no entry declared it —
+  and is now made true by NDR-u/NDR-v.)
   *Cited at:* register doctrine 2
   (completeness check), cycle-16 audit prompt.
 - **NDR-r — Filing identity, replay, and re-filing over identical bytes.**
@@ -2110,7 +2134,10 @@ DECISIONS-REQUIRED, never resolved silently).
   trusted-gate/supervisor-authored run meeting ALL of the above; it is
   the ONLY disposition closing a finding without acceptance or fix, so
   its evidence bar is the highest in the enum; a refuted run's evidence never
-  discharges a duplicate of a corrected claim (per NDR-n); refutation
+  discharges a duplicate of a corrected claim (no-cross-lineage
+  discharge — OWNED HERE, v27 R5-C19-3: the v26 text cited NDR-n for
+  this clause but NDR-n does not state it; the rule now lives in THIS
+  entry); refutation
   is repro-gated exactly like filing, and a wrong refutation is
   corrected only via the `correctionOf` lineage (per NDR-n), never by
   touching the closed record. *Applies:* `rejected-refuted` updates,
@@ -2147,6 +2174,111 @@ DECISIONS-REQUIRED, never resolved silently).
   lifecycle. *Expansion:* §14.10.1 field-rules block (`route`×`surface`
   bullet + `claimDigest`/artifact bullet). *Cited at:* §14.10.1 wire
   comments, intake paragraphs, G2 gate description.
+- **NDR-u — Two-phase residual cure: canonical protocol.** The COMPLETE
+  lifecycle of curing a `residual-inherited` chain member is canonical
+  HERE (v27 R5-C19-1 — v26 stated the protocol only at §14.10.3,
+  unregistered, while NDR-q's inventory pointed at it claiming each
+  listed act body lives at "its own NDR's expansion" — none did):
+  (1) CONFIRMATION — the owner act `residual-cure` binds
+  `{findingId, survivorId, route, commitment}` where `commitment` is
+  the RE-CHECKABLE PAIR `{digest, preimage}` (per-route CLOSED preimage
+  shape, §14.10.3 expansion; confirmation validates
+  `sha256(preimage) == digest` AND the shape parse — a violation is
+  `cure-commitment-malformed`, refused — and resolves
+  `reproDigestOrNull` by the deterministic rule over the survivor's
+  closure); the commitment is IMMUTABLE.
+  (2) UNIQUENESS — at most ONE unsettled, UN-cancelled cure per
+  `(findingId, survivorId)` pair; a second on the pair is refused
+  (no forked cure).
+  (3) SETTLEMENT — the supervisor appends `residual-cure-settlement`
+  under the deterministic id `cure-settlement-<cureActId>` (the
+  id-collision refusal IS the one-settlement-per-act guarantee); the
+  SOLE clearing condition is the SINGLE EVIDENCE CHECK (v28 R5-C20-1
+  — this paragraph OWNS the complete predicate; the §14.10.3 expansion
+  supplies clause-level detail and may not weaken it). `accepted-fix`
+  = a green `repro-run` whose definition re-digests to the committed
+  `reproDigest` AND the THREE-CONJUNCT ORDERING WITNESS: (b1) the
+  durable git ancestry walk (ancestor-of-connected from
+  `expectedFixBaseline`, ≠ baseline, walked ONCE at settlement-append
+  against the pinned gated lineage; missing/pruned/unverifiable closure
+  FAILS CLOSED), recorded as the settlement's `ancestryWitness` field;
+  (b2) the run record's S5-log position is AFTER the cure act; (b3)
+  the run's DURABLE CURE BINDING (v28 R5-C20-2 — the run must be the
+  post-confirmation execution the cure authorized; the mechanism is
+  the pre-execution gate defined in §14.10.3 and the binding field
+  `cureGateId` on `repro-run`). Ancestry alone and log position alone
+  are each NOT a temporal proof (v27 R5-C19-4). `fresh-finding-cycle`
+  = APPLIED filing whose `claimDigest` re-digests to the committed
+  `claimDigest` AND whose `cureActRef` names the cure act (identity
+  checked at intake, state checked here) AND — when the committed
+  `reproDigestOrNull` is non-null — whose repro re-digests to it (a
+  null commits no digest and none may be invented). Replay recomputes
+  ONLY durable operands and consumes the stored `ancestryWitness`; a
+  replay NEVER re-walks a git graph.
+  (4) CANCELLATION — the owner op `residual-cure-cancel {cureActId}`
+  on a cure that is confirmed, UNSETTLED and NOT ALREADY CANCELLED
+  (refused otherwise: `cure-already-settled` / `cure-unknown-act` /
+  `cure-already-cancelled`); the cancelled act becomes
+  TERMINAL-BY-CANCELLATION (per NDR-l), its derived settlement id is
+  PERMANENTLY VACATED (any later settlement record bearing it is
+  malformed, refused — cancellation beats evidence, fail-closed), and
+  the pair becomes RE-ELIGIBLE for a fresh cure. Conformance vector
+  (v28 R5-C20P-3 — stranded-queue exit: cure drains, owner cancels
+  before evidence, finalization must quiesce): a drained
+  `residual-cure` act followed by its validated cancel record passes
+  P3 on the cancellation record's account (no owed settlement), the
+  boundary is the residual's own UNCLEAN + needs-owner boundary, and
+  the later fresh cure on the pair settles the pair normally.
+  (5) NO-HOLD / NEVER-FINALIZE — an unsettled cure adds NO hold beyond
+  the residual-inherited uncleanliness it exists to clear, and while
+  unsettled NEVER finalizes its round; settlement is owed by EVIDENCE
+  ARRIVAL, never by supervisor effort — class membership of the
+  unsettled act: NDR-v.
+  *Applies:* every cure site, NDR-q inventory, §14.12.2 chain rule,
+  envelope record-kind inventory. *Expansion:* §14.10.3
+  `residual-cure` / `residual-cure-settlement` / `residual-cure-cancel`
+  entries (clause-level detail: preimage shapes, the full evidence
+  check text, refusal operands) and the §14.10.1 `cureActRef`
+  field-rule block (v27 R5-C19-3: wire operand + intake validation
+  of the settlement route's lineage check); v28 R5-C20-2/3: the
+  `cure-gate` record (`{id, cureActId, nonce}`), the `repro-run`
+  `cureGateId` field with its nullability rule, and the settlement's
+  `ancestryWitness` closed shape — the three-conjunct accepted-fix
+  ordering witness is OWNED by this entry's paragraph (3); the
+  expansion supplies the record shapes only and may not weaken the
+  predicate. *Cited at:* NDR-q inventory rows (residual-inherited +
+  locked-pair), NDR-v, §14.12.2, statement-site manifest.
+- **NDR-v — Effect-binding exceptions: CLOSED set + caller sweep.**
+  An act may LEGALLY hold `effectApplied:false` without being class B
+  ONLY in the named CLOSED exception set: (1) a filing-class act whose
+  intake appends a PERMANENT refusal (per NDR-d/NDR-l — the refusal IS
+  the effect appended, terminal-by-refusal; its unresolved refusal
+  CONDITION is the class-O item, per NDR-m/NDR-o); (2) a confirmed,
+  UNSETTLED, UN-cancelled `residual-cure` act per NDR-u — its effect
+  is the derived id `cure-settlement-<cureActId>`, absent until
+  evidence arrival: NEITHER `effectApplied:true` NOR class B NOR a
+  quiescence item NOR a quiesce-stall candidate (the B→O conversion
+  has nothing to convert — no supervisor-owed work exists), and the
+  boundary the round gets while it is unsettled is the
+  residual-inherited UNCLEAN + needs-owner boundary UNCHANGED.
+  **CALLER SWEEP (v27 R5-C19-2):** the exclusion governs EVERY
+  consumer of the effect fold — the general effect fold, the §14.12.2
+  B row, the queue P3 predicate, the drain act→effect same-section
+  rule, and the quiesce-stall rule — each carrying the exclusion by
+  named citation to THIS entry; a consumer that classifies an
+  exception act as class B from its own text is a DEFECT, corrected to
+  a citation (v26 stated the exception at the effect-binding paragraph
+  only and four callers contradicted it — one prefix, two
+  classifications). The set is disjoint from the integrity-fault
+  exclusion (terminal-by-damage, per NDR-h/NDR-l) and from
+  terminal-by-cancellation (per NDR-l, reached via NDR-u).
+  *Applies:* effect fold, §14.12.2 B/O rows, queue protocol
+  predicates, stall rule. *Expansion:* §14.10.3 effect-binding
+  paragraph (exception list + sweep text) and the consumer-site
+  exclusion clauses (§14.12.2 B row, queue P3 predicate, drain
+  NAMED DEFERRED-EFFECT EXCUSE, authorized-effect-stall paragraph).
+  *Cited at:* B row, P3, drain, stall rule, NDR-u, statement-site
+  manifest.
 
 
 **Statement-site manifest (every former restatement site → governing
@@ -2184,9 +2316,50 @@ NDR):**
 | §14.12.2 repro-run result-semantics paragraph | green/red/not-reproduced consumption (demoted v24 R5-C17-5; the semantics were MISSING from NDR-s — added canonically there v25 R5-C18-2 with a declared expansion; verbatim v23 text in docs/audits/g1-ndr-conflict-log.md§2c) | NDR-s (citation) |
 | §14.10.1 `findingRef`/artifact bullet | append-only artifact route | NDR-t (canonical expansion) |
 | §14.10.2 update-intake rule ("already-closed refused") | closed-state transitions | NDR-p (citation) |
+| §14.10.3 `residual-cure` / `residual-cure-settlement` / `residual-cure-cancel` entries | two-phase residual-cure protocol (confirmation, uniqueness, settlement + evidence check + ordering witness, cancellation, no-hold/never-finalize) | NDR-u (canonical; declared expansion — NEW v27 R5-C19-1, protocol was unregistered in v26) |
+| §14.10.3 `cure-gate` record + `repro-run` `cureGateId` field + settlement `ancestryWitness` shape (v28 R5-C20-2/3) | cure-gate binding and witness record shapes | NDR-u (expansion, v28 — record shapes and their append/binding clauses (dispatch gating, one-per-act, owed-completion recovery incl. the cancelled-act extinguishment R5-C20P-6); the ordering-witness PREDICATE is owned by NDR-u para (3) and no expansion clause may weaken it — wording aligned v28 cycle 23) |
+| §14.10.3 effect-binding paragraph (SECOND NAMED EXCEPTION + CALLER SWEEP) | effect-binding exception set + caller sweep | NDR-v (canonical; declared expansion — NEW v27 R5-C19-1/R5-C19-2) |
+| §14.12.2 B row cure clause; queue P3 cure exclusion; drain NAMED DEFERRED-EFFECT EXCUSE; authorized-effect-stall cure clause | consumer-site exclusions — predicates + `per NDR-v` citation only | NDR-v (declared expansion: exclusion clauses carry the sweep by named reference, no rule bodies) |
+| §14.12.2 r4 chain-closure minor-exception cell (member-discharge clause) | discharge predicate owned by NDR-b CHAIN-MEMBER DISCHARGE (v27 R5-C19-6 — v26 cell cited NDR-b for a rule it did not state) | NDR-b (canonical; citation only) |
+| §14.10.1 `cureActRef` field-rule block (v27 R5-C19-3) | cure-lineage wire operand + intake validation | NDR-u (declared expansion, v27 R5-C19-3) |
 | §14.10.1 `finding-disposition` payload `reason` rule | reason echo binding (NDR-b's operand check) | NDR-b (citation) |
+| §14.10.0 trust-assumptions block TA-1…TA-5 (v28 R5-C20F-5) | declared trust basis for the gate/runner, the git witness, and pair-recovery mechanics | — (owner decisions, cited at their enforcement sites; not NDR rules) |
 | §14.9 fold-hygiene row | process gate | register doctrine 4 (fold-hygiene v2) |
 | §14.12.6 | no §14.10 rule bodies (verified v22) | — |
+
+**Trust assumptions (v28 R5-C20F-5 — declared basis, owner-adopted;
+narrowing any TA is owner territory. A finding that an enforcement
+rests on TA-n is ANSWERED HERE, not re-found; every enforcement site
+cites its TA).**
+- **TA-1 Ledger integrity:** every cited record ref resolves to a
+  durable append-only log entry; appended entries are never removed
+  or reordered.
+- **TA-2 Runner trust:** the gate/run runner (`trusted-gate`, or the
+  supervisor where this section allows supervisor-authored runs)
+  executes the repro against the intended candidate and records
+  `runEvidenceRef` content honestly — including the honest echo of
+  the gate nonce (the nonce itself is MINTED by the supervisor at
+  confirmation, §14.10.3; the runner's trust obligation is the
+  echo). The
+  ledger provides durability and after-the-fact verifiability (the
+  nonce-containment check works against the durable gate record);
+  it does NOT authenticate an untrusted producer, and no claim in
+  this section depends on doing so.
+- **TA-3 Git-object honesty:** the object store reachable from
+  `expectedFixBaseline` and the candidate contains the objects the
+  run actually tested; a forged object store is outside the git
+  witness's scope (b1, §14.10.3).
+- **TA-4 Preimage availability:** the cure `commitment`'s
+  `{digest, preimage}` pair (§14.10.3) and every digest re-checked
+  against a stored preimage remain re-checkable for the ledger's
+  retention horizon.
+- **TA-5 Log-atomicity scope:** S5 is single-writer, ordered, and
+  append-only, but NOT transactional across (log append, external
+  dispatch) or across multi-record pairs: a crash can tear a pair.
+  Any mechanism relying on a pair MUST declare its recovery
+  direction (example: §14.10.3 cure-gate complete-the-pair,
+  D1=A) and MUST NOT claim "same critical section" atomicity the
+  log cannot deliver.
 
 #### 14.10.1 `audit-finding` — wire shape
 
@@ -2218,6 +2391,7 @@ state changes flow through `audit-finding-update` (§14.10.2).
   "repro":{ "kind":"probe|fixture|session-log|none", "command":"…",
             "preFixObserved":"…", "postFixExpected":"…" },
   "evidenceRefs":["sessions/t2.jsonl#<entryId>"],  // ≥1 required
+  "cureActRef":null,                  // v27 R5-C19-3 REQUIRED PRESENT (may be null; source: draft header, via act payload in owner-act mode — v28 R5-C20P-2) — the DURABLE lineage operand for the `fresh-finding-cycle` cure settlement route (NDR-u (3)): a filed finding curing a residual names the `residual-cure` ACT's record id here (intake checks IDENTITY only over the intake-validation prefix — resolves to a `residual-cure` act record, v28; confirmed/unsettled/not-cancelled is a SETTLEMENT-prefix check, F5); null = the finding is no cure evidence; a settlement citing a finding whose `cureActRef` is null or names a different or non-evidence-eligible (settled/cancelled) act is REFUSED (counterexample: a claim-matching finding with a purported prose citation and null `cureActRef` cannot settle a cure)
   "affectedNorm":{ "doc":"docs/21-p9-m3-…", "anchor":"§1.1 (c) step (2)",
                    "sha256":null }                 // or null (R6)
 }
@@ -2227,6 +2401,22 @@ Field rules (closed vocabularies; an unknown value makes the record
 invalid — the receiver refuses the line and surfaces it, never silently
 drops it):
 
+- **`cureActRef` (v27 R5-C19-3; intake/settlement split v28 R5-C20P-5: the v27 wire comment demanded confirmed+unsettled at intake
+  while the field rule deferred that state to settlement).**
+  REQUIRED to be PRESENT (value may be
+  null): the durable lineage operand of the `fresh-finding-cycle` cure
+  settlement route (per NDR-u (3)) — a finding filed as cure evidence
+  names the `residual-cure` act's record id; a non-null value is
+  validated at INTAKE for identity only — it must resolve in-log
+  over the intake-validation prefix to a `residual-cure` act record
+  (unknown id or non-cure act ⇒ the line is refused,
+  `cure-unknown-act`); CONFIRMED + UNSETTLED + NOT-CANCELLED is a
+  SETTLEMENT-prefix check (the target act's state at settlement
+  time), not an intake check. A finding naming an already-settled
+  or already-cancelled cure is a conforming finding that settles
+  nothing — a settlement citing it is refused. This is the ONLY
+  encoding of cure lineage — a prose or evidenceRefs citation
+  settles nothing.
 - **`route` × `surface` (R1-B).** `route` is the ONLY field the
   orchestrator routes on: `code-fix` re-enters the implementation loop;
   `human-review` goes to the owner ledger (G2's norm state — out of
@@ -2910,7 +3100,28 @@ structural, same posture as F53 (mint, don't trust):
   `tre://audit-filing-draft/1`; line 2 = ONE single-line JSON object
   (the header) carrying the record's COMPLETE closed-field set —
   `(route, surface, severity, verdictBasis, claim, repro, scopeRefs,
-  affectedNorm, correctionOf, evidenceRefs)` — free prose below.
+  affectedNorm, correctionOf, evidenceRefs, cureActRef)` — free prose below.
+  **`cureActRef` (v28 R5-C20P-2 — cure-lineage source: the v27 wire
+  field had no source in this map, so no owner filing could carry it
+  and the mapping's own any-unsourced-field defect fired on the
+  settlement route's key operand): the header carries `cureActRef`
+  REQUIRED-PRESENT (explicit null allowed — a null header value
+  files an ordinary non-cure finding); the record copies it verbatim
+  at intake and mapping replay compares it exactly (same
+  verbatim-compare rule as `taskId`, v10 R5-C4-1); a header omitting
+  the field is malformed (`owner-filing-mapping`, refused).
+  Non-null semantics are split by prefix (v28 R5-C20P-5 intake/
+  settlement split: the v27 texts demanded confirmed+unsettled at
+  intake in one place and at settlement in another): at INTAKE over
+  the intake-validation prefix the validator checks IDENTITY only —
+  the value resolves in-log to a `residual-cure` act record
+  (unknown id or non-cure act ⇒ `cure-unknown-act`, refused; ref
+  resolution over the durable append-only log is the declared basis
+  §14.10.0 TA-1); the
+  CONFIRMED + UNSETTLED + NOT-CANCELLED state is a SETTLEMENT-time
+  check over the settlement prefix (a finding naming a settled or
+  cancelled cure is a conforming finding — it simply settles
+  nothing, and a settlement citing it is refused).
   **`correctionOf` and `evidenceRefs` were absent from the v6 header
   enumeration while both are authority-relevant record fields
   (`correctionOf` drives lineage/convergence; `evidenceRefs` is
@@ -2920,12 +3131,20 @@ structural, same posture as F53 (mint, don't trust):
   source: the header (classified fields), the act payload
   (`draftSha256`, `claim`, `cycle`, `taskId|null` — v10 R5-C4-1),
   or the entry-mode envelope (mode,
-  origin, proof refs — entry-mode table above).** `draftSha256`
+  origin, proof refs — entry-mode table above; `ownerActRef` on the
+  record is an envelope proof ref, and in owner-act mode the act
+  payload's `cureActRef` — v28 R5-C20P-2 — is the header-carried value
+  above, so its chain is header → payload → record, never a
+  payload-only invention).** `draftSha256`
   covers the WHOLE artifact bytes. **`cycle` (v9 R4-C3-1 — re-lands
   C2-1, which a crashed fold script dropped from the body while the
   changelog claimed it): the header carries NO cycle; cycle's SOLE
-  source is the act payload; the MUST-EQUAL comparison applies to
-  `claim` ONLY.** Envelope-field sources, exhaustively (v9): `kind`
+  source is the act payload; the header↔payload MUST-EQUAL comparisons
+  are exactly TWO (v28 R5-C20-4 — finding 4: the v9 rule named `claim`
+  only while v28 requires `cureActRef` too): `claim` (byte-equal after
+  NFC, NDR-c) and `cureActRef` (null=null or identical in-log act id).
+  `cycle` is NOT compared — it has no header source and comes from the
+  act payload alone.** Envelope-field sources, exhaustively (v9): `kind`
   /`schema` fixed; `id`/`ts`/`episodeId`/`findingRef` path/
   `claimDigest` supervisor-minted at intake; `producer` trio = the
   session recorded on the CLI channel (owner-act mode; nullable trio
@@ -3075,7 +3294,16 @@ structural, same posture as F53 (mint, don't trust):
     draft→record mapping rule stated in the 14.10.1/14.10.3 owner-
     filing text above — the pre-F2 payload bound a path whose bytes
     could change after confirmation): `{ findingDraftRef, draftSha256,
-    claim, cycle, taskId|null }` — **`taskId|null` added v10 R5-C4-1:
+    claim, cycle, taskId|null, cureActRef|null }` — **`cureActRef|null`
+    added v28 R5-C20P-2 (the v27 settlement route's key lineage
+    operand had no act-payload carrier — a cure-evidence filing could
+    not be expressed on the owner channel without violating the
+    mapping's source rule; the payload carries the header's value
+    EXPLICIT-NULL closed, same nullability contract as `taskId|null`:
+    the CLI copies the confirmed header's `cureActRef` into the act
+    payload before the act is appended, intake compares
+    payload-to-header (`owner-filing-mapping` on mismatch), and the
+    resulting record copies it verbatim as above)** — **`taskId|null` added v10 R5-C4-1:
     the envelope map claimed `taskId` came from the act payload while
     the closed payload had no such field, making a task-specific owner
     filing inexpressible and a null-task filing unsourceable; the
@@ -3222,7 +3450,9 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     | fresh-finding-cycle: {claimDigest, reproDigestOrNull}}` (the
     closed per-route shape, keys in the order shown) and `digest` =
     sha256 of those exact bytes. Confirmation validation (fail-closed,
-    BOTH required): `sha256(preimage) == digest` and the preimage
+    BOTH required): `sha256(preimage) == digest` (the pair remains
+    re-checkable for the ledger's retention horizon per §14.10.0 TA-4)
+    and the preimage
     parses to the CLOSED shape for the payload's `route` (extra or
     missing member ⇒ `cure-commitment-malformed`, refused).
     `reproDigestOrNull` is resolved AT CONFIRMATION by a deterministic
@@ -3235,9 +3465,88 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     changed intent is a NEW cure act, and the second-unsettled-cure
     refusal on the same pair (§14.10.0 route row — no forked cure)
     still applies). REQUIRED non-null.
+    CURE GATE (v28 R5-C20-2 — finding 2: the v27 "post-confirmation"
+    claim had no mechanism; a run recorded after confirmation could
+    still be a pre-confirmation result). At CONFIRMATION the supervisor appends
+    (a SEPARATE append immediately after the confirmation record —
+    NOT "the same critical section as the act": the log is
+    append-then-act and cannot promise an atomic multi-record pair,
+    v28 R5-C20F-4 / owner decision D1=A; a crash tearing the pair is
+    recovered by the OWED-COMPLETION clause below),
+    `cure-gate { id, cureActId, nonce }` — `id` is a fresh conforming
+    ULID minted by the supervisor, `nonce` is 32 random bytes hex
+    minted by the supervisor, and the record is the only place the
+    nonce is durable before settlement. The supervisor hands the gate id + nonce to
+    the trusted gate runner for that cure only. DISPATCH GATING
+    (v28 R5-C20F-4): the repro is dispatched ONLY AFTER the gate
+    record's append is DURABLE (append-then-dispatch); a dispatch
+    issued while the gate append is not durable is a contract
+    violation, and every run such a dispatch produces is
+    unverifiable forever (§14.10.0 TA-5).
+    A `repro-run` admitted as cure
+    evidence MUST carry `cureGateId` (the gate's id) and its
+    `runEvidenceRef` MUST contain the nonce verbatim — the
+    verification predicate PINNED (v28 R5-C20F-2; the predicate is
+    NAMED `cureGateOk` — recovery and settlement clauses cite it by
+    that name): the gate `nonce`
+    string occurs as a SUBSTRING of the durable content named by
+    `runEvidenceRef` (the gate's command log echoes it); the
+    `cure-gate` RECORD is the ONLY durable nonce source — a nonce
+    quoted from memory or re-minted after a lost record verifies
+    NOTHING (the checked run predates the re-minted value). A run
+    citing a `cureGateId` with NO durable `cure-gate` record is
+    REFUSED as an unsourced citation (lost-gate refusal,
+    v28 R5-C20F-2: no gate record, no cure evidence, ever). Settlement-time
+    validation refuses: a run without `cureGateId`, a `cureGateId`
+    naming another cure's gate or an unknown gate, or a
+    `runEvidenceRef` lacking the nonce. STATED TRUST RESIDUAL (not
+    closed by the record):
+    a runner that fabricates the echoed nonce from a cached result
+    is outside the record's protection; the gate runner is a trusted
+    component (§14.10.0 TA-2) and the nonce echo is the checkable artifact the
+    supervisor verifies at append. Replay checks the stored
+    `cureGateId`/nonce operands only; it never re-runs the gate.
+    Because the `{id, nonce}` pair is minted at confirmation (or —
+    for an owed completion recovered under R5-C20F-4 / D1=A — by the
+    recovery append), a run recorded before the mint cannot carry
+    them, and any dispatch issued before the gate append was durable
+    is itself the TA-5 contract violation whose runs are
+    unverifiable forever, so a pre-confirmation green result can
+    never be retro-claimed.
+    PARTIAL-PAIR RECOVERY (v28 R5-C20F-4 — owner decision D1=A,
+    complete-the-pair): a CONFIRMED cure act with no durable gate
+    record (crash between the confirmation append and the gate
+    append) is an OWED COMPLETION, not a dead end: the supervisor's
+    recovery pass MUST append the derived `cure-gate` record (its
+    `nonce` freshly minted at recovery) BEFORE dispatching any
+    gated repro for that act. AT MOST ONE `cure-gate` record per
+    `cureActId` — a second gate for the same act is refused (the
+    id-uniqueness rule inherited from settlement; otherwise nonce
+    binding would be nondeterministic). If the act is already
+    CANCELLED at recovery time the owed completion is EXTINGUISHED
+    (v28 R5-C20P-6 — self-audit cycle 22, 2026-11-22: cancellation is
+    terminal-by-cancellation per NDR-l and nothing may dispatch under
+    a cancelled act, so the gate would serve no dispatch; a
+    `cure-gate` appended for a cancelled act is malformed, refused
+    `cure-already-cancelled` — the code is shared with the cancel
+    op's refusal; the two acts can never both demand it).
+    Recovery NEVER fabricates
+    evidence: any run dispatched before the gate existed cannot
+    contain a nonce that did not exist at its execution time and
+    fails `cureGateOk` forever; recovery only makes the
+    RE-dispatch correctly gated. The cancel-only alternative
+    (D1=B) was rejected by the owner 2026-11-22 — it strands an
+    executable cure as permanent owner work; complete-the-pair is
+    the log's universal recovery direction (owed record before owed
+    effect).
     PHASE 2: the supervisor appends a distinct durable settlement
     record `residual-cure-settlement { id, cureActId, evidenceRef, ts,
-    route }` in the S5 decision log (this kind JOINS the envelope
+    route, ancestryWitness|null }` — `ancestryWitness` is the closed
+    §14.10.3 accepted-fix shape (REQUIRED non-null exactly when
+    `route:"accepted-fix"`, null exactly when `route:"fresh-finding-cycle"`;
+    a value under the wrong route or null under accepted-fix is malformed)
+    (v28 R5-C20-3 — one shape, defined here and mirrored only by
+    reference in the inventory) in the S5 decision log (this kind JOINS the envelope
     record-kind inventory alongside `finding-hold`/`-lift` and the
     §14.10 kinds — v25 R5-C18-3; `route` is copied verbatim from the
     act at append; a settlement whose route differs from its act's
@@ -3250,20 +3559,62 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     The settlement is appended ONCE THE EVIDENCE EXISTS AND PASSES THE
     SINGLE EVIDENCE CHECK (v26 R5-C18F-1/F-3 — one predicate,
     machine-checkable at settlement time from durable records only,
-    recomputed identically by every replay):
+    recomputed identically by every replay — v27 R5-C19-4 names the
+    replay authority for each operand):
     `accepted-fix` — `evidenceRef` names a `repro-run` record
     `result:"green"` AND (a) its repro definition re-digests to the
-    preimage's `reproDigest` against `expectedFixBaseline` AND
-    (b) ORDERING PROOF (v26 R5-C18F-4 — "seq-after the cure act" was
-    undefined between git commits and S5 log lines): the run's
-    `executedArtifactDigest` is a commit in the gated candidate
-    lineage of `expectedFixBaseline` — git ancestor-of (walkable in
-    the object store, the same closure walk as the artifact-binding
-    check) AND NOT EQUAL to `expectedFixBaseline` (a fix IS a change
-    over the baseline; an equal digest fails the check, fail-closed);
+    preimage's `reproDigest` against `expectedFixBaseline` AND (b) the
+    THREE-CONJUNCT ORDERING WITNESS (v28 R5-C20-3 — replaces v27's
+    two-conjunct witness, which proved only record order):
+    (b1) ANCESTRY — the settlement's `ancestryWitness` field is the
+    closed shape `{ "executedArtifactDigest":"<sha>",
+    "expectedFixBaseline":"<sha>", "result":"ancestor-proper" }`
+    (the ONLY admissible `result` value; a failed walk appends NO
+    settlement, so no false witness is ever durable). Producer: the
+    supervisor, at settlement-append, by a git walk against the
+    gated candidate lineage pinned in the artifact store (missing,
+    pruned, or unverifiable closure FAILS CLOSED; the honesty of the
+    object store itself is the declared basis §14.10.0 TA-3).
+    Validation: the
+    two sha operands EQUAL the run record's `executedArtifactDigest`
+    and the preimage's `expectedFixBaseline`, and the digests differ
+    (a fix IS a change over the baseline). Replay checks the operands
+    and consumes the stored `result`; it never re-walks git.
+    (b2) LOG ORDER — the `repro-run` record's S5-log position is
+    after the cure act's record.
+    (b3) POST-CONFIRMATION CURE GATE (v28 R5-C20-2 — the mechanism
+    that makes the run post-confirmation testimony, see §14.10.3
+    `cure-gate`): confirmation of the cure act appends a
+    supervisor-minted `cure-gate` record
+    `{ id, cureActId, nonce }` (separate append, torn-pair-safe via
+    the §14.10.3 complete-the-pair recovery, v28 R5-C20F-4). The `repro-run` MUST carry
+    `cureGateId` equal to that gate's id, and its `runEvidenceRef` MUST contain the gate
+    `nonce` verbatim — substring containment over the durable
+    evidence content, predicate pinned in §14.10.3 (v28
+    R5-C20F-2). Because the gate id is minted at confirmation
+    (or, for an owed completion, at recovery — see the
+    complete-the-pair clause), no run recorded before the mint can
+    name it; a run whose
+    `cureGateId` is absent or names another cure's gate is refused.
+    The runner-side obligation to execute the post-confirmation
+    candidate and not a cached result is a stated trust residual
+    (see §14.10.3 `cure-gate`), checked by the supervisor's append-
+    time verification of the echoed nonce.
     `fresh-finding-cycle` — `evidenceRef` names a filed finding (an
     APPLIED `audit-filing` act) whose `claimDigest` re-digests to the
-    preimage's `claimDigest` AND whose lineage cites the cure act.
+    preimage's `claimDigest` AND whose `cureActRef` field (v27
+    R5-C19-3: the DURABLE lineage operand — the wire field added to
+    `audit-finding` in §14.10.1; "its lineage cites the cure act" had
+    no schema-valid encoding, so replay had no record field to check)
+    names the cure act's record id AND (v27 R5-C19-3, split v28 R5-C20P-5: intake checks identity, settlement checks state) if the
+    preimage's `reproDigestOrNull` is NON-NULL, the filed finding's
+    repro definition re-digests (same digest operation as
+    `accepted-fix` (a)) to that committed `reproDigestOrNull` — a
+    committed digest is checked on BOTH routes, a mismatch refuses
+    settlement (counterexample closed: claim-matching finding with
+    unrelated repro E settling a cure that committed D); where
+    `reproDigestOrNull` is null (non-falsifiable survivor closure)
+    no digest operand applies and none may be invented.
     NO FURTHER CONJUNCT (v26 R5-C18F-3 — the replay text's trailing
     "or the fresh finding itself disposed" is WITHDRAWN: settlement
     requires no disposition on the evidence beyond the check itself —
@@ -3277,9 +3628,49 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
     hold beyond the residual-inherited uncleanliness it exists to
     clear; settlement is owed by EVIDENCE ARRIVAL, never by supervisor
     effort — see the effect-binding paragraph, v26 R5-C18F-2).
+    CANCELLATION (v27 R5-C19-5 — closes the LOCKED-PAIR STATE the
+    v26 protocol could reach: a confirmed cure whose commitment can
+    never be satisfied — e.g. a wrong baseline or claim digest —
+    stays unsettled forever AND its immutability blocked every
+    corrected cure on the pair, with no exit) is the separate OWNER
+    op `residual-cure-cancel` — its own item below.
     One act cures ONE (`findingId`, `survivorId`) pair; the
     record's `authority` is supervisor-stamped from the act, as
     everywhere.)
+  - `residual-cure-cancel` (v27 R5-C19-5 — the EXIT from a confirmed
+    cure whose commitment can never be satisfied; without it the
+    pair was locked forever: the unsettled cure blocked every
+    corrected cure on the pair and its own commitment is immutable,
+    so no owner route existed): `{ cureActId }` — REQUIRED: the
+    named cure act resolves in-log to a `residual-cure` act that is
+    CONFIRMED and UNSETTLED and NOT ALREADY CANCELLED (a settled
+    cure is closed history, cancellation refused
+    `cure-already-settled`; an unknown act id refused
+    `cure-unknown-act`; a second cancel of the same cure refused
+    `cure-already-cancelled`); the cancel act's own effect set is
+    EMPTY with the observation-only attestation (per the general
+    effect rule — its authority-relevant consequence IS a state
+    fold over existing records, it mints nothing new), and its
+    `authority` is supervisor-stamped, as everywhere. Effects,
+    replay-deterministic: the cancelled cure becomes
+    TERMINAL-BY-CANCELLATION — the NAMED effect state alongside
+    applied / terminal-by-refusal / terminal-by-damage /
+    terminal-by-disposition per NDR-l (taxonomy canonical there)
+    reachable by THIS op class only — its
+    derived settlement id is permanently vacated (any later
+    settlement record bearing it is malformed, refused: a
+    cancellation between confirmation and settlement beats the
+    evidence, fail-closed), the cancelled act is NEITHER
+    `effectApplied:true` NOR class B NOR a quiescence item (the
+    cancellation record IS its clearing evidence), and the pair
+    becomes ELIGIBLE AGAIN: a fresh `residual-cure` on the same
+    `(findingId, survivorId)` pair confirms normally once no
+    un-cancelled, unsettled cure remains for the pair (the
+    second-unsettled-cure refusal checks UNSETTLED-AND-NOT-
+    CANCELLED). An owner correcting a wrong commitment cancels,
+    then re-confirms with the corrected commitment — the pair's
+    uncleanliness persists UNCLEAN + needs-owner across the gap
+    exactly as before any cure existed.)
   - `filing-drift-resolution` (v7, R4-C1-5 — the `owner-filing-draft-
     drift` terminal refusal of §14.10.3 needed a named owner exit or
     the drift would hold needs-owner forever with no closing act;
@@ -4399,8 +4790,33 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   the pending settlement from the deterministic id and, when the
   evidence arrives and passes the check, the supervisor appends the
   settlement with that id — an unsettled cure NEVER finalizes the
-  round it is live in.** An act with
-  `effectApplied:false` and NO terminal-by-refusal **and NOT under an
+  round it is live in. **CALLER SWEEP (v27 R5-C19-2 — v26 stated this
+  exception HERE only, while the general effect fold, the §14.12.2 B
+  row, the queue P3 predicate and the quiesce-stall rule each still
+  classified a confirmed-unsettled-un-cancelled cure act as class B
+  from their own text, so one prefix carried two classifications):**
+  this exception governs EVERY consumer of the effect fold — a
+  `residual-cure` act that is confirmed, UNSETTLED, and NOT
+  CANCELLED is excluded from class B at every site (the B row, P3
+  effect completion, the stall rule), each carrying this exclusion by
+  named reference; "NEVER finalizes the round" means exactly: never
+  a CLEAN boundary while unsettled — which is already true by the
+  residual-inherited unclean condition itself, carried per §14.12.2
+  until settlement lands; the cure's non-settlement adds NO
+  separate hold, so it neither blocks appends (it is not B) nor
+  converts through the quiesce-stall B→O route (that route converts
+  supervisor-owed work; there is none owed here), and the boundary
+  the round gets while the cure is unsettled is the residual's own
+  UNCLEAN + needs-owner boundary, unchanged.** An act with
+  `effectApplied:false` that is in NONE of the NDR-l terminal states
+  (applied excluded by `effectApplied:false`; terminal-by-refusal,
+  terminal-by-damage, terminal-by-disposition, and
+  terminal-by-cancellation per NDR-l are each terminal, never owed —
+  v28 R5-C20P-1: the v27 text named only terminal-by-refusal here,
+  re-admitting settled/cancelled/damaged acts to the owed predicate)
+  **AND NOT an NDR-v exception act** (a confirmed, UNSETTLED,
+  UN-cancelled `residual-cure` act — the sweep above; v27 R5-C19-2)
+  **and NOT under an
   `owner-filing-integrity-fault` (v12 R5-C6-1; exclusion keyed on fault
   EXISTENCE not undispositioned, v13
   R5-C7-1 — KIND-BOUNDED v14 R5-C8-1: for the DAMAGE kinds
@@ -4408,8 +4824,8 @@ A queue-receipt-divergence fault whose drifting entries are all voided is dispos
   `readjudication-group` — fourth kind enumerated here v18
   R5-C12-1) the exclusion
   holds in ANY state and post-disposition the act is TERMINAL-BY-DAMAGE
-  (the third terminal effect state —
-  applied / terminal-by-refusal / terminal-by-damage) and is never
+  (a named terminal effect state — the full closed taxonomy is
+  canonical per NDR-l, v27) and is never
   re-classified as outstanding (the group kind's sole-exit
   `withdrawn` is TERMINAL-BY-DAMAGE with the claim retired —
   v19 R5-C13-1/2 corrects v18's "restores terminal-by-refusal
@@ -5173,7 +5589,11 @@ the round is those auditors plus the `audit-finding` records with
    `{ findingId, reproDigest, executedArtifactDigest (the tested tree/
    candidate sha), runner:"trusted-gate|supervisor",
    result:"green|red|not-reproduced",
-   runEvidenceRef (gate log / command record), ts }` — where
+   runEvidenceRef (gate log / command record),
+   cureGateId (v28 R5-C20-2; nullability split v28 R5-C20F-3 —
+   names the `cure-gate` record the run was dispatched under, null
+   iff none; shape, one-per-act, recovery, and the consumer-side
+   belongs-to-this-cure check are owned by §14.10.3), ts }` — where
    `reproDigest` equals the finding's repro definition digest computed
    over its canonical serialization (v6: the repro digest is defined
    over the finding's `repro` object ONLY, excluding bookkeeping fields,
@@ -5404,9 +5824,11 @@ the round is those auditors plus the `audit-finding` records with
    (v26 R5-C18F-1); PHASE 2 is
    the supervisor-appended `residual-cure-settlement` record naming
    the cure act and the now-existing evidence, appended ONLY where
-   the §14.10.3 single evidence check passes (green repro-run whose
+   the §14.10.3 single evidence check passes (per NDR-u paragraph (3)
+   — v28: the three-conjunct accepted-fix witness; green repro-run whose
    repro definition re-digests to the preimage AND whose executed
-   artifact satisfies the v26 R5-C18F-4 git-ordering proof, or a
+   artifact satisfies the ordering witness (b1 git ancestry + b2 log
+   order + b3 durable cure-gate binding), or a
    filed finding whose claimDigest re-digests to the preimage and
    whose lineage cites the act),
    one settlement per act. Naming the SURVIVOR's closed residual
@@ -5509,6 +5931,23 @@ v5 finalizes under a protocol, in ONE S5 critical section:
    one, so no boundary commits between an act and its effect; the
    successor-ratification group of §14.11.2 is one such effect —
    both members appended as the atomic group, same lock).
+   **NAMED DEFERRED-EFFECT EXCUSE (v27 R5-C19-2):** the ONLY act
+   classes whose effect is LEGALLY ABSENT at drain time are the two
+   named effect-binding exceptions per NDR-v — (i) a filing-class
+   act whose intake appends a permanent refusal in the drain pass
+   (the refusal IS the effect appended in-section; terminal-by-
+   refusal per NDR-l) and (ii) a `residual-cure` act, whose effect
+   is the deterministically-derived settlement id that by
+   construction cannot exist before the evidence arrives: the drain
+   appends the act alone, the absent settlement is NOT an
+   outstanding effect, NOT class B, and NEVER a quiesce-stall
+   candidate (per NDR-v, incl. its caller sweep) — the
+   queue entry is complete, the act contributes NO hold beyond the
+   residual-inherited unclean condition it exists to clear, and
+   settlement is appended by the evidence-arrival route whenever
+   that falls (per the NDR-u protocol and its cancellation exit
+   `residual-cure-cancel`). No other act may drain effect-less:
+   the general same-section rule stands.)
    Drained acts are therefore IN
    the evaluated prefix — a queued cure (a waiver act) applies to the
    CURRENT cycle and can close it; it is never stranded waiting for a
@@ -5570,12 +6009,29 @@ v5 finalizes under a protocol, in ONE S5 critical section:
      stays the append-time conflict (refused + `needs-owner`).
    - **P3 effect completion:** if P1 is matched, the matched
      `owner-act`'s effect record is also present (a landed act
-     without its effect is class B — effect owed, c8-B1). P3 failure
+     without its effect is class B — effect owed, c8-B1; EXCEPT a
+     confirmed, unsettled, un-cancelled `residual-cure` act —
+     excluded by the v27 R5-C19-2 caller sweep, per NDR-v
+     effect-binding exception: it is NOT an owed effect and never
+     fails the emptiness test; AND EXCEPT a `residual-cure` act
+     exited by a validated `residual-cure-cancel` — v28 R5-C20P-3: the v27 P3 text stranded the cancelled cure as an owed
+     effect forever (the exception named only the UN-cancelled
+     cure while cancellation vacates the settlement id it demands):
+     terminal-by-cancellation per NDR-l, the cancellation record
+     IS the clearing evidence — the cure contributes no owed
+     effect and never fails the emptiness test on its own
+     account). P3 failure
      is NOT "unmatched" in the transport sense — the act consumed
      once, the owed effect drives recovery — it fails the emptiness
      test: an entry failing ANY predicate makes the queue NON-EMPTY
    for quiescence (a VOIDED entry of a retired channel is excluded from all three predicates, v19 finding 5); "matched" in every other paragraph of this
-     document means P1 only.
+     document means P1 only. A drained `residual-cure` act exited by a
+     validated `residual-cure-cancel` is terminally cleared for
+     quiescence: P3 consumes the cancellation record as its clearing
+     evidence (the vacated settlement id is never an owed effect —
+     v28 R5-C20P-3), so a cure → cancel → quiesce prefix passes
+     P1–P3 with the round's own residual-inherited UNCLEAN +
+     needs-owner boundary carried by the NDR-q row, not by the cure.
    **Pre-drain full scan (v17, cycle-11 finding 6, normative before/after):**
    before the drain consumes ANY entry — on every startup and before
    every quiescence check — the recovery pass scans EVERY durable
@@ -5749,7 +6205,7 @@ have disjoint, exhaustive effects:
 | Class | Condition (examples) | Boundary append? | Boundary verdict inputs | Cycle state after |
 |---|---|---|---|---|
 | **A — met/disposed** | receipts all filed/refused; owed filings drained; completion FSM settled; queue drained to empty; obligations met/waived/discharged; remote-terminal disposed; deferrals resolved in-window | YES | clean contribution | closes per verdict table (clean possible) |
-| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; drained `owner-act` with an outstanding effect (`effectRecordIds` not all present in the log, v10 c8-B1) — EXCLUDING a filing-class act that is **terminal-by-refusal** per NDR-l (its never-created finding is NOT an owed record; the unresolved refusal CONDITION in the O row IS its class-O item — per NDR-m, no act is simultaneously terminal and owed) — also EXCLUDING a filing-class act under an `owner-filing-integrity-fault` in ANY state (v13 R5-C7-1: terminal-by-damage — the class-O fault condition (open) or the disposition record (disposed) is its item, never an owed effect) — **EXCEPT an act whose only fault is `intake-refusal` with disposition `withdrawn` and NO re-adjudication outcome record yet: the named durable state `readjudication-owed` per NDR-l (class B, drain-progressing, until the outcome lands per NDR-i/NDR-k)** — **and NOT for an act under a `readjudication-group` fault in ANY state (per NDR-h exclusion, per NDR-l result: group `withdrawn` ⇒ terminal-by-damage + claim-retired, no outcome owed, no O item — the disposition record is the clearing evidence; v22 citation conversion — the v18/v20 body restatements and their superseded-wording notes are preserved verbatim in `docs/audits/g1-ndr-conflict-log.md`)**); mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
+| **B — drain-progressing (supervisor can still resolve; NOT yet finalizable)** | owed filing pending but its source refusal record is durable (drain will file it); intake receipt from `n`'s sessions whose session is still alive/respawnable; queue entry awaiting its drain turn; drained `owner-act` with an outstanding effect (`effectRecordIds` not all present in the log, v10 c8-B1) — EXCLUDING a filing-class act that is **terminal-by-refusal** per NDR-l — **and EXCLUDING (v27 R5-C19-2, per NDR-v — effect-binding exception set + caller sweep, canonical in the register; §14.10.3 is its declared expansion) a confirmed, UNSETTLED, un-cancelled `residual-cure` act: settlement is owed by evidence arrival, not supervisor effort, so it is no B item, no quiescence item, and never a quiesce-stall candidate — the round's boundary while it is unsettled is the residual-inherited UNCLEAN + needs-owner boundary unchanged (no CLEAN boundary, per the effect-binding paragraph)** — and a `residual-cure` act exited by a validated `residual-cure-cancel` is likewise no B item (terminal-by-cancellation per NDR-l — the cancellation record is the clearing evidence; v28 R5-C20P-3) (its never-created finding is NOT an owed record; the unresolved refusal CONDITION in the O row IS its class-O item — per NDR-m, no act is simultaneously terminal and owed) — also EXCLUDING a filing-class act under an `owner-filing-integrity-fault` in ANY state (v13 R5-C7-1: terminal-by-damage — the class-O fault condition (open) or the disposition record (disposed) is its item, never an owed effect) — **EXCEPT an act whose only fault is `intake-refusal` with disposition `withdrawn` and NO re-adjudication outcome record yet: the named durable state `readjudication-owed` per NDR-l (class B, drain-progressing, until the outcome lands per NDR-i/NDR-k)** — **and NOT for an act under a `readjudication-group` fault in ANY state (per NDR-h exclusion, per NDR-l result: group `withdrawn` ⇒ terminal-by-damage + claim-retired, no outcome owed, no O item — the disposition record is the clearing evidence; v22 citation conversion — the v18/v20 body restatements and their superseded-wording notes are preserved verbatim in `docs/audits/g1-ndr-conflict-log.md`)**); mandated filing awaiting its deterministic derivation | NO — step 3 MUST-NOT-APPEND holds; retry finalization after the drain lands | n/a (no boundary yet) | cycle stays OPEN; if drain stalls past `quiesceWaitMaxMs` the condition is reclassified O (durable `quiesce-stall` needs-owner record citing the stalled condition) |
 | **O — owner-only (unclosable-clean, closable-unclean)** | active `finding-hold`; unresolved filing-refusal condition — `owner-filing-draft-drift`, `owner-filing-mapping`, OR (v11 R5-C5-5) ANY permanent intake refusal of an `audit-filing` (§14.10.3's exhaustive rule names them; the condition cites the refusal record and its diagnostic code) — naming its terminal-by-refusal act (v9 R4-C3-2 — the refusal condition, not the never-created finding, is the owed-owner item; cleared only by a conforming `filing-drift-resolution` act, v10-generalized to either refusal kind, v11 to every permanent filing refusal); `owner-filing-integrity-fault` **in its UNDISPOSITIONED state ONLY (v14 R5-C8-6 — the predicate is the OPEN fault CONDITION, not the record's existence: a disposed fault is already cleared by its disposition record and must NEVER keep a later boundary unclean)** (v11 R5-C5-3; exit defined R5-C6-1; lifecycle keyed R5-C7-1/5 — post-effect artifact/record damage (or a non-re-deriving bound refusal, failingCheck `intake-refusal` or `act-payload`, v13 R5-C7-3 / v14 R5-C8-5): fail-closed owner disposition via the closed `filing-integrity-disposition` op, never silently APPLIED nor drift; the faulted act's class-B exclusion and per-disposition terminality are per NDR-h (damage-kind exclusion on record EXISTENCE, open OR disposed; `intake-refusal` exclusion disposition-dependent) and per NDR-l (terminal taxonomy); one fault record per identity for all time per NDR-h (identity rules canonical there), never re-minted by post-disposition re-observation (per NDR-m); **per-disposition results: per NDR-l (v22 register — this cell states the predicate only; the per-disposition outcome enumeration lives canonically in the register entry, and the fault-identity/exclusion rules in this cell are NDR-h/NDR-m — a rule body restated here is a defect the self-check flags)**); unresolved `scope-escape`; `remote-terminal-unproven` without disposition; history-integrity-fault; deferred receipt still `deferred` (window elapsed or still open); nonempty pending-act queue whose entries are all class-O-shaped acts (holds/dispositions); escape-obligation open without waiver | YES — boundary appends, UNCLEAN | every unclean predicate of the verdict table fires; `needs-owner` | closed UNCLEAN + `needs-owner`; obligations carry into the next window (deferral) or stay episode-global (escape, fault); NEVER retroactively re-cleaned |
 
 Precedence is mechanical (v10, c8-B2 — total, no silent waiver): a
@@ -5769,7 +6225,12 @@ obligation is consumed by the NEXT window's drain as work the previous
 cycle left owed (counted there, reported at every later boundary until
 filed). **Authorized-effect stall — the NON-EQUIVALENT conversion
 (v11, c9-B3):** a drained `owner-act` whose `effectRecordIds` are not
-all durable is class B, and its B→O conversion at `quiesceWaitMaxMs`
+all durable is class B (EXCEPT the two named effect-binding
+exceptions per NDR-v — a terminal-by-refusal filing act and a
+confirmed, unsettled, un-cancelled `residual-cure` act, both
+excluded from B by the v27 R5-C19-2 caller sweep, so neither is
+ever this paragraph's stall material), and its B→O conversion at
+`quiesceWaitMaxMs`
 unblocks the APPEND but NEVER the AUTHORITY: the converted condition's
 boundary appends UNCLEAN + `needs-owner` (never clean), the effect
 stays OWED across every later boundary until applied (the act is
@@ -6418,8 +6879,9 @@ not inference, is the evidence of "every assigned auditor").
 { "kind":"repro-run", "id":"…", "ts":…, "episodeId":"…",
   "findingId":"01J…", "reproDigest":"sha256:…",       // == the finding's repro definition digest
   "executedArtifactDigest":"<git sha>",               // the tested tree/candidate
-  "runner":"trusted-gate | supervisor", "result":"green | red",
-  "runEvidenceRef":"…" },                  // gate log / command record; supervisor-authored only
+  "runner":"trusted-gate | supervisor", "result":"green | red | not-reproduced",  // NDR-s three-value semantics (v25 R5-C18-2); the v28 example's "green | red" was a stale two-value comment — a spec-literal reader would refuse every refutation run (v28 R5-C20F-3)
+  "runEvidenceRef":"…",               // gate log / command record; supervisor-authored only
+  "cureGateId":null },                // v28 R5-C20-2; split v28 R5-C20F-3: REQUIRED non-null iff the run was DISPATCHED UNDER a cure-gate (names its `cure-gate` id; the gate nonce must appear in runEvidenceRef — §14.10.3); null otherwise. APPEND-DECIDABLE at write time (the producer knows whether a gate dispatch happened); whether the run is cure EVIDENCE is a CONSUMER judgment (NDR-u paragraph (3) conjunct (b3) + the settlement check, incl. that the gate's `cureActId` is this accepted fix's `cureActRef`), never a producer judgment.
 { "kind":"convergence-verdict", "id":"…", "ts":…, "episodeId":"…",
   "cycle":4, "boundaryId":"01J…", "streakAfter":1, "confirmingUsed":0,
   "verdict":"continue", "implementerFamily":"openai-gpt",
@@ -6622,9 +7084,26 @@ the example-syntax clause below.**
   passing the §14.10.3 single evidence check against the act's
   commitment PREIMAGE (v26 R5-C18F-1); `id` is the deterministic
   `cure-settlement-<cureActId>` (v26 R5-C18F-2); one settlement
-  per cure act (a second is malformed, refused); appended to the S5
+  per cure act (a second is malformed, refused); `accepted-fix`
+  carry `ancestryWitness` (the §14.10.3 closed shape, REQUIRED for
+  accepted-fix, null for fresh-finding-cycle — v28 R5-C20-3; replay
+  consumes it and never re-walks git); appended to the S5
   decision log, replayed as the sole clearing evidence of the
   residual-inherited uncleanliness forward of its append position.
+- **v28 (cycle-20) record kind:** `cure-gate` — producer: the
+  supervisor; appended after the `residual-cure` act's confirmation
+  record and only ever after it (normally IMMEDIATELY after as a
+  separate append; in the owed-completion case R5-C20F-4/D1=A it is
+  appended at recovery time — still after the act, never before,
+  never for a cancelled act per R5-C20P-6); fields
+  `{ id, cureActId, nonce }` — the closed shape and the nonce/
+  recovery rules are OWNED by §14.10.3 (v28 R5-C20-2); this row
+  exists because the table is the authoritative record-kind
+  inventory and had been cited by §14.10 without carrying the kind
+  (v28 R5-C20F-1). ONE gate per cure act — a second gate for the
+  same act is refused (R5-C20F-4, id-uniqueness as for settlement);
+  `repro-run`'s `cureGateId` is a FIELD (14.12.4), not a record
+  kind.
 - `scope-escape-resolution`, `partition`, `dispatch-authorization`,
   `submission-receipt`, `policy-revision`, `repro-run` — producers and
   fields as specified in place (14.14.4/.5, 14.12.4, 14.12.3, 14.12.2
