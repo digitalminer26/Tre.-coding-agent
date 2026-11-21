@@ -1322,6 +1322,9 @@ const allow = new Set([
   // v27 R5-C19-5: residual-cure cancellation owner-act op (§14.10.3,
   // declared by field-shape in the op enum; mints no record kind):
   "residual-cure-cancel",
+  // v29 R5-C21-2: route enum value of the residual-cure act/settlement
+  // (NDR-u para (3)); a decision value, not a record kind:
+  "fresh-finding-cycle",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and
