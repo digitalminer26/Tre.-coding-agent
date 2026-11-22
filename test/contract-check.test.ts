@@ -72,14 +72,14 @@ function staleSection(doc: string, sec: string, from: string, to: string): strin
 
 // A1: a fully stale section must fail PER-SECTION (C2) and overall (C1).
 test("A1 one stale section fails that section citation", () => {
-  const mutated = staleSection(base, "14.12", "v34", "v33");
-  runProbe("a1-stale-subnote", mutated, ["C2 \u00a714.12 status cites v34", "C1 status uniform"]);
+  const mutated = staleSection(base, "14.12", "v36", "v35");
+  runProbe("a1-stale-subnote", mutated, ["C2 \u00a714.12 status cites v36", "C1 status uniform"]);
 });
 
 // A1: a second section (14.14) left fully stale fails too.
 test("A1 one stale section status line fails uniformly", () => {
-  const target = staleSection(base, "14.14", "v34", "v33");
-  runProbe("a1-stale-status", target, ["C1 status uniform", "C2 \u00a714.14 status cites v34"]);
+  const target = staleSection(base, "14.14", "v36", "v35");
+  runProbe("a1-stale-status", target, ["C1 status uniform", "C2 \u00a714.14 status cites v36"]);
 });
 
 // A1 decoy: a fake status string OUTSIDE any G-section must not launder a
@@ -89,11 +89,11 @@ test("A1 one stale section status line fails uniformly", () => {
 // its v34 fold citation so C2 passes there BY DESIGN (C1 owns uniformity;
 // C2 owns citation presence).
 test("A1 decoy status outside sections launders nothing", () => {
-  const stale = staleSection(base, "14.11", "v34", "v33");
+  const stale = staleSection(base, "14.11", "v36", "v35");
   const decoyAnchor = "### 14.1 Identity";
   const i = stale.indexOf(decoyAnchor);
   assert.ok(i > 0);
-  const mutated = stale.slice(0, i) + "**Status: DRAFT v34 (2099-01-01)**\n\n" + stale.slice(i);
+  const mutated = stale.slice(0, i) + "**Status: DRAFT v36 (2099-01-01)**\n\n" + stale.slice(i);
   runProbe("a1-decoy", mutated, ["C1 status uniform"]);
 });
 
@@ -101,8 +101,8 @@ test("A1 decoy status outside sections launders nothing", () => {
 test("A4 decoy marker in an older row fails uniqueness", () => {
   const olderRow = "| 2026-10-30 | \u00a712 | added build-vs-buy prior-art appendix (herdr evaluation) | internet research |";
   assert.ok(base.includes(olderRow));
-  const decoy = olderRow.replace("(herdr evaluation)", "(v34 decoy) (herdr evaluation)");
-  runProbe("a4-decoy-marker", base.replace(olderRow, decoy), ["C3 exactly one row carries the current-version marker (v34)"]);
+  const decoy = olderRow.replace("(herdr evaluation)", "(v36 decoy) (herdr evaluation)");
+  runProbe("a4-decoy-marker", base.replace(olderRow, decoy), ["C3 exactly one row carries the current-version marker (v36)"]);
 });
 
 // A4: unescaped-terminator detection — convert the c27 row's final | to \|
@@ -117,8 +117,8 @@ test("A4 escaped terminator fails termination", () => {
 // A4: the marked row with an open decision fails.
 test("A4 current row with DECISIONS-REQUIRED: 1 fails", () => {
   const mutated = base.replace(
-    "wired into quality-check.sh as step 8: C1 status-line uniformity",
-    "wired into quality-check.sh as step 8 (DECISIONS-REQUIRED: 1): C1 status-line uniformity",
+    "DECISIONS-REQUIRED: 0 | v36 terra fold",
+    "DECISIONS-REQUIRED: 1 | v36 terra fold",
   );
   assert.notEqual(mutated, base);
   runProbe("a4-open-decision", mutated, ["C3 current-marked row DECISIONS-REQUIRED"]);
@@ -185,7 +185,7 @@ test("C7 unregistered kind-shaped term fires", () => {
 
 // A1/date-independence: bumping every status DATE (not version) passes.
 test("date-only change passes (no hard-coded date)", () => {
-  const mutated = base.replaceAll("**Status: DRAFT v34 (2026-11-18", "**Status: DRAFT v34 (2026-12-31");
+  const mutated = base.replaceAll("**Status: DRAFT v35 (2026-11-21", "**Status: DRAFT v35 (2026-12-31");
   runProbe("a1-date-bump", mutated, false);
 });
 

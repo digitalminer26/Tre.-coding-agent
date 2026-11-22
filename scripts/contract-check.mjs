@@ -1307,6 +1307,10 @@ const allow = new Set([
   "stale-deferral-lineage", "task-tip-archived", "task-tip-lost",
   "usage-late-arrived", "zero-call-closure", "grant-new-window",
   "dispatch-authorization-drop", "evidence-nudge-resume", "auditor-round-completion",
+  // v35 F3: anti-relabel descriptor (§14.13.3) — a descriptor of the
+  // ledger-integrity fault the O-G4-3 note mandates; the fault RECORD is a
+  // `history-integrity-fault`, the descriptor names the relabel mode only:
+  "spend-class-relayer",
   // record kinds described in prose (declared by field-shape, not "kind":jsonc):
   "history-integrity-fault", "history-integrity-disposition", "residual-unit-release",
   "channel-open", "evidence-invalidation", "queue-receipt",
@@ -1325,6 +1329,10 @@ const allow = new Set([
   // v29 R5-C21-2: route enum value of the residual-cure act/settlement
   // (NDR-u para (3)); a decision value, not a record kind:
   "fresh-finding-cycle",
+  // v36 cycle-19: `round-abandoned` record kind (S5 manifest-log kind,
+  // declared by field-shape in the §14.12.4b inventory and §14.12.4
+  // record 1 Abandonment clause) and its sole `reason` enum value:
+  "round-abandoned", "snapshot-missing-at-recovery",
 ]);
 // Existence test: the term must still appear as a standalone token
 // (word-bounded) somewhere in the document — declared kinds, faultKinds and
