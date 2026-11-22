@@ -48,7 +48,7 @@ text-vs-intent divergence.
 | file | contents | NDR coverage |
 |---|---|---|
 | `records.ts` | wire types + envelope + closed vocabularies (finding, update, filing, outcome, fault, disposition, drift-resolution, cure/settlement/cancel, cure-gate, repro-run) | NDR-t(1), NDR-a nullability shapes, NDR-h record shape |
-| `intake.ts` | finding intake: entry-mode validation, id mint, claimDigest/findingRef artifact, scopeRefs carry (opaque; G5 path validation DEFERRED to G5 — G1 validates `string[]` shape only, no §14.14.3 semantics claimed); **spool admission producer/consumer: CLI writes confirmed bytes to `drafts/sha256-<draftSha256>` + fsync BEFORE the act append (16 KiB cap, over-cap refused at input); intake NEVER reads the live draft path — reads the spool, re-hashes it; mismatch/missing ⇒ `owner-filing-draft-drift` (terminal for the act)**; named spool vectors (c2 m2): `spool-a-write-fsync-order` (bytes durable before act append), `spool-a-rerehash-mismatch-drift` (intake reads spool only, live path NEVER), `spool-a-overcap-refused` (16 KiB at input), `spool-a-crash-between-write-and-act` (drift-only resolution; no unapplied-owed-effect state); G2-gate stub refusal path (see note below the table) | NDR-a, NDR-t, NDR-c, spool §14.10.3 (MAJOR-6 fold) |
+| `intake.ts` | finding intake: entry-mode validation, id mint, claimDigest/findingRef artifact, scopeRefs carry (opaque; G5 path validation DEFERRED to G5 — G1 validates `string[]` shape only, no §14.14.3 semantics claimed); **spool admission producer/consumer: CLI writes confirmed bytes to `drafts/sha256-<draftSha256>` + fsync BEFORE the act append (16 KiB cap, over-cap refused at input); intake NEVER reads the live draft path — reads the spool, re-hashes it; mismatch/missing ⇒ `owner-filing-draft-drift` (terminal for the act)**; named spool vectors (c2 m2, split per c3 M1): `spool-a-write-fsync-order` (bytes durable before act append), `spool-a-rerehash-mismatch-drift` (intake reads spool only, live path NEVER), `spool-a-overcap-refused` (16 KiB at input), `spool-a-act-present-spool-missing` (terminal drift + resolution path per §14.10.3 — the act exists, its re-hash fails, empty-by-refusal), `spool-a-preact-crash-no-act` (crash between (i) fsync and (ii) act append: NO act was appended, so NOTHING exists to refuse, resolve, or owe — the orphan spool object is inert storage, the owner re-confirms normally); G2-gate stub refusal path (see note below the table) | NDR-a, NDR-t, NDR-c, spool §14.10.3 (MAJOR-6 fold) |
 | `disposition.ts` | update-intake: transition legality incl. the two reopening edges, minor exception, refutation validation | NDR-b, NDR-p, NDR-s, NDR-t(3) |
 | `fold.ts` | effect fold + correction/duplicate lineage fold (total 4-step), terminal taxonomy, B/O finalization predicates. **Consumes fault identity/disposition outcomes via an interface (`faultsIfc`) defined in step 1's `records.ts` — the fold/faults dependency seam (MINOR-1): fold tests run green against the interface with fakes; `faults.ts` lands step 5 with the real impl behind the same interface.** | NDR-l, NDR-m, NDR-n, NDR-r, NDR-v |
 | `queue.ts` | queue P3 predicate, drain named deferred-effect excuse, quiesce-stall rule + the drain-excuse/stall exclusions — the NDR-v **caller-sweep consumer homes named individually (MAJOR-5)**: `fold.ts#effectException` is the shared predicate; `queue.ts` P3 / drain-excuse / stall each carry their own exclusion clause citing NDR-v and are each tested against the SAME prefix as the fold (one prefix, one classification) | NDR-v caller sites |
@@ -105,7 +105,7 @@ order honored).
 4. `disposition.ts` — NDR-b/p/s
 5. `faults.ts` — NDR-g/h/o (real impl behind `faultsIfc`; fold's fake-vs-real differential test lands here)
 6. `adjudicate.ts` — NDR-d/e/f/i/j
-7. `recovery.ts` — NDR-k + the decomposed restart ordering (c0/c1a/c1b/c1c) and cure-gate owed-completion D1=A; V-g8…V-g13 ports
+7. `recovery.ts` — NDR-k + the decomposed restart ordering (c0/c1a/c1b/c1c) and cure-gate owed-completion D1=A; V-g8…V-g13 ports. **Seam (c3 m2, same pattern as the faults seam): the `cure-gate`/settlement/cancel RECORD TYPES + the gate-protocol interface land in step 1's `records.ts` (the kind table already lists them); step 7 tests D1=A complete-the-pair against the interface with fakes, and step 8's `cure.ts` lands the real protocol behind it — the step-7/8 differential test (fake-vs-real gate completion) lands in step 8.**
 8. `cure.ts` — NDR-u/v cure half incl. the cure-gate clause-level protocol (last: depends on fold + faults + s5log)
 9. `inventory.ts` + totality test — NDR-q closes the set
 
@@ -175,9 +175,34 @@ terminalizes; deterministic ⇒ group fault) + `ndr-k-transient-retry`
 vector; M2 NDR-d row — pinned vs gate classes spelled out, vector
 renamed `ndr-d-binding-class`, no asserted-label operand; M3 (check-10
 satisfiability) resolved by that rename — all vector names now carry
-the NDR id under the proposed literal check; m1 NDR-h row — damage
+the NDR id under the proposed literal check (OVERSTATED as written —
+corrected by cycle 3 m1: the spool vectors are protocol-named
+`spool-a-*`; the accurate claim is every per-rule ROW carries ≥1
+`ndr-<id>`-named vector, which is what check-10 consumes); m1 NDR-h row — damage
 vs eventful exclusion qualified per kind; m2 named spool vectors added
 (`spool-a-*` ×4). A transcription slip during this fold ("re-hashes,
 path.") was caught and repaired in the same commit. Gates re-run after
 fold: contract-check 40/40, g1-ndr-selfcheck PASS. Cycle 3 (second
 confirming) dispatched against the folded text.
+
+## Audit disposition — mapping-audit cycle 3 (confirming on c2 fold, 2026-11-22)
+
+Auditor gpt-6.1-terra (detached one-shot `~/.tre/audits/v36/g1map-c3-*`,
+against commit 7fe5b91): CHANGES REQUESTED — 0 blockers / 1 MAJOR / 2
+MINOR. Cycle 2's fold confirmed (NDR-k/d/h rows, spool vectors,
+transcription repair all supported; Q2/Q3/Q4/Q5 fixed-ok modulo the
+three new findings). New findings, all adopted: **M1** —
+`spool-a-crash-between-write-and-act` prescribed a drift resolution
+where NO ACT EXISTS (crash between (i) spool fsync and (ii) act append
+leaves nothing to refuse or resolve; the contract's drift path governs
+an appended immutable act) — split into `spool-a-act-present-spool-
+missing` (terminal drift + resolution) and `spool-a-preact-crash-no-act`
+(orphan spool object inert, owner re-confirms, nothing owed); **m1** —
+cycle 2's "all vector names carry the NDR id" overstated (spool vectors
+are protocol-named) — corrected in place in the cycle-2 section; **m2** —
+step 7→8 cure-gate seam made explicit (gate types + protocol interface
+in step 1's records.ts, D1=A fakes at step 7, real protocol step 8,
+differential test at step 8 — same pattern as the faults seam).
+Gates re-run after fold: contract-check 40/40, g1-ndr-selfcheck PASS
+(22 entries). Closure bar for this doc: CLEAN ×2 on identical text —
+next cycle is the first confirming attempt on the folded text.
