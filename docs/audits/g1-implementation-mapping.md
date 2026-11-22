@@ -1,13 +1,19 @@
 # G1 implementation mapping — NDR register → code sites → test vectors
 
-**Status: DRAFT for owner review (pre-implementation).** Contract ground
-truth: `docs/11-orchestrator-schema.md` §14.10 (G1 finding-record schema,
-draft v33, D-signed-off round closed CLEAN ×2; the §14.10 internal G1
-draft numbering is separate and continued to v33 through the g1r4 +
-follow-up rounds). This doc is the step-1 sanity check the owner
-approved (2026-11-22, "go with your recommendation"): every canonical
-rule gets a named code site and a named test vector BEFORE code lands,
-because the v36 audits repeatedly found text-vs-intent divergence.
+**Status: DRAFT for owner review (pre-implementation); folded through
+mapping-audit cycle 1 (gpt-6.1-terra, detached, 2026-11-22: CHANGES
+REQUESTED — 0 blockers / 7 MAJOR / 5 MINOR, all adopted as noted at the
+foot of this doc).** This doc is NON-NORMATIVE mapping/audit material:
+it is not a canonical expansion site of any NDR entry, and it mints no
+P13 exchange; where it and §14.10.0 disagree the register governs.
+Contract ground truth: `docs/11-orchestrator-schema.md` §14.10 (G1
+finding-record schema, draft v33, D-signed-off round closed CLEAN ×2;
+the §14.10 internal G1 draft numbering is separate and continued to v33
+through the g1r4 + follow-up rounds). This doc is the step-1 sanity
+check the owner approved (2026-11-22, "go with your recommendation"):
+every canonical rule gets a named code site and a named test vector
+BEFORE code lands, because the v36 audits repeatedly found
+text-vs-intent divergence.
 
 ## Ground rules
 
@@ -16,9 +22,16 @@ because the v36 audits repeatedly found text-vs-intent divergence.
   the existing supervisor session log; `src/supervisor/` stays the
   caller). Test home: `test/findings-*.test.ts` (node --test, same
   discipline as convergence-tier.test.ts — reference-model vectors).
-- **Replay-derived everything:** no stored state flags. The fold
-  (`fold.ts`) recomputes act state from the durable prefix; every
-  predicate in the register is a pure function over (prefix, candidate).
+- **Replay-derived state, observed inputs:** no stored state flags — the
+  fold (`fold.ts`) recomputes act state from the durable prefix. NOT
+  "every predicate is a pure function over (prefix, candidate)" as a
+  blanket claim (audit c1 fresh finding): two contract inputs are
+  legitimately non-prefix — the settlement's ONE-TIME git-ancestry
+  witness walk (NDR-u b1, recorded once into `ancestryWitness`, replay
+  never re-walks) and spool admission's read of durable spool bytes
+  (§14.10.3 confirmed-bytes snapshot). Sites with external observation
+  must record their witness durably at append and replay consumes the
+  record.
 - The register governs: where this doc's paraphrase and §14.10.0
   disagree, **the register entry wins** (doctrine 2). Each site below
   carries a `// NDR-x` comment; `scripts/g1-ndr-selfcheck.mjs` style
@@ -35,33 +48,45 @@ because the v36 audits repeatedly found text-vs-intent divergence.
 | file | contents | NDR coverage |
 |---|---|---|
 | `records.ts` | wire types + envelope + closed vocabularies (finding, update, filing, outcome, fault, disposition, drift-resolution, cure/settlement/cancel, cure-gate, repro-run) | NDR-t(1), NDR-a nullability shapes, NDR-h record shape |
-| `intake.ts` | finding intake: entry-mode validation, id mint, claimDigest/findingRef artifact, scopeRefs carry, G2-gate refusal path | NDR-a, NDR-t, NDR-c (claim equality impl) |
+| `intake.ts` | finding intake: entry-mode validation, id mint, claimDigest/findingRef artifact, scopeRefs carry (opaque; G5 path validation DEFERRED to G5 — G1 validates `string[]` shape only, no §14.14.3 semantics claimed); **spool admission producer/consumer: CLI writes confirmed bytes to `drafts/sha256-<draftSha256>` + fsync BEFORE the act append (16 KiB cap, over-cap refused at input); intake NEVER reads the live draft path — reads the spool, re-hashes, mismatch/missing ⇒ `owner-filing-draft-drift` (terminal for the act)**; G2-gate stub refusal path (see note below the table) | NDR-a, NDR-t, NDR-c, spool §14.10.3 (MAJOR-6 fold) |
 | `disposition.ts` | update-intake: transition legality incl. the two reopening edges, minor exception, refutation validation | NDR-b, NDR-p, NDR-s, NDR-t(3) |
-| `fold.ts` | effect fold + correction/duplicate lineage fold (total 4-step), terminal taxonomy, B/O finalization predicates | NDR-l, NDR-m, NDR-n, NDR-r, NDR-v (caller sweep = fold's consumers) |
+| `fold.ts` | effect fold + correction/duplicate lineage fold (total 4-step), terminal taxonomy, B/O finalization predicates. **Consumes fault identity/disposition outcomes via an interface (`faultsIfc`) defined in step 1's `records.ts` — the fold/faults dependency seam (MINOR-1): fold tests run green against the interface with fakes; `faults.ts` lands step 5 with the real impl behind the same interface.** | NDR-l, NDR-m, NDR-n, NDR-r, NDR-v |
+| `queue.ts` | queue P3 predicate, drain named deferred-effect excuse, quiesce-stall rule + the drain-excuse/stall exclusions — the NDR-v **caller-sweep consumer homes named individually (MAJOR-5)**: `fold.ts#effectException` is the shared predicate; `queue.ts` P3 / drain-excuse / stall each carry their own exclusion clause citing NDR-v and are each tested against the SAME prefix as the fold (one prefix, one classification) | NDR-v caller sites |
 | `adjudicate.ts` | serialized withdrawal→effect→outcome unit, append-legality gate, refusal binding, check classes, byte provenance | NDR-d, NDR-e, NDR-f, NDR-i, NDR-j |
-| `recovery.ts` | restart crash-recovery duty (candidate kinds a–d), establishment/ordering per the v31–v33 restart-step audit folds | NDR-k (total duty), NDR-i, NDR-j |
+| `recovery.ts` | restart crash-recovery duty (candidate kinds a–d) + the **restart-step ORDERING decomposed (MINOR-5, per v32/v33 audit folds): (c0) ownership → validation WITHOUT mutation; (§13.1 repair; torn gate lines repaired-then-appended under exclusive ownership); (c1a) semantic checks (O1/O2/O3, one-per-act, terminal-combination) BEFORE any establishing sync; (c1b) terminal-first classification (unestablished terminal records established by the restart's own fsync here); (c1c) sync ONLY for an otherwise-live act's gate — failed sync leaves the act under the barrier; no appends of any kind after a gate-append failure (fail-stop)** | NDR-k (total duty), NDR-i, NDR-j, restart ordering V-g8…V-g13 |
 | `faults.ts` | integrity-fault mint/identity/disposition, drift-resolution op, intake-refusal ONLY-list | NDR-g, NDR-h, NDR-o, NDR-l disposition outcomes |
-| `cure.ts` | residual-cure two-phase protocol: confirm/unique/settle/cancel, ordering witness (b1/b2/b3), reproDigest(F) | NDR-u, NDR-v, NDR-q inventory rows |
-| `inventory.ts` | NDR-q closing-inventory as a data table + totality check (unlisted reachable hold = contract defect) | NDR-q |
-| `s5log.ts` | append/flock/fsync (durability-establishment per file, one fsync per pass), redelivery idempotence | NDR-r(1), NDR-i critical section, v33 per-file establishment |
+| `cure.ts` | residual-cure protocol: confirm/unique/settle/cancel + the **cure-gate clause-level sites (MAJOR-4 fold): `confirmCure` appends the gate record as a SEPARATE append immediately after the confirmation record (NOT an atomic multi-record pair — append-then-act, D1=A); nonce mint (fresh ULID `id` + 32 random bytes hex, durable ONLY in the gate record); DISPATCH GATING — repro dispatched only after the gate append is DURABLE (append-then-dispatch; dispatch-while-not-durable is a contract violation, every run it produces unverifiable forever, TA-5); `repro-run.cureGateId` append-decidable nullability split; one-gate-per-cure-act; owed-completion D1=A complete-the-pair recovery (crash tearing the pair); cancelled/settled gate EXTINGUISHMENT + failed-append outcomes** — plus ordering witness (b1/b2/b3), reproDigest(F) | NDR-u, NDR-v, NDR-q inventory rows |
+| `inventory.ts` | NDR-q closing-inventory as a data table + totality check (unlisted reachable hold = contract defect). **Envelope/record-kind scope note (MINOR-3): G1's OWN wire kinds only** (finding, update, filing, outcome, fault, disposition, drift-resolution, cure/settlement/cancel, cure-gate, repro-run). The §14.12.4b `cure-gate` inventory row is carried in `records.ts`'s kind table with a pointer; `finding-hold` / `finding-hold-lift` (§14.12.4, NDR-q row) are **G1 WIRE DEPENDENCIES carried as types + intake vocab, their lifecycle semantics land with G3** — stated, not implied | NDR-q |
+| `s5log.ts` | append/flock/fsync (durability-establishment per file, one fsync per pass), redelivery idempotence. **Wrapper contract (audit c1 Q5c): "thin" is a decoupling claim, not a capability claim — the wrapper MUST provide exclusive ownership (flock held across the serialized unit), ordered durability (fsync-before-ack of decision records), and full lock lifetime per NDR-i; conformance vectors V-g1/V-g4/V-g13 ported as acceptance tests of the wrapper itself** | NDR-r(1), NDR-i critical section, v33 per-file establishment |
+
+**G2-gate stub contract (MAJOR-7 fold):** the stub is an injected
+interface `normGate(record) => pass | fail(code)`; G1 owns its observable
+outcomes per NDR-t(2), so the stub ships WITH them: a `code-fix` record
+failing the gate is refused at intake, the `refusal-code` is JOURNALED
+as an S5 decision-log record naming the refused line's content hash,
+the line NEVER becomes an `audit-finding`, and a corrected resubmission
+is a NEW record next cycle. Fail-closed: a gate that errors is a
+refusal with the error journaled. Test vectors `ndr-t2-gate-journal` +
+`ndr-t2-gate-never-finding`. No G2 implementation is scheduled (§14.15
+order honored).
 
 ## Per-rule mapping (NDR-a … NDR-v)
 
 | NDR | canonical rule (1-line) | primary code site | test vector(s) |
 |---|---|---|---|
 | a | 3 entry modes, nullability by MODE, derived = supervisor privilege | `intake.ts#validateEntryMode` | `ndr-a-entry-modes`: all 3 legal; every other (origin,proof) combo refused; auditor never originates owner line |
-| b | accepted-fix needs green reproRunRef; sole minor owner exception; chain-member discharge predicate | `disposition.ts#acceptedFixOk` + `fold.ts#chainMemberDischarge` | `ndr-b-minor-exception` (4 cases: non-null ref still validated green); `ndr-b-discharge-machine-check` (member link not reproDigest-equal ⇒ UNCLEAN) |
+| b | accepted-fix needs green reproRunRef; sole minor owner exception; chain-member discharge = member is **minor** AND the member's OWN effective link (NDR-n step 2) is machine-checkable — BOTH operands | `disposition.ts#acceptedFixOk` + `fold.ts#chainMemberDischarge` | `ndr-b-minor-exception` (4 cases: non-null ref still validated green); `ndr-b-discharge-machine-check` (member link not reproDigest-equal ⇒ UNCLEAN); `ndr-b-discharge-nonminor` (non-minor member never discharges via the exception) |
 | c | claim equality = NFC-normalized decoded JSON value equality | `intake.ts#claimEqual` | `ndr-c-nfc-equality`: byte-different/NFC-equal pair accepted; v9 byte reading dead (regression pin) |
 | d | refusal binds immediate predecessor; EXHAUSTIVE 2-class exception; class replay-derived, never labeled | `adjudicate.ts#bindingClass` | `ndr-binding-class`: eligibility⇒predecessor, R2⇒P(W); label-vs-derived mismatch ⇒ malformed candidate |
 | e | bytesSource required, durable-only deterministic; enum closed (no embedded-R1); fresh-spool reserved | `adjudicate.ts#bytesSource` | `ndr-e-provenance`: re-digest⇒content-addressed; drift⇒none; validator never fabricates fresh-spool |
 | f | MIXED class = exactly 4 correction codes, JOINT re-derivation prefix+bytes | `adjudicate.ts#mixedCheck` | `ndr-f-joint-rewrite`: prefix-only and bytes-only each insufficient (split-vector asserts both halves needed) |
-| g | intake-refusal fault ONLY-list (closed) | `faults.ts#intakeRefusalOnly` | `ndr-g-only-list`: each listed cause mints; each near-miss does NOT |
+| g | intake-refusal fault ONLY-list (closed — NECESSARY not sufficient: listed cause + eligibility/identity/replay context still govern) | `faults.ts#intakeRefusalOnly` | `ndr-g-only-list`: each listed cause mints WHEN the surrounding fault context holds; each near-miss does NOT; a listed cause in isolation (identity already disposed / no live act) mints nothing (ONLY-list is not an unconditional-mint rule) |
 | h | fault shape; damage identity (actId,failingCheck) forever vs eventful intake-refusal; B-existence vs O-open-only exclusion | `faults.ts#faultIdentity` + `fold.ts#classExclusions` | `ndr-h-identity`: post-disposition re-observation re-mints nothing; disposed intake-refusal doesn't suppress later forged attempt |
 | i | withdrawal W binds P(W) never self-digest; W→effect→outcome one flock section; 1:1 outcome | `adjudicate.ts#serializedUnit` | `ndr-i-selfdigest-dead`: self-referential digest refused; `ndr-i-second-outcome` malformed |
 | j | append-legality gate in same section; CLOSED failure→diagnostic mapping (no new code); R2 predecessor-bound | `adjudicate.ts#legalityGate` | `ndr-j-gate`: eligible⇒append; collision⇒R2 w/ mapped diagnostic, outcome refused/eligible/null |
 | k | recovery duty TOTAL by candidate kind (a–d); exactly-one-valid⇒validation-only replay; ≥2 or fail⇒group fault; withdrawn only, refiled inexpressible | `recovery.ts#dutyTotal` | `ndr-k-kinds-abcd` one vector per kind incl. (d) byte-free drift over recorded spoolObserved (filesystem NEVER substitutes); `ndr-k-two-candidates` group fault, no winner picked |
 | l | 5 terminal states + readjudication-owed + claim-retired; membership + clearing per state | `fold.ts#terminalState` | `ndr-l-taxonomy`: state-by-state table vector; cancellation reachable only via cancel op |
-| m | finalization O predicate = UNDISPOSITIONED condition only; disposed never re-dirties; no retroactive re-clean | `fold.ts#finalizeBO` | `ndr-m-disposed-clean`: boundary after disposition CLEAN; closed unclean boundary never re-cleaned |
+| m | finalization O predicate = UNDISPOSITIONED condition only; disposed never RE-DIRTIES (it does not itself CLEAN a boundary — other unclean conditions still govern); no retroactive re-clean | `fold.ts#finalizeBO` | `ndr-m-disposed-no-redirty`: all OTHER predicates held clear, boundary after disposition is clean; variant with an independent open condition stays unclean; closed unclean boundary never re-cleaned |
 | n | total 4-step lineage fold; effective live tip walk (visit-once, cycle⇒needs-owner); no-live-tip via tip-most T | `fold.ts#lineageFold` | `ndr-n-cycle-prefix` (A→B→A admitted, routed, not assumed away); `ndr-n-effective-tip` (terminalized tip delegates to survivor); vectors (b)(c)(d) ported from schema |
 | o | drift-resolution binds refusalRecordId (live, unique); refiled needs equal-claim APPLIED later filing | `faults.ts#driftResolution` | `ndr-o-liveness`: R1 resolution never binds R2; cleared/superseded refusal refused as target |
 | p | exactly 2 reopening edges (minor exception over dup OR superseded; strand cure 2 strands), forward-only; all else invalid | `disposition.ts#reopenEdges` | `ndr-p-edges`: edge (1) covers superseded; edge (2)(a)/(b) strand proofs fail closed; third transition refused |
@@ -69,20 +94,33 @@ because the v36 audits repeatedly found text-vs-intent divergence.
 | r | 3 filing-identity cases never collapsed; redelivery idempotent; new act = new attempt (never duplicate-intent refusal); divergent bytes refused | `s5log.ts#redelivery` + `intake.ts#refileAttempt` | `ndr-r-three-cases`: identical-bytes refiling succeeds as separate finding (then rejected-duplicate is the normal path); same-act divergent ⇒ replay-integrity refusal |
 | s | green/red/not-reproduced closed semantics; refuted needs not-reproduced on PRE-FIX baseline (executedArtifactDigest == baseline); incomplete run = no record; owner-grade; no cross-lineage discharge | `disposition.ts#refutationOk` | `ndr-s-refutation-invalid` (run on fixed tree refused); `ndr-s-no-cross-lineage` |
 | t | closed vocab (refuse+surface, never silent drop); route×surface validity; findingRef append-only, edit⇒new+superseded only while OPEN (correctionOf is refuted-targets-only) | `intake.ts#vocabValidate` + `disposition.ts#supersedeRoute` | `ndr-t-spec-codefix` refused; `ndr-t-artifact-drift`; supersede-onto-closed refused except the named route |
-| u | cure protocol canonical: {digest,preimage} commitment immutable; uniqueness per pair; settlement id `cure-settlement-<actId>`; single evidence check; witness b1(git walk once, fail-closed)+b2(log position)+b3(cureGateId binding); reproDigest(F) one operation all sites; cancel ⇒ vacated settlement id; unsettled ⇒ no CLEAN, boundary still APPENDS unclean | `cure.ts` whole-file | `ndr-u-commitment-shape`; `ndr-u-witness-three` (ancestry alone insufficient; log-position alone insufficient); `ndr-u-cancel-drain` (stranded-queue exit vector, v28 R5-C20P-3); `ndr-u-replays-never-reswalk-git`; `ndr-u-reprodigest-equality` (scoped: only cited runs owe the cure digest) |
-| v | effect-binding exception CLOSED set (2 members) + caller sweep; owed cure-gate shares parent class, never a B/quiescence/stall item | `fold.ts#effectException` (+ exclusion clauses at every consumer site) | `ndr-v-one-prefix-one-class`: every fold consumer re-derives same class for an unsettled cure; crash-window owed-gate vector (boundary never evaluated against unrestored gate — recovery pass runs first) |
+| u | cure protocol canonical: {digest,preimage} commitment immutable; uniqueness per pair; settlement id `cure-settlement-<actId>`; single evidence check; witness b1(git walk once, fail-closed)+b2(log position)+b3(cureGateId binding — the cure-gate clause-level protocol lives in the `cure.ts` row above); reproDigest(F) one operation all sites; cancel ⇒ vacated settlement id; unsettled ⇒ no CLEAN, boundary still APPENDS unclean | `cure.ts` whole-file (incl. gate sites) | `ndr-u-commitment-shape`; `ndr-u-witness-three` (ancestry alone insufficient; log-position alone insufficient); `ndr-u-gate-append-then-dispatch` (dispatch before durable gate append ⇒ run unverifiable, refused at settlement); `ndr-u-gate-torn-pair` (D1=A complete-the-pair recovery; cancelled/settled extinguishment; failed append); `ndr-u-cancel-drain` (stranded-queue exit vector, v28 R5-C20P-3); `ndr-u-replays-never-redigest-git` (stored ancestryWitness consumed); `ndr-u-reprodigest-equality` (scoped: only cited runs owe the cure digest) |
+| v | effect-binding exception CLOSED set (2 members) + caller sweep — **consumer homes named individually (MAJOR-5): `fold.ts#effectException` (shared predicate), `queue.ts` P3 predicate, `queue.ts` drain deferred-effect excuse, `queue.ts` quiesce-stall paragraph** — each carries its own exclusion clause citing NDR-v; owed cure-gate shares parent class, never a B/quiescence/stall item | the four sites listed | `ndr-v-one-prefix-one-class`: P3, drain-excuse and stall each re-derive the SAME classification as the fold against one prefix (a caller differing from the fold is a defect); crash-window owed-gate vector (boundary never evaluated against unrestored gate — recovery pass runs first) |
 
 ## Implementation order inside G1 (each step = own commit + tests green)
 
-1. `records.ts` + `s5log.ts` (types, envelope, append/fsync, redelivery) — NDR-t(1), NDR-r(1), durability establishment (v33 per-file fsync vector V-g13 ported)
-2. `intake.ts` — NDR-a/c/t; G2-gate stub refusal path
-3. `fold.ts` — NDR-l/m/n/r/v; lineage fold is the heart — port the schema's worked vectors first
+1. `records.ts` + `s5log.ts` (types incl. the **`faultsIfc` interface seam** (MINOR-1) and envelope, append/fsync, redelivery; wrapper conformance vectors land here) — NDR-t(1), NDR-r(1), durability establishment (v33 per-file fsync vector V-g13 ported)
+2. `intake.ts` — NDR-a/c/t; spool admission + drift route; G2-gate stub refusal path with journal
+3. `fold.ts` — NDR-l/m/n/r/v (against `faultsIfc` fakes — the step-5 seam); lineage fold is the heart — port the schema's worked vectors first; **same commit family: the `queue.ts` caller-site exclusion clauses (NDR-v sweep lands with its predicate, not "later")**
 4. `disposition.ts` — NDR-b/p/s
-5. `faults.ts` — NDR-g/h/o
+5. `faults.ts` — NDR-g/h/o (real impl behind `faultsIfc`; fold's fake-vs-real differential test lands here)
 6. `adjudicate.ts` — NDR-d/e/f/i/j
-7. `recovery.ts` — NDR-k (+restart ordering V-g8…V-g13 ports)
-8. `cure.ts` — NDR-u/v cure half (last: depends on fold + faults + s5log)
+7. `recovery.ts` — NDR-k + the decomposed restart ordering (c0/c1a/c1b/c1c) and cure-gate owed-completion D1=A; V-g8…V-g13 ports
+8. `cure.ts` — NDR-u/v cure half incl. the cure-gate clause-level protocol (last: depends on fold + faults + s5log)
 9. `inventory.ts` + totality test — NDR-q closes the set
+
+**Trust-basis traceability (MINOR-2):** TA-1…TA-5 (§14.10.3, declared
+assumptions — enforcement sites must cite them; no runtime module) —
+each TA gets a `// TA-n` marker comment at its enforcement site
+(TA-1 ledger-ref resolution ⇒ `s5log.ts`/`fold.ts` cite checks; TA-2
+runner trust — nonce MINTED by supervisor never runner, runner's
+obligation is the honest echo ⇒ the gate-echo check in `cure.ts`; TA-3
+git-object honesty ⇒ the b1 witness walk in `cure.ts`; TA-4 preimage
+availability ⇒ the commitment re-check in `cure.ts`; TA-5
+log-atomicity scope ⇒ dispatch gating + D1=A complete-the-pair in
+`cure.ts`/`recovery.ts`) and a traceability table in
+`test/findings-ta.test.ts` asserting every TA-n is cited by ≥1 site
+(documentation-grade check, same shape as the check-10 candidate).
 
 Then: G1's own fresh-audit cycle(s) (detached terra, prompt built from
 this mapping + the register) to CLEAN, Change Ledger row, per §14.15.
@@ -101,3 +139,27 @@ this mapping + the register) to CLEAN, Change Ledger row, per §14.15.
   recommended yes, they are the contract's own tests.
 - **Q4 selfcheck extension:** add quality-check.sh check 10 (every NDR
   id present in `src/findings/` AND in a test name) — recommended yes.
+
+## Audit disposition — mapping-audit cycle 1 (2026-11-22)
+
+Auditor gpt-6.1-terra (detached one-shot
+`~/.tre/audits/v36/g1map-c1-*`, against commit 4840465): CHANGES
+REQUESTED — 0 blockers / 7 MAJOR / 5 MINOR. All 12 adopted; folded
+in-place (this file is the fold): M1 minor-member operand + counterexample
+vector (NDR-b row); M2 ONLY-list necessity-not-sufficiency (NDR-g row);
+M3 disposed-fault vector qualified (NDR-m row); M4 cure-gate clause-level
+sites + vectors (cure.ts row, NDR-u row); M5 caller-sweep consumer homes
+named individually — new `queue.ts` (layout + NDR-v row + step-3 sweep
+landing); M6 spool admission producer/consumer (intake.ts row); M7
+G2-stub observable contract (note below the layout table). m1 fold/faults
+`faultsIfc` seam + differential test (layout + steps 1/3/5); m2 TA-1…5
+traceability (post-steps); m3 inventory scope note + hold-record
+deferral (inventory.ts row); m4 scope-validation deferral stated
+(intake.ts row); m5 restart ordering decomposed c0/c1a/c1b/c1c
+(recovery.ts row). Fresh-finding (Q6): the blanket "pure function over
+(prefix, candidate)" rewritten — external-observation inputs declare
+their durable witness (ground rules). Gates re-run after fold:
+contract-check 40/40 PASS, g1-ndr-selfcheck PASS. The auditor confirmed:
+no src/findings/ exists; 22/22 entries carry ≥1 site + ≥1 vector;
+doctrine compliance fixed-ok with the non-normative status line now
+explicit at the head.
