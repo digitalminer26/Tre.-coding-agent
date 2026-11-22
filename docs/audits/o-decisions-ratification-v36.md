@@ -49,3 +49,18 @@ exchanges are minted from.
   detection proven); never as a schema promise without the mechanism
   (v1's error).
 
+## Audit disposition (same day)
+
+The post-D cross-reference (the §1 Change Ledger row "v36 O-*
+post-D re-ratification logged", this log, and the §14.15 / decision-note
+targets) was audited by the detached terra one-shot cycle 47
+(`~/.tre/audits/v36/c47-*`): VERDICT CHANGES REQUESTED — 0 blockers /
+0 majors / 2 minors. M1 the ledger row said "two standing re-open
+triggers" where the log lists four (O-G4-1, O-G4-2, O-G5-1, O-G5-2) —
+ledger row corrected. M2 this section was referenced ("see audit
+disposition below") before it existed — it exists now. All five audit
+questions returned fixed-ok, including the O-G4-3 row correction (the
+v35 against-default ring-fence stands; the sheet-recommendation
+transcription error is closed here and was caught before this row's
+text could mislead an implementation wave).
+
