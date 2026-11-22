@@ -90,7 +90,7 @@ order honored).
 | n | total 4-step lineage fold; effective live tip walk (visit-once, cycle⇒needs-owner); no-live-tip via tip-most T | `fold.ts#lineageFold` | `ndr-n-cycle-prefix` (A→B→A admitted, routed, not assumed away); `ndr-n-effective-tip` (terminalized tip delegates to survivor); vectors (b)(c)(d) ported from schema |
 | o | drift-resolution binds refusalRecordId (live, unique); refiled needs equal-claim APPLIED later filing | `faults.ts#driftResolution` | `ndr-o-liveness`: R1 resolution never binds R2; cleared/superseded refusal refused as target |
 | p | exactly 2 reopening edges (minor exception over dup OR superseded; strand cure 2 strands), forward-only; all else invalid | `disposition.ts#reopenEdges` | `ndr-p-edges`: edge (1) covers superseded; edge (2)(a)/(b) strand proofs fail closed; third transition refused |
-| q | no orphan holds; supplied closing inventory (totality); unlisted reachable hold = contract defect | `inventory.ts` data table + `test/findings-inventory.test.ts` | `ndr-q-totality`: enumerate unclean conditions from fold.ts, assert every one maps to an inventory row (the locked-pair row = regression pin for the c19 F5 class) |
+| q | no orphan holds; supplied closing inventory (totality); unlisted reachable hold = contract defect | `inventory.ts` data table + `test/findings-inventory.test.ts` | `ndr-q-totality`: the condition set is enumerated from a SINGLE SHARED SOURCE — `inventory.ts` exports the canonical condition list (all §14.10/§14.12.2 unclean/needs-owner conditions INCLUDING quiesce-stall and finding-hold, the latter carried as a G1 wire dependency with lifecycle deferred to G3), and fold.ts/queue.ts register their emitted conditions AGAINST that source (a condition emitted by any consumer with no inventory row, or an inventory row with no emitter, fails the test) — enumerating from `fold.ts` alone would miss the queue.ts/stall/hold conditions (c4 MAJOR-1 fix); the locked-pair row = regression pin for the c19 F5 class |
 | r | 3 filing-identity cases never collapsed; redelivery idempotent; new act = new attempt (never duplicate-intent refusal); divergent bytes refused | `s5log.ts#redelivery` + `intake.ts#refileAttempt` | `ndr-r-three-cases`: identical-bytes refiling succeeds as separate finding (then rejected-duplicate is the normal path); same-act divergent ⇒ replay-integrity refusal |
 | s | green/red/not-reproduced closed semantics; refuted needs not-reproduced on PRE-FIX baseline (executedArtifactDigest == baseline); incomplete run = no record; owner-grade; no cross-lineage discharge | `disposition.ts#refutationOk` | `ndr-s-refutation-invalid` (run on fixed tree refused); `ndr-s-no-cross-lineage` |
 | t | closed vocab (refuse+surface, never silent drop); route×surface validity; findingRef append-only, edit⇒new+superseded only while OPEN (correctionOf is refuted-targets-only) | `intake.ts#vocabValidate` + `disposition.ts#supersedeRoute` | `ndr-t-spec-codefix` refused; `ndr-t-artifact-drift`; supersede-onto-closed refused except the named route |
@@ -109,7 +109,9 @@ order honored).
 8. `cure.ts` — NDR-u/v cure half incl. the cure-gate clause-level protocol (last: depends on fold + faults + s5log)
 9. `inventory.ts` + totality test — NDR-q closes the set
 
-**Trust-basis traceability (MINOR-2):** TA-1…TA-5 (§14.10.3, declared
+**Trust-basis traceability (MINOR-2; § corrected per c4 m1 — the
+TA block lives in §14.10.0, after the statement-site manifest):**
+TA-1…TA-5 (declared
 assumptions — enforcement sites must cite them; no runtime module) —
 each TA gets a `// TA-n` marker comment at its enforcement site
 (TA-1 ledger-ref resolution ⇒ `s5log.ts`/`fold.ts` cite checks; TA-2
@@ -206,3 +208,21 @@ differential test at step 8 — same pattern as the faults seam).
 Gates re-run after fold: contract-check 40/40, g1-ndr-selfcheck PASS
 (22 entries). Closure bar for this doc: CLEAN ×2 on identical text —
 next cycle is the first confirming attempt on the folded text.
+
+## Audit disposition — mapping-audit cycle 4 (2026-11-22)
+
+Auditor gpt-6.1-terra (detached one-shot `~/.tre/audits/v36/g1map-c4-*`,
+against commit 8838899): CHANGES REQUESTED — 0 blockers / 1 MAJOR / 1
+MINOR. Cycle 3's fold confirmed. All 22 rule rows classified neutral or
+acceptable-paraphrase. Findings adopted: **M1** — `ndr-q-totality`
+enumerated conditions from `fold.ts` alone, which cannot see the
+queue.ts (P3/drain/stall) conditions or the finding-hold dependency
+boundary — rewritten: `inventory.ts` is the SINGLE SHARED SOURCE of
+canonical conditions, consumers (fold.ts, queue.ts) register emitted
+conditions against it, both directions (emitted-without-row /
+row-without-emitter) fail the test; **m1** — trust-basis section
+citation corrected (§14.10.3 ⇒ §14.10.0, after the statement-site
+manifest — verified against docs/11 line 2435). Gates re-run:
+contract-check 40/40, g1-ndr-selfcheck PASS. CLEAN×2 closure bar: this
+fold resets the clock; next cycle is the first confirming attempt on
+the folded text.
