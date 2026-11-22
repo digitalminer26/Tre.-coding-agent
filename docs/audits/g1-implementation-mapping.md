@@ -90,7 +90,7 @@ order honored).
 | n | total 4-step lineage fold; effective live tip walk (visit-once, cycle⇒needs-owner); no-live-tip via tip-most T | `fold.ts#lineageFold` | `ndr-n-cycle-prefix` (A→B→A admitted, routed, not assumed away); `ndr-n-effective-tip` (terminalized tip delegates to survivor); vectors (b)(c)(d) ported from schema |
 | o | drift-resolution binds refusalRecordId (live, unique); refiled needs equal-claim APPLIED later filing | `faults.ts#driftResolution` | `ndr-o-liveness`: R1 resolution never binds R2; cleared/superseded refusal refused as target |
 | p | exactly 2 reopening edges (minor exception over dup OR superseded; strand cure 2 strands), forward-only; all else invalid | `disposition.ts#reopenEdges` | `ndr-p-edges`: edge (1) covers superseded; edge (2)(a)/(b) strand proofs fail closed; third transition refused |
-| q | no orphan holds; supplied closing inventory (totality); unlisted reachable hold = contract defect | `inventory.ts` data table + `test/findings-inventory.test.ts` | `ndr-q-totality`: the condition set is enumerated from a SINGLE SHARED SOURCE — `inventory.ts` exports the canonical condition list (all §14.10/§14.12.2 unclean/needs-owner conditions INCLUDING quiesce-stall and finding-hold, the latter carried as a G1 wire dependency with lifecycle deferred to G3), and fold.ts/queue.ts register their emitted conditions AGAINST that source (a condition emitted by any consumer with no inventory row, or an inventory row with no emitter, fails the test) — enumerating from `fold.ts` alone would miss the queue.ts/stall/hold conditions (c4 MAJOR-1 fix); the locked-pair row = regression pin for the c19 F5 class |
+| q | no orphan holds; supplied closing inventory (totality); unlisted reachable hold = contract defect | `inventory.ts` data table + `test/findings-inventory.test.ts` | `ndr-q-totality`: the condition set is enumerated from a SINGLE SHARED SOURCE — `inventory.ts` exports the canonical condition list (all §14.10/§14.12.2 unclean/needs-owner conditions INCLUDING quiesce-stall and finding-hold), and fold.ts/queue.ts register their emitted conditions AGAINST that source (a condition emitted by any consumer with no inventory row, or an inventory row with no emitter, fails the test) — enumerating from `fold.ts` alone would miss the queue.ts/stall/hold conditions (c4 MAJOR-1 fix). **Hold-row emitter seam (c5 MAJOR fix): the G1 EMITTER is real — `fold.ts` handles a conforming `finding-hold` record (G1 wire kind, `records.ts`) by registering the hold condition; only the sign-off-counting semantics and the `finding-hold-lift` CLOSER transition land with G3 (the closer is referenced by name in the row, marked `closer: G3` in the row data, and the lift wire type ships in step 1 so the ref resolves); the totality test exercises the closer with a FIXTURE lift record proving the row's exit is expressible over G1's vocabulary — the both-direction check is NOT weakened (emitter required, closer ref required to resolve). The SHARED LIST + registration interface land in step 1 (m1 fix: before its consumers, same seam pattern as faultsIfc); the data table + totality test remain step 9**; the locked-pair row = regression pin for the c19 F5 class |
 | r | 3 filing-identity cases never collapsed; redelivery idempotent; new act = new attempt (never duplicate-intent refusal); divergent bytes refused | `s5log.ts#redelivery` + `intake.ts#refileAttempt` | `ndr-r-three-cases`: identical-bytes refiling succeeds as separate finding (then rejected-duplicate is the normal path); same-act divergent ⇒ replay-integrity refusal |
 | s | green/red/not-reproduced closed semantics; refuted needs not-reproduced on PRE-FIX baseline (executedArtifactDigest == baseline); incomplete run = no record; owner-grade; no cross-lineage discharge | `disposition.ts#refutationOk` | `ndr-s-refutation-invalid` (run on fixed tree refused); `ndr-s-no-cross-lineage` |
 | t | closed vocab (refuse+surface, never silent drop); route×surface validity; findingRef append-only, edit⇒new+superseded only while OPEN (correctionOf is refuted-targets-only) | `intake.ts#vocabValidate` + `disposition.ts#supersedeRoute` | `ndr-t-spec-codefix` refused; `ndr-t-artifact-drift`; supersede-onto-closed refused except the named route |
@@ -99,7 +99,7 @@ order honored).
 
 ## Implementation order inside G1 (each step = own commit + tests green)
 
-1. `records.ts` + `s5log.ts` (types incl. the **`faultsIfc` interface seam** (MINOR-1) and envelope, append/fsync, redelivery; wrapper conformance vectors land here) — NDR-t(1), NDR-r(1), durability establishment (v33 per-file fsync vector V-g13 ported)
+1. `records.ts` + `s5log.ts` (types incl. the **`faultsIfc` interface seam** (MINOR-1), the **shared canonical condition list + registration interface** (c5 m1: lands before its consumers fold.ts/queue.ts, same seam pattern as faultsIfc; `inventory.ts` imports it, fold/queue register against it) and envelope, append/fsync, redelivery; wrapper conformance vectors land here) — NDR-t(1), NDR-r(1), durability establishment (v33 per-file fsync vector V-g13 ported)
 2. `intake.ts` — NDR-a/c/t; spool admission + drift route; G2-gate stub refusal path with journal
 3. `fold.ts` — NDR-l/m/n/r/v (against `faultsIfc` fakes — the step-5 seam); lineage fold is the heart — port the schema's worked vectors first; **same commit family: the `queue.ts` caller-site exclusion clauses (NDR-v sweep lands with its predicate, not "later")**
 4. `disposition.ts` — NDR-b/p/s
@@ -226,3 +226,22 @@ manifest — verified against docs/11 line 2435). Gates re-run:
 contract-check 40/40, g1-ndr-selfcheck PASS. CLEAN×2 closure bar: this
 fold resets the clock; next cycle is the first confirming attempt on
 the folded text.
+
+## Audit disposition — mapping-audit cycle 5 (2026-11-22)
+
+Auditor gpt-6.1-terra (detached one-shot `~/.tre/audits/v36/g1map-c5-*`,
+against commit e709251): CHANGES REQUESTED — 0 blockers / 1 MAJOR / 1
+MINOR. Cycle 4's fold confirmed (shared-source totality design judged
+faithful; TA citation confirmed; all 22 rows neutral). Findings
+adopted: **M1** — the finding-hold inventory row had no G1 emitter
+under both-direction totality (lifecycle deferred to G3): seam
+specified — fold.ts's handling of a conforming `finding-hold` record
+IS the G1 emitter (wire kind ships step 1); only sign-off-counting
+semantics + the `finding-hold-lift` closer transition land G3 (closer
+ref'd by name, `closer: G3` in row data, wire type step 1 so the ref
+resolves); totality test exercises the closer with a fixture lift
+record — check NOT weakened; **m1** — the shared condition list +
+registration interface now land in step 1, before their consumers
+(same seam pattern as faultsIfc). Gates re-run: contract-check 40/40,
+g1-ndr-selfcheck PASS. CLEAN×2 clock reset by this fold; next cycle is
+the first confirming attempt on the folded text.
