@@ -92,7 +92,7 @@ order honored).
 | p | exactly 2 reopening edges (minor exception over dup OR superseded; strand cure 2 strands), forward-only; all else invalid | `disposition.ts#reopenEdges` | `ndr-p-edges`: edge (1) covers superseded; edge (2)(a)/(b) strand proofs fail closed; third transition refused |
 | q | no orphan holds; supplied closing inventory (totality); unlisted reachable hold = contract defect | `inventory.ts` data table + `test/findings-inventory.test.ts` | `ndr-q-totality`: the condition set is enumerated from a SINGLE SHARED SOURCE — **`records.ts` exports the canonical condition list + registration interface** (step 1, before its consumers; c6 MAJOR fix: the row and the step list now agree — `inventory.ts` IMPORTS the list and owns the step-9 data table) (all §14.10/§14.12.2 unclean/needs-owner conditions INCLUDING quiesce-stall and finding-hold), and fold.ts/queue.ts register their emitted conditions AGAINST that source (a condition emitted by any consumer with no inventory row, or an inventory row with no emitter, fails the test) — enumerating from `fold.ts` alone would miss the queue.ts/stall/hold conditions (c4 MAJOR-1 fix). **Hold-row emitter seam (c5 MAJOR fix): the G1 EMITTER is real — `fold.ts` handles a conforming `finding-hold` record (G1 wire kind, `records.ts`) by registering the hold condition; only the sign-off-counting semantics and the `finding-hold-lift` CLOSER transition land with G3 (the closer is referenced by name in the row, marked `closer: G3` in the row data, and the lift wire type ships in step 1 so the ref resolves); the totality test exercises the closer with a FIXTURE lift record proving the row's exit is expressible over G1's vocabulary — the both-direction check is NOT weakened (emitter required, closer ref required to resolve). The SHARED LIST + registration interface land in step 1 (m1 fix: before its consumers, same seam pattern as faultsIfc); the data table + totality test remain step 9**; the locked-pair row = regression pin for the c19 F5 class |
 | r | 3 filing-identity cases never collapsed; redelivery idempotent; new act = new attempt (never duplicate-intent refusal); divergent bytes refused | `s5log.ts#redelivery` + `intake.ts#refileAttempt` | `ndr-r-three-cases`: identical-bytes refiling succeeds as separate finding (then rejected-duplicate is the normal path); same-act divergent ⇒ replay-integrity refusal |
-| s | green/red/not-reproduced closed semantics; refuted needs not-reproduced on PRE-FIX baseline (executedArtifactDigest == baseline); incomplete run = no record; owner-grade; no cross-lineage discharge | `disposition.ts#refutationOk` | `ndr-s-refutation-invalid` (run on fixed tree refused); `ndr-s-no-cross-lineage` |
+| s | green/red/not-reproduced closed semantics; refuted needs not-reproduced on PRE-FIX baseline (executedArtifactDigest == baseline); incomplete run = no record; owner-grade; refuted-run evidence never discharges a DUPLICATE OF A CORRECTED CLAIM (the register's narrow no-cross-lineage clause, v27 R5-C19-3 — NOT a blanket ban on all cross-lineage discharge; c7 MAJOR fix) | `disposition.ts#refutationOk` | `ndr-s-refutation-invalid` (run on fixed tree refused); `ndr-s-no-cross-lineage-dup-of-corrected` (refuted-run evidence against a duplicate of a corrected claim refused; a cross-lineage discharge the register does NOT name is asserted NOT refused — pin against over-implementation) |
 | t | closed vocab (refuse+surface, never silent drop); route×surface validity; findingRef append-only, edit⇒new+superseded only while OPEN (correctionOf is refuted-targets-only) | `intake.ts#vocabValidate` + `disposition.ts#supersedeRoute` | `ndr-t-spec-codefix` refused; `ndr-t-artifact-drift`; supersede-onto-closed refused except the named route |
 | u | cure protocol canonical: {digest,preimage} commitment immutable; uniqueness per pair; settlement id `cure-settlement-<actId>`; single evidence check; witness b1(git walk once, fail-closed)+b2(log position)+b3(cureGateId binding — the cure-gate clause-level protocol lives in the `cure.ts` row above); reproDigest(F) one operation all sites; cancel ⇒ vacated settlement id; unsettled ⇒ no CLEAN, boundary still APPENDS unclean | `cure.ts` whole-file (incl. gate sites) | `ndr-u-commitment-shape`; `ndr-u-witness-three` (ancestry alone insufficient; log-position alone insufficient); `ndr-u-gate-append-then-dispatch` (dispatch before durable gate append ⇒ run unverifiable, refused at settlement); `ndr-u-gate-torn-pair` (D1=A complete-the-pair recovery; cancelled/settled extinguishment; failed append); `ndr-u-cancel-drain` (stranded-queue exit vector, v28 R5-C20P-3); `ndr-u-replays-never-redigest-git` (stored ancestryWitness consumed); `ndr-u-reprodigest-equality` (scoped: only cited runs owe the cure digest) |
 | v | effect-binding exception CLOSED set (2 members) + caller sweep — **consumer homes named individually (MAJOR-5): `fold.ts#effectException` (shared predicate), `queue.ts` P3 predicate, `queue.ts` drain deferred-effect excuse, `queue.ts` quiesce-stall paragraph** — each carries its own exclusion clause citing NDR-v; owed cure-gate shares parent class, never a B/quiescence/stall item | the four sites listed | `ndr-v-one-prefix-one-class`: P3, drain-excuse and stall each re-derive the SAME classification as the fold against one prefix (a caller differing from the fold is a defect); crash-window owed-gate vector (boundary never evaluated against unrestored gate — recovery pass runs first) |
@@ -222,7 +222,11 @@ canonical conditions, consumers (fold.ts, queue.ts) register emitted
 conditions against it, both directions (emitted-without-row /
 row-without-emitter) fail the test; **m1** — trust-basis section
 citation corrected (§14.10.3 ⇒ §14.10.0, after the statement-site
-manifest — verified against docs/11 line 2435). Gates re-run:
+manifest — verified against docs/11 line 2435). *(Historical note, c7
+m1: the shared-source ownership above was later superseded — c6 moved
+the exporter to `records.ts` (step 1) with `inventory.ts` as importer +
+data-table owner; this paragraph is preserved as the cycle-4
+disposition as issued.)* Gates re-run:
 contract-check 40/40, g1-ndr-selfcheck PASS. CLEAN×2 closure bar: this
 fold resets the clock; next cycle is the first confirming attempt on
 the folded text.
@@ -257,7 +261,27 @@ could not complete the step-3 consumers. **Fix:** the row now names
 `records.ts` as the exporter (step 1, before consumers) and
 `inventory.ts` as importer + owner of the step-9 data table — row and
 step list agree throughout; verified no residual "inventory.ts
-exports" claim. All 22 rows neutral (rule paraphrase of q itself
+exports" claim *(corrected in c7: this was too broad — the historical
+cycle-4 paragraph still carried the old ownership statement and is now
+marked superseded there)*. All 22 rows neutral (rule paraphrase of q itself
 judged faithful). Gates re-run: contract-check 40/40, g1-ndr-selfcheck
 PASS. CLEAN×2 clock reset; next cycle is the first confirming attempt
 on this text.
+
+## Audit disposition — mapping-audit cycle 7 (2026-11-22)
+
+Auditor gpt-6.1-terra (detached one-shot `~/.tre/audits/v36/g1map-c7-*`,
+against commit 6769ebb): CHANGES REQUESTED — 0 blockers / 1 MAJOR / 1
+MINOR. Cycle 6's fold confirmed (records.ts-exporter agrees with step
+list). Findings adopted: **M1** — NDR-s row said unqualified "no
+cross-lineage discharge"; the register's clause (v27 R5-C19-3,
+docs/11:2204-2208) is narrower: a REFUTED RUN's evidence never
+discharges a DUPLICATE OF A CORRECTED CLAIM — row qualified and vector
+renamed `ndr-s-no-cross-lineage-dup-of-corrected` with an
+assert-not-refused pin against over-implementation; **m1** — the
+historical cycle-4 disposition still described `inventory.ts` as the
+shared-source owner: marked superseded in place (history preserved),
+and the cycle-6 "agree throughout / no residual" claim corrected in
+place as too broad. Gates re-run: contract-check 40/40,
+g1-ndr-selfcheck PASS. CLEAN×2 clock reset; next cycle is the first
+confirming attempt on this text.
