@@ -285,3 +285,15 @@ and the cycle-6 "agree throughout / no residual" claim corrected in
 place as too broad. Gates re-run: contract-check 40/40,
 g1-ndr-selfcheck PASS. CLEAN×2 clock reset; next cycle is the first
 confirming attempt on this text.
+
+## Audit disposition — mapping-audit cycles 8–9 (2026-11-22) — CLOSED
+
+Cycle 8 (detached `~/.tre/audits/v36/g1map-c8-*`, HEAD 47a0530):
+**CLEAN** — 0/0/0; all 22 rows neutral; coverage/inverse coverage,
+build-order seams, doctrine, and scope boundaries all fixed-ok;
+cycle-7 fold confirmed. Cycle 9 (detached `g1map-c9-*`, same HEAD,
+independent full re-review per the doctrine): **CLEAN** — 0/0/0.
+**CLEAN ×2 on identical text at 47a0530 — the G1-mapping audit is
+CLOSED** (9 cycles: 7 CHANGES REQUESTED folded, 2 confirming CLEAN).
+Mode B complete: the NDR→implementation mapping is audit-clean and
+ready for owner Q1–Q4 sign-off before code.
