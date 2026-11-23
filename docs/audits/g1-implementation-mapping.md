@@ -79,7 +79,7 @@ order honored).
 | c | claim equality = NFC-normalized decoded JSON value equality | `intake.ts#claimEqual` | `ndr-c-nfc-equality`: byte-different/NFC-equal pair accepted; v9 byte reading dead (regression pin) |
 | d | refusal binds immediate predecessor; EXHAUSTIVE 2-class exception: PINNED re-adjudication refusal (P(W)-bound by identity) vs GATE refusal (predecessor-bound) — class REPLAY-DERIVED from the record + outcome pinnedVerdict pair, never from an asserted label | `adjudicate.ts#bindingClass` | `ndr-d-binding-class`: pinned-R2⇒P(W), gate-refusal⇒predecessor; derived-class-vs-record mismatch ⇒ malformed candidate (the vector derives the class itself — no asserted-label operand exists) |
 | e | bytesSource required, durable-only deterministic; enum closed (no embedded-R1); fresh-spool reserved | `adjudicate.ts#bytesSource` | `ndr-e-provenance`: re-digest⇒content-addressed; drift⇒none; validator never fabricates fresh-spool |
-| f | MIXED class = exactly 4 correction codes, JOINT re-derivation prefix+bytes | `adjudicate.ts#mixedCheck` | `ndr-f-joint-rewrite`: prefix-only and bytes-only each insufficient (split-vector asserts both halves needed) |
+| f | MIXED class = closed FIVE (v34 D1(a): the 4 correction codes + `cure-unknown-act`), JOINT re-derivation prefix+bytes | `adjudicate.ts#mixedCheck` | `ndr-f-joint-rewrite`: prefix-only and bytes-only each insufficient (split-vector asserts both halves needed) |
 | g | intake-refusal fault ONLY-list (closed — NECESSARY not sufficient: listed cause + eligibility/identity/replay context still govern) | `faults.ts#intakeRefusalOnly` | `ndr-g-only-list`: each listed cause mints WHEN the surrounding fault context holds; each near-miss does NOT; a listed cause in isolation (identity already disposed / no live act) mints nothing (ONLY-list is not an unconditional-mint rule) |
 | h | fault shape; damage identity (actId,failingCheck) forever vs EVENTFUL intake-refusal (actId,failingCheck,refusalRecordId); B exclusion: DAMAGE kinds exclude on record EXISTENCE (open or disposed), intake-refusal excludes ONLY while UNDISPOSITIONED; disposition results per NDR-l | `faults.ts#faultIdentity` + `fold.ts#classExclusions` | `ndr-h-identity`: post-disposition re-observation re-mints nothing; disposed intake-refusal doesn't suppress later forged attempt |
 | i | withdrawal W binds P(W) never self-digest; W→effect→outcome one flock section; 1:1 outcome | `adjudicate.ts#serializedUnit` | `ndr-i-selfdigest-dead`: self-referential digest refused; `ndr-i-second-outcome` malformed |
@@ -127,20 +127,36 @@ log-atomicity scope ⇒ dispatch gating + D1=A complete-the-pair in
 Then: G1's own fresh-audit cycle(s) (detached terra, prompt built from
 this mapping + the register) to CLEAN, Change Ledger row, per §14.15.
 
-## Open questions for the owner (answer before step 1)
+## Open questions for the owner (answer before step 1) — ANSWERED 2026-11-23
+
+Owner confirmed all four as recommended (2026-11-23: "confirm all four
+as recommended and open the implementation step 1"):
 
 - **Q1 language surface:** pure TS module inside this repo (`src/
   findings/`, imported by the future supervisor wiring) — assumed yes;
-  no separate package.
+  no separate package. **CONFIRMED.**
 - **Q2 S5 log:** real append against the existing supervisor JSONL
   session-log code, or a G1-local append-only file first with the S5
   adapter as a thin wrapper (recommended: thin wrapper — decouples G1's
-  audit from P1 session-log internals)?
+  audit from P1 session-log internals)? **CONFIRMED: thin wrapper.**
+  `s5log.ts` owns the append primitive writing its own append-only
+  JSONL; `src/session/session.ts`'s selective-fsync policy (§13.1,
+  steer-receipt-only fsync) is explicitly NOT the S5 backing store;
+  cross-log joins ride by id/content-hash.
 - **Q3 vectors:** the schema worked examples (V-g1…V-g13, r4 chain
   vectors, cure vectors) get ported verbatim as fixture vectors —
-  recommended yes, they are the contract's own tests.
+  recommended yes, they are the contract's own tests. **CONFIRMED
+  verbatim**, with the bookkeeping rule: each port carries its schema
+  anchor; a vector testing behavior deferred to G2/G3/G5 is marked
+  DEFERRED, never adapted.
 - **Q4 selfcheck extension:** add quality-check.sh check 10 (every NDR
   id present in `src/findings/` AND in a test name) — recommended yes.
+  **CONFIRMED**, with one build-out refinement: check 10 is
+  HARD-ENFORCED once `src/findings/inventory.ts` exists (step 9 closes
+  the id set — the mechanical analogue of NDR-q totality); before step
+  9 it runs informational (a mid-build hard check would fail by
+  design, which would pressure skipping tests). Steps 1–8 carry the
+  grep as a per-step self-discipline gate.
 
 ## Audit disposition — mapping-audit cycle 1 (2026-11-22)
 
