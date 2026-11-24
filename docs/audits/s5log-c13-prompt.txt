@@ -1,0 +1,22 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CONFIRMING CYCLE 13.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c12 found (F1) that the header claimed the (c1a) semantic
+checks run before any establishing sync, but appendUnit runs the
+dir-entry bootstrap (log-file, log-dir, marker writes) before make()
+when the marker is missing or the log is absent. The fold documents
+that bootstrap as a carve-out in the header (pass-order list and the
+V-g4 bullet) and adds test "c12 contract". The fix deliberately does
+NOT move the ritual; it documents current behavior.
+
+TASK — answer each in <=4 sentences. Any finding must name a concrete
+byte sequence or interleaving and the wrong observable outcome.
+
+Q1. HEADER vs CODE, post-fold: check the pass-order list, the V-g4
+bullet carve-out, and the ONE FSYNC PER PASS section against
+appendUnit, replay, ensureEstablished, and establishDurability. Is any
+sentence still false, incomplete, or overstated?
+Q2. TEST vs HEADER: do the c10-F1, c11, and c12 tests pin the claims
+they cite, and could any pass while its claim is false?
+Q3. Anything else provable in the file. If nothing survives, say
+CLEAN and name the two scenarios you tried hardest to break.

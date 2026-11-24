@@ -1,0 +1,60 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. 10-cycle run, CYCLE 9
+of 10, auditing the CURRENT working tree (source + test suite
+attached). c8 returned 2 findings, BOTH FOLDED (below). Suite
+71/71, tsc clean, full repo suite 3055 pass / 0 fail.
+
+STATE — folds since c8:
+- c8 finding 1 FOLDED: new test "audit c5-Q1 localization" injects
+  a SAME-INODE content swap (hardlink round-trip: link -> unlink ->
+  in-place write via link -> relink) so the digest line in
+  assertSnapshotIntact is the SOLE refusing gate. Mutation-verified:
+  deleting the digest line reddens it (and the c8 in-place test).
+- c8 Q2c FOLDED: `tailCorrupt` added to FileState. A tail ending
+  in a raw \r whose text WITHOUT the \r is a valid JSON record
+  (never writer-produced; an external CRLF editor's footprint) is
+  classified corrupt at both readState branches: appendUnit refuses
+  it at (c0) with S5LogCorruptionError(line = lines.length+1,
+  "corrupt-line") BEFORE any mutation (no silent ftruncate), and
+  replay() reports it in corruptLines at the same 1-based number.
+  A tail ending \r that does NOT parse even stripped stays ordinary
+  torn residue (writer-\n + editor-CR half-write is
+  indistinguishable from any fragment); a genuinely torn fragment
+  still repairs (control test). Mutation matrix: dropping the (c0)
+  refusal 1 red, dropping replay reporting 1 red, neutralizing
+  classification 1 red, digest line 2 red, mutQ2 1, mutC3Q1del 1,
+  mutG3 3, mutMS 1, mutG1invert 62, mutG1drop survives (redundant:
+  downstream fd gates refuse with the same class — documented
+  defense-in-depth residual).
+
+ACCEPTED RESIDUALS (unchanged): S1/S5 guard-deletion suite
+survival; byte-identical recreation; rm after final ack gate;
+pid-reuse/zombie; null-pid sweep; 2 GiB cap (raw errno escape);
+cross-host flock; raw-errno taxonomy gap; c4-F1 one-pass appear
+refusal; mutG1drop redundancy.
+
+THIS ROUND — ATTACK THE NEW FOLD ITSELF + FRESH EYES on the
+changed regions (readState classification, (c0) refusals, replay
+corruptLines wiring, assertSnapshotIntact). Answer each in <=4
+sentences; a claim must name a concrete interleaving/byte-sequence.
+
+Q1. CLASSIFICATION EDGE CASES of the new \r detection: (a) tail =
+`{"id":"x","kind":"k"}\r\r` — does anything misbehave? (b) tail
+whose text ends \r and parses stripped but the FULL text also
+parses (e.g. a JSON string ending in an escaped-then-raw mix)?
+(c) could tailCorrupt ever be true while tailKind is "complete"
+and the record gets APPENDED to recordTexts, double-reporting or
+double-counting bytes in reliedBytes? (d) multi-byte UTF-8 tail
+ending with a byte that decodes to something ending \r?
+Q2. LINE-NUMBER TRUTH: replay reports corruptLines tail line as
+lines.length+1; mid-file loop reports i+1. For a file with blank
+lines and a \r tail, are both numbers correct and non-colliding?
+What if the \r tail is the FIRST and only content (no terminated
+lines at all)?
+Q3. STATE-MACHINE INTERPLAY: after an appendUnit refusal on
+tailCorrupt, the file stands. Does a SUBSEQUENT legitimate append
+also refuse (file wedged until operator fixes) — is that the
+documented behavior and is it consistent with mid-file corrupt
+lines? Does replay of a tailCorrupt file still establish
+durability/watermark correctly (records before the tail usable)?
+Q4. Anything else: a provable defect anywhere in the changed
+regions (classification, (c0), replay reporting, digest gate).

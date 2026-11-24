@@ -1,0 +1,44 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 23 of the arc.
+Audits the CURRENT working tree (source + test attached) — the tree
+AFTER the c22 folds.
+
+CONTEXT: c22 was productive:
+- F1 (CODE): the ACKED return now pays assertClaimHeld before the
+  caller sees it — every caller-visible decision (acked, refiled-
+  only receipt, replay snapshot) is claim-fenced. Test plants an
+  adversary that unlinks our claim at the "append" sync; the ack
+  must refuse as S5LockLostError.
+- F2 (CODE+DOC): a non-directory at `<log>.lock` (pre-cycle-4
+  legacy lock file) is refused deterministically with a stable
+  `code: "ENOTDIR"` instead of the old raw-errno wedge; the
+  foreign file is never deleted. Test pins both.
+- c22 Q2 flagged test-name integrity: the V-g13 "exactly ONE fsync"
+  name counts only the "append" label (the c18 all-labels test now
+  exists and pins the true per-pass sync set); the "every exit
+  path" test covers ack + one refusal. Both accepted as
+  documented-scope residuals, not defects.
+Suite after c22: 82/82 s5log, 3066/0 full, tsc clean.
+
+c19-c23 score so far: 1 doc fold (c19), CLEAN (c20), CLEAN (c21),
+2 code folds (c22). THIS CYCLE is the last of the requested five:
+attack the NEW c22 code itself plus the interactions it creates.
+
+Q1. THE NEW ACK FENCE: assertClaimHeld(held) now runs AFTER the
+mutation fsync and AFTER provenThrough/provenOn advanced. Enumerate
+every way it can throw: S5LockLostError on path-gone, inode-swap,
+token-mismatch — and for each, state the exact state left behind
+(watermark? marker? claim released?). Is there a state where the
+throw leaves provenThrough covering bytes that a SUCCESSOR will
+legitimately re-append, producing a false "proven" later?
+Q2. THE NEW ENOTDIR GUARD: statSync(regPath) can race a replace-
+between-stat-and-claim-open. Walk the interleavings: dir->file
+swap between the guard and openSync of the claim. What error does
+the caller get and is it in the documented taxonomy? Also: the
+guard throws a plain Error (not S5LockBusyError) — does the header
+error taxonomy need a sentence, and does any existing caller
+pattern (catch S5LockBusyError) swallow it wrongly?
+Q3. REGISTRY CLEANUP x the guard: rmdirSync in releaseLock fails
+on a non-directory regPath — could a successful instance with a
+forged legacy file at regPath ever leave the instance's OWN claim
+file orphaned outside the registry?
+Q4. Anything else provable. CLEAN + two hardest scenarios otherwise.

@@ -1,0 +1,35 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 22 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c19: one doc fold (takeover list + dead-creator-at-any-age).
+c20 CLEAN (sweep TOCTOU closed by re-verify; marker format conforms;
+pid edges fail-closed). c21 CLEAN on all JOINT regions: shrink x
+marker-carve-out (marker never consulted when established=true; size
+check discards the proof first), establish-sync throws x V-g3/V-g5
+(state unmoved; replay -> honest "unproven"), intra-unit refiled x
+shrink x replay (no overstated claim). Suite: 80/80 s5log, 3064/0
+full, tsc clean. c18+c19+c20+c21: 2 doc folds + 1 test, since the
+last CODE change (c17).
+
+The arc has now covered: lock protocol, sweep, marker, watermark,
+tail model, NDR-r classification, error taxonomy, sync seam, shrink,
+pid edges, and all pairwise interactions of the late folds.
+
+FINAL-PHASE TASK — try to break the DOCUMENTATION CONTRACT as a
+whole, not individual mechanisms:
+
+Q1. CONTRACT COHERENCE: list every header promise of the form
+"EVERY X does Y" / "NEVER Z" (full lock lifetime, one-fsync rule,
+fail-closed classes, claim-held-before-decision, release-on-every-
+exit). For each, name the code path a skeptical caller would probe
+to falsify it, and whether the probe falsifies. Include the paths:
+constructor throws mid-bootstrap, append with zero incoming records
+(make() => []), replay on a file created by an OLDER protocol
+version, two S5Log instances in the SAME process pointing at the
+same path (no cross-instance state sharing assumed), and appendUnit
+where make() MUTATES the incoming array after returning it.
+Q2. TEST-NAME INTEGRITY: every test whose name asserts a universal
+("every", "never", "exactly", "atomic"): can it pass with the
+universal false? One paragraph each.
+Q3. If nothing survives, say CLEAN and name the two scenarios you
+tried hardest to break.

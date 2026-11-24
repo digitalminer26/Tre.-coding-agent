@@ -1,0 +1,12 @@
+**Q1.** Mostly yes: the acked path re-proves identity after the fsync, the watermark advances only after a successful sync on the synced descriptor's identity, and units are atomic. The exception is the refiled-only return, which checks only that the path exists and never re-proves the inode or content it describes (Finding 1). Lock exclusivity holds under creates-before-enumerate: any two contenders each observe the other's entry, so both yield.
+
+**Q2.** Lock-busy, identity, corruption, replay-integrity, and input errors are all classified. Raw errno escapes from `readState` (EACCES, EIO, EMFILE on `openSync`/`readFileSync`), and `establishDurability`/`acquireLock` rewrap I/O failures as a plain `Error` that loses the errno and cannot be distinguished from other failures. The header does not promise classification for these I/O paths, so this is a taxonomy gap, not a contract break.
+
+**Q3.** One defect remains outside the accepted residuals, Finding 1 below.
+
+**Findings**
+
+1. **MINOR: refiled-only report can describe a replaced file.**
+   Scenario: the log holds record X at inode I1 and this instance's watermark already covers it, so no sync runs. `make()` returns X. Before `return`, an external `rm` plus recreate installs an empty file I2 at the path. The refiled-only branch then runs `assertClaimHeld` (token and inode of the lock, not the log) and checks only `existsSync(path)`, which is true for I2. The caller receives `refiled: [X]` with `durability: "nothing-written"`, but X is not in the standing file. The acked path and `replay()` both re-prove identity before returning, so this is inconsistent with the stated rule that every caller-visible decision is fenced.
+   Region: `appendUnit`, the `toAppend.length === 0 && tailKind === "none"` branch, right after `assertClaimHeld(held)`.
+   Fix: replace `!existsSync(this.opts.path)` with `assertSnapshotIntact(state, this.provenOn, this.opts.path)`. This adds the (dev, ino) and digest re-proof when `state.identity` is non-null, and covers the null-identity case as well.

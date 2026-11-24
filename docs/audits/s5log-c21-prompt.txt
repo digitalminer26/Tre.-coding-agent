@@ -1,0 +1,35 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 21 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c18 fixed the lock-acquire header contradiction + added an
+all-labels-counting test; shrink wording -> size-sampled. c19's
+line-by-line header sweep: one FALSE (takeover list omitted dead-
+creator-removal-at-any-age; doc-folded; behavior was already tested
+by c6-M3). c20 probed sweep TOCTOU (re-verify closes it; residual
+atomicity documented), marker format (only {version:1,
+establishedAt:int>=0} passes; all malformed shapes re-run the
+ritual — header-conform), pid edges (pid>0 enforced; own-pid entry
+fail-closed skip), and confirmed replay's non-identity establish-
+sync errors leave the prefix honestly "unproven". CLEAN.
+Suite: 80/80 s5log, 3064/0 full, tsc clean.
+
+The arc is converging: c19 found one doc gap, c20 found none.
+THIS CYCLE: final adversarial pass over the JOINT regions — places
+where two previously-separately-audited mechanisms interact.
+
+Q1. INTERACTION: c17 shrink-drop x c13-F1 bootstrap carve-out. Walk
+this sequence: warm instance proves N bytes; external truncate to
+0 (inode same); WITHOUT another pass on the instance, an external
+process writes a FRESH durability marker (well-formed, valid JSON,
+version 1); now the instance appends. What runs, in order? Is any
+byte labeled proven that never was?
+Q2. INTERACTION: c15 cause/code plumbing x c17 shrink path x V-g3:
+make the injected sync throw on establish-prefix inside appendUnit
+and inside replay. Trace watermark/marker/claim state after each
+throw; compare against every sentence the header says about failed
+passes (V-g3, V-g5 indeterminate, one-fsync rule). Any mismatch?
+Q3. INTERACTION: c16 intra-unit refiled x c17 shrink: unit appends
+[a,a] (refiled twin), then external shrink below the appended size,
+then replay. Records? corruptLines? durability label? Any claim in
+the result object that overstates?
+Q4. Anything else provable. CLEAN + two hardest scenarios otherwise.

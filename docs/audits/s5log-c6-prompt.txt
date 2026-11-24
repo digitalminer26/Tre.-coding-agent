@@ -1,0 +1,96 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts` (an append-only JSONL log
+transport with a directory-registry lock, per-file durability
+establishment, a byte durability watermark bound to file identity
+AND content digest, and a tail repair model). 10-cycle audit run,
+CYCLE 6 of 10. You are auditing the CURRENT working tree (source and
+test suite attached). Prior rounds c1-c5; your predecessor's c5
+output and its disposition are quoted below. Suite green 68/68, tsc
+clean, full project suite 3052/3052.
+
+CONTEXT — changes since your predecessor's c5 input:
+
+FOLDED SINCE c5 WAS WRITTEN:
+ - c5-Q1: the refiled-only return now runs the FULL snapshot proof
+   (`assertSnapshotIntact`: path (dev,ino) match AND sha256 content
+   digest of the bytes this pass read) instead of existsSync-only.
+   Your cited fix was applied verbatim. Regression test added;
+   mutation-verified (reverting to the old fence: 1 test red).
+
+FOLDED SINCE SELF-REVIEW (your c5 output plus an internal review):
+ - DURABLE-BUT-REFUSED ACK documented in the module header: when
+   the post-fsync ack gate fires, the record IS durable on the
+   synced inode but the PATH no longer routes there; the caller
+   catching S5LogIdentityError from a unit that may have written
+   must treat the write outcome as UNKNOWN (NDR-r dedup makes a
+   later retry safe once the path again holds a readable log);
+   "throw" never means "nothing written" for the post-fsync window.
+ - Error-text fix: acquire/lock error strings no longer say "flock"
+   (the mechanism is directory-registry claims; the cross-host
+   exclusion scope note is unchanged).
+ - c4-F1 adjudication CORRECTED (docs/audits/s5log-c4-prompt.txt
+   fold log 2): the claimed appear-between-read-and-establish seam
+   DOES produce a real one-pass S5LogIdentityError; the rejection
+   stands on it being a bounded, self-healing, one-pass fail-closed
+   refusal matching the contract, not on "never happens".
+
+DISCLOSED, ACCEPTED RESIDUALS (out of scope unless broken
+concretely): S1/S5 guard-deletion suite-survival (no test seam;
+bounded failure mode, self-healed); byte-identical recreation at
+the digest gate; rm after the final ack gate; pid-reuse/zombie
+liveness; null-pid sweep; 2 GiB read cap; cross-host flock;
+raw-errno taxonomy gap on I/O paths the header does not classify
+(predecessor c5-Q2, accepted as gap-not-break).
+
+FULL HISTORY OF FOLDED FINDINGS (do NOT re-derive; break the
+folded code or it is out): rename-verify protocol (c4 B1
+removal); (createdMs,name) admission (c6 B1); synced-fd identity
+(c7 M2); jittered retry; digest-backed replay proof (c8);
+self-wedge on listing failure (c1-Q3); immediate refusal on
+first listing failure (c2-Q2); mid-pass rm recovery rebase
+(c2-Q3); post-sync ack gate (c3-Q1); refiled-only full snapshot
+proof (c5-Q1); durable-but-refused documented contract.
+
+YOUR PREDECESSOR'S CYCLE-5 OUTPUT (for context):
+<<<
+**Q1.** Mostly yes: the acked path re-proves identity after the fsync,
+the watermark advances only after a successful sync on the synced
+descriptor's identity, and units are atomic. The exception is the
+refiled-only return, which checks only that the path exists and
+never re-proves the inode or content it describes (Finding 1). Lock
+exclusivity holds under creates-before-enumerate: any two contenders
+each observe the other's entry, so both yield.
+**Q2.** Lock-busy, identity, corruption, replay-integrity, and input
+errors are all classified. Raw errno escapes from readState (EACCES,
+EIO, EMFILE on openSync/readFileSync), and
+establishDurability/acquireLock rewrap I/O failures as a plain Error
+that loses the errno and cannot be distinguished from other
+failures. The header does not promise classification for these I/O
+paths, so this is a taxonomy gap, not a contract break.
+**Q3.** One defect remains outside the accepted residuals, Finding 1
+below.
+1. MINOR: refiled-only report can describe a replaced file. [FOLDED
+   — your exact fix applied; see FOLDED SINCE c5 above]
+>>>
+
+QUESTIONS (answer each in <=4 sentences):
+Q1. The durable-but-refused contract paragraph was just written
+    into the header. Does the CODE actually deliver it: is the
+    post-gate throw always confined to "path no longer routes to
+    the synced inode", and is the retry-after-refusal dedup story
+    (NDR-r against a later re-read) actually sound for the records
+    an acked-but-refused unit appended? Any caller-visible state
+    (watermark, provenOn, lock heartbeats) left inconsistent on
+    that throw path?
+Q2. assertSnapshotIntact now runs on THREE return paths (replay
+    pre-return, refiled-only, and — via identity — the mutation
+    sites). Any path where its own failure mode creates a worse
+    outcome than it prevents (e.g. the re-read itself: fd opened
+    AFTER the (dev,ino) check — TOCTOU within the proof)? Is the
+    digest re-read bounded/safe under the 2 GiB cap interplay?
+Q3. Final sweep: name ANY remaining defect not on the
+    accepted-residual list and not a re-derivation of a folded
+    finding, or state "CLEAN — no findings beyond accepted
+    residuals".
+
+Findings: numbered, scenario -> wrong observable outcome, region,
+minimal fix direction. If none, "No findings" per question.

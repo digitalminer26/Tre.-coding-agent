@@ -1,0 +1,13 @@
+**Q1 (header contract vs code):** One mismatch. The header says a writing pass is "open + (repair | append | both) + exactly ONE fsync of the log fd", but a fresh instance on a non-empty log issues two log-fd fsyncs in one pass: `establish-prefix`, then the pass sync. The decision-provenance rule itself holds on every return path I checked (acked, refiled-only, replay).
+
+**Q2 (lock/registry):** No wedge found. A refused pass throws before any claim-side residue is created outside the `finally`, and `releaseLock` removes only our own entry before `rmdir`. Dead residue is swept at any age, and a live holder is never swept. I found no way for a refusal to leave residue beyond the documented bounds.
+
+**Q3 (durability accounting):** A refusal at `tailCorrupt` throws before `ensureEstablished` and before the watermark is invalidated, so `provenThrough` is unchanged. An in-place same-inode edit that preserves length is still counted proven. That is the documented identity-not-content residual, not a new defect.
+
+**Q4 (anything else):** CLEAN otherwise. The two scenarios I tried hardest to break were:
+- A `\r`-terminated tail with no complete region, checked against the `tailCorrupt`/`partial` classification and `buildPrefix` reporting.
+- A mid-pass `rm` landing inside `make()`, checked against the open, fence, and ack gates. Each one refuses with `S5LogIdentityError` before any write or receipt.
+
+**Findings:**
+
+1. **Header contract violated (minor, provable).** Sequence: fresh `S5Log` instance, log already holds N ≥ 1 records, marker proven. `appendUnit(() => [x])` runs `openSync(r+)` → `sync(efd,"establish-prefix")` → later `sync(fd,"append")`. That is two log-fd fsyncs in one writing pass, against the header's "exactly ONE fsync of the log fd" per writing pass. Observable: the V-g13 test passes only because it counts `append|repair|establish-prefix` and runs on a warm instance. Fix the header wording to "one pass-level fsync plus at most one establish-prefix fsync when reliance is unproven", or fold the establishment into the pass sync.

@@ -1,0 +1,12 @@
+**Q1.** The four c2-Q3 guards cover the decision paths that run before the mutation phase: the pre-ensure check, the establish-prefix open, the refiled-only return, and the pre-ritual check. The `replay()` pre-return gate is also covered by `assertSnapshotIntact`. The gap is the `acked` return, which runs after the mutation fsync with no path-level identity check. The guards do not fire on `identity === null` shapes, and the repair paths are only reached after `assertClaimHeld`.
+
+**Q2.** No new defect. Each failed listing unlinks the round's own entry and closes its fd before `continue`, so entries are not leaked across rounds. The sleep is capped by the remaining budget (with a 5 ms floor), so the loop terminates at the deadline. No pass proceeds past the listing-failed branch without a claim, because the only continuation is a fresh acquire loop iteration.
+
+**Q3.** One path. A mid-unit `rm` that lands after the mutation fsync (after `assertClaimHeld` and the `touchLock` heartbeat, which uses the fd and never checks the path) still returns `status: "acked"` with `durability: "fsynced"`. The bytes were synced to an inode that is no longer standing at the path. This is not one of the accepted residuals.
+
+**Findings**
+
+1. **MAJOR — acked return with no post-sync path-identity gate (Q1/Q3).**
+   - Scenario: `appendUnit` passes `assertClaimHeld` and `assertSameInode(state.identity ?? provenOn, identityOfFd(fd))`, then writes and fsyncs. An external `rm` of the log lands before `return { status: "acked" … }`. The caller receives an acked, fsynced record for a file that no longer exists at the path. The c2-Q3 refiled-only branch explicitly refuses this shape, but the acked branch does not.
+   - Region: `appendUnit`, between `this.provenOn = identityOfFd(fd)` and the `return` of the acked result (and the `touchLock` call before it).
+   - Fix direction: after the fsync, before returning acked, re-check `existsSync` and the path's (dev, ino) against the fd identity, and throw `S5LogIdentityError` if they differ. Document that this narrows the window but cannot close it, since a rm after the check is still possible.

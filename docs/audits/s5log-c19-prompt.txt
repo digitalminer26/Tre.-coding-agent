@@ -1,0 +1,32 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 19 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c18 folded two header/code contradictions: (F1) `lock-acquire`
+is now documented as running on EVERY acquisition (probe: warm append
+= lock-acquire + append; warm replay = lock-acquire) and a new test
+counts EVERY sync label on those passes; (F2) shrink detection is
+documented as size-SAMPLED between passes (ensureEstablished), not
+continuous. c18 Q1 also confirmed the c17 shrink fix sound
+(shrink-to-0, regrow, and discriminating-test all traced). Suite:
+80/80 s5log, 3064/0 full, tsc clean.
+
+OPEN ITEM FROM c18: its Q2 sweep flagged additional header sentences
+as suspect but only the lock-acquire one was chased and verified.
+This cycle finishes that sweep line by line.
+
+TASK — exhaustive, mechanical. Any finding must quote the header
+sentence VERBATIM, cite the code line, and name the concrete call
+sequence with the wrong observable outcome.
+
+Q1. HEADER LINE-BY-LINE: go through the module header from line 1
+to its end in BLOCKS of ~10 lines. For each factual claim (lock
+protocol, claim naming, sweep rules, marker semantics, watermark,
+tail classification, error taxonomy, scope limits, residuals), state
+TRUE / FALSE / UNVERIFIABLE-AT-TRANSPORT with the code line that
+settles it. Do not summarize — enumerate.
+
+Q2. For any claim you marked FALSE: what would a test that
+discriminates it look like? Write the assertion in prose.
+
+Q3. Anything else provable in the file. If nothing survives, say
+CLEAN and name the two scenarios you tried hardest to break.

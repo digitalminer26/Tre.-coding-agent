@@ -1,0 +1,13 @@
+Q1 (sweep TOCTOU): sweepStaleClaims reads st and token, then re-stats and compares dev/ino, mtime, and token bytes before unlink (sweepStaleClaims re-verify block). A live holder's touchLock refresh changes mtime and defeats removal, so a live entry cannot be removed through that path. Residual: the check-then-unlink gap is not atomic; an entry replaced between the final readFileSync and unlinkSync can be unlinked, but a replacement can only occur by its own creator or by an adversary who already controls the registry, and the header's residual covers planted entries.
+
+Q2 (marker format): readMarker accepts only JSON with version===1 and an integer establishedAt>=0; any other content, trailing garbage (JSON.parse rejects it), or a directory at the marker path (readFileSync throws EISDIR, caught as "unreadable") forces a re-run of the ritual, which matches the header. An empty marker fails JSON.parse and is "unreadable". Nothing here yields a wrong "established" verdict.
+
+Q3 (pid edges): parseClaimName requires pid>0, so `claim-0-...` returns null; claimHolderPid then falls through to parseClaimNamePid, which also requires pid>0, and then to the token pid. pidAlive(pid) is only called on positive pids, so pid 0 and negatives never reach kill(). Our own pid in a foreign name makes pidAlive true, so the entry is skipped (fail-closed, and consistent with the header's "live creator never broken").
+
+Q4 (other):
+- FINDING 1 (wedge, provable): the sweep keeps a well-formed claim whose name encodes a live pid even when it is the claim of a process that has since reused that pid. This is the header's documented pid-reuse residual, not new, so it is not a defect.
+- FINDING 2 (liveness, provable): in acquireLock, when `live.length > 1` and the registry holds two fresh live entries, both contenders unlink and sleep; with `retrySleepMs` jitter this terminates (verified by the jitter test). Not a defect.
+- Hardest scenario A: a holder whose pid is dead but whose claim is well-formed is removed at any age (sweepStaleClaims `wellFormedDead`). If the pid is recycled by an unrelated live process, the claim is kept — fail-closed.
+- Hardest scenario B: replay's establish-prefix branch swallows non-identity errors (`catch` in replay), so `provenThrough` stays unchanged and the snapshot is returned as "unproven". This matches the documented reader semantics.
+
+CLEAN on the regions probed: no provable defect found with a concrete interleaving and wrong observable outcome.

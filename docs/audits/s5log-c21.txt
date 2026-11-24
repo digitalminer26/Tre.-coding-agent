@@ -1,0 +1,13 @@
+**Q1 (shrink x bootstrap carve-out): CLEAN.** The external truncate to 0 keeps the inode, so `readState` gives `identity = I`, `completeBytes = 0`. `ensureEstablished` sees `provenOn !== null` and `st.size (0) < provenThrough (N)`, so it sets `provenThrough = 0`. The fresh marker is never read, because `established` is still true and `readMarker` runs only in `establishDurability`. Nothing is relied on, and the append's decision fsync advances the watermark only over bytes it synced.
+
+**Q2 (sync throws on establish-prefix): CLEAN.** In `appendUnit`, a throw at `establish-prefix` happens before `provenThrough`/`provenOn` advance and before any write. `finally` releases the lock and closes the fd. The `refiled` decision is never returned. In `replay`, the catch swallows the error into `durability: "unproven"`, which matches the V-g5 wording. Only `S5LogIdentityError` propagates.
+
+**Q3 (intra-unit `[a,a]` then shrink then replay): CLEAN.** The unit's result (`acked`, `appended:[a]`, `refiled:["a"]`, `fsynced`) was true when it returned and makes no claim about later bytes. The later shrink drops the watermark through the size check. Replay then reports only the bytes now on disk, with `unproven` unless it re-syncs. Nothing in replay's result claims proof over the vanished bytes.
+
+**Q4: CLEAN.** The one candidate, `provenOn` being overwritten at the mutation-time sync, is covered: `state.identity` is asserted against the mutation fd, and `ensureEstablished` compares `provenOn` against the current path stat before any reliance. No counterexample sequence produces a mislabelled byte.
+
+**Hardest scenarios checked:**
+1. External same-inode truncate to 0, then an external fresh marker, then an instance append. The marker is never consulted, and the old proof is discarded by the size check before reliance.
+2. Replay with an `EIO` on the `establish-prefix` open or sync. The result is `unproven` with records delivered, not an error, which is the documented V-g5 behaviour.
+
+**Findings:** none. No provable defect scenario was found in the joint regions.

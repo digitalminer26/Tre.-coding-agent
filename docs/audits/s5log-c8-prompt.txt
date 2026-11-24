@@ -1,0 +1,56 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. 10-cycle run, CYCLE 8
+of 10, auditing the CURRENT working tree (source + test suite
+attached). c6 and c7 both returned CLEAN on their angles (contract
+delivery + return-path gates; sync-failure arithmetic + heartbeat/
+sweep interplay + marker forgery). Suite 68/68, tsc clean.
+
+STATE — nothing changed in source since c7 (only this audit
+prompt). Accepted residuals unchanged: S1/S5 guard-deletion suite
+survival; byte-identical recreation; rm after final ack gate;
+pid-reuse/zombie; null-pid sweep; 2 GiB cap (raw errno escape);
+cross-host flock; raw-errno taxonomy gap; c4-F1 one-pass appear
+refusal. Folded history unchanged (see prior prompts; do not
+re-derive: rename-verify, (createdMs,name) removal, synced-fd
+identity, jittered retry, digest replay proof, listing-failure
+wedges, mid-pass rm rebase, post-sync ack gate, refiled-only full
+proof, durable-but-refused doc).
+
+THIS ROUND — TEST TRUTHFULNESS + WIRE-FORMAT EDGECASES. Answer
+each in <=4 sentences; a test you claim is truthful must name the
+mutation that reddens it.
+
+Q1. REGRESSION-TEST VERACITY: the suite claims mutation coverage
+for: c2-Q2 retry-to-deadline (mutQ2: 2 red), c2-Q3 mid-pass rm
+refusal at ALL decision sites (mutG2/mutMS: 1 red each), c3-Q1
+post-sync ack gate (mutC3Q1del: 1 red), c5-Q1 refiled-only full
+proof (mutG3: 2 red), c8 digest replay proof. For EACH claim,
+trace ONE test: does it fail on the SPECIFIC wiring (the guard
+line), or only on an incidental side effect (e.g. it breaks a
+different path first)? Name any test whose redness does NOT
+localize to its claimed guard.
+
+Q2. WIRE-FORMAT EDGECASES in the JSONL line format: (a) a record's
+serialized line CONTAINING a literal "\n" escape vs raw newline —
+does the writer guarantee raw newlines never appear inside the
+payload before appending (JSON.stringify escapes them — but what
+about the normGate/passthrough path and the recordTexts re-split
+in replay: can a line the writer accepted fail to round-trip
+through split("\n")?); (b) U+FEFF BOM at file start — readState's
+first line carries it into parse; is that a documented, classified
+outcome (corruption class) or a silent parse difference vs the
+same bytes mid-file; (c) CRLF: a file edited by an external tool
+whose "\r\n" makes every line fail strict parse — same class? Any
+edgecase where the OBSERVABLE class differs from what the header
+promises for "a line that does not parse"?
+
+Q3. replay() vs appendUnit() DIVERGENCE on the SAME file state:
+construct a file where replay() returns records labeled proven
+while a subsequent appendUnit's make() sees the same prefix but
+receives durability "unproven" (or vice versa) — and the
+divergence is VISIBLE to the caller in a way the header's label
+contract does not permit (labels are per-instance, per-watermark —
+that is allowed; a label contradiction on the SAME instance
+passing the same gate is not). Sequence -> outcome, or "excluded".
+
+Findings: numbered, scenario -> wrong observable outcome, region,
+minimal fix direction. If none, "No findings" per question.

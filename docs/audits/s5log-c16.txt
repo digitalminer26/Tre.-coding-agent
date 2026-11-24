@@ -1,0 +1,15 @@
+**Q1 (NDR-r classification):** `appendUnit` keys only on `rec.id`, taken from the once-serialized bytes, and compares `prev === line` on exact bytes. Both sides of that comparison are `JSON.stringify` output of the same key order, so the three cases separate correctly. I could not construct a byte sequence where the classifier reads the wrong field. The one collapse I found is in intra-unit duplicates (Q4 below).
+
+**Q2 (refile/idempotence bounds):** A stored copy in a partial tail is excluded from `recordTexts`, so an incoming id that exists only there is classified as a new attempt and appended. That is correct, since the partial fragment was never durable. Refiled-only passes with a repairable tail go through the mutation branch and return `acked` with the refiled list. I found no durability-label or tail-repair defect here.
+
+**Q3 (replay vs appendUnit):** Both paths build `recordTexts` identically, and both route `tailCorrupt` to a corrupt line. A `\r`-terminated tail has `lineIsValid(tailText)` false, so it is `partial` and excluded from records, and it is reported at `lines.length+1` in `corruptLines` by replay and refused by appendUnit. I found no divergence in records, labels, or corruptLines.
+
+**Q4 (other):** One provable defect, below. I tried hardest to break (a) an rm+recreate between the watermark check and the refiled receipt, and (b) the first-ever pass with the log absent (`identity === null`) and `provenOn` consumed by the mutation gate. Both are fail-closed as the comments describe.
+
+**Finding 1 — intra-unit duplicate reported as a durable refiling candidate.**
+- Call: `log.appendUnit(() => [{id:"x",kind:"k"}, {id:"x",kind:"k"}])` on an empty log.
+- Trace: the first `x` hits `prev === undefined`, goes to `toAppend`, and calls `existing.set("x", line)`. The second `x` gets `prev === line` (identical bytes), so it takes branch (b) and pushes `"x"` to `refiled`.
+- Observable: the result is `status:"acked"`, `appended:[x]`, `refiled:["x"]`. The header defines `refiled` as "incoming records whose id+bytes already stand in the durable prefix". Here `x` was not in the durable prefix at all. A caller using `refiled` to mint rejected-duplicate findings will report a duplicate that was never durable before this unit.
+- Fix: check `existing` membership against the pre-unit prefix only, or classify a second identical copy within the unit as a separate, labelled case.
+
+**Finding 2 — `classifyRedelivery` is not the authoritative comparison and can disagree with it.** It compares `existingLine === JSON.stringify(incoming)` on the raw input object. `appendUnit` serializes once and derives identity from those bytes (the BLOCKER 2 rule). For a stateful `toJSON()`, the exported helper can return "refiled" or "replay-integrity-refusal" for a record that `appendUnit` would classify differently. This is exported as a pre-flight, so the mismatch is a real caller-facing inconsistency.

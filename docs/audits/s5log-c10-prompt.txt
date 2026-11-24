@@ -1,0 +1,55 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. 10-cycle run, FINAL
+CYCLE 10 of 10, auditing the CURRENT working tree (source + test
+suite attached). c9 returned ZERO findings (clean) on the new fold
+regions; its open questions were answered from the code AND closed
+empirically (below). Suite 71/71, tsc clean, full repo suite 3055
+pass / 0 fail.
+
+STATE — since c8: the tailCorrupt fold (classification at both
+readState branches, (c0) refusal in appendUnit at line
+lines.length+1, replay corruptLines reporting via buildPrefix's
+optional corruptTailLine param) and the c5-Q1 localization test
+(same-inode hardlink round-trip: the digest line is the sole
+refusing gate; mutation-verified). Mutation matrix all killed or
+documented-redundant: mutG1drop survives — the two (c0) existsSync
+guards are defense-in-depth; downstream fd-identity gates
+(assertSameInode on the establish-prefix fd and the mutation fd)
+refuse the same interleaving with the same error class before any
+write. Accepted residuals unchanged (S1/S5 guard-deletion survival;
+byte-identical recreation; rm after final ack gate; pid-reuse/
+zombie; null-pid sweep; 2 GiB cap raw-errno escape; cross-host
+flock; raw-errno taxonomy gap; c4-F1 one-pass appear refusal;
+mutG1drop redundancy; NEW: `\r\r` tail = ordinary torn residue,
+silently truncated per the documented single-\r-strip rule).
+
+c9 EMPIRICAL PROBES (executed, results recorded): `{"x"}\r\r` ->
+acked, truncated (documented boundary); blank line + `\r` tail ->
+refused @2 (mid-file blank caught first), replay corruptLines
+[2,3] non-colliding; lone `{"x"}\r` -> refused @1, replay [1].
+tailCorrupt implies tailKind partial (lineIsValid rejects any
+\r-ending text, so the `complete` classification can never see a
+corrupt tail): no double-count in recordTexts or reliedBytes.
+
+THIS ROUND — WHOLE-FILE FRESH EYES + CONTRACT RE-VERIFICATION.
+Answer each in <=4 sentences; every finding must name a concrete
+byte-sequence or interleaving and the wrong observable outcome.
+
+Q1. HEADER CONTRACT vs CODE: re-read the module header (its V-g*
+invariants and the decision-provenance rule "a caller-visible
+return is a decision about standing bytes"). Any return path in
+appendUnit/replay that hands the caller a decision NOT re-proven
+under that rule, or any header claim the code no longer makes
+true?
+Q2. LOCK/REGISTRY PATHS: acquireLock takeover, sweep bounds,
+release, heartbeat interplay with the NEW replay-side gates — can
+a refused pass (identity/corruption throw) ever leave a claim,
+registry residue, or watermark state that wedges a legitimate
+successor beyond the documented bounds?
+Q3. DURABILITY ACCOUNTING: provenThrough/provenOn across the
+newly-possible refusal sequences (refuse at (c0) tailCorrupt,
+then operator edits the file in place keeping the same inode —
+does the next pass correctly treat post-edit bytes as
+unproven?).
+Q4. Anything else provable anywhere in the file. If truly
+nothing survives, say CLEAN and name the two scenarios you tried
+hardest to break.

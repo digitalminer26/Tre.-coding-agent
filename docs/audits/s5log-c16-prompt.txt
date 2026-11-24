@@ -1,0 +1,34 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 16 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c14 folded two header overstatements (cold-instance sync
+shape; emptyPartial sweep gate for pidless entries). c15 folded the
+error-taxonomy findings: (F1) environment failures on the log path
+(EACCES/EISDIR) documented as RAW errno-bearing escapes — not
+protocol states, fail-closed, claim released; (F2) ALL plain-Error
+wrap sites (lock acquire x3, mkdirDurably, ancestor sync, ritual
+x2) now preserve cause + code. New tests pin both (77/77 s5log,
+3061/0 full, tsc clean). c15 Q1 (racing acquirers) and the traced
+interleavings held.
+
+TASK — adversarial: assume a defect EXISTS. Probe regions this arc
+has hit LEAST: the NDR-r classification core and the redelivery/
+refile logic (not the lock/fsync periphery).
+
+Q1. NDR-r CLASSIFICATION: three identity cases (identical redelivery
+= refile, same-act divergent = ReplayIntegrity refusal, new act =
+new attempt). Construct byte-level record sequences (ids, kinds,
+payloads, timestamps in the wire format) where the classification
+would key on the WRONG field or collapse two distinct cases. Trace
+the exact comparison code.
+Q2. REFILE/IDEMPOTENCE BOUNDS: duplicate ids across SEPARATE acts,
+refiled-only status accounting, durability flags on refiled receipts,
+and the interaction with tail repair (a redelivered record whose
+stored copy sits in a partial tail being truncated away). Any wrong
+observable outcome?
+Q3. REPLAY vs APPENDUNIT divergence: build concrete files where
+replay() and a pass's internal prefix would disagree on records,
+durability labels, or corruptLines AFTER all folds. Quote both code
+paths.
+Q4. Anything else provable. If nothing survives, say CLEAN and name
+the two scenarios you tried hardest to break.

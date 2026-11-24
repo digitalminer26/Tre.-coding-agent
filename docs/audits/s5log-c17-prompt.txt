@@ -1,0 +1,31 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 17 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c14: header precision (cold-instance sync shape; emptyPartial
+sweep gate). c15: error taxonomy — env failures on the log path
+documented as RAW errno escapes; ALL plain-Error wraps (acquire x3,
+mkdirDurably, ancestor sync, ritual x2) now carry cause + code; two
+new tests pin EACCES paths. c16: classification core held (Q1-Q3
+clean); intra-unit duplicate → refiled documented+tested (F1);
+classifyRedelivery re-serialization caution added (F2). Suite:
+78/78 s5log, 3062/0 full, tsc clean.
+
+TASK — adversarial: assume a defect EXISTS.
+
+Q1. THE NEW cause/code PLUMBING (c15 fold): read every fold site.
+Does any path lose the errno the fold promises (e.g. an inner
+already-wrapped error re-wrapped, a non-Error thrown where ?.code
+is read)? Is any caller-facing message now misleading? Find the
+concrete site.
+Q2. SYNC FN CONTRACT: injected sync (SyncFn) receives labels; what
+happens if it THROWS on a specific label mid-ritual, returns
+non-void, or mutates its args? Any state (watermark, marker,
+provenOn, claim) left inconsistent by a throw at each label? Walk
+every label.
+Q3. INSTANCE LIFECYCLE across MULTIPLE PASSES: same instance,
+append → external truncation → append; append → identity change →
+replay; replay → append on the same instance after the file was
+fully rewritten. Where can cached state (provenOn, watermark,
+marker trust) serve a proof the current bytes do not deserve?
+Q4. Anything else provable. If nothing survives, say CLEAN and name
+the two scenarios you tried hardest to break.

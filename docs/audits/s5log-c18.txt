@@ -1,0 +1,13 @@
+**Q1 (c17 shrink fix).** Sound as far as it goes. When the same inode shrinks below `provenThrough`, `ensureEstablished` (under `provenOn !== null`) zeroes the watermark. The next `appendUnit` then sees `reliedBytes > 0 = provenThrough` and runs `establish-prefix` on an fd that passes `assertSameInode`. The shrink-to-0 case gives `reliedBytes = 0`, so nothing unsynced is labeled proven. The regrow-after-shrink case is caught by the relied-bytes comparison whenever the regrown file exceeds the old watermark; the only gap is the same-size rewrite, which the header already documents. The c17 test does discriminate: without the fix, `provenThrough` (~50) ≥ `reliedBytes` (~24), so no establish would run.
+
+**Q2 (header vs code).** The header says lock and bootstrap syncs "run only on the cold/absent/marker-unusable path (audit c13-F1)" and that "an instance whose watermark already covers every relied byte issues exactly the decision fsync and nothing else." Both are false: `acquireLock` (line `sync(fd, "lock-acquire")`) runs on every acquisition, so every warm append and every `replay()` issues a `lock-acquire` fsync.
+
+**Q3 (test honesty).** The tests that claim "one fsync per pass" (V-g13, c10-F1, c11, watermark-advance) filter for `append`/`repair`/`establish-prefix` only. They cannot see `lock-acquire`, so they pass while the header's exact-count claim is false. The c17, c12, c13, c15, c16 and c2-Q2 tests I checked do attach their spies before the operation under test and would fail if their named behavior regressed.
+
+**Q4.** Finding below.
+
+**Findings**
+
+1. **Header/code contradiction on fsync count (header lines "ONE FSYNC PER PASS" and "Lock and bootstrap syncs ... run only on the cold/absent/marker-unusable path"; code: `acquireLock`, `sync(fd, "lock-acquire")`).** Call sequence: a warm instance with a proven marker and full watermark calls `append(r)`. Observed sync labels: `["lock-acquire", "append"]`. The header promises `["append"]`. Every test that asserts the exact count filters out `lock-acquire`, so the regression is invisible to the suite. Fix either the header or the code path, and add a test that counts all labels.
+
+2. **Overstated shrink-detection claim (header, identity bullet: "an in-place TRUNCATE below the watermark is visible through st_size ... the whole proof is dropped").** Detection depends on `st.size < provenThrough` at the moment `ensureEstablished` runs. A truncate followed by a rewrite that is larger than the watermark is handled only indirectly, through the relied-bytes comparison. The header should say that shrink detection is size-sampled between passes, not continuous.

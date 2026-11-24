@@ -1,0 +1,22 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CONFIRMING CYCLE 12.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c11 found (F1) a stale header sentence in "ONE FSYNC PER
+PASS" that said exactly one fsync of the log fd per writing pass,
+and (F2) an untested warm-log + deleted-marker path that issues a
+`log-file` ritual sync plus the decision `append` sync. The fold
+reworded the header (exactly one DECISION fsync; establishment syncs
+are separate and may precede it) and added test "c11 contract: warm
+log + deleted marker". c12 must review the post-fold text.
+
+TASK — answer each in <=4 sentences. Any finding must name a concrete
+byte sequence or interleaving and the wrong observable outcome.
+
+Q1. HEADER vs CODE, post-fold: check every fsync-count and ordering
+claim in the module header (ONE FSYNC PER PASS section, pass-order
+paragraph, V-g13 wording) against appendUnit, replay, and
+establishDurability. Is any sentence still false or overstated?
+Q2. TEST vs HEADER: do the c10-F1 and c11 tests pin the header's
+claims, and could either pass while its claim is false?
+Q3. Anything else provable in the file. If nothing survives, say
+CLEAN and name the two scenarios you tried hardest to break.

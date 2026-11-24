@@ -1,0 +1,23 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CONFIRMING CYCLE 11.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c10 found one minor header-contract mismatch (header said
+"exactly ONE fsync of the log fd" per writing pass; a cold instance
+on a warm log pays establish-prefix + pass sync). The fold reworded
+the header (V-g13 bounds the DECISION sync; establish-prefix is a
+watermark proof of bytes already on disk, v33) and added the test
+"c10-F1 contract". c11 has NOT yet reviewed this post-fold text.
+
+TASK — answer each in <=4 sentences. Any finding must name a concrete
+byte sequence or interleaving and the wrong observable outcome.
+
+Q1. HEADER vs CODE, post-fold: read the module header's fsync and
+ordering claims (pass order, V-g13, establish-prefix, one-fsync
+wording) and check every claim against the code paths in appendUnit
+and replay. Is any header sentence now false, or does the reworded
+claim overstate or understate what the code does?
+Q2. TEST vs HEADER: does the c10-F1 test actually pin the header's
+claim, or could the test pass while the claim is false (e.g. a
+spy that misses a sync label)?
+Q3. Anything else provable in the file. If nothing survives, say
+CLEAN and name the two scenarios you tried hardest to break.

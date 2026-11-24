@@ -1,0 +1,9 @@
+Q1. Lock-acquire sync failure: the catch unlinks our entry and closes fd, then throws a plain Error; no watermark or marker is touched, and a fresh instance acquires and decides identically. Clean.
+Establish-prefix sync failure: the throw happens before `provenThrough = reliedBytes`, so the watermark stays at its pre-pass value; the marker is not yet written (the ritual's log-file sync precedes marker write), and the next instance re-runs the same decision. Clean.
+Mutation-pass sync failure: `provenThrough` was clamped to `completeBytes` before mutation and is only raised after the sync succeeds, so bytes written and un-synced are never proven. A fresh instance re-classifies the same bytes and pays establish-prefix, matching what the failed pass owed. Clean.
+
+Q2. The holder's own gate throws (e.g. assertSnapshotIntact reading a 2 GiB file, or a slow sync) leave the claim file on disk with its last mtime. The sweeper only removes an entry if the pid probe reports the holder dead, and a still-executing holder is alive. The sweep never admits a takeover against a live pid, so a stalled-but-live holder cannot be displaced, and sole-occupancy admission still yields while the entry exists. The stale window only governs removal of dead-pid residue, which the pid gate already protects. No mutual-exclusion violation found.
+
+Q3. A forged marker cannot advance the watermark. `readMarker` only gates whether the ritual runs; `establishDurability` returns `provenBytes: 0` on a marker-skipped path, and the watermark is set only from a sync that ran on a descriptor (`syncedIdentity`, `provenOn`). So a forged marker yields `durability: "unproven"` and forces an `establish-prefix` sync before reliance. The forged marker is a trust-model question for the dir-entry claim only, and it never produces a "proven" label for bytes no instance synced in this lineage. No wrong observable outcome reached.
+
+Findings: No findings.

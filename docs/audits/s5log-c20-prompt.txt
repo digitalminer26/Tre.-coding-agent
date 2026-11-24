@@ -1,0 +1,37 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 20 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c18: lock-acquire-documented-on-every-acquisition + all-
+labels test; shrink wording -> size-SAMPLED. c19: exhaustive header
+sweep — only one FALSE item: takeover rules omitted the well-formed-
+dead-creator removal at ANY age (doc fold; behavior already pinned
+by the c6-M3 test). Everything else in the header swept TRUE.
+Suite: 80/80 s5log, 3064/0 full, tsc clean.
+
+REGIONS THE ARC HAS NOT PROBED (target them this cycle):
+- `sweepStaleClaims` internals: the re-stat/no-change verification
+  before unlink, the token re-read, the catch-continue on vanished
+  entries, ordering of gates.
+- `readMarker` / marker file format: what bytes make a marker
+  well-formed vs malformed; marker with trailing garbage; marker
+  as directory; empty marker.
+- `retrySleepMs` and other exported helpers: contract vs behavior.
+- `touchLock` and the refresh-during-long-unit path.
+- `pidAlive` edge: pid 0, negative pids, our OWN pid in a foreign
+  claim name.
+
+TASK — pick 3+ of these regions and attack them concretely. Any
+finding: byte sequence or call sequence + wrong observable outcome +
+cited line.
+
+Q1. sweep internals: construct an entry that is removed although
+its content changed mid-sweep (TOCTOU), or one that survives
+although its holder is dead. If the re-verify closes it, say so
+with the line.
+Q2. marker format: plant each malformed marker shape; state what
+the pass does (ritual? skip? refuse?) and whether that matches the
+header's claims about well-formedness.
+Q3. own-pid claim forgery + pid edges: trace parseClaimName and
+claimHolderPid for adversarial inputs (claim-0-..., claim with two
+pids disagreeing name vs token, pid = our own).
+Q4. Anything else provable. CLEAN + two hardest scenarios otherwise.

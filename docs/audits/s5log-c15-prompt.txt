@@ -1,0 +1,33 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CYCLE 15 of the arc.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c13 folded doc precision (lock/bootstrap syncs listed as
+additional; unreadable-marker trigger named; order pinned by test).
+c14 folded two header overstatements: (F1) "warm marker-established
+pass = decision fsync and nothing else" corrected to watermark-based
+wording (a COLD instance on a marker-valid log still pays
+establish-prefix — the c10-F1 shape); (F2) the NULL-PID sweep
+paragraph now names the emptyPartial gate (0-byte entries swept at
+1 s, every shape). Suite 3059/0 full, 75/75 s5log, tsc clean.
+
+TASK — adversarial, not confirming: assume a defect EXISTS and hunt
+it. Any finding must name a concrete byte sequence or interleaving
+and the wrong observable outcome.
+
+Q1. CONCURRENCY INTERLEAVINGS not yet probed by tests: pick a
+two-process interleaving the single-process test suite structurally
+cannot express (racing acquirers, takeover races, sweep vs touch,
+marker tmp-file rename races) and reason it through the code step by
+step. Does any order produce double-ownership, a forged proof, or a
+wedged registry?
+Q2. ERROR TAXONOMY: enumerate every throw site's error CLASS
+(Identity/Corruption/LockBusy/LockLost/InvalidInput/ReplayIntegrity/
+raw). Find any site where a raw errno escapes a pass that the
+header's taxonomy says must classify, or where two different failure
+modes collapse into one class a caller cannot distinguish.
+Q3. SIZE/BOUNDARY inputs: empty file, 1-byte file, file of only
+newlines, exactly-2GiB boundary minus one, path without a directory,
+symlinked log, read-only dir. Trace each through readState →
+appendUnit. Any wrong classification or uncaught throw?
+Q4. Anything else provable in the file. If truly nothing survives,
+say CLEAN and name the two scenarios you tried hardest to break.

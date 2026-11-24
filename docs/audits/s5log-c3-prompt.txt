@@ -1,0 +1,138 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts` (an append-only JSONL log
+transport with a directory-registry lock, per-file durability
+establishment, a byte durability watermark bound to file identity
+AND content digest, and a tail repair model). 5-cycle audit run,
+CYCLE 3 of 5. You are auditing the CURRENT working tree, which
+folds your cycle-2 findings.
+
+CONTEXT: this module survived seven prior cycles plus two audited
+rounds (c1, c2 — your predecessor's output is quoted below). Suite
+green 66/66, tsc clean. Your cycle-2 findings were adjudicated as:
+
+FOLDED (verify the FOLD is correct — a defective fold is a valid
+finding; re-deriving the old scenario is not):
+ - c2-Q2 (transient listing failure refused without waiting): the
+   mine===undefined / listingFailed branch no longer throws on the
+   first failed listing. It closes its fd, unlinks its own entry
+   (leaving it would carry OUR LIVE pid — the c1-Q3 self-wedge),
+   checks the deadline, and falls through to backoff+retry: a
+   single EMFILE/EIO consumes none of the budget; a PERSISTENT
+   listing failure burns the whole lockWaitMs and fails CLOSED as
+   S5LockBusyError (never lockless, never early). Regression
+   tests pin both the transient-retry and the persistent fail-
+   closed shapes.
+ - c2-Q3 (mid-pass external rm made the documented recovery a
+   dead path that recreated the operator's file): the mutation
+   phase now refuses a MID-PASS deletion BEFORE running the fresh-
+   instance ritual. Scope rule shared by all c2-Q3 guards: the
+   recreate ritual is legitimate ONLY when this pass read nothing
+   (`state.identity === null` — the deletion preceded the read);
+   with bytes read and the path gone, the deletion is mid-pass and
+   every caller-visible decision about those bytes is refused as
+   S5LogIdentityError, leaving no file behind. Four guard sites:
+   (S1) pre-ensureEstablished check in appendUnit, (S2) the
+   establishing-sync openSync ENOENT classified into the identity
+   error, (S3) the refiled-only receipt fence (decision
+   provenance: no receipt for a deleted log), (S4) the mutation-
+   phase pre-ritual nested check, (S5) the same pre-
+   ensureEstablished check in replay().
+   MUTATION MATRIX (delete or invert each site, run the suite):
+   S2, S3, S4 and every inversion are killed by >=1 red test.
+   DELETIONS OF S1 AND S5 SURVIVE THE SUITE — disclosed
+   residual, your call whether it is a finding: their protected
+   window (between readState's return and ensureEstablished's
+   first touch of the path) contains no caller-side seam (no
+   sync has run yet, make() has not been called), so no
+   deterministic in-process test can inject the rm there (the
+   suite uses a sync-callback seam; ESM live bindings forbid
+   monkey-patching node:fs). Failure mode WITHOUT the guard is
+   bounded: a later identity gate still refuses with
+   S5LogIdentityError, the only delta being the ritual
+   recreating the operator-deleted file + republishing its
+   durability marker — which establishDurability's marker-vs-log
+   coherence fold self-heals on the next pass. The DIRECTION of
+   both guards (must NOT fire when identity===null) is pinned by
+   complement tests: inversion is killed.
+
+REJECTED (rebuttal — report only if you can break the rebuttal with
+a concrete interleaving):
+ - c2-Q1 "No defect found" (assertSnapshotIntact under the claim)
+   stands.
+
+YOUR PREDECESSOR'S CYCLE-2 OUTPUT (for context):
+<<<
+**Q1.** No defect found. `assertSnapshotIntact` runs under the
+claim, so a non-cooperating writer is the only source of change,
+and the remaining swap (a byte-identical recreation) is the
+accepted escape. The `identity === null` branch compares against
+`provenOn`, which is set by the same ritual that created the file.
+The empty and invalid-UTF-8 early returns in `readState` both
+carry `contentDigest`, so the gate never sees a null digest for an
+existing file.
+
+**Q2.** Yes, one new false refusal. The first-enumeration
+`listingFailed` branch throws `S5LockBusyError` immediately, with
+no backoff and no retry, so a single transient `readdir` error
+(EMFILE, EIO) refuses without using `lockWaitMs`. The post-yield
+path is bounded by the deadline, so it does not wedge. The
+`mine === undefined` unlink-then-throw path is correct.
+
+**Q3.** One reachable path leaves the operator-deletion recovery
+dead. Writes go to `r+` only after the pass has already read the
+file, so an external `rm` between `readState` and the mutation
+makes `state.identity` non-null. The `!existsSync` re-establish
+branch then runs, but `assertSameInode(state.identity ??
+this.provenOn, …)` compares against the vanished inode and
+refuses. Nothing is written, so this is not corruption, but the
+code path it documents never succeeds.
+
+**Findings**
+
+1. MINOR (false refusal, Q2): transient listing failure refuses
+   without waiting. [folded as above]
+
+2. MINOR (dead recovery path, Q3): same-instance deletion re-
+   establish always fail-stops. [folded as above]
+>>>
+
+ALREADY-FOUND-AND-ADJUDICATED in EARLIER rounds (do NOT re-report;
+break the FOLDED code with a concrete interleaving or it is out):
+ - rename-verify lock protocol (removed c4 B1); (createdMs,name)
+   ordering admission (removed c6 B1, clock skew) — replaced by
+   sole-claim exclusivity.
+ - watermark/path-identity shapes (c7 M2: identity from the SYNCED
+   fd); foreign-bytes-proven race.
+ - deterministic retry lockstep (fixed: jittered retrySleepMs).
+ - replay snapshot whose inode ceased to stand (fixed c8, digest-
+   backed pre-return proof).
+ - self-wedged registry on listing failure (c1-Q3), immediate
+   refusal on first listing failure (c2-Q2), mid-pass rm dead
+   recovery (c2-Q3) — all folded, see above.
+ - pid-reuse / zombie liveness, null-pid sweep residual, 2 GiB
+   readFileSync cap, cross-host flock, byte-identical-recreation
+   escape at the digest gate: DOCUMENTED ACCEPTED residuals, out
+   of scope.
+
+QUESTIONS (answer each in <=4 sentences, then the numbered findings):
+Q1. Are the FOUR c2-Q3 guards jointly exhaustive and individually
+    sound? Specifically: is there a caller-visible decision path
+    (return value OR thrown-error class) reachable with
+    `state.identity !== null` and the path gone that does NOT
+    pass one of the four guards (or another identity gate)? Or a
+    guard that fires when it should NOT (e.g. identity===null
+    shapes, tailKind paths, the repair paths, the inter-pass rm
+    legitimate recreate)?
+Q2. Does the c2-Q2 retry fold introduce a NEW defect: an entry
+    leak across retry rounds (entry created per round? removed on
+    every exit?), a lost-wakeup livelock (backoffSleepSync past
+    the deadline?), or a window where the pass proceeds WITHOUT a
+    held claim after the listing-failed continue?
+Q3. Any remaining path where a caller observes records/acks/
+    receipts whose bytes were never the standing file's, or two
+    mutators share a unit, or a claim/registry entry outlives its
+    holder permanently, or an rm'd log is recreated/republished by
+    a FAILING pass — NOT covered by the accepted residuals?
+
+Findings: numbered, each with scenario (concrete call sequence ->
+wrong observable outcome), region, and minimal fix direction. If
+none, say "No findings" per question.

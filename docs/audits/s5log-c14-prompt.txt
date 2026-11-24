@@ -1,0 +1,26 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts`. CONFIRMING CYCLE 14.
+Audits the CURRENT working tree (source + test attached).
+
+CONTEXT: c13 folded three doc-level findings: (F1) the ONE FSYNC PER
+PASS section now lists lock/bootstrap syncs (lock-acquire, log-dir,
+marker-file, marker-dir) as ADDITIONAL to the decision fsync; (F2)
+the bootstrap carve-out now names the unreadable/malformed marker as
+a trigger (pass-order line + V-g4 bullet); (F3) test "c13 contract"
+pins ritual-before-make() ORDER by snapshotting spy labels inside
+make(). Prior folds: c10-F1 (decision-sync wording + cold-on-warm
+test), c11 (marker-deleted warm-log shape pinned), c12 (bootstrap
+carve-out documented; refusal-after-ritual test).
+
+TASK — answer each in <=4 sentences. Any finding must name a concrete
+byte sequence or interleaving and the wrong observable outcome.
+
+Q1. Whole-header sweep: read the module header top to bottom and
+check EVERY remaining factual claim about the code (lock protocol,
+sweep rules, marker semantics, watermark, tail classification, error
+taxonomy) against the current source. Quote any sentence that is
+false, incomplete, or overstated.
+Q2. Test claims vs behavior: for each test whose name cites an audit
+cycle (c10-F1, c11, c12, c13), can it pass while its cited claim is
+false?
+Q3. Anything else provable in the file. If nothing survives, say
+CLEAN and name the two scenarios you tried hardest to break.

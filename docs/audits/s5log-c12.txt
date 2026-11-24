@@ -1,0 +1,12 @@
+**Q1.** One sentence is false. The header says recovery's "(c1a) semantic checks run before ANY establishing sync" and gives the order "(c1a) → (c1c)". But `appendUnit` calls `ensureEstablished()` before `make()`, and that runs the full ritual (`log-file`, `log-dir`, `marker-file`, `marker-dir`) whenever the marker is missing or the log is absent. The ONE FSYNC and V-g13 wording is otherwise consistent with the code: the decision sync is single, and establishment syncs are described as separate.
+
+**Q2.** The c11 test pins only the decision-fsync count and the call sequence `["log-file","append"]`. It does not test the (c1a) claim. The "(c1a) ordering (cycle-2 f3)" test uses a warm marker, so `ensureEstablished` does nothing, and it asserts only that there is no `establish-prefix`. It would pass with the false header sentence still in place. No test covers make-throws-after-a-cold-ritual.
+
+**Q3.** Finding below. I tried hardest to break (a) the watermark-clamp and repair-failure path, where a failed repair fsync must not leave a stale proof over replacement bytes (it is clamped before mutation, so it holds); and (b) the post-sync identity check, where an rm lands after the append fsync (the `assertSameInode(this.provenOn, identityOfPath…)` gate catches it, and `provenOn` is non-null there because the mutation branch set it from the synced fd).
+
+**Finding 1 (header/code contradiction, provable).**
+- Setup: log exists, marker file deleted (`unlinkSync(p + ".durability")`), no `.durability` on disk.
+- Call: `new S5Log({path, sync: spy}).appendUnit(() => { throw new Error("c1a") })`.
+- Code path: validation passes, then `ensureEstablished()` runs `establishDurability`, which does `openSync`, `sync(fd,"log-file")`, `syncDir` (`log-dir`), writes the marker, and syncs `marker-file` and `marker-dir`. Only then does `make()` run and throw.
+- Observable: the spy records `["log-file","log-dir","marker-file","marker-dir"]`, and `p.durability` is recreated on disk even though the semantic check refused the pass. The header's "(c1a) before ANY establishing sync" is therefore false for cold or marker-missing logs. The fix is to either move `ensureEstablished()` after `make()`, or reword the header to say that the ritual precedes `make()` and only `establish-prefix` follows it.
+- Add a test: delete the marker, `make` throws, assert no sync label and no marker. This fails under the current code, which is the point.

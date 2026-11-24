@@ -1,0 +1,77 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts` (append-only JSONL log
+transport: directory-registry lock, per-file durability
+establishment, byte watermark bound to file identity AND content
+digest, tail repair model). 10-cycle run, CYCLE 7 of 10. Auditing
+the CURRENT working tree (source + test suite attached). Prior
+rounds c1-c6; c6 returned CLEAN. Suite green 68/68, tsc clean,
+full project suite 3052/3052.
+
+STATE: c5-Q1 (refiled-only full snapshot proof) folded verbatim per
+your predecessor; durable-but-refused ack documented in the header;
+c4-F1 adjudication corrected to "bounded, self-healing, one-pass
+fail-closed refusal" (see s5log-c4-prompt.txt fold log 2);
+lock error strings de-"flock"ed. c6 verified: post-gate throws are
+confined to vanish/replace, retry dedup sound, TOCTOU inside
+assertSnapshotIntact collapses into the byte-identical-recreation
+residual, 2 GiB interplay fails closed.
+
+DISCLOSED, ACCEPTED RESIDUALS (out unless broken concretely):
+S1/S5 guard-deletion suite-survival; byte-identical recreation at
+the digest gate; rm after the final ack gate; pid-reuse/zombie
+liveness; null-pid sweep; 2 GiB read cap; cross-host flock;
+raw-errno taxonomy gap on unclassified I/O paths; the corrected
+c4-F1 one-pass appearance refusal.
+
+FOLDED HISTORY (break the code, don't re-derive): rename-verify
+(c4 B1), (createdMs,name) admission (c6 B1), synced-fd identity
+(c7 M2), jittered retry, digest-backed replay proof (c8),
+listing-failure self-wedge (c1-Q3), instant refusal on first
+listing failure (c2-Q2), mid-pass rm rebase (c2-Q3), post-sync ack
+gate (c3-Q1), refiled-only full proof (c5-Q1), durable-but-refused
+contract doc.
+
+c6 OUTPUT (predecessor, CLEAN):
+<<<
+Q1: contract delivered; post-fsync throws confined to
+identityOfPath/assertSameInode; watermark/provenOn stay on synced
+inode; retry appends once. No finding.
+Q2: TOCTOU inside assertSnapshotIntact real but collapses to
+byte-identical residual; 2 GiB -> raw ERR_FS_FILE_TOO_LARGE =
+disclosed gap, fails closed. No new finding.
+Q3: CLEAN. Checked admission sole-occupancy, dead-residue sweep,
+watermark/provenOn transitions, absent-log/marker-skip, release
+ordering.
+>>>
+
+THIS ROUND'S ANGLE — the paths c6 did NOT enumerate. Answer each in
+<=4 sentences:
+Q1. FAILURE-PATH ARITHMETIC: pick three sync failures at different
+    sites (lock-acquire sync, establish-prefix sync, mutation-pass
+    sync). For each: what caller-visible class escapes, what the
+    watermark/provenOn/durability-marker state is after, and does a
+    FOLLOWING pass on a fresh instance make the same decision the
+    failed pass would have owed? Any site where a failed sync
+    advances state it must not (marker written without sync,
+    watermark past an un-synced boundary)?
+Q2. HEARTBEAT/STALE-WINDOW INTERPLAY: touchLock runs before some
+    returns and after others (refiled-only vs acked vs replay).
+    Construct an interleaving where a holder's own gate throw
+    leaves the claim live past lockStaleMs while a sweeper admits a
+    takeover that violates mutual exclusion with a STILL-EXECUTING
+    first holder (not a crashed one — executing, blocked inside a
+    2 GiB read or a slow sync). Concrete sequence -> wrong
+    observable outcome, or say the bounded-phase rule / sweep
+    liveness proof excludes it.
+Q3. MARKER COHERENCE ACROSS IDENTITY CHURN: the durability marker
+    file is a SEPARATE path from the log. Sequence: establish log
+    L1; external actor rm's L1 AND rewrites the marker with a fresh
+    timestamp claiming durability of bytes that never existed; a
+    fresh instance bootstraps. Does anything accept the forged
+    marker as evidence (watermark advance without any sync in this
+    lineage), and if so is that inside the documented trust model
+    (marker content vs the digest gate)? Any wrong observable
+    outcome reachable, e.g. replay labeling bytes "proven" that no
+    instance's fsync in the current lineage covered?
+
+Findings: numbered, scenario -> wrong observable outcome, region,
+minimal fix direction. If none, "No findings" per question.

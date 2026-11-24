@@ -1,0 +1,15 @@
+**Q1 (cause/code plumbing):** CLEAN. Every fold site (`mkdirDurably` x2, acquire x3, `establishDurability` x2, the ritual wrap) preserves `cause` and `code`, and the `?.code` reads are safe for non-Error throws. The inner messages are only embedded in the wrap text, so no errno is dropped. The `marker-file` open and `renameSync` sit outside the wrapping try and escape raw, which matches the documented c15-F1 scope.
+
+**Q2 (SyncFn throw / mutation at each label):** Walked all eight labels. `log-file`, `log-dir`, `lock-acquire` and `marker-file` clean up their fd and entry before rethrowing. `repair` and `append` clamp the watermark before the write and never advance it on a throw. `establish-prefix` leaves `provenThrough` and `provenOn` unmoved. The one residual is `marker-dir`: the marker is already renamed into place when it throws, so the next pass reads a well-formed marker and skips the ritual. That is safe, because the log's own dir entry was synced earlier, and the only cost is a marker that may not survive a crash. No inconsistent proof results.
+
+**Q3 (multi-pass caching):** One concrete defect. The watermark is only checked against the inode identity, never against the file's size or content.
+
+**Q4:** Nothing else provable. The two scenarios I tried hardest to break were the post-`ensureEstablished` rm+recreate interleaving (caught by the identity gates) and the `refiled-only` receipt under a mid-pass rm (caught by the digest fence). Both hold.
+
+**Findings:**
+
+1. **Same-inode shrink-and-regrow leaves an unsynced byte range marked "proven".**
+   - Sequence: instance A appends and proves N bytes (`provenThrough = N`, `provenOn = inode X`). An external writer, without rm, truncates the file in place to 0 and rewrites 10 bytes of valid records (L = 10 ≤ N).
+   - Next pass on A: `ensureEstablished` sees the same inode and keeps the watermark. `reliedBytes = 10 ≤ provenThrough = N`, so no `establish-prefix` runs and `prefix.durability` is `"proven"`.
+   - Wrong outcome: a decision (and a `refiled` receipt, or `replay()`'s `durability: "proven"`) rests on bytes this instance never synced. The watermark records a byte count, but the bytes it covers have changed.
+   - The header calls this out of scope as "identity, not content". The byte-count watermark itself is still stale here, so the `"proven"` label is false. The fix is cheap: clamp `provenThrough` to the observed file size in `ensureEstablished` (and drop it to 0 if `size < provenThrough`) before any pass relies on it.

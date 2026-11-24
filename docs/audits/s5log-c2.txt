@@ -1,0 +1,17 @@
+**Q1.** No defect found. `assertSnapshotIntact` runs under the claim, so a non-cooperating writer is the only source of change, and the remaining swap (a byte-identical recreation) is the accepted escape. The `identity === null` branch compares against `provenOn`, which is set by the same ritual that created the file. The empty and invalid-UTF-8 early returns in `readState` both carry `contentDigest`, so the gate never sees a null digest for an existing file.
+
+**Q2.** Yes, one new false refusal. The first-enumeration `listingFailed` branch throws `S5LockBusyError` immediately, with no backoff and no retry, so a single transient `readdir` error (EMFILE, EIO) refuses without using `lockWaitMs`. The post-yield path is bounded by the deadline, so it does not wedge. The `mine === undefined` unlink-then-throw path is correct.
+
+**Q3.** One reachable path leaves the operator-deletion recovery dead. Writes go to `r+` only after the pass has already read the file, so an external `rm` between `readState` and the mutation makes `state.identity` non-null. The `!existsSync` re-establish branch then runs, but `assertSameInode(state.identity ?? this.provenOn, …)` compares against the vanished inode and refuses. Nothing is written, so this is not corruption, but the code path it documents never succeeds.
+
+**Findings**
+
+1. **MINOR (false refusal, Q2): transient listing failure refuses without waiting.**
+   Scenario: the first `liveClaims(regPath)` call after our `openSync(claimPath, "wx")` hits a transient `readdirSync` error. It returns `listingFailed: true` with an empty list, so `mine === undefined` and `listingFailed` is true. The code unlinks our entry and throws `S5LockBusyError` at once, even though `lockWaitMs` has not elapsed and the registry may be empty. Observable outcome: a busy refusal under a one-off EMFILE, when a retry would have succeeded.
+   Region: `acquireLock`, the `mine === undefined` / `listingFailed` branch.
+   Fix direction: on `listingFailed`, unlink and fall through to the deadline/backoff path instead of throwing immediately.
+
+2. **MINOR (dead recovery path, Q3): same-instance deletion re-establish always fail-stops.**
+   Scenario: a pass's `readState` reads a file (identity X). An external actor deletes the log before the mutation phase. The `!existsSync` branch re-runs `ensureEstablished()`, which creates inode Y. `assertSameInode(state.identity ?? this.provenOn, identityOfFd(fd), …)` then compares X against Y and throws `S5LogIdentityError`. The documented recovery never completes, and the caller sees a refusal after it has already recreated the file and republished the marker.
+   Region: `appendUnit`, the post-`assertClaimHeld` `!existsSync` branch and the mutation-descriptor identity check.
+   Fix direction: after re-establishment, rebind the expected identity to `provenOn` (the newly established inode), or refuse before re-establishing so the file is not recreated on a failing pass.

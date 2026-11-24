@@ -1,0 +1,13 @@
+**Q1 (interleavings):** I traced two racing acquirers. Both create entries, both sweep, and both list. If either sees a second live entry, it unlinks its own entry and yields. Only a listing showing exactly one entry admits, and a later creator always sees the admitted holder's entry until release, so no double ownership arises. Takeover stays fenced by the pid probe plus the re-stat and token re-read in `sweepStaleClaims`. I found no forged-proof or wedge sequence.
+
+**Q2 (taxonomy):** `readState` rethrows any non-ENOENT `openSync`/`readFileSync` error raw. That includes EACCES on an unreadable log, EISDIR when the log path is a directory (Linux `openSync(dir,"r")` succeeds and the later read throws), and `ERR_FS_FILE_TOO_LARGE` at 2 GiB. `acquireLock` and `establishDurability` wrap failures in plain `Error`s with no class, so a caller cannot tell a permission failure from a sync failure.
+
+**Q3 (boundaries):** Empty file gives `lines=[]`, `tailKind="none"`, and a valid identity. A 1-byte `"\n"` gives `lines=[""]`, which fails `lineIsValid` and reports line 1 corrupt. A 1-byte `"x"` is a partial tail and is truncated. A path with no directory resolves `dirname` to `"."`, which exists. For a symlinked log, `openSync`, `statSync`, and `fstat` all follow the link, so identities agree. The read-only directory case is traced in finding 2. The 2 GiB boundary is in finding 1.
+
+**Q4 / findings:**
+
+1. **Raw error escape (readState, Q2/Q3).** Input: `chmod 000 s5.jsonl` (or make it a directory, or grow it to ≥2 GiB). `appendUnit` calls `readState`, which throws raw EACCES, EISDIR, or `ERR_FS_FILE_TOO_LARGE` from inside the `try`. The `finally` releases the lock, but the caller receives an unclassified errno instead of any taxonomy class. The header's scope note covers only the size limit, not the uncaught raw throw.
+
+2. **Unclassified acquire failure (acquireLock, Q2).** Input: a read-only parent dir so `mkdirSync(regPath)` fails EACCES. `acquireLock` throws a plain `Error("S5 lock acquire failed…")`, indistinguishable from a sync failure or a durability failure. Nothing is written, so this is a classification defect and not a data defect.
+
+No double-ownership, forged-proof, or wedge scenario survived the trace.

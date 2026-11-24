@@ -1,0 +1,12 @@
+**Q1 (header sweep).** Two header sentences are false against the code.
+
+- The ONE FSYNC PER PASS paragraph says "a warm, marker-established pass issues exactly the decision fsync and nothing else." The same header says a cold instance whose watermark lags pays an `establish-prefix` sync, and `ensureEstablished` returns `provenBytes: 0` on the marker-skipped path. Concrete: a fresh instance on a warm, marker-valid log running `append({id:"fresh"})` issues `establish-prefix` then `append`, which the c10-F1 test pins. The sentence is overstated for any cold instance.
+- The NULL-PID paragraph says a pidless foreign entry is "removed once aged past `lockStaleMs`." `sweepStaleClaims` also removes any entry with `st.size <= 0 && age > 1000` (`emptyPartial`), and no pid check protects a pidless entry. Concrete: a 0-byte planted file `claim-` with no parseable pid (or a name like `stray`, which has no pid at all) and mtime 2 s old is swept at the next acquire under `lockStaleMs = 30000`.
+
+**Q2 (cycle-cited tests).**
+- c10-F1 contract: it checks counts and order of labels; it would fail if the header's claim were false in the other direction, so it is consistent with the code. It cannot pass with the header's "nothing else" sentence still true for cold instances, so it actually contradicts that header line.
+- c11 contract: passes only if the ritual's `log-file` precedes `append` and no `establish-prefix` runs. It does not cover the `marker-file`/`marker-dir` labels it filters out, so it cannot detect a regression in the bootstrap's extra syncs. Not a false claim.
+- c12 contract: the "no content mutated" assertion holds because `make()` throws before mutation. It does not prove the marker re-creation is the only side effect, so it is weaker than the header's carve-out wording but not false.
+- c13 order contract: `seenAtMake` snapshots the spy before `make()`, so `log-file` and `marker-dir` appearing there proves they ran before `make()`. It would fail if the ritual moved after `make()`. It is falsifiable and holds.
+
+**Q3 (anything else).** The only provable defect is the pidless-residue sweep mismatch in Q1. Two scenarios I tried to break and found holding: (1) a `fsync` failure on the marker `tmp` file leaves no marker, so retry re-runs the ritual; (2) an `rm` between the `append` sync and the ack return is caught by `assertSameInode(identityOfPath)`. Otherwise not CLEAN, because of the sweep finding.

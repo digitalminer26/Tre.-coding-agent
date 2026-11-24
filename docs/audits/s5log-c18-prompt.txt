@@ -1,0 +1,10 @@
+ADVERSARIAL AUDIT — the CURRENT uncommitted changes to `src/findings/s5log.ts` and `test/findings-s5log.test.ts`. CYCLE 18 (fresh-eyes review of the whole change set, not just the last fold).
+
+CONTEXT: an audit arc has folded c11–c17 into this file: header precision edits (warm/cold sync shape, null-pid sweep residual, bootstrap carve-out, lock/bootstrap syncs as additional to the decision fsync); error-taxonomy plumbing (`cause`/`code` on every wrapped Error; raw errno escapes for environment failures on the log path, documented); intra-unit duplicate reported as `refiled` (documented + pinned); `classifyRedelivery` re-serialization caution; and one code change: `ensureEstablished` drops the byte watermark when the same inode shrinks below it (c17-F1).
+
+TASK — assume a defect EXISTS and hunt it. Any finding must name a concrete byte sequence or call sequence and the wrong observable outcome, and must cite a line.
+
+Q1. The c17 CODE CHANGE in isolation: is dropping `provenThrough` to 0 on shrink sufficient and correct? Trace the next pass through the `this.provenThrough < reliedBytes` branch, including the case where `provenOn` is still set to the old inode and the case where the file shrank to 0 bytes. Any path that still labels unsynced bytes "proven"?
+Q2. HEADER vs CODE: read the module header top to bottom and check each remaining factual sentence against the code. Quote any that are false or overstated.
+Q3. TEST HONESTY: for each test added in c11–c17, can it pass while its named claim is false? Look especially at tests that set up a spy after construction (a spy attached too late proves nothing).
+Q4. Anything else provable. If nothing survives, say CLEAN and name the two scenarios you tried hardest to break.

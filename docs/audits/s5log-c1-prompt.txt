@@ -1,0 +1,68 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts` (an append-only JSONL log
+transport with a directory-registry lock, per-file durability
+establishment, a byte durability watermark bound to file identity,
+and a tail repair model). 5-cycle audit run, CYCLE 1 of 5.
+
+CONTEXT: this module survived seven prior adversarial cycles. The
+comments in the source record what each cycle found and folded
+(c1..c7). Fixes just landed in THIS working tree (cycle 8 folds,
+already tested, suite green 58/58, tsc clean):
+ - replay() now re-proves path identity (inode) immediately BEFORE
+   returning the snapshot (fail-stop S5LogIdentityError), covering
+   the rm / rm+recreate windows the sync-branch check cannot
+   (proven-watermark shape runs no sync at all).
+ - lock retry sleep is jittered uniform [5, cap] ms (exported as
+   retrySleepMs) to break lockstep-yield livelock.
+
+ALREADY-FOUND-AND-ADJUDICATED (do NOT re-report as new; if you
+believe one of these folds is itself defective, give the concrete
+interleaving that breaks the FOLDED code, not the old scenario):
+ - rename-verify lock protocol (removed: c4 B1), (createdMs,name)
+   ordering admission (removed: c6 B1 — clock skew), sole-claim
+   exclusivity admission replaced both.
+ - watermark bound to path-stat identity (replaced c7 M2: identity
+   taken from the SYNCED fd), foreign-bytes-proven race.
+ - deterministic retry backoff lockstep starvation (fixed c8).
+ - replay delivering a snapshot whose inode ceased to stand
+   (fixed c8: pre-return identity re-proof).
+ - pid-reuse / zombie liveness, null-pid sweep residual, 2 GiB
+   readFileSync cap, cross-host flock, in-place content tamper:
+   ALL DOCUMENTED, ACCEPTED residuals — out of scope by design.
+
+YOUR JOB — find NEW defects in the CURRENT code. Priority attack
+surfaces (not exclusive):
+ 1. The directory-registry lock: claim creation/sweep/exclusivity
+    proof/release under crash or concurrent acquirers — any
+    interleaving where TWO holders mutate, or a holder mutates
+    after its claim was swept, or release removes a foreign entry.
+ 2. The durability watermark & identity: any path where
+    provenThrough advances over bytes never synced, or a proof is
+    trusted across an identity change.
+ 3. Tail model: repair/validate/append ordering — any case where a
+    rejected pass mutates, a keepable record is truncated, or a
+    torn fragment is treated as durable.
+ 4. replay()/ensureEstablished(): marker trust rules, establishment
+    racing a writer, the new pre-return gate's own holes (e.g.
+    TOCTOU between gate and return, the `state.identity ?? this.provenOn`
+    fallback).
+ 5. The new retrySleepMs: bounds, interaction with deadline check
+    order, starvation despite jitter.
+ 6. NDR-r redelivery: any sequence where a divergent-bytes replay
+    appends, or a byte-identical redelivery corrupts prefix state.
+
+ANSWER EXACTLY THESE QUESTIONS FIRST, then findings:
+ Q1. List any interleaving (two processes A/B, or crash point) you
+     can construct from the code that violates mutual exclusion or
+     the watermark invariant. "None found" is an acceptable answer.
+ Q2. For the new pre-return identity gate in replay(): construct a
+     case where it passes but the returned snapshot does not
+     describe the bytes of the file standing at the path — or say
+     why impossible.
+ Q3. Any error path where the lock is NOT released, or released
+     while a mutation is still outstanding?
+
+FINDINGS format (numbered): severity BLOCKER/MAJOR/MINOR, the
+concrete scenario (call sequence + interleaving), the wrong
+observable outcome, and the minimal code region. A finding without
+a constructable scenario is NOT a finding. If everything checks out
+say so per question — do not invent findings to be useful.

@@ -1,0 +1,12 @@
+**Q1.** The ack gate does not refuse a path that must succeed. It compares against `provenOn`, which the mutation branch sets to the mutation descriptor's identity just before it, so repair-only (`toAppend` empty) and marker-skipped instances are covered. On the error path the watermark has already advanced to `size` on the now-replaced inode, but `ensureEstablished` resets it on the next pass because `provenOn` no longer matches the path. The gate runs under the claim, and `touchLock` runs after it.
+
+**Q2.** I found no caller-visible return value, thrown class, or durability label that contradicts the path's state at return, beyond the two disclosed residuals. The refiled-only fence, the replay snapshot re-proof, and the ack gate each cover the bytes they describe.
+
+**Q3.** The `replay()` watermark advances only after a successful sync on the same identity, and the `S5LogIdentityError` rethrow preserves that ordering. No new defect in lock lifetime, heartbeat ordering, or marker coherence from the cycle-9 folds.
+
+**Findings**
+
+1. **MINOR — spurious identity refusal when the log is created between the read and establishment (`replay()` and `appendUnit`).**
+   - Scenario: `readState` sees ENOENT (`identity = null`). Out-of-protocol, a file appears at the path before `ensureEstablished`. The marker is "established", so `establishDurability` returns `identity: null` and `provenOn` stays `null`. The mutation gate `assertSameInode(state.identity ?? this.provenOn, …)` and the snapshot gate `assertSnapshotIntact` both then compare against `null` and throw `S5LogIdentityError` on every attempt, with no bytes written.
+   - Region: `ensureEstablished` / `establishDurability` marker-skipped branch, `assertSameInode`, `assertSnapshotIntact`.
+   - Fix: when `state.identity === null` and the path now exists, re-run the ritual (or take the identity from an fd opened under the claim) rather than refusing. Alternatively, document that a file created outside the protocol mid-pass is refused by design.

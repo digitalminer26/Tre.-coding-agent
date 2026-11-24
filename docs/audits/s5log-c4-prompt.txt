@@ -1,0 +1,130 @@
+ADVERSARIAL AUDIT — `src/findings/s5log.ts` (an append-only JSONL log
+transport with a directory-registry lock, per-file durability
+establishment, a byte durability watermark bound to file identity
+AND content digest, and a tail repair model). 5-cycle audit run,
+CYCLE 4 of 5. You are auditing the CURRENT working tree, which
+folds your cycle-3 findings.
+
+CONTEXT: this module survived seven prior cycles plus three audited
+rounds (c1-c3 — your predecessor's output is quoted below). Suite
+green 67/67, tsc clean. Your cycle-3 findings were adjudicated as:
+
+FOLDED (verify the FOLD is correct — a defective fold is a valid
+finding; re-deriving the old scenario is not):
+ - c3-Q1 (acked return with no post-sync path-identity gate):
+   the acked branch of appendUnit now re-proves, AFTER the
+   mutation fsync and BEFORE the return, that the path still
+   stands with the synced inode's identity (`assertSameInode
+   (this.provenOn, identityOfPath(path))` — a vanished path or a
+   swapped inode refuses as S5LogIdentityError). Documented
+   honest limit, accepted as part of the fold: this NARROWS the
+   window to the few instructions between the gate and the
+   caller's use of the ack — no in-process gate can be rm-proof;
+   the ack is provenance-bounded. Regression test injects the rm
+   at the append-sync point; mutation (delete the gate) turns it
+   red.
+
+DISCLOSED RESIDUALS from c2/c3 you may re-examine but that are
+adjudicated ACCEPTED unless you break them concretely:
+ - the S1/S5 guard deletions (pre-ensureEstablished checks in
+   appendUnit/replay) survive the suite because their window has
+   no test seam; failure mode without them is bounded by later
+   identity gates (delta: ritual recreates + marker republish,
+   self-healed by establishDurability's marker-coherence fold).
+ - byte-identical recreation at the digest gate; rm after the
+   final ack gate.
+
+REJECTED (rebuttal — report only if you can break the rebuttal):
+ - none outstanding from c3.
+
+YOUR PREDECESSOR'S CYCLE-3 OUTPUT (for context):
+<<<
+**Q1.** The four c2-Q3 guards cover the decision paths that run
+before the mutation phase: the pre-ensure check, the establish-
+prefix open, the refiled-only return, and the pre-ritual check.
+The `replay()` pre-return gate is also covered by
+`assertSnapshotIntact`. The gap is the `acked` return, which runs
+after the mutation fsync with no path-level identity check. The
+guards do not fire on `identity === null` shapes, and the repair
+paths are only reached after `assertClaimHeld`.
+
+**Q2.** No new defect. Each failed listing unlinks the round's own
+entry and closes its fd before `continue`, so entries are not
+leaked across rounds. The sleep is capped by the remaining budget
+(with a 5 ms floor), so the loop terminates at the deadline. No
+pass proceeds past the listing-failed branch without a claim,
+because the only continuation is a fresh acquire loop iteration.
+
+**Q3.** One path. A mid-unit `rm` that lands after the mutation
+fsync (after `assertClaimHeld` and the `touchLock` heartbeat,
+which uses the fd and never checks the path) still returns
+`status: "acked"` with `durability: "fsynced"`. The bytes were
+synced to an inode that is no longer standing at the path. This
+is not one of the accepted residuals.
+
+**Findings**
+
+1. MAJOR — acked return with no post-sync path-identity gate
+   (Q1/Q3). [folded as above]
+>>>
+
+ALREADY-FOUND-AND-ADJUDICATED in EARLIER rounds (do NOT re-report;
+break the FOLDED code with a concrete interleaving or it is out):
+ - rename-verify lock protocol (removed c4 B1); (createdMs,name)
+   ordering admission (removed c6 B1, clock skew).
+ - watermark/path-identity shapes (c7 M2: identity from the SYNCED
+   fd); foreign-bytes-proven race.
+ - deterministic retry lockstep (fixed: jittered retrySleepMs).
+ - replay snapshot whose inode ceased to stand (c8 digest-backed
+   pre-return proof).
+ - self-wedged registry on listing failure (c1-Q3); immediate
+   refusal on first listing failure (c2-Q2); mid-pass rm dead
+   recovery (c2-Q3); post-sync ack without path proof (c3-Q1).
+ - pid-reuse / zombie liveness, null-pid sweep residual, 2 GiB
+   readFileSync cap, cross-host flock, byte-identical-recreation
+   escape, rm-after-final-ack-gate: DOCUMENTED ACCEPTED
+   residuals, out of scope.
+
+QUESTIONS (answer each in <=4 sentences, then the numbered findings):
+Q1. Is the NEW ack-gate fold itself defective: does it refuse
+    paths that must succeed (repair-only units where toAppend is
+    empty; the inter-pass-rm fresh-instance ack; instances whose
+    provenOn came from the marker-skipped ritual), or advance/
+    corrupt any watermark on its error path, or run outside the
+    claim?
+Q2. With all five decision-provenance gates (refiled-only fence,
+    ack gate, replay pre-return proof, the two pre-ritual
+    refuses, the establish-open classification): is there ANY
+    remaining caller-visible outcome (return value, thrown class,
+    or durability label) that contradicts the state of the path
+    at the moment of return, beyond the two disclosed residuals?
+Q3. Any NEW interaction defect anywhere in the module introduced
+    by the cycle-9 folds (c2-Q2 retry loop + c2-Q3 guards +
+    c3-Q1 ack gate): lock lifetime, heartbeat (touchLock after
+    the ack gate), marker coherence, replay watermark advance on
+    the rm-refused instance?
+
+Findings: numbered, each with scenario (concrete call sequence ->
+wrong observable outcome), region, and minimal fix direction. If
+none, say "No findings" per question.
+
+FOLD LOG (cont. 2) - adjudication correction (self-review, cycle-9
+follow-up), filed against F1:
+
+The original rejection said "empirically refuted as persistent" —
+overstated. The probe (.scratch/c4f1b.mjs) does not reproduce the
+auditor's claimed seam: in the probe the file EXISTED before the
+pass began, so readState saw it. The claimed shape (readState
+observes ENOENT, the file appears before ensureEstablished returns)
+does trace to a real ONE-PASS S5LogIdentityError: null identity +
+null provenOn through establishment, then the mutation-site
+same-instance check refuses against the appeared file.
+
+Corrected adjudication: the rejection stands on different grounds —
+the refusal is exactly the fail-closed design (a file this instance
+never read is unattributable), it lasts at most ONE pass (the next
+pass reads the file; the mid-pass-deletion rule and the snapshot
+proof re-attribute everything), and the proposed fix — letting
+establishment adopt the appeared file — would ack bytes the pass
+never read. Not a persistent spurious refusal; a bounded,
+self-healing, one-pass fail-closed refusal matching the contract.

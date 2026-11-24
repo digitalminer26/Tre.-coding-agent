@@ -1,0 +1,17 @@
+**Q1. Header, line by line (blocks ~10 lines each, grouped where claims are uniform):**
+
+- **Block 1 (lines 1–20, thin-wrapper and exclusive-ownership intro):** TRUE. Name shape `claim-<pid>-<ms>-<hex>`, token `"pid hex\n"`, and O_EXCL creation match `acquireLock` (`openSync(...,"wx",0o600)`). Release unlinks only its own entry, fenced by dev/ino (`releaseLock`).
+- **Block 2 (lines 21–40, takeover rules):** FALSE as an exhaustive list. The header says foreign entries are removed only when stale past `lockStaleMs` or fresh-but-empty past 1 s, with the pid dead. `sweepStaleClaims` also removes a fresh, well-formed entry whose creator pid is dead, at any age (`wellFormedDead`). Safety is unaffected because the pid gate still applies.
+- **Block 3 (lines 41–60, sole-claim admission and mtime-as-staleness-only):** TRUE. Admission is `live.length === 1 && mine`, and a failed listing never admits.
+- **Block 4 (lines 61–80, bounded-unit and mutation fence):** TRUE. `assertClaimHeld` runs before every mutation and every caller-visible decision, and `touchLock` refreshes mtime.
+- **Block 5 (lines 81–100, ordered durability and watermark):** TRUE. `provenThrough` advances only after a successful sync (`appendUnit` and `replay`), and the clamp precedes truncation.
+- **Block 6 (lines 101–120, pass order and the one-fsync rule):** TRUE. `lock-acquire` runs on every acquisition (`acquireLock`). Decision sync is `append` or `repair` (one per pass). `establish-prefix` runs only when `provenThrough < reliedBytes`.
+- **Block 7 (lines 121–150, per-file durability marker):** TRUE. Marker publish is tmp, fsync, rename, then dir sync (`establishDurability`). Reopen requires a well-formed marker (`readMarker`).
+- **Block 8 (lines 151–185, tail model V-g1/V-g2/V-g4):** TRUE. Validation precedes repair, `readState` classifies the tail, and `appendUnit` throws before mutation.
+- **Block 9 (lines 186–210, durable-but-refused ack):** TRUE. The post-sync `assertSameInode(... identityOfPath)` gate throws after the fsync and before the return.
+- **Block 10 (lines 211–235, NDR-r cases a/b/c and scope):** TRUE. `existing`/`prev` logic matches cases (a), (b), and (c).
+- **Block 11 (sync seam and scope limits):** UNVERIFIABLE-AT-TRANSPORT for the claim that pid reuse "wedges recovery." The code's behavior is consistent with it (a live pid blocks), but the wedge duration depends on the OS.
+
+**Q2. Test for the FALSE claim (block 2).** Plant a well-formed claim named `claim-999999-<now>-<hex>` with mtime = now and token `999999 x\n`, then call `append` with `lockStaleMs` = 30000. The header-as-written predicts `S5LockBusyError` (fresh, not stale, not empty). The code predicts success. Assert `status === "acked"` and the residue is gone. A test asserting the header's refusal would fail, which discriminates.
+
+**Q3. CLEAN, with the caveat above.** The only provable divergence is the exhaustive-looking sweep sentence, which has no safety consequence because the pid-liveness gate still applies. I tried hardest to break (1) the sole-occupancy admission under two contenders that both create, enumerate, and yield, and (2) a stale-watermark refiled-only receipt after an external in-place shrink. The first is blocked by the enumerate-after-create ordering. The second is caught by `ensureEstablished`'s size check, plus the digest gate on the refiled-only path.
