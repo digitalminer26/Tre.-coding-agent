@@ -62,6 +62,8 @@ import {
   UPDATE_TO_CLOSED_SET,
   type AuditFindingUpdate,
   type CanonicalCondition,
+  type OwnerActPayloadMap,
+  type LineageEdgeRetirePayload,
 } from "../src/findings/records.js";
 import * as recordsModule from "../src/findings/records.js";
 
@@ -537,6 +539,48 @@ test("exported closed sets are frozen at runtime (round-6 audit F3)", () => {
       assert.ok(Array.isArray(value), `${name} is an array`);
       assert.equal(Object.isFrozen(value), true, `${name} must be frozen`);
     }
+  }
+});
+
+/* ---------- v35 D2(i): lineage-edge-retire op + payload shape --------- */
+
+test("lineage-edge-retire: closed-set membership + payload SHAPE only (v35 D2(i), audit C6-M4; scope clarified v35 cycle-18 fold V18-1 — the §14.10.3 derivation rule and check order 0–3 are contract-declared, NOT exercised here: no op executor exists in src/ yet)", () => {
+  // Closed-set membership: the op is in the vocabulary exactly once
+  // and `inClosedSet` accepts it; a near-miss spelling is refused.
+  assert.equal(
+    OWNER_ACT_OPS_CLOSED_SET.filter((op) => op === "lineage-edge-retire")
+      .length,
+    1,
+    "lineage-edge-retire listed exactly once",
+  );
+  assert.equal(inClosedSet(OWNER_ACT_OPS_CLOSED_SET, "lineage-edge-retire"), true);
+  assert.equal(inClosedSet(OWNER_ACT_OPS_CLOSED_SET, "lineage-edge-retired"), false);
+
+  // Payload shape: a well-formed LineageEdgeRetirePayload type-checks
+  // against the map entry (compile-time) and both fields are required
+  // strings — self-loop and two-node proof fixtures, SHAPE-LEVEL
+  // ONLY (v35 cycle-18 fold V18-1: this test does not re-implement
+  // the derivation rule or the check order). (The op's
+  // effect set on the act envelope is `effectRecordIds: string[]`,
+  // the same forward-only envelope field every owner act carries.)
+  const selfLoop: OwnerActPayloadMap["lineage-edge-retire"] = {
+    edgeSource: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    cycleProof: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+  };
+  const twoNode: LineageEdgeRetirePayload = {
+    edgeSource: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    cycleProof: ["01ARZ3NDEKTSV4RRFFQ69G5FAW"],
+  };
+  for (const p of [selfLoop, twoNode]) {
+    assert.equal(typeof p.edgeSource, "string");
+    assert.ok(Array.isArray(p.cycleProof) && p.cycleProof.length >= 1, "fixture is non-empty (NOT a shape rule — an EMPTY submission is a check-3 byte-comparison mismatch, lineage-cycle-proof-mismatch, per §14.10.3 C11-3; v35 cycle-28 fold minor-3)");
+    // no id listed twice, except the SELF-LOOP case ([edgeSource])
+    const dups = new Set(p.cycleProof);
+    assert.ok(
+      dups.size === p.cycleProof.length ||
+        (p.cycleProof.length === 1 && p.cycleProof[0] === p.edgeSource),
+      "no duplicate ids outside the self-loop exception",
+    );
   }
 });
 

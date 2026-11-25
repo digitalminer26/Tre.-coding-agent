@@ -360,7 +360,28 @@ export interface AuditFindingUpdate extends Envelope {
    * satisfy NDR-s (`result:"not-reproduced"` against the pre-fix
    * baseline — never green/red) */
   reproRunRef: string | null;
-  /** REQUIRED non-null findingId for rejected-duplicate AND superseded */
+  /** REQUIRED non-null findingId for rejected-duplicate AND superseded.
+   * Supersedes-target validity (v35 cycle-10 fold, docs §14.10.2 —
+   * declarative, NOT checked here: `isUpdateShapeValid` stays at the
+   * shape level, non-null alone): the target MUST resolve to an
+   * existing `audit-finding` record in the bound prefix at
+   * disposition-append time AND appear STRICTLY BEFORE the source
+   * finding's own record (self-reference refused by the same rule) —
+   * else refused `supersede-bad-target` — the refused disposition
+   * appends NOTHING and creates NO obligation (no-op rejection;
+   * the finding's current disposition stands; v35 cycle-20 fold
+   * minor-3) (a DECLARATIVE
+   * disposition-side diagnostic mirroring `correction-bad-target`'s
+   * shape — no TS enum or script checks it; the disposition-append
+   * adjudication itself enforces it (v35 cycle-16 fold V16-5,
+   * self-consistency v35 cycle-18 fold V18-3);
+   * NOT a filing-refusal code — the nine-code
+   * `FILING_REFUSAL_CODE_CLOSED_SET` governs owner-filing intake
+   * adjudication, and no TS enum is added per the v35 cycle-4
+   * closed-set precedent). Effect: every duplicate/superseded edge
+   * points strictly backward in append order, so a pure
+   * duplicate/superseded cycle is IMPOSSIBLE on any prefix that
+   * passed intake (docs NDR-n step-4 CYCLE PROVENANCE, both kinds) */
   supersedes: string | null;
   /** bounded single line, advisory; must EQUAL the owning
    * finding-disposition act payload's reason
@@ -448,6 +469,7 @@ export const OWNER_ACT_OPS_CLOSED_SET = Object.freeze([
   "residual-cure-cancel",
   "filing-drift-resolution",
   "filing-integrity-disposition",
+  "lineage-edge-retire",
 ] as const);
 export type OwnerActOp = (typeof OWNER_ACT_OPS_CLOSED_SET)[number];
 
@@ -573,6 +595,32 @@ export interface FilingIntegrityDispositionPayload {
   newActId: string | null;
 }
 
+export interface LineageEdgeRetirePayload {
+  /** the finding whose OWN `correctionOf` edge is retired (the edge
+   * `edgeSource → correctionOf(edgeSource)`); admissible ONLY against
+   * an edge participating in a DETECTED fold cycle. Validation ORDER,
+   * every check, and the cycle provenance are canonical in docs
+   * §14.10.3 (v35 cycle-32 fold m1 — this JSDoc no longer restates
+   * them; drift surface closed). Refusals, first failing check
+   * supplies the code: already-retired edge ⇒
+   * `lineage-edge-retired`; no live cycle over the named edge ⇒
+   * `lineage-edge-not-cyclic`; proof mismatch (incl. an EMPTY list) ⇒
+   * `lineage-cycle-proof-mismatch`. (check 0's bad-`edgeSource`
+   * refusal reuses the generic `correction-bad-target` by name — see
+   * the FAMILY SCOPE NOTE on `FILING_REFUSAL_CODE_CLOSED_SET` below
+   * and docs §14.10.3.) */
+  edgeSource: string;
+  /** Closed walk re-derivable from the log prefix (REQUIRED — replay
+   * re-derives deterministically and ANY byte mismatch against the
+   * derived list is refused `lineage-cycle-proof-mismatch`; the three
+   * op-specific codes are declarative — JSDoc-only like the precedent
+   * `cure-*` codes, not a TS enum). The DERIVATION RULE (incl. the
+   * self-loop case), live-edge-only walk, existence and precedence
+   * conditions are canonical in docs §14.10.3 (v35 cycle-32 fold m1
+   * — no restatement here). */
+  cycleProof: string[];
+}
+
 /** Map a G1-scope op name to its closed payload type (type-level
  * closed set — an op outside the map belongs to another contract). */
 export interface OwnerActPayloadMap {
@@ -584,6 +632,7 @@ export interface OwnerActPayloadMap {
   "residual-cure-cancel": ResidualCureCancelPayload;
   "filing-drift-resolution": FilingDriftResolutionPayload;
   "filing-integrity-disposition": FilingIntegrityDispositionPayload;
+  "lineage-edge-retire": LineageEdgeRetirePayload;
 }
 /** Ops whose payloads G1 does not type (other contracts; the op
  * names stay in the closed enum for validation). */
@@ -605,14 +654,30 @@ export interface OwnerAct<K extends OwnerActOp = OwnerActOp>
   channel: string;
   sessionRef: string | null;
   /** Effect binding (v10 c8-B1): ids of the authorized privileged
-   * record(s) — exactly one id, or exactly the member ids of the
-   * authorized atomic group. `effectApplied` is replay-DERIVED (true
+   * record(s) — exactly one id, exactly the member ids of the
+   * authorized atomic group, OR EMPTY for a state-fold op that mints
+   * no record — A CLOSED SET, ENUMERATED COMPLETE: the ONLY ops
+   * with an EMPTY authorized
+   * effect set are `lineage-edge-retire` and `residual-cure-cancel`
+   * (v35 cycle-11 fold C11-1 + cycle-12 fold C12-1 — cancel's own
+   * entry has stated EMPTY-with-attestation since v27 R5-C19-5,
+   * "mints nothing new"; the C11 closure was right, short one
+   * member;
+   * general effect rule EMPTY clause, docs/11 §14.10.3: the durable
+   * act record itself is the observation-only attestation and
+   * `effectApplied` is vacuously true — hence it NEVER holds
+   * `effectApplied:false` and is NOT an NDR-v exception); an EMPTY
+   * set on any other op is MALFORMED, refused at validation —
+   * ENFORCED BY THE STEP-3 FOLD CONSUMER, NOT YET WRITTEN
+   * (v35 cycle-18 fold V18-2).
+   * `effectApplied` is replay-DERIVED (true
    * iff every named record exists and validates against the act's op
    * schema), with the named exceptions: filing-class terminal-by-
    * refusal (v9 R4-C3-2 / v11 R5-C5-5 exhaustive) and the two-phase
    * residual-cure act (v26 R5-C18F-2 — effectRecordIds is the
    * SINGLETON of the derived settlement id `cure-settlement-<actId>`
-   * before it exists). Derivation lives in `fold.ts` (step 3). */
+   * before it exists). Derivation lives in `fold.ts` (step 3 — the
+   * module is a planned step-3+ consumer, not yet written). */
   effectRecordIds: string[];
 }
 
@@ -630,7 +695,15 @@ export interface OwnerAct<K extends OwnerActOp = OwnerActOp>
  * repro, §14.10.1 docs/11:2580-2582 — the `repro` rule) and
  * `cure-unknown-act` (header `cureActRef` failing identity resolution
  * at intake, v28 R5-C20P-2 / R5-C20P-5 intake split, docs/11:
- * 3235-3250 — the `cureActRef` header-mapping prose).
+ * 3235-3250 — the `cureActRef` header-mapping prose.
+ * FAMILY SCOPE NOTE (v35 cycle-30 fold minor-1; scope narrowed to
+ * owner-FILING intake per v35 cycle-31 fold minor-2 — matching the
+ * §14.10.2/supersede prose): this set governs owner-FILING intake
+ * adjudication. Two codes serve beyond it BY NAME ONLY, and those
+ * refusals are NOT filing-intake refusals: `correction-bad-target`
+ * at the `lineage-edge-retire` owner-op check 0 (§14.10.3), and
+ * `supersede-bad-target` — which is OUTSIDE this nine-code set
+ * entirely (§14.10.2).
  */
 export const FILING_REFUSAL_CODE_CLOSED_SET = Object.freeze([
   "owner-filing-draft-drift",
@@ -1493,9 +1566,9 @@ registerCondition({
 });
 registerCondition({
   code: "correction-lineage-cycle",
-  text: "correction/duplicate edge fold reaches a cycle (NDR-n step-4 case / visit-once repeat, v25 R5-C18-4) — NO effective tip, chain UNCLEAN + needs-owner naming the lineage. NOTE (G2 round-5 cycle-2 fold, terra G2-2): the §14.10 schema names this needs-owner condition but the NDR-q closing inventory carries NO row for it (no closing act documented) — an unlisted reachable hold is itself a contract defect per NDR-q's closing sentence; surfaced here as fail-closed until a schema fold registers the row",
+  text: "correction/duplicate edge fold reaches a cycle (NDR-n step-4 case / visit-once repeat, v25 R5-C18-4) — NO effective tip, chain UNCLEAN + needs-owner naming the lineage. Closing act (v35 D2(i) fold): the NDR-q inventory carries a row — owner op `lineage-edge-retire {edgeSource, cycleProof}` (§14.10.3), admissible ONLY against an edge in a DETECTED fold cycle; the retired edge is excluded from fold-level edge traversal AND from cycle DETECTION (walks, member-row and chain re-derivation, step-(1)/§14.10.2 detection — v35 cycle-30 fold minor-2: the clearing condition below REQUIRES detection to drop the retired edge) for boundaries AFTER the act (forward-only; step-(1) intake-linearity UNIQUENESS still counts it — v35 cycle-15 fold V15-2), the condition clears IFF the fold re-derives without remaining cycles (one retire per surviving cycle); an exit exists ONLY for a PURE `correctionOf` cycle (cycles exist ONLY on intake-FAILED prefixes — NDR-n CYCLE PROVENANCE); a MIXED-KIND hold or a PURE duplicate/superseded cycle on an intake-FAILED prefix has NO exit by design — terminal needs-owner (NDR-q row carve-out, v35 cycle-15 fold V15-1); every other mechanism stays fail-closed against a cycle",
   faultClass: "O",
-  ref: "NDR-n step 4 / NDR-q (row MISSING upstream)",
+  ref: "NDR-q inventory cycle row (v35) / NDR-n step 4 / §14.10.3 `lineage-edge-retire`",
 });
 registerCondition({
   code: "readjudication-owed",
