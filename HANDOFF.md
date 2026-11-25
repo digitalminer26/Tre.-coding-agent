@@ -1,3 +1,61 @@
+## 2026-11-25 — G1 step 1 (`src/findings/records.ts`) VERIFIED COMPLETE against docs/11 v35 fold; tree clean; NEXT = step 2 (`intake.ts`)
+
+**Workstream:** G1 audit-finding contracts (docs/11 §14.10.x / §14.12.x /
+NDR register §14.10.0), implementation per
+`docs/audits/g1-implementation-mapping.md`. Step 1 is **wires only** —
+record shapes, closed vocabularies, owner-act op payloads, the NDR-q
+canonical condition list + registration seam, and the `FaultsIfc` /
+`CureGateProtocolIfc` seams. No behavior, no policy — intake validation
+is step 2, `faults.ts` step 5 behind `FaultsIfc`, hard every-NDR-id
+enforcement step 9 (`inventory.ts`).
+
+**State on disk (all committed — verify `git status --porcelain` empty):**
+HEAD `a981d44` (v35 D2(i) lineage-edge-retire fold, records.ts types +
+tests, after the 32-cycle adversarial arc converged CLEAN x1, owner
+Option B JSDoc trims). Prior: `c4fb9be` (S5 append-only log module, 82
+tests, CLEAN x3), `3b79bc7` (step-1 records module + 26 tests, CLEAN
+after 6 rounds). Full suite: **3081 tests / 3067 pass / 0 fail / 14
+skipped** (`npm test` = quality-check + tsc + node --test; re-run green
+this session 2026-11-25). `findings-records.test.ts` alone: 27/27.
+
+**Verification pass (this session, read-only, no file modified) — all
+open items from the v16 review CLOSED:**
+1. **Prefix-binding pairs wired:** `intakePrefixEndId`/`intakePrefixSha256`
+   non-nullable on `IntakeRefusal` (v13 R5-C7-3 predecessor binding);
+   `readjudicationPrefixEndId`/`readjudicationPrefixSha256` nullable on
+   `FilingIntegrityDisposition` with the exact-condition guard
+   (`failingCheck==="intake-refusal" && outcome==="withdrawn"`).
+2. **Exhaustive two-class exception (v16 R5-C10-2 / v19 R5-C13-5)**
+   encoded via `pinnedVerdict`/`pinnedVerdictCode` closed set on
+   `FilingReadjudicationOutcome` + three guard predicates (outcome
+   dependency, bytes provenance, pinned combination). The
+   eligibility⇒predecessor-bound vs refusal⇒P(W)-bound CLASS split is
+   replay-derived (`adjudicate.ts`, later step) — the schema explicitly
+   forbids envelope-local encoding of it, so its absence here is the
+   correct placement, not a gap.
+3. **`FaultsIfc`** matches §14.12.2 scoped semantics: `classOf` consults
+   the NDR-q list (A/B/O classes), `blocksEdge` keeps the edge table in
+   `faults.ts`; open/disposed lifecycle lives in the disposition record
+   kinds, not the seam.
+4. **Kind table scope note correct** against the wider §14.12.2 faultKind
+   enum (through v35 `spend-class-relayer`): those are S5 kinds owned by
+   other sections/steps; `KIND_TABLE`/`isRecordKind` must NEVER reject
+   them (in-file clause).
+5. Domain separation `tre-canonical-json/1` present at all three
+   canonical-digest sites; `s5log.ts` content-digest logic is plain
+   sha256 over bytes — the prefix-pair FIELDS are refusal/disposition
+   wire fields (records.ts), not s5log responsibilities.
+
+**Deferred (by design, tracked in-file):** V-g canonical-JSON vectors →
+steps 3/7; hard NDR-id totality → step 9; `faults.ts` real impl → step 5;
+cure-gate real protocol → step 8 (`cure.ts`, fakes at step 7); hold
+sign-off-counting + lift closer → G3.
+
+**NEXT (owner's pick):** step 2 `intake.ts` (intake validation, NDR-b/c
+predicate homes) per the mapping's step table; or kick the next
+confirming audit cycle on the v35 state if the owner wants one before
+proceeding.
+
 ## 2026-11-17 (LATE) — AUD51 extension (user budget: 3 confirming cycles c6-c8, terra) EXECUTED and CLOSED UNCONFIRMED; no CYCLE CLEAN within budget
 
 **Cycles:** c6 (pre-written confirming prompt) CYCLE FINDINGS 1 — M2
