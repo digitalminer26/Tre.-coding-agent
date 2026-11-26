@@ -144,3 +144,14 @@ __pycache__/
 # Round-20 contract-check fuzz harness (fuzz.mjs + commonmark/markdown-it ref installs)
 # — findings pinned as r20-F1/F2 regression tests; the fuzzer is scratch.
 .scratch-r*/
+
+# Round-g1s adversarial-audit scratch (probe harnesses, verdict notes, and
+# their build output). Findings are pinned as named regression tests
+# (test/findings-intake-probes.test.ts + the mutation audit in
+# scripts/findings-mutate.py); the staging harnesses themselves are scratch.
+staging/
+
+# Sweep/test scratch: leaked journal-lock litter from scratch-journal dirs
+# and the sweep runner's local log (the durable record lives in ~/.tre).
+.g1s7-jtest/
+.mutate-sweep.log

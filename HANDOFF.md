@@ -1,3 +1,151 @@
+## 2026-11-26 — g1s6-c2 AUDIT FIXES LANDED: all 3 majors + 3 minors fixed, gates green (NOT yet committed)
+
+**All six findings of the 2026-11-25 audit below are FIXED and verified
+this session. Tree is dirty (8 files) — the commit is the remaining
+owner step.**
+
+Fixes landed (each with a kill-pinned probe + mutant):
+
+1. **MAJOR-1 torn tail hid acked entries** — `openJournalAppended`
+   rewritten to COPY-THEN-TRUNCATE: only the torn SUFFIX is copied to
+   the `.torn.*` quarantine sibling, the live journal is truncated at
+   the last newline (durable order: quarantine file fsynced before
+   truncate; hard links ruled out for the copy — they share the inode
+   and would destroy the forensic copy, verified by probe). Probe:
+   `g1s6-c2 MAJOR-1: torn tail with ACKED records before it — the
+   prefix stays on the live path`. Mutants `torn-tail-detect-off`,
+   `journal-append-mode-off` KILLED.
+2. **MAJOR-2 concurrent writers** — cross-process single-writer FENCE
+   (`acquireJournalLock`/`releaseJournalLock`, O_EXCL lockfile with
+   stale-holder takeover) wrapped around tail-check + append; refuses
+   fail-closed while a live holder exists. Three probes: live-holder
+   REFUSAL, STALE-fence takeover (with fence-leak assert), and a
+   **two-process race** (`spawnSync` of a temp `.mjs` child appending
+   concurrently — every record survives whole). Mutants
+   `journal-lock-acquire-off` / `journal-lock-release-off` KILLED.
+3. **MAJOR-3 mutation-gate false kills** — green-pristine baseline is
+   pinned before the sweep (red baseline or baseline timeout ABORTS);
+   kills must be tests that were baseline-green; timeouts are only
+   kills when attribution succeeds (one suite hangs, rest clean);
+   kills are reproduced in ISOLATION. THIS SESSION also fixed two
+   further defects found while validating the fix: (a) the sweep's
+   isolation re-run passed the RAW test name to `--test-name-pattern`,
+   which is a JS REGEX — names containing literal parens (e.g.
+   `(dir is a regular file)`) can never match themselves, so node
+   SKIPPED the killing test and deterministic kills were MISREPORTED
+   FLAKY-NOT-KILLED. Fixed with `_js_regex_escape`. (b) the final
+   verdict gate tested `"KILLED" not in r` — a substring — so
+   `FLAKY-NOT-KILLED` counted as a kill and the success banner printed
+   over flaky rows. Fixed to require the verdict to BEGIN with
+   `KILLED(` after the optional `[tsc-error]` tag.
+   (Also: `scripts/findings-mutate.py` had been corrupted by a
+   duplicated/interleaved paste — reconstructed to a single clean
+   copy: full-name TAP parse `(.+) + TAP-directive strip, 65
+   mutants, verified `ast.parse` clean.)
+4. **MINOR-4 cause edges** — `attachDeepestCause` REFUSES to overwrite
+   an occupied non-Error/cyclic tail slot (returns false; compound
+   keeps both), and the frozen-primary compound now carries a real
+   `closeCause` own-property (first-class, not just message text).
+   Probes: cyclic-chain refusal, FROZEN-primary closeCause. Mutants
+   `cause-slot-overwrite-old`, `closecause-prop-off` KILLED.
+5. **MINOR-5 g7-F3 order dependency** — the probe now files through a
+   PASSING gate INSIDE the probe (precondition asserted), then asserts
+   the per-call refusing gate wins; isolation-clean
+   (`--test-name-pattern` run alone still kills a first-call-caching
+   mutant).
+6. **MINOR-6 `syncDirEntry` sentinel** — `hadCloseFault` boolean
+   replaces `closeFault !== null`; a seam close throwing literal
+   `null` is still a fault. Probe: `g1s6-c2 MINOR-6 …literal null…`.
+   Mutants `syncdir-hadcloseflag-off`, `syncdir-close-raw-off` KILLED.
+
+**Verification this session (post-fix):** `tsc` clean; findings gate
+(`sh scripts/findings-gate.sh`): baseline green 221/0 + **65/65
+mutants KILLED, every kill attributed, exit 0**; full repo suite
+`node --test dist/test/*.test.js`: **3193 tests, 3179 pass, 0 fail,
+14 skipped**. (`dist/test/eval-run.js` is a LIVE-MODEL eval, outside
+the `npm test` glob and outside this increment — its stochastic
+wrong-tool result is not a regression here.)
+
+**NEXT (owner): commit the whole increment** (`git add -A && git
+commit`) — 8 dirty files: `src/findings/intake.ts`,
+`test/findings-intake-probes.test.ts` (new), `test/findings-intake.test.ts`,
+`scripts/findings-mutate.py` (new), `scripts/findings-gate.sh` (new),
+`package.json`, `.gitignore`, `HANDOFF.md`.
+
+---
+
+## 2026-11-25 — G1 step-2 intake.ts worktree AUDITED (changes requested): 3 majors + 2 minors, fixes pending
+
+**Workstream:** G1 step 2 (`src/findings/intake.ts`) UNCOMMITTED worktree
+on top of HEAD `4afa0e2`. Diff vs HEAD: 7 files, +4007/−215 — intake.ts
+(g6/g7 durability upgrades), new `test/findings-intake-probes.test.ts`
+(46 probes), `test/findings-intake.test.ts` (+1014), new
+`scripts/findings-mutate.py` (60 mutants) + `scripts/findings-gate.sh`,
+package.json scripts, .gitignore. NOTHING committed yet — the tree at
+resume must still show these 7 files dirty.
+
+**Verification state at audit time (owner-verified this session):**
+tsc clean; probe suite 46/46; full suite **3171 pass / 0 fail** after
+killing the two then-survivors `syncdir-close-raw-off` +
+`torn-tail-detect-off`; mutation sweep **60/60 KILLED** with pristine source
+restored. These greens PREDATE the audit findings below — the fixes
+must re-run them.
+
+**AUDIT VERDICT (this session, read-only; fixes land in the worktree
+NEXT session):**
+
+1. **MAJOR — torn-tail recovery HIDES ACKED journal entries**
+   (`intake.ts:1064-1080`): a journal with valid newline-terminated
+   records followed by a torn tail has the WHOLE file renamed to a
+   `.torn.*` sibling, so previously acked records vanish from the live
+   journal path (no reader merges siblings). Fix: quarantine only the
+   TORN SUFFIX (copy the suffix, truncate the live file at the last
+   newline, durable ordering), and add a probe with ≥1 acked record
+   BEFORE the torn tail — the current probe plants a partial-only
+   journal and never sees the hidden-prefix case.
+2. **MAJOR — concurrent journal writers can quarantine a live append**
+   (`intake.ts:1027-1066` tail check + `:1146` append): the
+   check→append→fsync sequence is unlocked; a second process appending
+   to the same journalPath mid-write gets its partial record classified
+   as crash damage and renamed away while its writer still fsyncs and
+   returns success against the renamed inode — the active path loses a
+   record that reader-side claims acked. Fix: cross-process
+   single-writer fence (lockfile) around tail-check + append, OR an
+   enforced, documented single-writer precondition; plus a controlled
+   concurrency regression.
+3. **MAJOR — mutation gate can report false kills**
+   (`scripts/findings-mutate.py:314-324, 379-386`): ANY failing test
+   (pre-existing or flaky, unrelated to the mutant) counts as a kill,
+   and ANY 120 s timeout is auto-tagged `KILLED(hang)` without
+   attribution. Fix: run a PRISTINE baseline before the sweep and abort
+   the run unless it is green; classify timeouts as UNATTRIBUTED-HANG
+   requiring evidence the mutant caused the spin. "ALL MUTANTS KILLED"
+   is only meaningful on top of a green baseline.
+4. **MINOR — cause-preservation edge cases** (`intake.ts:499-515,
+   545-555`): `attachDeepestCause` OVERWRITES an existing non-Error /
+   cyclic cause (contradicts its never-overwrite comment), and the
+   frozen-primary compound path builds no `closeCause` property despite
+   the comment claiming one (the close fault survives only as text).
+   Fix both + probes (non-Error cause, cyclic chain, frozen primary).
+5. **MINOR — g7-F3 probe order dependency**
+   (`findings-intake-probes.test.ts:1164+`): the probe relies on OTHER
+   tests having filed through PASS_GATE earlier in the process — run in
+   isolation it cannot catch a first-call-caching mutant. Fix: file
+   through a passing gate INSIDE the probe first, then the refusing
+   gate, asserting both outcomes.
+6. **MINOR (reproduced edge)** — `syncDirEntry` uses `closeFault !==
+   null` as its sentinel (`intake.ts:408-421`): a seam close throwing
+   literal `null` was empirically confirmed to return SUCCESS (this
+   session). Native fs close throws Error objects so practical risk is
+   low, but use a `hadCloseFault` boolean.
+
+**FIX ORDER (owner):** 3 first (the sweep is untrustworthy until a
+green baseline is pinned), then 1 and 2 (durability), then 4/5/6. After
+fixing: `sh scripts/findings-gate.sh` must show green baseline + 60/60
+kills, and the probe suite must include the new hidden-prefix,
+concurrency, isolation-clean and cause-edge probes — then full
+`npm test`, THEN commit the whole increment.
+
 ## 2026-11-25 — G1 step 1 (`src/findings/records.ts`) VERIFIED COMPLETE against docs/11 v35 fold; tree clean; NEXT = step 2 (`intake.ts`)
 
 **Workstream:** G1 audit-finding contracts (docs/11 §14.10.x / §14.12.x /
