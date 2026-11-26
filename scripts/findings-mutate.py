@@ -115,6 +115,23 @@ known limitations, accepted on the record):
   g1s7-C2v-F1 / C2w-F3, journal durability ordering) is pinned by
   test/findings-mutate.test.ts and exercised by the real-signal
   driver probes (scripts/findings-mutate-driver.py clear_durability).
+
+FLAKE LEDGER (pre-existing, TS-side, tracked — do not re-hunt blindly):
+'g1s6-c2 MAJOR-2: two PROCESSES appending one journal' intermittently
+fails in FULL SWEEP runs (seen under auditor-vocab-off and
+artifact-cap-off, different mutants each time) but NEVER in isolation
+— ~100 stress runs incl. 72-way parallel and 8x CPU-load contention,
+zero reproductions. The sweep's isolation gate correctly refuses to
+credit such a kill (FLAKY-NOT-KILLED), so a flake shows as a RED
+sweep, not a silent pass. Leads, in order: (1) the fence refuses a
+contended append after JOURNAL_LOCK_TIMEOUT_MS=2000ms — under full
+sweep load both children could exceed it, making the test's
+refusals>=2 floor fail while every record stays whole (the child
+asserts k.code==0 first, so a refused child is 'child failed');
+(2) capture the failing assertion's message in the sweep's isolation
+rerun instead of discarding it, so the NEXT occurrence names itself.
+A red sweep that is exactly this test = rerun once; two consecutive
+reds = chase lead (2). CI: .github/workflows/ci.yml.
 """
 from __future__ import annotations
 
@@ -1752,6 +1769,29 @@ def _js_regex_escape(s: str) -> str:
     return re.sub(r"[.*+?^${}()|\[\]\\]", r"\\\g<0>", s)
 
 
+def _failure_digest(r: "RunResult", name: str) -> str:
+    """FLAKE LEDGER lead 2: the first assertion message node's TAP
+    printed under a failing test ("error: ..." within its YAML-ish
+    diagnostic block). The FLAKY-NOT-KILLED line previously discarded
+    this — a sweep-only flake could never name itself. Best-effort:
+    '' when the stream never carried it."""
+    out: list[str] = []
+    inside = False
+    for ln in r.lines:
+        m = re.match(r"\s*not ok \d+ - ", ln)
+        if inside and not re.match(r"\s*(not ok|ok) \d+ - ", ln):
+            if re.match(r"\s*\.\.\.", ln):
+                break
+            t = ln.strip()
+            if t.startswith(("error:", "code:", "name:", "failureType:")):
+                out.append(t)
+            if len(out) >= 3:
+                break
+        elif m:
+            inside = f" - {name}" in ln
+    return "; ".join(out)[:200]
+
+
 def attribution_green(r: RunResult) -> set[str]:
     """Baseline-green tests whose assertions ACTUALLY EXECUTED
     (g1s7-F3 audit fix 2): ok-status AND in r.executed. A test that
@@ -2393,9 +2433,14 @@ def main() -> int:
                 iso_status, iso_detail, _ = judge_run(
                     iso, baseline_green, base.skipped, require_iso_fail=new_fail[0])
                 if iso_status != "killed":
+                    # FLAKE LEDGER lead 2: name the flake — the
+                    # sweep-run assertion text for the very test that
+                    # failed there, which isolation then threw away.
+                    fdig = _failure_digest(r, new_fail[0])
                     results.append((name, f"{tag}FLAKY-NOT-KILLED << {new_fail[0]!r} failed in "
                                           f"the sweep run but not reproduced in isolation "
-                                          f"({iso_status}: {iso_detail})"))
+                                          f"({iso_status}: {iso_detail})"
+                                          + (f" [sweep-run: {fdig}]" if fdig else "")))
                     continue
                 shown = new_fail[0] if len(new_fail) == 1 else f"{new_fail[0]} (+{len(new_fail) - 1} more)"
                 results.append((name, f"{tag}KILLED(test:{shown})"))

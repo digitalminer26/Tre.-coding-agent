@@ -103,6 +103,14 @@ def cmd_iso(mod, payload):
     return {"status": status, "detail": detail}
 
 
+def cmd_failure_digest(mod, payload):
+    """FLAKE LEDGER lead 2 pin: extract the failing test's assertion
+    text from TAP lines (fixture: two failing tests, only the named
+    one's block may be extracted)."""
+    r = parse_tap(mod, payload["tap"])
+    return {"digest": mod._failure_digest(r, payload["target"])}
+
+
 def cmd_hang(mod, payload):
     base = parse_tap(mod, payload["base_tap"])
     per_suite = []
@@ -1213,6 +1221,7 @@ def main():
           "clear_durability": cmd_clear_durability,
           "build_kill_on_unwind": cmd_build_kill_on_unwind,
           "spawnmask": cmd_spawnmask,
+          "failure_digest": cmd_failure_digest,
           }[cmd]
     buf = io.StringIO()
     with redirect_stdout(buf):  # module prints nothing expected; stay clean

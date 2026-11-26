@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly full mutation sweep: the guard contract must hold even
+    # when the findings module was NOT touched (dependency drift,
+    # toolchain upgrades). Known intermittent: the two-process probe
+    # (g1s6-c2 MAJOR-2) can report FLAKY-NOT-KILLED under parallel
+    # load — never in isolation; leads in findings-mutate.py's header
+    # before re-running a red nightly.
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20   # engines: >=20 (repo runs node 20 locally)
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  # Which surface did a push/PR move? (schedule/dispatch skip this job;
+  # the sweep then runs unconditionally.)
+  changes:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      findings: ${{ steps.filter.outputs.findings }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            findings:
+              - 'src/findings/**'
+              - 'scripts/findings-*.py'
+              - 'scripts/findings-gate.sh'
+              - 'test/findings-*.test.ts'
+              - '.github/workflows/ci.yml'
+
+  # Findings-module mutation sweep — the expensive tier of
+  # scripts/findings-gate.sh (its test half is covered by the `test`
+  # job; the sweep is ~28x rebuild cost and deliberately lives OUTSIDE
+  # npm test, g1s5-c1 D6). Runs on every findings-surface change,
+  # nightly, and on manual dispatch.
+  findings-mutation-sweep:
+    needs: changes
+    if: >-
+      always() && (needs.changes.result == 'skipped' ||
+      needs.changes.outputs.findings == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Findings gate (suites + full mutation sweep)
+        run: sh scripts/findings-gate.sh

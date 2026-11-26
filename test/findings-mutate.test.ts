@@ -1617,6 +1617,40 @@ test("C2v-F1: a REAL SIGTERM delivered inside the ARMED->DONE completion must st
     "C2v-F1: the CURRENT (divergent) source bytes must be preserved BEFORE the destructive restore write");
 });
 
+test("flake-ledger lead 2: FLAKY-NOT-KILLED must NAME the flake — the sweep-run assertion text is extracted from the failing test's TAP block (only the named test, terminated at '...', empty when absent)", () => {
+  const tap = [
+    "TAP version 14",
+    "# Subtest: test A",
+    "not ok 1 - test A",
+    "  ---",
+    "  failureType: 'testCodeFailure'",
+    "  error: 'A: expected true'",
+    "  ...",
+    "# Subtest: test B",
+    "not ok 2 - test B",
+    "  ---",
+    "  error: 'B: expected false'",
+    "  stack: |-",
+    "    stack body must not appear",
+    "  ...",
+    "# fail 2",
+  ];
+  const b = drive("failure_digest", { tap, target: "test B" });
+  assert.equal(b.digest, "error: 'B: expected false'",
+    "flake-ledger: the digest carries the NAMED failing test's assertion line only");
+  const a = drive("failure_digest", { tap, target: "test A" });
+  assert.ok(!String(a.digest).includes("B:") && String(a.digest).includes("A: expected true"),
+    "flake-ledger: extraction is scoped to the requested test (a sibling's error must not leak in)");
+  const none = drive("failure_digest", { tap: ["ok 1 - test A", "# fail 0"], target: "test A" });
+  assert.equal(none.digest, "",
+    "flake-ledger: no failing block -> empty digest (best-effort, never a fabricated line)");
+  // The FLAKY-NOT-KILLED report must APPEND the digest (the message
+  // template is the contract; a refactor that drops it re-blinds us).
+  const sweep = fs.readFileSync(SWEEP, "utf8");
+  assert.ok(/FLAKY-NOT-KILLED[\s\S]{0,300}\[sweep-run: \{fdig\}\]/.test(sweep),
+    "flake-ledger: the flaky verdict line must carry the sweep-run digest");
+});
+
 test("C2w-F3: an unexpected exception (KeyboardInterrupt) escaping the DONE-mark must restore the caller's signal mask on EVERY completion path — a leaked mask makes the process deaf to SIGINT/SIGTERM for its lifetime", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "c2w-f3-"));
   try {
