@@ -1,3 +1,44 @@
+## 2026-11-26 — CI WIRED for the findings sweep (a061b9e, pushed) + C2w cycle CLOSED + OPTIONAL BACKLOG (this is the backlog's durable home — grep here)
+
+**C2w hardening arc CLOSED by owner ruling (cycle 24, Option A): F3
+applied (signal-mask restore on every exit path of both completion
+sites in `findings-mutate.py`), F1/F2 ACCEPTED AS KNOWN RISKS — they
+are recorded ONLY in the `findings-mutate.py` docstring ("ACCEPTED
+RESIDUAL RISKS", ~line 87): F1 power-loss window on the backup layer,
+F2 backup overwrite under PID reuse. No code comment, no further
+audits of the mutation harness.**
+
+**CI landed (`a061b9e`, pushed to main):** `.github/workflows/ci.yml`
+— `changes` path-gate → `test` job (npm test) → `findings-mutation-sweep`
+job (full `scripts/findings-gate.sh` sweep, ~90 min ceiling, outside
+npm test per g1s5-c1 D6). Triggers: push/PR touching the findings
+surface, nightly cron 04:30 UTC, dispatch. Sweep flakes are
+self-naming: the driver captures the failing assertion text into the
+FLAKY-NOT-KILLED verdict.
+
+**First-run status (run 45896352725):** `changes` green; `test` job
+FAILED (exit 1 at `npm test`) — **local reproduction on the same
+commit + same node v20.20.2 is green (3258 tests / 0 fail)**, and the
+Actions-log endpoints 404 with the current PAT (no Actions-read
+scope), so the failure is UNDIAGNOSED — environment-specific
+(`ubuntu-latest` vs macOS) or a first-run flake. NEXT on red: either
+grant the PAT Actions-read (or use `gh`) and pull
+`runs/45896352725/jobs/…/logs`, or re-run the workflow and see if it
+reproduces. `findings-mutation-sweep` was still in progress at last
+check.
+
+**OPTIONAL BACKLOG (owner's "pick 3", 2026-11-26 — none started):**
+1. **CI `test`-job red diagnosis** — see status above; the sweep
+   flake hypothesis (2 s fence, `TOTAL_LOCK_TIMEOUT_MS`, MAJOR-2
+   two-process probe nondeterminism under parallel load) lives in the
+   `findings-mutate.py` flake ledger (rerun-once / chase-on-two rule).
+2. **README status badge** for the CI workflow (cosmetic).
+3. **Extend the mutation-audit pattern** (`findings-mutate.py` +
+   driver + gate + CI wiring as the template) to another module —
+   candidates: compaction, supervisor.
+
+---
+
 ## 2026-11-26 — g1s6-c2 AUDIT FIXES LANDED: all 3 majors + 3 minors fixed, gates green (NOT yet committed)
 
 **All six findings of the 2026-11-25 audit below are FIXED and verified
