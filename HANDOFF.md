@@ -1,3 +1,13 @@
+## 2026-11-27 — BACKLOG ITEM 2 DONE: README CI status badge (last optional item closed — backlog EMPTY)
+
+`README.md` Status section gains the shields dynamic badge for the CI
+workflow on main (`?branch=main` — push/PR runs, nightly included). Badge
+endpoint verified live (`CI: passing`; note shields 403s on python's default
+User-Agent — browsers render fine). With items 1–3 done the optional backlog
+is empty; project posture is ongoing hardening per the standing cadence.
+
+---
+
 ## 2026-11-27 — BACKLOG ITEM 1 DONE: CI test-job red diagnosed & CLOSED (from Actions logs — PAT does have Actions-read)
 
 The November note said the PAT got 404s on Actions endpoints and the red went
