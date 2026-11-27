@@ -14,6 +14,8 @@ rules).
 
 ## Status
 
+[![CI](https://img.shields.io/github/actions/workflow/status/digitalminer26/Tre.-coding-agent/ci.yml?branch=main&label=CI)](https://github.com/digitalminer26/Tre.-coding-agent/actions/workflows/ci.yml)
+
 All planned workstreams are complete; the project is in ongoing hardening.
 
 - [x] Phase A — WS0: repo scaffold + the three contracts (`src/types.ts`)
