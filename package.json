@@ -26,6 +26,8 @@
     "test": "sh scripts/quality-check.sh && tsc && node --test dist/test/*.test.js",
     "test:findings": "sh scripts/findings-gate.sh",
     "test:findings:fast": "sh scripts/findings-gate.sh --no-mutate",
+    "test:compact": "sh scripts/compact-gate.sh",
+    "test:compact:fast": "sh scripts/compact-gate.sh --no-mutate",
     "eval": "tsc && node dist/test/eval-run.js",
     "clean": "rm -rf dist"
   },

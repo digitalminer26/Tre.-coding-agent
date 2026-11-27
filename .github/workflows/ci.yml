@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       findings: ${{ steps.filter.outputs.findings }}
+      compact: ${{ steps.filter.outputs.compact }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -46,6 +47,12 @@ jobs:
               - 'scripts/findings-*.py'
               - 'scripts/findings-gate.sh'
               - 'test/findings-*.test.ts'
+              - '.github/workflows/ci.yml'
+            compact:
+              - 'src/context/compact.ts'
+              - 'scripts/compact-mutate.py'
+              - 'scripts/compact-gate.sh'
+              - 'test/compact.test.ts'
               - '.github/workflows/ci.yml'
 
   # Findings-module mutation sweep — the expensive tier of
@@ -69,3 +76,24 @@ jobs:
       - run: npm ci
       - name: Findings gate (suites + full mutation sweep)
         run: sh scripts/findings-gate.sh
+
+  # Compaction-module mutation sweep (backlog item 3 of 2026-11-26: the
+  # findings pattern extended to compact.ts). Same tiering as the
+  # findings sweep: the test half is in `test`; the ~18-min sweep runs
+  # on compact-surface changes, nightly, and on dispatch.
+  compact-mutation-sweep:
+    needs: changes
+    if: >-
+      always() && (needs.changes.result == 'skipped' ||
+      needs.changes.outputs.compact == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Compact gate (suites + full mutation sweep)
+        run: sh scripts/compact-gate.sh

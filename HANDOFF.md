@@ -1,3 +1,28 @@
+## 2026-11-27 — BACKLOG ITEM 3 DONE: mutation-audit pattern extended to compaction (35/35 killed) + CI compact sweep wired
+
+**`scripts/compact-mutate.py`** (wraps the findings-mutate engine unchanged —
+rebinds SRC/DIST/SUITES/MUTS/journal root + the duplicate-name audit to its
+own registry) + **`scripts/compact-gate.sh`** (`npm run test:compact` /
+`:fast`, mirrors findings-gate tiering: test half already in npm test, sweep
+outside it). Full sweep green: **35/35 mutants killed, baseline green
+(193 tests), every kill attributed** (tmp/compact-sweep-final.log). Two
+registry facts: (1) `keeptarget-default-8192-to-8193` killed by a new
+wrapper-level test (calibrated suffix lands exactly at 8192: default kept=2,
+explicit 8193 kept=3 — the plan-level default test cannot see the
+`opts.keepTokens ?? 8192` fallback). (2) `plan-keepfrom-floor-off` REMOVED
+as PROVABLY EQUIVALENT (entrymode precedent): every write to `keepFrom` is
+≥1 (strictly-increasing bounds with `bounds[1]≥1` after the length refusal;
+`lastUser>0` gate; descent only assigns `nextStart>keepFrom`), so
+`keepFrom<=0` is unreachable and no input distinguishes the guard's removal
+— full proof in the registry comment; guard stays as defense-in-depth.
+CI: `changes` job gains a `compact` filter (compact.ts, compact scripts,
+compact.test.ts, ci.yml) + a `compact-mutation-sweep` job (45-min ceiling,
+nightly/dispatch included) — pattern-identical to the findings job.
+Backlog item 3 CLOSED; items 1 (CI test-job red diagnosis) and 2 (README
+badge) remain OPTIONAL and untouched.
+
+---
+
 ## 2026-11-26 — CI WIRED for the findings sweep (a061b9e, pushed) + C2w cycle CLOSED + OPTIONAL BACKLOG (this is the backlog's durable home — grep here)
 
 **C2w hardening arc CLOSED by owner ruling (cycle 24, Option A): F3
