@@ -1543,3 +1543,154 @@ test("compactContext: the fold rung caps the summarizer at the headroom over its
   assert.ok(r!.fitsInputBudget, "the capped fold candidate fits the request budget");
   assert.ok(!r!.kept.includes(live), "the fold carried the live task out of the tail (accepted because it bought the fit)");
 });
+
+// ---------------------------------------------------------------------------
+// Mutation-killer tests (compact-mutate.py survivors, round: 36/36)
+// ---------------------------------------------------------------------------
+
+test("calibrateCharsPerToken: excludes the last assistant message and clamps to 1 (not 2) at r=1.25", () => {
+  // Clamp floor: est=100 (400 chars), actual=320 → r = 4*100/320 = 1.25.
+  // A clamp floor of 2 would return 2 — the honest 1.25 must survive.
+  assert.equal(calibrateCharsPerToken({ input: 320, output: 10, totalTokens: 330 }, [user("x".repeat(400))], 0), 1.25);
+  // Last-assistant exclusion: est over [user 800, assistant 800] = 400 with the
+  // assistant kept, 200 with it excluded (its tokens are the just-generated
+  // completion, not prompt tokens). actual=400 distinguishes 2 from 4.
+  assert.equal(
+    calibrateCharsPerToken({ input: 400, output: 10, totalTokens: 410 }, [user("x".repeat(800)), assistantText("y".repeat(800))], 0),
+    2,
+    "the last assistant message is excluded from the calibration estimate",
+  );
+});
+
+test("planCompaction: default keepTokens is exactly 8192 (the walk breaks AT the target)", () => {
+  // Suffix accumulates 4096 + 4096 = exactly 8192 at index 2.
+  // keepTokens 8192: acc >= target → keepFrom 2. 8193: 8192 < 8193 → the walk
+  // runs to the end (keepFrom 1): an off-by-one default is observable.
+  const ctx: AgentMessage[] = [
+    user("x".repeat(30000)),
+    assistantText("y".repeat(30000)),
+    user("z".repeat(16384)),
+    assistantText("w".repeat(16384)),
+  ];
+  assert.equal(planCompaction(ctx, 8192)!.keepFrom, 2, "exact-target suffix breaks the walk");
+  assert.equal(planCompaction(ctx, 8193)!.keepFrom, 1, "one above the target and the suffix does not reach it");
+  assert.equal(planCompaction(ctx)!.keepFrom, 2, "the DEFAULT equals 8192 exactly");
+});
+
+test("summarizePrompt: a tool result of exactly 2000 chars is not clipped (boundary, not off-by-one)", () => {
+  const planOf = (toolChars: number): CompactionPlan => {
+    const toSummarize: AgentMessage[] = [
+      user("g".repeat(50)),
+      assistantToolCall("bash", { x: "k".repeat(28) }),
+      toolResult("T".repeat(toolChars)),
+      assistantText("c".repeat(40)),
+    ];
+    return { keepFrom: 4, toSummarize, kept: [user("tail"), assistantText("t")], isIterative: false };
+  };
+  // clip() emits the "truncated" marker only when length > limit: 2000 is
+  // kept whole, 2001 is cut — the limit IS 2000 (a 1999 default shows up as
+  // the 2000-char result carrying the marker).
+  assert.ok(!summarizePrompt(planOf(2000)).includes("truncated"), "exactly 2000 chars survives uncut");
+  assert.ok(summarizePrompt(planOf(2001)).includes("truncated"), "2001 chars is clipped (boundary really sits at 2000)");
+});
+
+test("compactContext: the fold gate keeps summaries down to 64 headroom tokens (not 200)", async () => {
+  // requestBudget = 1624−489−1024 = 111. Live prompt est 111, kept tail (the
+  // assistant "ok") = 1, wrapper 11, overhead 0 → fold headroom = 111−1−11 =
+  // 99 ∈ [64, 200). The preserving floor busts (1+111+0 > 111) and the notice
+  // busts too, so the direct fold rung must be SELECTED at 64. With the gate
+  // raised to 200 the fold is rejected: the plan falls back to the
+  // preserving carrier whose candidate grows → undefined.
+  const model: ModelConfig = { ...MODEL, contextWindow: 1624, maxTokens: 489 };
+  const live = user("M".repeat(441));
+  const ctx: AgentMessage[] = [user("old"), live, assistantText("ok")];
+  const models: ModelConfig[] = [];
+  const scripted = fakeStream([{ type: "text", text: "T".repeat(200) }]);
+  const fn: StreamFn = (m, c, o) => {
+    models.push(m);
+    return scripted(m, c, o);
+  };
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    force: true,
+    strictFit: true,
+    promptOverheadTokens: 0,
+  });
+  assert.ok(r, "the fold rung is selected at 99 headroom tokens");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
+  assert.equal(models.length, 1, "one summarizer call (the direct fold rung)");
+  assert.equal(models[0]!.maxTokens, 99, "the fold call is capped at exactly the 99-token headroom");
+  assert.ok(!r!.kept.includes(live), "the live prompt was folded (the fold bought the fit)");
+  assert.ok(r!.fitsInputBudget, "the folded candidate fits the request budget");
+});
+
+test("compactContext: a strict fold that GREW the context is kept when it actually folded the live prompt (growth exemption)", async () => {
+  // requestBudget 111; before = 1+101+1 = 103 (the 404-char live prompt is
+  // folded). The accepted summary (396 chars) yields after = 111: strictly
+  // LARGER than before (111 > 103) yet ≤ requestBudget. The exemption for a
+  // fold that really consumed the live prompt keeps this candidate — the
+  // alternative is the irreducible 111-token over-budget request it replaced.
+  const model: ModelConfig = { ...MODEL, contextWindow: 1624, maxTokens: 489 };
+  const live = user("L".repeat(404));
+  const ctx: AgentMessage[] = [user("go"), live, assistantText("ok")];
+  const { fn } = withCapture(fakeStream([{ type: "text", text: "S".repeat(396) }]));
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    force: true,
+    strictFit: true,
+    promptOverheadTokens: 0,
+  });
+  assert.ok(r, "the growth-exempt fold candidate is returned, not undefined");
+  if (r === COMPACT_ABORTED) throw new Error("unexpected COMPACT_ABORTED sentinel");
+  assert.ok(r!.estimatedTokensAfter > r!.estimatedTokensBefore, "the candidate really grew over the old context");
+  assert.ok(r!.estimatedTokensAfter <= r!.requestBudget, "…while fitting the request budget");
+  assert.equal(r!.kept.length, 1, "only the trailing assistant survives — the live prompt crossed into the summary");
+});
+
+test("compactContext: the default keep target is EXACTLY 8192 (mutant keeptarget-default-8192-to-8193)", async () => {
+  // A calibrated cumulative suffix sits 3 est-tokens under 8192: with the
+  // default keepTokens the walk breaks AT the 3-token message (kept = 2),
+  // while any default raised by 1 token (e.g. 8193) extends the keep across
+  // the 4000-token message before it (kept = 3). Pinning the observed kept
+  // length distinguishes the default from EVERY neighbor value — the
+  // planCompaction-level `keepTokens: 8192` test cannot see this, because it
+  // never exercises the wrapper's `opts.keepTokens ?? 8192` fallback.
+  const model: ModelConfig = { ...MODEL, contextWindow: 32000, maxTokens: 100, compactionReserve: 100 };
+  // Cumulative suffix (calibrated): m3 = 8189t (assistant + usage),
+  // m2 = 4000t, m1 = 1t, m4 (lastUser) = 3t.
+  const ctx: AgentMessage[] = [
+    assistantText("a".repeat(400)),
+    assistantText("b"),
+    assistantText("c".repeat(16000)),
+    assistantText("d".repeat(32756), usageOf(31000)), // trips the trigger
+    user("do the thing"),
+  ];
+  const { fn } = withCapture(fakeStream([{ type: "text", text: "S summary." }]));
+  const r = await compactContext({
+    streamFn: fn,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+  });
+  assert.ok(r && r !== COMPACT_ABORTED, "the default compaction fires");
+  assert.equal(r.kept.length, 2, "the DEFAULT keep target cuts at exactly 8192: the 3-token live pair survives");
+  // The same context with an explicit one-token-larger target keeps one more
+  // message — proving the 2 above came from the default itself, not from a
+  // plan-level invariant that any default would reproduce.
+  const { fn: fn2 } = withCapture(fakeStream([{ type: "text", text: "S2 summary." }]));
+  const r2 = await compactContext({
+    streamFn: fn2,
+    model,
+    signal: new AbortController().signal,
+    context: ctx,
+    keepTokens: 8193,
+  });
+  assert.ok(r2 && r2 !== COMPACT_ABORTED, "the explicit-target compaction fires");
+  assert.equal(r2.kept.length, 3, "keepTokens 8193 extends the keep over the 4000-token message (the mutant's behavior)");
+});

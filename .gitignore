@@ -155,3 +155,4 @@ staging/
 # and the sweep runner's local log (the durable record lives in ~/.tre).
 .g1s7-jtest/
 .mutate-sweep.log
+tmp/
