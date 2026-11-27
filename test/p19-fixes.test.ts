@@ -21,6 +21,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, writeFile, chmod, utimes, readdir, rm, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,6 +37,16 @@ const graphA = (episodeId: string, goal = "p19 goal") => ({
   tasks: [{ id: "t1", persona: "worker", promptRef: "prompts/t1.md", dependsOn: [], acceptance: { criteria: [], requiredChecks: [], artifacts: [] } }],
   policy: { baseCommit: "abc", gate: { cmd: "true" } },
 });
+
+// CI RED FIX (run 45928457678): pid 111 hardcoded as "not alive" is ALIVE
+// on GitHub-hosted runners (system daemons own low pids). Use a reaped
+// child pid — proven dead (ESRCH) on every platform.
+async function deadPid(): Promise<number> {
+  const p = spawn("/bin/sh", ["-c", "exit 0"]);
+  await new Promise((r) => p.on("exit", r));
+  return p.pid as number;
+}
+const DEAD = await deadPid();
 
 async function quickWorker(root: string): Promise<string> {
   const worker = join(root, "worker.sh");
@@ -126,7 +137,7 @@ test("P19-F1: an orphaned lease tmp older than the bound is swept; a live-owner 
   t.after(() => rm(root, { recursive: true, force: true }));
   const epGraph = graphA("ep-f1-sweep");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
-  const oldTmp = join(dir, "host.lease.tmp-111.crash"); // pid 111: not alive
+  const oldTmp = join(dir, `host.lease.tmp-${DEAD}.crash`); // reaped child pid: proven dead
   const freshTmp = join(dir, "host.lease.tmp-1.live"); // pid 1: alive (launchd/init)
   await writeFile(oldTmp, "{ orphan");
   await writeFile(freshTmp, "{ live-staging");
@@ -136,7 +147,7 @@ test("P19-F1: an orphaned lease tmp older than the bound is swept; a live-owner 
   const worker = await quickWorker(root);
   await runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} });
   const names = await readdir(dir);
-  assert.ok(!names.includes("host.lease.tmp-111.crash"), "the crash-leaked tmp (dead owner) is reclaimed");
+  assert.ok(!names.includes(`host.lease.tmp-${DEAD}.crash`), "the crash-leaked tmp (dead owner) is reclaimed");
   assert.ok(names.includes("host.lease.tmp-1.live"), "a tmp naming a LIVE owner is never touched, whatever its age (P20-F3)");
 });
 

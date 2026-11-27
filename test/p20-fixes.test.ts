@@ -37,6 +37,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, writeFile, chmod, utimes, readdir, rm, mkdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,6 +60,13 @@ async function quickWorker(root: string): Promise<string> {
   await chmod(worker, 0o755);
   return worker;
 }
+
+// CI RED FIX (run 45928457678): the suite hardcoded pid 111 as "not alive".
+// On GitHub-hosted ubuntu runners low pids are OCCUPIED by system daemons,
+// so kill(111,0) succeeds and the honest liveness fence refuses every
+// takeover the tests drive. A reaped child's pid is PROVEN dead on every
+// platform (ESRCH); pid reuse inside a test run is vanishingly unlikely.
+const DEAD = await deadPid();
 
 const origLink = fs.promises.link.bind(fs.promises);
 const origRename = fs.promises.rename.bind(fs.promises);
@@ -161,7 +169,7 @@ test("P20-F2: a COMPLETE body with a dead pid is still taken over immediately (s
   const epGraph = graphA("ep-f2-dead");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner", episodeId: "ep-f2-dead", claimedAt: 1 }) + "\n");
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "dead-owner", episodeId: "ep-f2-dead", claimedAt: 1 }) + "\n");
   const worker = await quickWorker(root);
   const lines: string[] = [];
   const t0 = Date.now();
@@ -180,7 +188,7 @@ test("P20-F1: a takeover paused past the steal bound does NOT lose its lock to a
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
   // Stale claim: complete JSON, dead pid — recovery-eligible immediately.
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n");
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n");
   const worker = await quickWorker(root);
 
   // C: the first recovery takes the lock and freezes INSIDE the swap.
@@ -236,7 +244,7 @@ test("P20-F1: a stale lock stamped with a LIVE pid is never torn down, whatever 
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n");
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n");
   // A lock past the steal bound whose stamp names a LIVE pid (this test
   // process): the unfenced code would rm -rf it on the first attempt.
   await mkdir(lockPath);
@@ -251,7 +259,7 @@ test("P20-F1: a stale lock stamped with a LIVE pid is never torn down, whatever 
   );
   const names = await readdir(dir);
   assert.ok(names.includes("host.lease.lock"), "the live holder's lock survived untouched");
-  assert.equal(await readFile(leasePath, "utf8"), JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n", "the stale claim was not touched behind the live lock");
+  assert.equal(await readFile(leasePath, "utf8"), JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n", "the stale claim was not touched behind the live lock");
 });
 
 test("P20-F1: an abandoned lock with NO stamp (legacy format) is still reclaimed past the bound — recovery proceeds", async (t) => {
@@ -262,7 +270,7 @@ test("P20-F1: an abandoned lock with NO stamp (legacy format) is still reclaimed
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n");
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n");
   await mkdir(lockPath); // no owner stamp: a crash from the pre-P20 protocol
   const aged = new Date(Date.now() - 31_000);
   await utimes(lockPath, aged, aged);
@@ -281,7 +289,7 @@ test("P20-F1: a claim replaced under us MID-SWAP makes the taker walk away (iden
   const epGraph = graphA("ep-f1-midswap");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n");
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n");
   const worker = await quickWorker(root);
   // Simulate a lock-thief winning mid-swap. P20c6-F1 REPAIR: the swap
   // no longer renames OVER the lease — it moves the stale claim aside
@@ -315,7 +323,7 @@ test("P20-F1: a refuse-throw UNDER the takeover lock releases the lock (no self-
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  const stale = JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n";
+  const stale = JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n";
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   // REPAIRED after the cycle-4 audit: the old injection flipped the lease
@@ -328,12 +336,12 @@ test("P20-F1: a refuse-throw UNDER the takeover lock releases the lock (no self-
   // pre-P20 code leaked the stamped lock on.
   let killCalls = 0;
   (process as { kill: unknown }).kill = function (pid: number, sig?: string | number) {
-    if (pid === 111 && sig === 0 && ++killCalls === 2) return true; // fence sees it LIVE
+    if (pid === DEAD && sig === 0 && ++killCalls === 2) return true; // fence sees it LIVE
     return (origKill as (p: number, s?: string | number) => boolean)(pid, sig);
   } as typeof process.kill;
   await assert.rejects(
     () => runHostEpisode({ episodesRoot: root, graph: epGraph as never, taskId: "t1", grantedBy: "test", workerCommand: worker, maxIterations: 1, log: () => {} }),
-    /already activated by pid 111/,
+    new RegExp(`already activated by pid ${DEAD}`),
     "the under-lock fence re-check met a LIVE holder and refused (a genuine throw under the lock)",
   );
   assert.ok(killCalls >= 2, "both liveness checks happened (loop-top dead, fence live)");
@@ -354,7 +362,7 @@ test("P20-F3: the tmp sweep is pid-aware — dead owner gone at any age, LIVE ow
   const old = Date.now() / 1000 - 60;
   const fresh = Date.now() / 1000;
   const cases: Array<[string, boolean]> = [
-    ["host.lease.tmp-111.dead-fresh", true],   // dead owner, fresh — swept at ANY age
+    [`host.lease.tmp-${DEAD}.dead-fresh`, true],   // dead owner, fresh — swept at ANY age
     ["host.lease.tmp-1.live-old", false],       // pid 1 is alive — never touched, whatever its age (the reproduced unlink)
     ["host.lease.tmp-99999999999999999999.unknown-old", true],  // uninterpretable pid + aged — age bound rules
     ["host.lease.tmp-99999999999999999998.unknown-fresh", false], // uninterpretable + fresh — unknown is not dead
@@ -724,7 +732,7 @@ test("P20c6-F1/F2: a takeover whose claim-link FAILS mid-swap restores the moved
   const epGraph = graphA("ep-c6-f1-restore");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  const stale = JSON.stringify({ pid: 111, token: "dead-owner" }) + "\n";
+  const stale = JSON.stringify({ pid: DEAD, token: "dead-owner" }) + "\n";
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   let fired = false;
@@ -810,8 +818,6 @@ test("P20c6-F2: a PERSISTENT release failure is DISCLOSED on the log — never a
 
 // ─── Cycle 7 (R4 audit of 3317730): named regressions for findings 1-4 ─────
 
-import { spawn } from "node:child_process";
-
 // A pid we can PROVE dead (a reaped child), for reconcile/steal tests.
 async function deadPid(): Promise<number> {
   const p = spawn("/bin/sh", ["-c", "exit 0"]);
@@ -835,7 +841,7 @@ test("P20c7-F1/F2: a dead mover's `.reclaim-` artifact is RESTORED to the vacant
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const dead = await deadPid();
-  const moved = JSON.stringify({ pid: 111, token: "prev-owner" });
+  const moved = JSON.stringify({ pid: DEAD, token: "prev-owner" });
   const artifact = join(dir, `host.lease.reclaim-${dead}.frozentoken`);
   await writeFile(artifact, moved); // lease path ABSENT: the wedge state
   const worker = await quickWorker(root);
@@ -893,7 +899,7 @@ test("P20c7-F4: a mid-swap occupant is CLASSIFIED — a takeover whose restore h
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  await writeFile(leasePath, JSON.stringify({ pid: 111, token: "stale" }));
+  await writeFile(leasePath, JSON.stringify({ pid: DEAD, token: "stale" }));
   const worker = await quickWorker(root);
   const rivalProc = spawn("/bin/sh", ["-c", "sleep 30"]); // a genuinely LIVE pid
   t.after(() => { try { rivalProc.kill("SIGKILL"); } catch { /* gone */ } });
@@ -946,7 +952,7 @@ test("P20c7-F3: a restore that ERRORED keeps the recovery source — `gone` is N
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  const stale = JSON.stringify({ pid: DEAD, token: "stale-owner" });
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   let lockStolen = false;
@@ -997,7 +1003,7 @@ test("P20c8-F1: a reconcile restore whose link ERRORED (EIO) PRESERVES the recov
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const dead = await deadPid();
-  const moved = JSON.stringify({ pid: 111, token: "prev-owner" });
+  const moved = JSON.stringify({ pid: DEAD, token: "prev-owner" });
   const artifact = join(dir, `host.lease.reclaim-${dead}.frozentoken`);
   await writeFile(artifact, moved); // lease ABSENT: the wedge state
   const worker = await quickWorker(root);
@@ -1085,7 +1091,7 @@ test("P20c8-F2: a FRESH takeover lock stamped by a dead pid is cleared immediate
   const lockPath = join(dir, "host.lease.lock");
   const dead = await deadPid();
   const artifact = join(dir, `host.lease.reclaim-${dead}.frozentoken`);
-  await writeFile(artifact, JSON.stringify({ pid: 111, token: "prev-owner" }));
+  await writeFile(artifact, JSON.stringify({ pid: DEAD, token: "prev-owner" }));
   await mkdir(lockPath); // FRESH lock — pre-P20c8: 30s of "contended"
   await writeFile(join(lockPath, "owner"), `${dead}.dead-mover.dead`);
   const worker = await quickWorker(root);
@@ -1106,7 +1112,7 @@ test("P20c9-F3: a same-process live mover's old-mtime recovery source is never s
   const epGraph = graphA("ep-c9-f3-active-mover");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  const leaseBody = JSON.stringify({ pid: 111, token: "stale-original" });
+  const leaseBody = JSON.stringify({ pid: DEAD, token: "stale-original" });
   await writeFile(leasePath, leaseBody);
   await utimes(leasePath, 1, 1); // rename preserves this OLD mtime
   const worker = await quickWorker(root);
@@ -1146,7 +1152,7 @@ test("P20c10-F1d: aliased episodes roots cannot evade active recovery protection
   const epGraph = graphA("ep-c10-f1-alias");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  const leaseBody = JSON.stringify({ pid: 111, token: "stale-original" });
+  const leaseBody = JSON.stringify({ pid: DEAD, token: "stale-original" });
   await writeFile(leasePath, leaseBody);
   await utimes(leasePath, 1, 1);
   const worker = await quickWorker(root);
@@ -1283,7 +1289,7 @@ test("P20c8-F4: the pre-move re-verify refuses a LIVE claim naming THIS process 
   const epGraph = graphA("ep-c8-f4-premove");
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
-  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  const stale = JSON.stringify({ pid: DEAD, token: "stale-owner" });
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   const recycled = JSON.stringify({ pid: process.pid, token: "recycled-namesake-live" }); // same pid, FOREIGN token: live namesake claim
@@ -1323,7 +1329,7 @@ test("P20c8-F5a: an occupant that VANISHED after the restore's EEXIST is disclos
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  const stale = JSON.stringify({ pid: DEAD, token: "stale-owner" });
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   let lockStolen = false;
@@ -1370,7 +1376,7 @@ test("P20c8-F5b: an UNREADABLE occupant (EIO) is disclosed and keeps `gone` — 
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  const stale = JSON.stringify({ pid: DEAD, token: "stale-owner" });
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   let lockStolen = false;
@@ -1426,7 +1432,7 @@ test("P20c8-F5c: malformed occupant content is classified AMBIGUOUS — never a 
   const dir = await createEpisodeLayout(root, epGraph.episodeId, epGraph as never);
   const leasePath = join(dir, "host.lease");
   const lockPath = join(dir, "host.lease.lock");
-  const stale = JSON.stringify({ pid: 111, token: "stale-owner" });
+  const stale = JSON.stringify({ pid: DEAD, token: "stale-owner" });
   await writeFile(leasePath, stale);
   const worker = await quickWorker(root);
   const ambiguous = `{"pid":${process.pid}`; // the P20-F2 truncated body
