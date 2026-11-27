@@ -1,3 +1,28 @@
+## 2026-11-27 — BACKLOG ITEM 1 DONE: CI test-job red diagnosed & CLOSED (from Actions logs — PAT does have Actions-read)
+
+The November note said the PAT got 404s on Actions endpoints and the red went
+undiagnosed. Re-checked today: `GET /actions/runs`, `/runs/{id}/jobs`, and
+job-log redirects all answer with the existing `.tre/github-token` (the one
+401 gotcha: job `/logs` redirects to blob storage — fetch the redirect
+Location WITHOUT the Authorization header). Full history visible:
+a061b9e/4d188cc/50a7743/a0be6d6/44e804e were **red** (2026-11-26/27), then
+623c5f6, dcc8a75, dd4d4bd, b9a51c2 **green** — the red was chased down live
+by the same-day fix chain (a92ca49 /proc zombie-aware liveness probes →
+44e804e pid-111 test fix → 50a7743/a0be6d6 callback-style PTY exit-1 →
+623c5f6 fsmonitor premise → dcc8a75 stray-sweep bound).
+Log forensics on the original red run 45896352725 (a061b9e): test job
+33 fail/3200 — the failing cluster is the **process-group-kill/probe tests**
+(`W2: real SIGTERM-ignoring worker — runner stop() escalates to a REAL group
+SIGKILL`, journal-first dead-pid probes) — GitHub runners' PID handling in
+the runner container vs macOS; fixed by the chain above. Run 46007342044
+(b9a51c2) verified: test 3245 pass / 0 fail / W2 ok, and **both first-ever
+CI mutation sweeps green**: findings 37/37 and compact 35/35 `ALL MUTANTS
+KILLED (baseline green, every kill attributed)` on ubuntu-latest — the
+sweep harness ported to Linux cleanly on its first CI run. Only remaining
+optional item: README status badge (cosmetic).
+
+---
+
 ## 2026-11-27 — BACKLOG ITEM 3 DONE: mutation-audit pattern extended to compaction (35/35 killed) + CI compact sweep wired
 
 **`scripts/compact-mutate.py`** (wraps the findings-mutate engine unchanged —
