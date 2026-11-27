@@ -248,7 +248,11 @@ describe("F1 (cycle-3 review): group signalling authority is gated at the kill(2
     await withRecordedKill(async (sent) => {
       const entry = rigEntry();
       // TERM was sent while alive (recorded); the leader is then reaped; the group probes alive.
-      const r = rigRunner(["alive", "alive", "alive"]);
+      const r = rigRunner([]);
+      // Survivor stays alive PERSISTENTLY (a one-shot verdict array would
+      // flip to the "reaped" default under stop()'s post-exit grace poll):
+      // the honest verdict must stay unknown no matter how often probed.
+      r.groupAlive = (): Verdict => "alive";
       (r as unknown as Record<string, unknown>).__entry = entry;
       (r as unknown as Record<string, unknown>).terminate = async (e: Record<string, unknown>): Promise<boolean> => {
         // The REAL gate sends the TERM while the leader is unreaped: the

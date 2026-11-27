@@ -113,6 +113,18 @@ const ATTEMPT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*-a[0-9]+$/;
 // unbounded exit wait a hang — on timeout the verdict is "unknown".
 const POST_KILL_EXIT_WAIT_MS = 2_000;
 
+/** Post-exit survivor grace. stop()'s SIGKILL group-sweep reaches every
+ *  member, but the KILL takes effect asynchronously: on a loaded CI box
+ *  the leader can be reaped (exit event) while a group member is still
+ *  in the process of dying — kill(-pgid,0) then answers "exists" and the
+ *  honest first-pass verdict is "unknown" (F1: never claim reaped for an
+ *  unproven number). A second pass of the probe after a short grace
+ *  settles it: the leader is still UNREAPED (pins the number against
+ *  reuse) for every instant of the wait, so re-probing is as safe as
+ *  the first. A genuinely foreign/live group just re-probes a pinned
+ *  number (read-only, never signals) and still lands on "unknown". */
+const STOP_GROUP_GRACE_MS = 250;
+
 /** Task identity for one run/resume. `session` is the worker session FILE
  *  path — the resource the ownership fence is drawn on (§14.5 pairs
  *  session+worktree; later phases layer the worktree fence on this
@@ -962,7 +974,25 @@ export class AttemptRunner {
     // reaped leader (ownership unprovable — never swept here); EPERM ⇒
     // undeterminable.
     let verdict = this.probeGroup(entry);
-    // Post-exit survivor handling (cycle-4 audit): reaching this line with
+    // Post-exit survivor GRACE (CI race, 2026-10): the group sweep reaches
+    // every member, but signal delivery is asynchronous — the leader can be
+    // reaped (the exit event) while a member is still on its way out, and a
+    // first probe then honestly answers "alive". Under load (CI) that window
+    // is real and made stop() report unknown for a group we demonstrably
+    // just killed. Re-probing is safe HERE because the leader was reaped by
+    // OUR sweep and any surviving member pins the number against reuse until
+    // the group empties: poll (read-only, never signals) until the verdict
+    // settles or the grace expires. A group that survives the grace is
+    // genuinely alive/foreign and lands on the pre-existing honest verdicts
+    // below (unknown, fence holds) — the grace only costs 25ms-per-tick
+    // latency on the race path.
+    if (verdict === "alive") {
+      const graceDeadline = Date.now() + STOP_GROUP_GRACE_MS;
+      while (verdict === "alive" && Date.now() < graceDeadline) {
+        await delay(25);
+        verdict = this.probeGroup(entry);
+      }
+    }
     // the group still "alive" means the LEADER was reaped — every path that
     // resolves exitPromise (the child's "exit" event; a test rig settling
     // it) sets entry.exited first, and the signalGroup authority gate

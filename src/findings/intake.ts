@@ -87,6 +87,7 @@ import {
   fsyncSync,
   fstatSync,
   ftruncateSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -754,74 +755,29 @@ export function spoolDraft(episodeDir: string, bytes: Buffer): string {
   // ack point below (g7-F2) — before any ack, no ack, no claim.
   mkdirEnsured(dirPath);
   // g1s5-c2 (C2-F2): no existsSync-then-wx TOCTOU — "wx" IS the race
-  // primitive (O_EXCL fails iff a concurrent writer won). On EEXIST the
-  // entry is re-read and compared: byte-identical → dedup reuse;
-  // divergent → integrity fault. The old check-then-write let a losing
-  // racer's raw EEXIST escape the input-error channel.
+  // primitive (O_EXCL fails iff a concurrent writer won).
+  // ATOMIC-PUBLISH fix (2026-11 flake, race probe g1s6-c2 MAJOR-2): the
+  // old shape created the FINAL path with wx and wrote into it, so a
+  // losing racer's EEXIST re-read could observe the winner's entry
+  // PARTIALLY written — the byte compare then honestly reported
+  // "DIVERGENT bytes" for an entry that was simply mid-write (a false
+  // integrity fault under parallel load). New shape: write+fsync a
+  // unique temp entry, then link(2) it onto the final path — link is
+  // atomic and the final path NEVER exists with partial content (it
+  // appears only after the bytes are fully written AND fsynced).
+  // EEXIST on link means a COMPLETE entry stands: re-read and compare
+  // (byte-identical → dedup reuse; divergent → genuine integrity
+  // fault, content addressing says two shas cannot share bytes).
+  const tmpName = `.tmp-${process.pid}-${(spoolDraftSeq += 1)}-${sha.slice(0, 12)}`;
+  const tmpPath = path.join(dirPath, tmpName);
   let fd: number;
   try {
-    fd = openSync(p, "wx");
+    fd = openSync(tmpPath, "wx");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-      // g1s6 (audit F1): every reuse-path I/O rides the retryable
-      // SpoolIoError channel (MAJOR-3 doctrine) — a fault here is an
-      // I/O condition, never a raw fs error escaping the intake.
-      let prior: Buffer;
-      try {
-        prior = readFileSync(p);
-      } catch (e2) {
-        throw spoolIoWrapping(
-          e2,
-          `spoolDraft: existing entry ${path.basename(p)} could not be read for dedup comparison: `,
-        );
-      }
-      if (!prior.equals(bytes)) {
-        throw new IntakeInputError(
-          `spool entry ${path.basename(p)} already stands with DIVERGENT bytes — integrity fault, never replaced`,
-        );
-      }
-      // g1s6 (audit F1): byte-equality is NOT durability. The prior
-      // write may be CRASH-PENDING (created but never fsynced) — acking
-      // it here would let the act append proceed while the entry may
-      // not survive. Establish durability for the reused entry too:
-      // re-open and fsync the FILE, then the directory entry, before
-      // returning. (Concurrent duplicate acks are idempotent — two
-      // fsyncs of the same completed bytes are harmless.)
-      let rfd: number;
-      try {
-        rfd = openSync(p, "r");
-      } catch (e2) {
-        throw spoolIoWrapping(
-          e2,
-          `spoolDraft: reused entry ${path.basename(p)} vanished/faulted before durability could be established: `,
-        );
-      }
-      let rPrimary: unknown = null;
-      let rHadErr = false;
-      try {
-        seamFsync(rfd);
-      } catch (e2) {
-        rPrimary = e2;
-        rHadErr = true;
-      } finally {
-        // g6-F2 (audit cycle 1): the close rides the checked path — a
-        // throwing close never escapes raw and never MASKS the fsync
-        // fault (it is attached to it as `cause` instead).
-        rPrimary = closeChecked(rfd, rPrimary, rHadErr);
-      }
-      if (rHadErr) {
-        if (rPrimary instanceof SpoolIoError) throw rPrimary;
-        throw spoolIoWrapping(
-          rPrimary,
-          `spoolDraft: reused entry ${path.basename(p)} could not be fsynced — never acked undurable: `,
-        );
-      }
-      // g7-F2 (terra cycle 1): reuse re-establishes durability of the
-      // file (above) AND the full name chain — the pre-existing dirs
-      // are VISIBLE, not durable (g6-F1 doctrine), so the walk climbs
-      // to the root rather than stopping at one parent.
-      syncPathChain(dirPath);
-      return sha; // verified existing entry reused (content-addressing dedup)
+      // Pathological temp collision (recycled pid + counter rollover):
+      // an input-level I/O condition, never a silent overwrite.
+      throw spoolIoWrapping(e, `spoolDraft: temp entry ${tmpName} already exists: `);
     }
     throw e;
   }
@@ -829,7 +785,7 @@ export function spoolDraft(episodeDir: string, bytes: Buffer): string {
   let wHadErr = false;
   try {
     writeFully(fd, bytes); // g6-F3: short writes looped, never acked short
-    seamFsync(fd); // durable BEFORE the act append
+    seamFsync(fd); // durable BEFORE the act append (and before publish)
   } catch (e) {
     wPrimary = e;
     wHadErr = true;
@@ -837,19 +793,99 @@ export function spoolDraft(episodeDir: string, bytes: Buffer): string {
     wPrimary = closeChecked(fd, wPrimary, wHadErr); // g6-F2
   }
   if (wHadErr) {
+    try { unlinkSync(tmpPath); } catch { /* best effort: the temp is ours */ }
     if (wPrimary instanceof SpoolIoError) throw wPrimary;
     throw spoolIoWrapping(
       wPrimary,
       `spoolDraft: write/fsync of the new entry failed — never acked undurable: `,
     );
   }
+  // Atomic publish. EEXIST → a complete entry already stands (only a
+  // link of a fully-written inode can have created it): drop our temp
+  // and take the dedup-reuse path below.
+  try {
+    linkSync(tmpPath, p);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+      try { unlinkSync(tmpPath); } catch { /* best effort */ }
+      throw spoolIoWrapping(e, `spoolDraft: atomic publish of ${path.basename(p)} failed: `);
+    }
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+    // g1s6 (audit F1): every reuse-path I/O rides the retryable
+    // SpoolIoError channel (MAJOR-3 doctrine) — a fault here is an
+    // I/O condition, never a raw fs error escaping the intake.
+    let prior: Buffer;
+    try {
+      prior = readFileSync(p);
+    } catch (e2) {
+      throw spoolIoWrapping(
+        e2,
+        `spoolDraft: existing entry ${path.basename(p)} could not be read for dedup comparison: `,
+      );
+    }
+    if (!prior.equals(bytes)) {
+      throw new IntakeInputError(
+        `spool entry ${path.basename(p)} already stands with DIVERGENT bytes — integrity fault, never replaced`,
+      );
+    }
+    // g1s6 (audit F1): byte-equality is NOT durability. The prior
+    // write may be CRASH-PENDING (created but never fsynced) — acking
+    // it here would let the act append proceed while the entry may
+    // not survive. Establish durability for the reused entry too:
+    // re-open and fsync the FILE, then the directory entry, before
+    // returning. (Concurrent duplicate acks are idempotent — two
+    // fsyncs of the same completed bytes are harmless.)
+    let rfd: number;
+    try {
+      rfd = openSync(p, "r");
+    } catch (e2) {
+      throw spoolIoWrapping(
+        e2,
+        `spoolDraft: reused entry ${path.basename(p)} vanished/faulted before durability could be established: `,
+      );
+    }
+    let rPrimary: unknown = null;
+    let rHadErr = false;
+    try {
+      seamFsync(rfd);
+    } catch (e2) {
+      rPrimary = e2;
+      rHadErr = true;
+    } finally {
+      // g6-F2 (audit cycle 1): the close rides the checked path — a
+      // throwing close never escapes raw and never MASKS the fsync
+      // fault (it is attached to it as `cause` instead).
+      rPrimary = closeChecked(rfd, rPrimary, rHadErr);
+    }
+    if (rHadErr) {
+      if (rPrimary instanceof SpoolIoError) throw rPrimary;
+      throw spoolIoWrapping(
+        rPrimary,
+        `spoolDraft: reused entry ${path.basename(p)} could not be fsynced — never acked undurable: `,
+      );
+    }
+    // g7-F2 (terra cycle 1): reuse re-establishes durability of the
+    // file (above) AND the full name chain — the pre-existing dirs
+    // are VISIBLE, not durable (g6-F1 doctrine), so the walk climbs
+    // to the root rather than stopping at one parent.
+    syncPathChain(dirPath);
+    return sha; // verified existing entry reused (content-addressing dedup)
+  }
   // MAJOR-9: the NAME must survive too — directory-entry durability
   // before ack. g7-F2: the FULL chain (not just dir + one parent) —
   // every name component up to the root is synced before this ack
   // returns, so no acknowledged name can die in the crash window.
   syncPathChain(dirPath);
+  try {
+    unlinkSync(tmpPath); // published: our temp name is retired (inode lives on as p)
+  } catch { /* best effort: a leaked .tmp-* entry is inert (hidden, content-named) */ }
   return sha;
 }
+
+/** Monotonic per-process counter keeping temp entry names unique
+ *  across concurrent spoolDraft calls in one process (pid covers
+ *  across processes). */
+let spoolDraftSeq = 0;
 
 /** Spool read outcome (consumer side). `absent` and `mismatch` both
  * route to the drift refusal; the consumer NEVER reads the live

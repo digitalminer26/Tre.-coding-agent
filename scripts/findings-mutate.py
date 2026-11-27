@@ -308,8 +308,8 @@ MUTS = {
     # (same reasoning as syncDirEntry's fsync side — no portable way
     # to fault ONLY the fsync of an openable file).
     "spool-reuse-read-raw-off": (
-        "      let prior: Buffer;\n      try {\n        prior = readFileSync(p);\n      } catch (e2) {\n        throw spoolIoWrapping(\n          e2,\n          `spoolDraft: existing entry ${path.basename(p)} could not be read for dedup comparison: `,\n        );\n      }",
-        "      const prior = readFileSync(p); /* mutant: raw read, untyped fault escape */"),
+        "    let prior: Buffer;\n    try {\n      prior = readFileSync(p);\n    } catch (e2) {\n      throw spoolIoWrapping(\n        e2,\n        `spoolDraft: existing entry ${path.basename(p)} could not be read for dedup comparison: `,\n      );\n    }",
+        "    const prior = readFileSync(p); /* mutant: raw read, untyped fault escape */"),
     # ================= g6 (audit cycle 1) ===========================
     # g6-F3: single-call write (the pre-fix primitive) — a SHORT write
     # return then acks a PREFIX. Killed behaviorally by the g6-F3 seam
@@ -357,11 +357,11 @@ MUTS = {
     # the fsync-observer probes (existing-dir spool, owner artifact,
     # auditor artifact, gate journal).
     "f1-parent-sync-off-spool-reuse": (
-        "      syncPathChain(dirPath);\n      return sha; // verified existing entry reused (content-addressing dedup)",
-        "      syncDirEntry(dirPath); // mutant: chain walk skipped (g7-F2 truncate)\n      return sha; // verified existing entry reused (content-addressing dedup)"),
+        "    syncPathChain(dirPath);\n    return sha; // verified existing entry reused (content-addressing dedup)",
+        "    syncDirEntry(dirPath); // mutant: chain walk skipped (g7-F2 truncate)\n    return sha; // verified existing entry reused (content-addressing dedup)"),
     "f1-parent-sync-off-spool-new": (
-        "  syncPathChain(dirPath);\n  return sha;\n}",
-        "  syncDirEntry(dirPath); // mutant: chain walk skipped\n  return sha;\n}"),
+        "  syncPathChain(dirPath);\n  try {\n    unlinkSync(tmpPath); // published: our temp name is retired (inode lives on as p)",
+        "  syncDirEntry(dirPath); // mutant: chain walk skipped\n  try {\n    unlinkSync(tmpPath); // published: our temp name is retired (inode lives on as p)"),
     "f1-parent-sync-off-journal": (
         "  syncPathChain(dirPath); // MAJOR-9 + g7-F2: full chain, not dir + one parent",
         "  syncDirEntry(dirPath); // mutant: chain walk skipped"),
