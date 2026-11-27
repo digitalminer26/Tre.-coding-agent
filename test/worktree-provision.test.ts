@@ -481,7 +481,15 @@ test("remove: a LYING fsmonitor hook + fsmonitor-valid bit cannot hide a modifie
   await writeFile(join(wt.path, "a.txt"), "edited-under-lying-hook, uncommitted\n");
   await git(wt.path, "update-index", "--fsmonitor-valid", "a.txt");
   // The hole as the audit reproduced it: the naive gate view is blind.
-  assert.equal(await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), "", "hook+bit hide the edit from a hook-trusting status (the audit finding)");
+  // ENV-DEPENDENT: CI runner image 20261122 ships a git where the hole is
+  // fixed upstream — a fsmonitor-valid entry whose stat no longer matches
+  // the index is re-validated, so an `echo ok` hook cannot hide the edit
+  // (run 45944530580 failed THIS premise, not the gate). The premise is
+  // asserted only where reproducible; the gate contract below must hold
+  // either way, and the forced status (the gate's own view) proves the
+  // edit is visible wherever the git trusts the hook.
+  const naiveView = await git(wt.path, "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all");
+  assert.ok(naiveView === "" || /M a\.txt/.test(naiveView), `naive status is either blind (the hole) or sees the edit, got ${JSON.stringify(naiveView)}`);
   // The gate's OWN view forces core.fsmonitor=false — the edit is seen.
   assert.match(await git(wt.path, "-c", "core.fsmonitor=false", "status", "--porcelain=1", "--ignored=traditional", "--untracked-files=all"), /M a\.txt/, "fsmonitor-forced status sees the edit (helper trims the XY space)");
 
