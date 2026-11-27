@@ -35,7 +35,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AttemptRunner, RunnerError, type AttemptRunnerOptions, type AttemptTask, type WorkerSpawner } from "../src/runner/attempt.js";
+import { AttemptRunner, RunnerError, probeGroupLiveMembers, type AttemptRunnerOptions, type AttemptTask, type WorkerSpawner } from "../src/runner/attempt.js";
 import { DecisionJournal, type AttemptRecord } from "../src/episode/journal.js";
 
 // ─────────────────────────── fixtures & helpers ─────────────────────────────
@@ -92,9 +92,17 @@ async function waitPid(pid: number, want: "dead" | "alive", ms = 8000): Promise<
   }
 }
 
-/** kill(-pgid,0) truth: are there REAL processes in the group? */
+/** kill(-pgid,0) truth: are there REAL (non-zombie) processes in the
+ *  group? Raw kill(-pgid,0) answers "exists" for a group whose only
+ *  remaining members are zombies — on Linux an orphan in a container
+ *  whose PID 1 reaps nothing stays a zombie indefinitely (macOS reaps
+ *  via launchd). A zombie can never own a session again, so it is dead
+ *  for our purposes; probeGroupLiveMembers consults /proc where the
+ *  kernel keeps the distinction. */
 function groupAlive(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+  try { process.kill(-pgid, 0); } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+  const live = probeGroupLiveMembers(pgid);
+  return live === undefined ? true : live;
 }
 
 async function waitGroupGone(pgid: number, ms = 8000): Promise<void> {
@@ -210,7 +218,11 @@ describe("W3: worker SIGKILLed, supervisor restarts — journal-first reconcile 
   it("a fresh runner over the same journal probes the real dead pid (journal-first), decides spawn, and re-spawns under a new attemptId", async () => {
     const episodeId = "kw-w3";
     const session = join(root, "sessions", "w3.jsonl");
-    const spawner = shellSpawner("sleep 120");
+    // `exec` so the group is EXACTLY the leader: some Linux /bin/sh
+    // forks even a sole simple command (macOS bash execs it), which
+    // would leave the forked sleep holding the group open after the
+    // leader's SIGKILL — the test's premise is "no survivor".
+    const spawner = shellSpawner("exec sleep 120");
     const runner = await openRunner(episodeId, spawner);
     const task: AttemptTask = { episodeId, taskId: "t1", session };
 

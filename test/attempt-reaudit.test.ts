@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AttemptRunner, RunnerError, type AttemptRunnerOptions, type AttemptTask, type WorkerSpawner } from "../src/runner/attempt.js";
+import { AttemptRunner, RunnerError, probeGroupLiveMembers, type AttemptRunnerOptions, type AttemptTask, type WorkerSpawner } from "../src/runner/attempt.js";
 import { DecisionJournal, type AttemptRecord } from "../src/episode/journal.js";
 
 let root: string;
@@ -32,8 +32,17 @@ async function openRunner(episodeId: string, spawner: WorkerSpawner, opts: Parti
   return r;
 }
 
+/** kill(-pgid,0) truth: are there REAL (non-zombie) processes in the
+ *  group? Raw kill(-pgid,0) answers "exists" for a group whose only
+ *  remaining members are zombies — on Linux an orphan in a container
+ *  whose PID 1 reaps nothing stays a zombie indefinitely (macOS reaps
+ *  via launchd). A zombie can never own a session again, so it is dead
+ *  for our purposes; probeGroupLiveMembers consults /proc where the
+ *  kernel keeps the distinction. */
 function groupAlive(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+  try { process.kill(-pgid, 0); } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+  const live = probeGroupLiveMembers(pgid);
+  return live === undefined ? true : live;
 }
 
 async function waitFor(fn: () => Promise<boolean>, what: string, ms = 6000): Promise<void> {

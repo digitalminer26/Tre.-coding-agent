@@ -531,6 +531,7 @@ test("A6: REPL /compact forces a compaction (summarizer call + session entry + �
   await writeFile(models, JSON.stringify({ default: SMALL_WINDOW.id, models: [SMALL_WINDOW] }));
   await main(["run", "old task " + "y".repeat(3000), "--tools", "none", "--models", models, "--session", session], {
     streamFn: fakeStream([{ type: "text", text: "old answer" }]),
+    systemPrompt: PINNED_PROMPT,
   });
 
   const S = mkSinks();
@@ -544,6 +545,7 @@ test("A6: REPL /compact forces a compaction (summarizer call + session entry + �
       ]),
       sinks: S.sinks,
       stdin: pipedStdin(["go\n", "/compact\n"]),
+      systemPrompt: PINNED_PROMPT,
     },
   );
   assert.equal(code, 0);
@@ -1863,6 +1865,16 @@ const SMALL_WINDOW: ModelConfig = {
   // trigger math is unchanged by the maxTokens→compactionReserve separation.
   compactionReserve: 100,
 };
+
+/** A pinned, LARGE system prompt (deps.systemPrompt seam): with ~2000 est.
+ *  tokens of overhead, `foldableRoom` (window − overhead − maxTokens − slack)
+ *  is NEGATIVE on every host, so the estimate-based auto-compact trigger is
+ *  gated off and only the manual /compact (force) acts. Without the pin the
+ *  trigger depends on machine-level prompt mass (~/.tre skills on a dev box,
+ *  none on a clean CI runner) — the seed run then auto-compacts and consumes
+ *  the scripted fake-stream turns out of order (passed on macOS, failed on
+ *  ubuntu-latest). */
+const PINNED_PROMPT = "p".repeat(8000);
 
 /** Seed a session with one old [user, assistant] exchange, small-window model.
  *  The old PROMPT is deliberately LARGE: it is the OLDEST unit, so it is what

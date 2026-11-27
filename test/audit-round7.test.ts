@@ -77,6 +77,12 @@ async function makeSubmoduleParent(t: { after: (fn: () => void) => void }): Prom
   commitAll(parent, "parent c1");
   git(parent, ["-c", "protocol.file.allow=always", "submodule", "add", "--name", "child", childDir, "child"]);
   commitAll(parent, "add submodule");
+  // The submodule WORKTREE has its own config (parent/.git/modules/child
+  // on CI runners has no identity) — commits inside the child (R7-B1)
+  // need one; the parent's local config never reaches it.
+  const childWt = join(parent, "child");
+  git(childWt, ["config", "user.name", "test"]);
+  git(childWt, ["config", "user.email", "test@example.com"]);
   return parent;
 }
 

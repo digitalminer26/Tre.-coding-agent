@@ -66,7 +66,7 @@
  * P4 guard names — the first module allowed to write episode files.
  */
 import { spawn as nodeSpawn, execFile } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, constants as fsConstants, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { promisify } from "node:util";
@@ -2090,13 +2090,24 @@ export class AttemptRunner {
   private groupAlive(pgid: number): "reaped" | "alive" | "unknown" {
     try {
       process.kill(-pgid, 0);
-      return "alive";
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code === "ESRCH") return "reaped";
-      if (code === "EPERM") return "unknown";
-      return "unknown";
+      return "unknown"; // EPERM (foreign group) or anything else: undeterminable
     }
+    // kill(-pgid,0) succeeded: SOME task in the group still exists.
+    // GZ-LIVENESS (Linux CI finding): on Linux a ZOMBIE (exited, not
+    // yet wait()ed) keeps kill(-pgid,0) answering success for as long
+    // as its parent (or, after reparenting, PID 1 — which on containers
+    // and lean VMs reaps nothing) fails to collect it. macOS answers
+    // ESRCH over zombies (verified empirically). A zombie holds no open
+    // session, writes nothing, and can never run again — for ownership
+    // purposes the group is dead. Consult /proc and report "alive" only
+    // while a NON-zombie member exists; when /proc is unavailable
+    // (non-Linux, hidepid, sandboxed), trust kill(2) verbatim.
+    const live = probeGroupLiveMembers(pgid);
+    if (live === undefined) return "alive"; // oracle unavailable: trust kill(2)
+    return live ? "alive" : "reaped";
   }
 
   // ─────────────────────────── state.json helpers ───────────────────────────
@@ -2249,6 +2260,63 @@ export async function defaultPidProbe(pid: number): Promise<PidStatus | undefine
     if (code === "ESRCH") return { running: false, sameUid: false };
     if (code === "EPERM") return { running: true, sameUid: false };
     return undefined;
+  }
+}
+
+/** GZ-LIVENESS (Linux CI finding, cycle: kill-window red on ubuntu):
+ *  kill(-pgid,0) answers success for a group whose only remaining
+ *  members are ZOMBIES (exited, not yet wait()ed) — on Linux a reparented
+ *  zombie keeps its group resolvable until PID 1 collects it, and lean
+ *  container inits reap nothing. macOS answers ESRCH over zombies
+ *  (verified empirically). This oracle scans /proc and answers whether
+ *  the group has a NON-zombie member:
+ *    true      — at least one live member (the group is genuinely alive)
+ *    false     — members were seen and ALL are zombies (group dead,
+ *                collection pending) — or the scan raced a full collect
+ *                and the re-issued kill(2) proved ESRCH
+ *    undefined — no opinion: non-Linux, /proc unreadable (hidepid),
+ *                or the state between probes is undeterminable.
+ *  Callers that already probed kill(-pgid,0) treat undefined as "trust
+ *  kill(2)"; callers without a prior probe treat it as "unknown". */
+export function probeGroupLiveMembers(pgid: number): boolean | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const entries = readdirSync("/proc");
+    let sawMember = false;
+    for (const name of entries) {
+      if (!/^\d+$/.test(name)) continue;
+      let stat: string;
+      try {
+        stat = readFileSync(join("/proc", name, "stat"), "utf8");
+      } catch {
+        continue; // exited mid-scan / unreadable: skip this entry
+      }
+      // "/proc/[pid]/stat" is `pid (comm) state ppid pgrp ...` and comm
+      // may contain spaces and parens — anchor on the LAST ')'.
+      const closeIdx = stat.lastIndexOf(")");
+      if (closeIdx < 0) continue;
+      const fields = stat.slice(closeIdx + 2).split(" ");
+      // fields[0]=state (field 3), fields[1]=ppid (4), fields[2]=pgrp (5)
+      const pgrp = Number(fields[2]);
+      if (!Number.isFinite(pgrp) || pgrp !== pgid) continue;
+      sawMember = true;
+      if (fields[0] !== "Z") return true; // a LIVE member — the group lives
+    }
+    if (!sawMember) {
+      // Nothing matched (members all collected in the scan window, or
+      // none readable). Re-run the authoritative probe to break the race.
+      try {
+        process.kill(-pgid, 0);
+        return true; // still resolvable members we could not read: fail closed
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") return false; // genuinely gone
+        return undefined; // EPERM et al.: undeterminable
+      }
+    }
+    return false; // members exist and ALL are zombies
+  } catch {
+    return undefined; // /proc not readable here
   }
 }
 

@@ -1386,6 +1386,14 @@ export interface MainDeps {
    *  stop() against startup (the F2 `turnOut === undefined` → exit 130
    *  contract, audit R1-round4 recommendation R2). No production caller. */
   telegramDriverHook?: (driver: TelegramDriver) => void;
+  /** Prompt seam (tests): replaces the built system prompt wholesale. The
+   *  real prompt's VARIABLE sections (skills index, project context) are
+   *  machine-level state — a dev box with ~/.tre skills carries ~4.6k tokens
+   *  of overhead where a clean CI runner has ~0.4k — which flips the
+   *  compaction trigger's `foldableRoom` sign for tiny-window models. Tests
+   *  that reason about the trigger math pin the prompt here so they are
+   *  deterministic on every host. No production caller. */
+  systemPrompt?: string;
 }
 
 /**
@@ -1974,7 +1982,7 @@ async function mainBody(argv: string[], deps: MainDeps, mcpHolder: McpHolder): P
     skills,
     extraRoots,
   };
-  let systemPrompt = buildSystemPrompt(systemPromptOpts);
+  let systemPrompt = deps.systemPrompt ?? buildSystemPrompt(systemPromptOpts);
   // docs/07 §7 F2: the prompt's VARIABLE sections (project-context files,
   // skills index) measured ONCE at build time — the `sys` number in the TUI
   // context field splits into `sys N (ctx X · skills Y)`. Same lifecycle as

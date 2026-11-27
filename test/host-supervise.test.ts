@@ -624,7 +624,13 @@ test("W6: runShell hashStdout digests the FULL stream (multi-chunk) and withhold
   // hash mode: every byte hashed, stdout never accumulated; a timeout
   // (stream cut short) yields NO digest — callers fail closed.
   const big = "0123456789".repeat(20000); // 200KB: many pipe chunks
-  const r = await runShell(`printf '%s' '${big}'`, tmpdir(), 30, { hashStdout: true });
+  // Feed the payload through a FILE: a 200KB command line exceeds
+  // Linux's MAX_ARG_STRLEN (128 KiB per argv entry, E2BIG) — macOS has
+  // no per-arg cap, so this only bites the Linux CI runner.
+  const payloadDir = await mkdtemp(join(tmpdir(), "tre-host-w6-"));
+  const payload = join(payloadDir, "big.txt");
+  await writeFile(payload, big);
+  const r = await runShell(`cat '${payload}'`, tmpdir(), 30, { hashStdout: true });
   assert.equal(r.code, 0);
   const expect = createHash("sha256").update(big).digest("hex");
   assert.equal(r.stdoutDigest, expect, "digest covers every streamed byte");
@@ -632,6 +638,7 @@ test("W6: runShell hashStdout digests the FULL stream (multi-chunk) and withhold
   const t = await runShell("echo started; sleep 5", tmpdir(), 1, { hashStdout: true });
   assert.equal(t.cause, "timeout");
   assert.equal(t.stdoutDigest, undefined, "a cut-short stream has NO digest (never a partial one)");
+  await rm(payloadDir, { recursive: true, force: true });
 });
 
 test("W5-A2: a mid-file edit in a >16 MiB untracked file MOVES the digest (no size-only fallback)", async () => {

@@ -32,6 +32,7 @@ import {
   treWorkerSpawner,
   validateSpawnSpec,
   canonicalPath,
+  probeGroupLiveMembers,
   type AttemptTask,
   type PidStatus,
 } from "../src/runner/attempt.js";
@@ -927,8 +928,12 @@ test("C1-F7: surviving grandchild after the leader dies from group SIGTERM — s
   // Probe via the shared discipline helper (F2): ESRCH confirms, EPERM is
   // retryable-unknown, any other errno is a hard failure.
   const sweep = await pollForGroupDeath(() => {
-    try { realKill(-leaderPid, 0); return null; }
+    try { realKill(-leaderPid, 0); }
     catch (e) { return (e as NodeJS.ErrnoException).code ?? "UNKNOWN"; }
+    // kill(2) answers "exists" for a reparented ZOMBIE whose collector
+    // (a container PID 1) never reaps: consult /proc for a live member.
+    if (probeGroupLiveMembers(leaderPid) === false) return "ESRCH";
+    return null;
   }, 400);
   if (sweep.hardError !== undefined)
     throw new Error(`operator sweep probe returned ${sweep.hardError} — not proof of group death`);

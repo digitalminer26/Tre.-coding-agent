@@ -21,6 +21,14 @@ const COMMIT_SCRIPT = path.join(
   os.homedir(), ".tre", "agent", "skills", "git-commit", "git-commit.sh"
 );
 
+// The script is a MACHINE-LEVEL artifact (~/.tre/...), not a repo file:
+// a CI runner checks the repo out with no ~/.tre at all. These tests
+// cover the script's behaviour, so on a host without it they skip —
+// a missing skill install is not a code regression.
+const SKILL_SKIP = fs.existsSync(COMMIT_SCRIPT)
+  ? false
+  : "git-commit.sh not installed at ~/.tre/agent/skills/git-commit/ (machine-level skill, absent on CI)";
+
 function sh(cmd: string, args: string[], opts: { cwd: string; env?: Record<string, string> } = { cwd: repoRoot }): { status: number; out: string } {
   const r = spawnSync(cmd, args, {
     cwd: opts.cwd,
@@ -60,7 +68,7 @@ function runCommit(dir: string, args: string[], gate = "true"): { status: number
   return sh("sh", [COMMIT_SCRIPT, ...args], { cwd: dir, env: { GATE: gate } });
 }
 
-test("git-commit: clean tree is a no-op (exit 10, nothing committed)", (t) => {
+test("git-commit: clean tree is a no-op (exit 10, nothing committed)", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   const before = git(dir, ["rev-parse", "HEAD"]).out.trim();
   const r = runCommit(dir, ["hello"]);
@@ -69,7 +77,7 @@ test("git-commit: clean tree is a no-op (exit 10, nothing committed)", (t) => {
   assert.equal(git(dir, ["rev-parse", "HEAD"]).out.trim(), before);
 });
 
-test("git-commit: dirty tree + passing gate commits and verifies (exit 0)", (t) => {
+test("git-commit: dirty tree + passing gate commits and verifies (exit 0)", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   fs.writeFileSync(path.join(dir, "new.txt"), "added\n");
   const r = runCommit(dir, ["add new.txt"]);
@@ -80,7 +88,7 @@ test("git-commit: dirty tree + passing gate commits and verifies (exit 0)", (t) 
   assert.equal(git(dir, ["status", "--porcelain"]).out.trim(), "");
 });
 
-test("git-commit: failing gate exits 11, nothing staged or committed", (t) => {
+test("git-commit: failing gate exits 11, nothing staged or committed", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   fs.writeFileSync(path.join(dir, "new.txt"), "added\n");
   const before = git(dir, ["rev-parse", "HEAD"]).out.trim();
@@ -91,7 +99,7 @@ test("git-commit: failing gate exits 11, nothing staged or committed", (t) => {
   assert.equal(git(dir, ["status", "--porcelain"]).out.trim(), "?? new.txt");
 });
 
-test("git-commit: guardrail-zone commit is rejected (exit 1, no new commit)", (t) => {
+test("git-commit: guardrail-zone commit is rejected (exit 1, no new commit)", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   // A pre-commit hook that rejects changes to a protected path — mirrors the
   // real guardrail hook's contract (the agent must never bypass it).
@@ -113,21 +121,21 @@ test("git-commit: guardrail-zone commit is rejected (exit 1, no new commit)", (t
   assert.equal(git(dir, ["rev-parse", "HEAD"]).out.trim(), before);
 });
 
-test("git-commit: no message is a usage error (exit 2)", (t) => {
+test("git-commit: no message is a usage error (exit 2)", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   const r = runCommit(dir, []);
   assert.equal(r.status, 2);
   assert.match(r.out, /usage/);
 });
 
-test("git-commit: empty message is a usage error (exit 2)", (t) => {
+test("git-commit: empty message is a usage error (exit 2)", { skip: SKILL_SKIP }, (t) => {
   const dir = makeRepo(t);
   const r = runCommit(dir, [""]);
   assert.equal(r.status, 2);
   assert.match(r.out, /empty commit message/);
 });
 
-test("git-commit: outside a git repo is a usage error (exit 2)", (t) => {
+test("git-commit: outside a git repo is a usage error (exit 2)", { skip: SKILL_SKIP }, (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tre-nogit-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const r = runCommit(dir, ["hello"]);
