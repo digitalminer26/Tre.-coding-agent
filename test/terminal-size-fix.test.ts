@@ -51,11 +51,7 @@ console.log(JSON.stringify({ base, end, delta: end - base, frames: FRAMES }));
 process.exit(end - base > 10 ? 1 : 0);
 `;
 
-test("ink render frames under a PTY do not leak fds (C23)", { timeout: 30000 }, (t, done) => {
-  if (process.platform !== "darwin") {
-    t.skip("needs a macOS PTY (script)");
-    return;
-  }
+test("ink render frames under a PTY do not leak fds (C23)", { timeout: 30000, skip: process.platform !== "darwin" ? "needs a macOS PTY (script)" : false }, (t, done) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "tre-fd-c23-"));
   const child = path.join(dir, "child.mjs");
   writeFileSync(child, CHILD);
